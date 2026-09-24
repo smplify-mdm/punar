@@ -206,7 +206,9 @@ reconcile pass and, on TCG, nft operations are slow):
    control plane running?"), nothing written.
 3. **Register** — generate a 32-byte hex bootstrap secret (`rand`, in
    memory only, never persisted, never logged); `enroll.register{device_id
-   (from /var/lib/punar/device-id), bootstrap}` → `device_token`.
+   (from /var/lib/punar/device-id), bootstrap}` → `device_token`, waited
+   for 14 s (the built-in agent's 12 s register budget and a margin: a
+   registration the organization recorded must not be given up on).
    **Attestation is simulated**: punard stores the mock's literal
    `"attestation": "simulated"` string and surfaces it in `enroll.start`
    / `enroll.status` results — the honesty label travels with the data.

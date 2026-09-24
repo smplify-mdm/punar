@@ -75,9 +75,10 @@ term `enrollment.ownership` (§3.2), which the agent passes to punard
 untouched.
 `enroll.register {device_id, bootstrap, code}` → resolve (five keys) →
 `POST /enroll` (`Bearer <code>`, CSR `CN=device-pending`, no SAN,
-`machineId` = Punar `device-id`) → identity stored 0600 → first check-in pins
-`tenantPublicKeyX509Base64` → answers `{device_token, attestation: "none",
-organization}`; the device token is random, and only its SHA-256 is kept.
+`machineId` = Punar `device-id`) → identity stored 0600 → answers
+`{device_token, attestation: "none", organization}`; the device token is
+random, and only its SHA-256 is kept. The first check-in, which pins
+`tenantPublicKeyX509Base64`, is the first compliance report's.
 `policy.fetch` → `GET /devices/{id}/bundle`: 204 and any bundle without a
 Punar payload both answer `{policies: []}` (slice 2 adds the signed
 `punar-policy` payload). `compliance.report` / `inventory.report` → `POST
@@ -93,7 +94,15 @@ code was not accepted"); 409 → `denied`; 404 on a device path →
 The agent's HTTP budget is 4 s inside punard's 5 s per call, and it is the
 budget of the whole call, however many requests it makes: an answer that
 reaches punard late reads as "unreachable" even when Smplify kept the
-report, and the inventory would be uploaded again on every pass. So
+report, and the inventory would be uploaded again on every pass.
+`enroll.register` has its own: resolve and `/enroll` share one 12 s
+deadline (resolve may spend a third), and punard waits 14 s for it. A
+registration punard gave up on would be worse than a resent report:
+Smplify keeps the record `/enroll` created and refuses a second active
+record for the same machine, so the device could not enroll again until an
+administrator removed the stale one. The budgets are
+`crates/punar-smplifyd/src/budget.rs`, and punard's tests hold each of its
+timeouts (`call_timeout`) a second above them. So
 `inventory.report` makes one request; the check-in that retries pinning the
 tenant key rides only `compliance.report` (sent first on every pass) with a
 quarter of the budget, and its status POST gets what is left. Every read and

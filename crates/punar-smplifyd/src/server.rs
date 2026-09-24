@@ -12,13 +12,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use punar_smplifyd::budget::{CALL_BUDGET, REGISTER_BUDGET};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use crate::discovery::{self, Organization};
-use crate::identity::{self, Record, Store};
+use crate::identity::{self, Csr, Record, Store};
 use crate::protocol::{CallError, ErrorCode, error_line, parse_request_line, result_line};
-use crate::upstream::{Api, CALL_BUDGET, UpstreamError};
+use crate::upstream::{Api, Enrolled, UpstreamError};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const LINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -33,6 +34,9 @@ pub struct Daemon {
     pending: Mutex<Option<Organization>>,
     /// The whole of one of punard's calls, [`CALL_BUDGET`]; shorter in tests.
     call_budget: Duration,
+    /// The whole of one `enroll.register`, [`REGISTER_BUDGET`]; shorter in
+    /// tests.
+    register_budget: Duration,
 }
 
 impl Daemon {
@@ -43,6 +47,7 @@ impl Daemon {
             os_release_path: PathBuf::from("/etc/os-release"),
             pending: Mutex::new(None),
             call_budget: CALL_BUDGET,
+            register_budget: REGISTER_BUDGET,
         }
     }
 
@@ -55,6 +60,12 @@ impl Daemon {
     #[cfg(test)]
     fn with_call_budget(mut self, budget: Duration) -> Daemon {
         self.call_budget = budget;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_register_budget(mut self, budget: Duration) -> Daemon {
+        self.register_budget = budget;
         self
     }
 
@@ -158,7 +169,18 @@ impl Daemon {
         Ok(json!({ "organization": document }))
     }
 
+    /// Redeem the enrollment code for a certificate, within
+    /// [`Daemon::register_budget`] in all. punard waits a little longer than
+    /// that for the answer, and it must get one: Smplify keeps the device
+    /// record it creates at `/enroll` and refuses a second active record for
+    /// the same machine, so a registration Smplify accepted but punard gave
+    /// up on leaves a device that cannot enroll again until an administrator
+    /// removes the stale record. The two requests therefore share one
+    /// deadline, and nothing else is asked of Smplify here: the first
+    /// check-in, which pins the tenant key, is the first compliance report's
+    /// ([`Daemon::report`]).
     fn enroll_register(&self, params: Option<&Value>) -> Result<Value, CallError> {
+        let started = Instant::now();
         let device_id = param_str(params, "device_id")?;
         let code = Zeroizing::new(param_str(params, "code").map_err(|_| {
             CallError::new(
@@ -174,8 +196,11 @@ impl Daemon {
         })?;
 
         let os_release = crate::device::os_release(&self.os_release_path);
-        let anonymous = Api::anonymous(&organization.server).map_err(internal)?;
-        let os_identifier = anonymous
+        // Resolving is optional, so it may never cost /enroll most of the
+        // deadline: a third at most, and an unresolved image enrolls under
+        // the canonical identifier.
+        let os_identifier = Api::anonymous(&organization.server, self.register_budget / 3)
+            .map_err(internal)?
             .resolve_os(&os_release)
             .ok()
             .flatten()
@@ -187,16 +212,34 @@ impl Daemon {
         );
 
         let csr = identity::generate_csr().map_err(internal)?;
-        let enrolled = anonymous
-            .enroll(
-                &code,
-                &csr.csr_pem,
-                &crate::device::hostname(),
-                &os_identifier,
-                &device_id,
-            )
-            .map_err(enrollment_refusal)?;
+        let enrolled = Api::anonymous(
+            &organization.server,
+            self.register_budget.saturating_sub(started.elapsed()),
+        )
+        .map_err(internal)?
+        .enroll(
+            &code,
+            &csr.csr_pem,
+            &crate::device::hostname(),
+            &os_identifier,
+            &device_id,
+        )
+        .map_err(enrollment_refusal)?;
         drop(code);
+        self.keep_identity(organization, os_identifier, &csr, enrolled)
+    }
+
+    /// Store the identity Smplify just issued and answer punard. Local work
+    /// only: Smplify already holds the device record, so every moment spent
+    /// here is one in which punard could give up on a registration that
+    /// succeeded.
+    fn keep_identity(
+        &self,
+        organization: Organization,
+        os_identifier: String,
+        csr: &Csr,
+        enrolled: Enrolled,
+    ) -> Result<Value, CallError> {
         // punard asks for a registration only while it holds no enrollment,
         // so an identity still here is one it never committed: left by an
         // enrollment that failed after register on a build that did not
@@ -216,13 +259,14 @@ impl Daemon {
         }
 
         let (token, token_sha256) = identity::new_device_token().map_err(internal)?;
-        let mut record = Record {
-            device_id: enrolled.device_id.clone(),
+        let record = Record {
+            device_id: enrolled.device_id,
             server: organization.server.origin(),
             org_id: organization.id.clone(),
             org_name: organization.name.clone(),
-            os_identifier: os_identifier.clone(),
-            not_after: enrolled.not_after.clone(),
+            os_identifier,
+            not_after: enrolled.not_after,
+            // Pinned by the first compliance report's check-in.
             tenant_public_key: None,
             token_sha256,
             enrolled_at: crate::clock::now_rfc3339(),
@@ -230,23 +274,6 @@ impl Daemon {
         self.store
             .save(&record, &csr.key_pem, &enrolled.cert_pem, &enrolled.ca_pem)
             .map_err(internal)?;
-
-        // First check-in over the new identity pins the tenant's signing
-        // key. A failure here is reported but does not undo the enrollment:
-        // the certificate is issued and the next sync retries.
-        match self.api(self.call_budget).and_then(|api| {
-            api.checkin(&enrolled.device_id, &os_identifier, &os_release)
-                .map_err(internal)
-        }) {
-            Ok(tenant_key) => {
-                record.tenant_public_key = tenant_key;
-                let _ = self.store.update(&record);
-            }
-            Err(error) => eprintln!(
-                "punar-smplifyd: first check-in deferred ({})",
-                error.message
-            ),
-        }
 
         *self.pending.lock().unwrap() = None;
         Ok(json!({
@@ -333,12 +360,11 @@ impl Daemon {
         Ok(json!({ "sent": body }))
     }
 
-    /// Pin the organization's signing key if the check-in at registration
-    /// did not. That first check-in is allowed to fail without undoing the
-    /// enrollment, so this is the "next sync retries" its comment promises:
-    /// one check-in per compliance report, within `budget`, until the key is
-    /// held, then never again. It is pinned once and never replaced here: a
-    /// key that changes under a pinned device is a question for
+    /// Pin the organization's signing key. Registration leaves it to the
+    /// first compliance report, and a check-in that fails undoes nothing, so
+    /// this is one check-in per compliance report, within `budget`, until the
+    /// key is held, then never again. It is pinned once and never replaced
+    /// here: a key that changes under a pinned device is a question for
     /// re-enrollment, not for a sync.
     fn pin_tenant_key_if_missing(&self, record: &Record, budget: Duration) {
         if record.tenant_public_key.is_some() {
@@ -457,6 +483,8 @@ fn peer_is_root(stream: &UnixStream) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     fn daemon() -> (Daemon, PathBuf) {
@@ -472,6 +500,54 @@ mod tests {
         let d = Daemon::new(root.join("state"), root.join("discovery"))
             .with_os_release(root.join("os-release"));
         (d, root)
+    }
+
+    /// A Smplify that accepts every connection and never answers: each
+    /// request spends whatever budget it was given. Its port, and when each
+    /// connection arrived.
+    fn silent_smplify() -> (u16, Arc<Mutex<Vec<Instant>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let counted = Arc::clone(&arrivals);
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                counted.lock().unwrap().push(Instant::now());
+                held.push(stream);
+            }
+        });
+        (port, arrivals)
+    }
+
+    /// Answer `request` on a thread of its own, so a call that never
+    /// returns fails the test instead of hanging it: how long it took, and
+    /// the answer.
+    fn answer_apart(
+        daemon: &Arc<Daemon>,
+        request: Value,
+        patience: Duration,
+    ) -> (Duration, String) {
+        let daemon = Arc::clone(daemon);
+        let (sender, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let line = daemon.answer_line(&request.to_string());
+            let _ = sender.send((started.elapsed(), line));
+        });
+        answer
+            .recv_timeout(patience)
+            .expect("the call outlived its patience")
+    }
+
+    /// An organization whose Smplify is at `port` on this machine, as
+    /// `org.discover` would resolve it.
+    fn organization_at(port: u16) -> Value {
+        json!({
+            "id": "acme",
+            "name": "Acme",
+            "enrollment": {"server": format!("https://127.0.0.1:{port}"), "methods": ["code"]},
+        })
     }
 
     #[test]
@@ -504,6 +580,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Smplify keeps the device record it creates at `/enroll` and refuses a
+    /// second one for the same machine, so a registration punard gave up on
+    /// can lock the device out. However slow Smplify is, registering answers
+    /// within one register budget, which punard waits out: resolving and
+    /// enrolling share one deadline, resolving may not spend all of it, and
+    /// nothing else is asked of Smplify.
+    #[test]
+    fn a_registration_answers_within_its_budget_from_a_silent_smplify() {
+        const BUDGET: Duration = Duration::from_millis(1200);
+        let (d, root) = daemon();
+        let (port, arrivals) = silent_smplify();
+        std::fs::write(
+            root.join("discovery/acme.com.json"),
+            organization_at(port).to_string(),
+        )
+        .unwrap();
+        let d = Arc::new(d.with_register_budget(BUDGET));
+        let line = d.answer_line(
+            r#"{"v":1,"id":"a","method":"org.discover","params":{"domain":"acme.com"}}"#,
+        );
+        assert!(line.contains(r#""result""#), "{line}");
+
+        let (took, line) = answer_apart(
+            &d,
+            json!({"v": 1, "id": "r", "method": "enroll.register",
+                   "params": {"device_id": "machine-1", "bootstrap": "b", "code": "lex_1"}}),
+            BUDGET * 10,
+        );
+        assert!(
+            line.contains(r#""error""#),
+            "Smplify never answered: {line}"
+        );
+        assert!(took < BUDGET + BUDGET / 2, "{took:?}");
+        let arrivals = arrivals.lock().unwrap().clone();
+        assert_eq!(arrivals.len(), 2, "resolving and enrolling, nothing else");
+        assert!(
+            arrivals[1].duration_since(arrivals[0]) < BUDGET / 2,
+            "resolving spent most of the deadline"
+        );
+        assert!(!d.store.exists(), "no identity without a certificate");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Once Smplify has issued the certificate, the agent only stores it and
+    /// answers: the check-in that pins the tenant key is the first compliance
+    /// report's, so a slow check-in can never make punard give up on a
+    /// registration Smplify already recorded.
+    #[test]
+    fn a_registration_smplify_accepted_is_kept_without_asking_smplify_again() {
+        let (d, root) = daemon();
+        let (port, arrivals) = silent_smplify();
+        let d = d.with_call_budget(Duration::from_millis(500));
+        let organization = discovery::parse_document("acme.com", organization_at(port)).unwrap();
+        let csr = identity::generate_csr().unwrap();
+        let key = rcgen::KeyPair::from_pem(&csr.key_pem).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let enrolled = Enrolled {
+            device_id: "dev-1".into(),
+            cert_pem: cert.pem(),
+            ca_pem: cert.pem(),
+            not_after: None,
+        };
+
+        let answer = d
+            .keep_identity(organization, "punar".into(), &csr, enrolled)
+            .unwrap();
+        assert!(answer["device_token"].as_str().is_some(), "{answer}");
+        // Anything the agent sent would have arrived by now.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            arrivals.lock().unwrap().is_empty(),
+            "Smplify was asked again"
+        );
+        let status = d.identity_status().unwrap();
+        assert_eq!(status["device_id"], "dev-1");
+        assert_eq!(status["tenant_key_pinned"], false);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// punard gives each call 5 s. A report that Smplify kept but whose
     /// answer arrives later reads there as "unreachable", and the whole
     /// inventory is then uploaded again on every pass. So one report never
@@ -513,7 +671,6 @@ mod tests {
     /// budget with the status POST instead of adding a second one.
     #[test]
     fn a_report_answers_within_one_call_budget_while_the_key_is_unpinned() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         const BUDGET: Duration = Duration::from_millis(1000);

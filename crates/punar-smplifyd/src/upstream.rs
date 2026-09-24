@@ -27,13 +27,6 @@ fn bundle_request(url: &Url) -> Request<'_> {
         body: None,
     }
 }
-/// Inside punard's 5 s per-call budget with room for the socket round trip.
-/// It is the budget of one of punard's calls, however many requests to
-/// Smplify that call makes: an answer that reaches punard late reads as
-/// "unreachable" even when Smplify kept the report (see
-/// `Daemon::report`).
-pub const CALL_BUDGET: Duration = Duration::from_millis(4000);
-
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {
     #[error("{0}")]
@@ -74,10 +67,12 @@ pub struct Enrolled {
 }
 
 impl Api {
-    pub fn anonymous(server: &Url) -> Result<Api, UpstreamError> {
+    /// A client without the device's identity, for resolving and enrolling,
+    /// whose every request must finish within `budget`.
+    pub fn anonymous(server: &Url, budget: Duration) -> Result<Api, UpstreamError> {
         Ok(Api {
             server: server.clone(),
-            client: Client::new(None, CALL_BUDGET)?,
+            client: Client::new(None, budget)?,
         })
     }
 

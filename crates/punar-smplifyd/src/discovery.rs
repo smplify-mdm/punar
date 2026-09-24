@@ -14,8 +14,8 @@
 //! such as `removable` and `ownership` are punard's to judge, so they travel
 //! in `document` untouched.
 use std::path::Path;
-use std::time::Duration;
 
+use punar_smplifyd::budget::DISCOVERY_BUDGET;
 use serde_json::{Value, json};
 
 use crate::http::{self, Client, Request, parse_https_url};
@@ -23,7 +23,6 @@ use crate::protocol::{CallError, ErrorCode};
 
 /// Well-known path (relative to the organisation's domain).
 pub const WELL_KNOWN_PATH: &str = "/.well-known/smplify-management.json";
-pub const DISCOVERY_BUDGET: Duration = Duration::from_millis(3500);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Organization {

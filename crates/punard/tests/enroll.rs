@@ -101,6 +101,9 @@ struct ControlPlaneState {
     translate_like_smplifyd: AtomicBool,
     /// Every body that translation produced: what Smplify itself received.
     status_bodies: Mutex<Vec<Value>>,
+    /// Answer these methods only after the given delay: a control plane
+    /// that is slow to reach the organization's server.
+    answer_late: Mutex<HashMap<&'static str, Duration>>,
     /// Hold the next `inventory.report`, once its token is resolved, until
     /// `release_inventory`: a sync pass caught with its report in flight.
     hold_next_inventory: AtomicBool,
@@ -110,6 +113,10 @@ struct ControlPlaneState {
 
 impl ControlPlaneState {
     fn handle(&self, method: &str, params: &Value) -> Result<Value, (&'static str, String)> {
+        let late = self.answer_late.lock().unwrap().get(method).copied();
+        if let Some(delay) = late {
+            std::thread::sleep(delay);
+        }
         match method {
             "org.discover" => {
                 let domain = params["domain"].as_str().unwrap_or_default();
@@ -1637,6 +1644,28 @@ fn a_non_removable_enrollment_needs_the_persons_yes_and_then_binds_everyone() {
         .count();
     assert_eq!(denials, 3, "every refused unenroll is audited");
     root.stop();
+}
+
+/// A registration is waited for past the generic per-call timeout. The
+/// built-in agent may spend up to its whole register budget reaching Smplify,
+/// and once Smplify has recorded the device it refuses a second active record
+/// for the same machine: an answer punard gave up on would leave the person
+/// unable to enroll until an administrator removed the stale record.
+#[test]
+fn a_registration_slower_than_one_call_still_enrolls() {
+    let dir = test_dir("slow-register");
+    let control_plane = ControlPlane::start(&dir);
+    let late = punard::enroll::CONTROL_PLANE_CALL_TIMEOUT + Duration::from_millis(500);
+    control_plane
+        .state
+        .answer_late
+        .lock()
+        .unwrap()
+        .insert("enroll.register", late);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let result = daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(result["enrolled"], true, "{result}");
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], true);
 }
 
 /// An organization that tried to state a removal term this device cannot

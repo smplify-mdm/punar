@@ -54,10 +54,31 @@ pub const CONTROL_PLANE_SOCKET_ENV: &str = "PUNAR_CONTROL_PLANE_SOCKET";
 /// Production path of the shell summary file (ipc.md section 9).
 pub const DEFAULT_STATUS_FILE: &str = "/run/punar/status.json";
 
-/// Per-call read/write timeout on the control-plane socket. `enroll.start`
-/// makes at most three calls plus two reports, comfortably inside its 60 s
-/// processing bound (ipc.md section 2).
+/// Per-call read/write timeout on the control-plane socket, for every method
+/// [`call_timeout`] does not name. `enroll.start` makes three calls, then
+/// a reconcile pass with its reports; all of them waited out in full still
+/// fit its 60 s processing bound (ipc.md section 2).
 pub const CONTROL_PLANE_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `enroll.register`'s timeout. The control plane registers with the
+/// organization's server inside this call, and a registration the server
+/// recorded but punard gave up on can refuse every later attempt from this
+/// machine (Smplify keeps one active record per machine), so punard waits
+/// out the built-in agent's whole register budget, and its local work after
+/// it, rather than the generic [`CONTROL_PLANE_CALL_TIMEOUT`].
+pub const REGISTER_CALL_TIMEOUT: Duration = Duration::from_secs(14);
+
+/// How long punard waits for the answer to one call of `method`: at least a
+/// second longer than the built-in agent may spend on the organization's
+/// server for it (`punar_smplifyd::budget`), so an answer that exists
+/// arrives. An answer that arrives after punard stopped waiting reads as
+/// "unreachable" even when the server acted on the request.
+pub fn call_timeout(method: &str) -> Duration {
+    match method {
+        "enroll.register" => REGISTER_CALL_TIMEOUT,
+        _ => CONTROL_PLANE_CALL_TIMEOUT,
+    }
+}
 
 /// Bootstrap secret size in bytes (64 hex chars on the wire — the mock
 /// requires ≥ 32 hex chars; milestone-5.md section 4.3).
@@ -132,8 +153,8 @@ impl ControlPlaneClient {
     fn call(&self, method: &str, params: Value) -> Result<Value, UpstreamError> {
         let stream = UnixStream::connect(&self.socket)
             .map_err(|e| UpstreamError::transport("connect failed", &e))?;
-        let _ = stream.set_read_timeout(Some(CONTROL_PLANE_CALL_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(CONTROL_PLANE_CALL_TIMEOUT));
+        let _ = stream.set_read_timeout(Some(call_timeout(method)));
+        let _ = stream.set_write_timeout(Some(call_timeout(method)));
 
         let request = json!({
             "v": 1,
@@ -1924,6 +1945,32 @@ mod tests {
         assert!(!raw.contains("token"), "{raw}");
         assert!(raw.contains("remote_query_scopes"), "{raw}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every call punard makes waits at least a second longer than the
+    /// built-in agent may spend on the organization's server for it, so an
+    /// answer the agent has is never read as "unreachable".
+    #[test]
+    fn every_call_waits_out_what_the_agent_may_spend_on_it() {
+        for method in [
+            "org.discover",
+            "enroll.register",
+            "enroll.unregister",
+            "policy.fetch",
+            "compliance.report",
+            "inventory.report",
+            "recovery.key",
+            "recovery.escrow",
+            CP_METHOD_QUERIES_PENDING,
+            CP_METHOD_QUERIES_ANSWER,
+        ] {
+            let budget = punar_smplifyd::budget::call_budget(method);
+            assert!(
+                call_timeout(method) >= budget + Duration::from_secs(1),
+                "{method}: punard waits {:?}, the agent may spend {budget:?}",
+                call_timeout(method)
+            );
+        }
     }
 
     #[test]
