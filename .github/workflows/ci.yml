@@ -361,6 +361,7 @@ jobs:
             tests/desktop/app-launcher-contract-test.sh \
             tests/desktop/evolution-defaults-contract-test.sh \
             tests/desktop/bar-affordance-contract-test.sh \
+            tests/desktop/system-control-parity-contract-test.sh \
             tests/desktop/mail-identity-contract-test.sh \
             tests/desktop/qml-inline-component-depth-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
@@ -422,6 +423,15 @@ jobs:
       # MouseArea had no id for anything to bind to.
       - name: Validate that bar controls show a hover state
         run: ./tests/desktop/bar-affordance-contract-test.sh
+
+      # System Control must not claim, offer or hide more than the device
+      # does: [S] only for two-valued capabilities (it once offered to rename
+      # the machine "enabled"), no parity claim it lacks, any battery punard
+      # counts, a label for every capability, refusals read rather than run
+      # detached, plain text for organization-supplied names, and a printed
+      # policy command a person could run.
+      - name: Validate System Control's parity claims and refusal handling
+        run: ./tests/desktop/system-control-parity-contract-test.sh
 
       # The app id, the desktop file id and StartupWMClass must agree, because
       # the shell joins a running window to its product name by the desktop
