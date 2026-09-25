@@ -643,6 +643,13 @@ mutate_a21_order() {
     mv "${CASE}/greetd.reordered" "${CASE}/etc/pam.d/greetd"
 }
 mutate_a21_module() { rm -f "${CASE}/usr/lib/security/pam_gnome_keyring.so"; }
+# pam_unix back to `required`: a mistyped password would run on into the
+# keyring line and create the login keyring under the typo.
+mutate_a21_required() {
+    sed -i 's/^auth\([[:space:]]\{1,\}\)requisite\([[:space:]]\{1,\}pam_unix\.so\)/auth\1required \2/' \
+        "${CASE}/etc/pam.d/greetd"
+    grep -Eq '^auth[[:space:]]+required[[:space:]]+pam_unix\.so' "${CASE}/etc/pam.d/greetd"
+}
 mutate_a21_missing() { rm -f "${CASE}/etc/pam.d/greetd"; }
 
 reset_case
@@ -801,6 +808,7 @@ expect_fail A21 mutate_a21_auth
 expect_fail A21 mutate_a21_session
 expect_fail A21 mutate_a21_order
 expect_fail A21 mutate_a21_module
+expect_fail A21 mutate_a21_required
 expect_fail A21 mutate_a21_missing
 
 reset_case

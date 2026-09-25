@@ -841,7 +841,10 @@ fi
 # daemon receives it. Either way the first application that stores a secret
 # makes the person choose a keyring password, and an empty one writes every
 # secret to disk in plaintext, which is where Omarchy's default keyring is.
-# The auth line must follow pam_unix, which is what obtains the password.
+# The auth line must follow pam_unix, which is what obtains the password, and
+# pam_unix must be `requisite`: under `required` a WRONG password still reaches
+# the keyring line, which creates a login keyring that does not exist yet
+# under whatever was typed.
 GREETD_PAM="${ROOT}/etc/pam.d/greetd"
 if [ ! -f "${GREETD_PAM}" ]; then
     fail A21 'the sign-in PAM stack is missing: etc/pam.d/greetd'
@@ -855,6 +858,11 @@ else
         END { print found ? "ok" : "missing" }' "${GREETD_PAM}")
     [ "${keyring_auth}" = ok ] \
         || fail A21 'etc/pam.d/greetd has no optional pam_gnome_keyring auth line after pam_unix'
+    unix_control=$(awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*-?auth[[:space:]]/ && /pam_unix\.so/ { print $2; exit }' "${GREETD_PAM}")
+    [ "${unix_control}" = requisite ] \
+        || fail A21 "etc/pam.d/greetd runs pam_unix auth as '${unix_control:-absent}', not requisite, so a wrong password reaches pam_gnome_keyring"
     grep -Eq '^[[:space:]]*-?session[[:space:]]+optional[[:space:]]+([^[:space:]]*/)?pam_gnome_keyring\.so([[:space:]].*)?[[:space:]]auto_start([[:space:]]|$)' \
         "${GREETD_PAM}" \
         || fail A21 'etc/pam.d/greetd has no optional pam_gnome_keyring auto_start session line'

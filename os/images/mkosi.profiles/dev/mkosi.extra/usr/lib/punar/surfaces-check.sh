@@ -1965,6 +1965,7 @@ check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state 
 # daemon rather than the sign-in, and a lane without the probe fails instead
 # of falling back. Remove the pam_gnome_keyring auth line and no keyring
 # appears, which fails below; release gate A21 checks the PAM lines as well.
+# A mistyped password goes through the stack first and must change nothing.
 #
 # WAITING FOR THE WRITE, NOT FOR THE NAME. gnome-keyring reserves a new
 # keyring's name by creating the file EMPTY (O_CREAT|O_EXCL, mode 600), then
@@ -2047,6 +2048,24 @@ else
     # creates it under the password.
     DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
         timeout 20 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 || true
+    # NEGATIVE LEG FIRST: a mistyped password is refused, and leaves the
+    # login keyring exactly as it was. Under `auth required pam_unix.so` the
+    # stack ran on into pam_gnome_keyring with the typo, which created a login
+    # keyring that did not exist yet under whatever had been typed, and a
+    # check of the format alone would have passed that keyring. The daemon
+    # answers the stack before the stack returns, so a keyring the typo made
+    # is on disk by the time the probe exits.
+    login_sum_before="$(sha256sum "${login_keyring}" 2>/dev/null | awk '{print $1}')"
+    typo_result=0
+    printf '%s\n' "${lock_wrong}" \
+        | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+            timeout 30 "${signin_probe}" greetd "$(id -un)" >/dev/null 2>&1 \
+        || typo_result=$?
+    check_eq "the greetd sign-in stack refuses a mistyped password (sign-in probe exit)" \
+        "1" "${typo_result}"
+    check_eq "a mistyped password leaves the login keyring as it was (format, digest)" \
+        "${login_before} ${login_sum_before:-none}" \
+        "$(keyring_format "${login_keyring}") $(sha256sum "${login_keyring}" 2>/dev/null | awk '{print $1}' | grep . || echo none)"
     signin_result=0
     signin_errors="$(printf '%s\n' "${lock_password}" \
         | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
