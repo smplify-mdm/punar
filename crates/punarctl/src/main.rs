@@ -61,10 +61,13 @@
 
 #![forbid(unsafe_code)]
 
+mod brightness;
 mod desktop;
 mod fmt;
 mod hypr;
+mod input;
 mod ipc;
+mod media;
 mod model;
 mod peer;
 mod session;
@@ -151,10 +154,30 @@ enum Command {
         command: session::WorkspaceCommand,
     },
     /// Apply a tiling layout preset (balanced, columns, rows, focus, stack,
-    /// next, prev, restore), or show the current one with `status`.
+    /// next, prev, restore), or show the current one with `status`. With
+    /// --workspace, the preset belongs to that workspace only and is kept
+    /// across sessions; `default` gives it back to the session's preset.
     Layout {
         #[arg(value_parser = session::LAYOUT_ARGS)]
         preset: String,
+        /// A workspace number, or `active` for the focused one.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// The keyboard layout, and Mac-style clipboard keys.
+    Keyboard {
+        #[command(subcommand)]
+        command: input::KeyboardCommand,
+    },
+    /// The key binds of this session, as the shortcut help shows them.
+    Keys {
+        #[command(subcommand)]
+        command: input::KeysCommand,
+    },
+    /// Play, pause and skip what is playing (MPRIS), as the media keys do.
+    Media {
+        #[command(subcommand)]
+        command: media::MediaCommand,
     },
     /// Windows of this session: list, show the focused one, raise, close, or
     /// kill one exact window.
@@ -4516,7 +4539,12 @@ fn main() -> ExitCode {
             Err(error) => fail(&error),
         },
         Command::Workspace { command } => session::workspace(command, &style, json),
-        Command::Layout { preset } => session::layout(&preset, &style, json),
+        Command::Layout { preset, workspace } => {
+            session::layout(&preset, workspace.as_deref(), &style, json)
+        }
+        Command::Keyboard { command } => input::keyboard(command, socket.as_deref(), &style, json),
+        Command::Keys { command } => input::keys(command, &style, json),
+        Command::Media { command } => media::media(command, &style, json),
         Command::Window { command } => session::window(command, &style, json),
         Command::Session { command } => session::session(command, &style, json),
         Command::Display { command } => session::display(command, &style, json),

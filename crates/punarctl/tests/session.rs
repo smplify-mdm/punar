@@ -68,6 +68,8 @@ impl Session {
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
             .env("HYPRLAND_INSTANCE_SIGNATURE", "test-sig")
             .env("HOME", self.root.join("home"))
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_STATE_HOME")
             .env("NO_COLOR", "1");
         command
     }
@@ -538,4 +540,590 @@ fn notifications_verbs_call_the_shells_ipc() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+}
+
+// ---------------------------------------------------------------------------
+// SMP-1405 WP-02: media, the microphone, brightness, keyboard layout, keys.
+// ---------------------------------------------------------------------------
+
+/// A fake `busctl` that plays both roles this crate uses it for: the
+/// person's session bus (MPRIS) and logind's SetBrightness. It logs every
+/// argv; SetBrightness also writes the value into the fake sysfs, so the
+/// verb's read-back sees what "the device" now holds.
+fn fake_busctl(dir: &Path, players: &[(&str, &str)]) -> PathBuf {
+    let bin = dir.join("busbin");
+    fs::create_dir_all(&bin).unwrap();
+    let mut names: Vec<String> = vec!["\"org.freedesktop.DBus\"".into(), "\":1.7\"".into()];
+    names.extend(players.iter().map(|(name, _)| format!("\"{name}\"")));
+    let mut status_cases = String::new();
+    for (name, status) in players {
+        status_cases.push_str(&format!(
+            "    {name}) echo '{{\"type\":\"s\",\"data\":\"{status}\"}}' ;;\n"
+        ));
+    }
+    let script = bin.join("busctl");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n\
+             [ \"$1\" = --user ] && shift && shift\n\
+             case \"$1 $5\" in\n\
+               'call ListNames') echo '{{\"type\":\"as\",\"data\":[[{names}]]}}' ;;\n\
+               *' SetBrightness')\n\
+                 printf '%s\\n' \"$9\" > '{sys}/class/'\"$7\"'/'\"$8\"'/brightness' ;;\n\
+               'get-property PlaybackStatus')\n\
+                 case \"$2\" in\n{status_cases}    esac ;;\n\
+               'get-property Metadata') echo '{{\"type\":\"a{{sv}}\",\"data\":{{\"xesam:title\":{{\"type\":\"s\",\"data\":\"Song\\u001b[2J\"}},\"xesam:artist\":{{\"type\":\"as\",\"data\":[\"Band\"]}}}}}}' ;;\n\
+               'get-property Identity') echo '{{\"type\":\"s\",\"data\":\"Player\"}}' ;;\n\
+             esac\n",
+            log = dir.join("busctl.log").display(),
+            sys = dir.join("sys").display(),
+            names = names.join(","),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+fn with_path(bins: &[&PathBuf]) -> String {
+    let mut parts: Vec<String> = bins.iter().map(|b| b.display().to_string()).collect();
+    parts.push(std::env::var("PATH").unwrap_or_default());
+    parts.join(":")
+}
+
+/// The media keys reach the player that is playing, by its bus name, and
+/// the title a player sends is printed through the terminal-safe filter.
+#[test]
+fn media_keys_reach_the_playing_player_over_mpris() {
+    let session = Session::start(desktop);
+    let bin = fake_busctl(
+        &session.root,
+        &[
+            ("org.mpris.MediaPlayer2.mpv", "Paused"),
+            ("org.mpris.MediaPlayer2.chromium.instance42", "Playing"),
+        ],
+    );
+    let path = with_path(&[&bin]);
+    let output = session
+        .command(&["media", "play-pause"])
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stdout(&output).contains('\u{1b}'), "{:?}", stdout(&output));
+    let log = fs::read_to_string(session.root.join("busctl.log")).unwrap();
+    assert!(
+        log.lines().any(|l| l
+            == "--user --json=short call org.mpris.MediaPlayer2.chromium.instance42 \
+                /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player PlayPause"),
+        "{log}"
+    );
+    assert!(
+        log.lines().all(|l| l.starts_with("--user --json=short ")),
+        "{log}"
+    );
+
+    let output = session
+        .command(&["--json", "media", "status"])
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let state: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(state["player"]["status"], "Playing");
+    assert_eq!(state["player"]["artist"], "Band");
+    assert_eq!(state["players"].as_array().unwrap().len(), 2);
+
+    // Nothing playing anywhere: exit 6, the "not present" code.
+    let empty = fake_busctl(&session.root.join("empty"), &[]);
+    let output = session
+        .command(&["media", "next"])
+        .env("PATH", with_path(&[&empty]))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
+    assert!(stderr(&output).contains("No media player is running"));
+}
+
+/// The microphone key mutes the default source, never the output.
+#[test]
+fn mic_mute_targets_the_default_input() {
+    let session = Session::start(desktop);
+    let bin = fake_wpctl(&session.root, true);
+    let output = session
+        .command(&["audio", "mute", "--input"])
+        .env("PATH", with_path(&[&bin]))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = fs::read_to_string(session.root.join("wpctl.log")).unwrap();
+    assert_eq!(
+        log.lines().next(),
+        Some("set-mute @DEFAULT_AUDIO_SOURCE@ toggle")
+    );
+}
+
+fn fake_backlight(root: &Path, class: &str, name: &str, current: u64, max: u64) {
+    let dir = root.join("sys/class").join(class).join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("brightness"), format!("{current}\n")).unwrap();
+    fs::write(dir.join("max_brightness"), format!("{max}\n")).unwrap();
+    fs::write(dir.join("type"), "raw\n").unwrap();
+}
+
+/// Brightness is logind's SetBrightness on this session's own object, with
+/// a closed argv; the answer is what sysfs holds afterwards, and the OSD is
+/// raised with that value.
+#[test]
+fn brightness_goes_through_the_sessions_own_logind_object() {
+    let session = Session::start(desktop);
+    fake_backlight(&session.root, "backlight", "intel_backlight", 9600, 19200);
+    fake_backlight(&session.root, "leds", "tpacpi::kbd_backlight", 1, 2);
+    let bus = fake_busctl(&session.root, &[]);
+    let qs = fake_qs(&session.root);
+    let path = with_path(&[&bus, &qs]);
+    let run = |args: &[&str]| {
+        session
+            .command(args)
+            .env("PATH", &path)
+            .env("PUNAR_SYSFS_ROOT", session.root.join("sys"))
+            .output()
+            .unwrap()
+    };
+
+    let output = run(&["--json", "display", "brightness", "+10%"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let state: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(state["percent"], 60);
+    assert_eq!(state["brightness"], 11520);
+    let log = fs::read_to_string(session.root.join("busctl.log")).unwrap();
+    assert_eq!(
+        log.lines().last(),
+        Some(
+            "call org.freedesktop.login1 /org/freedesktop/login1/session/auto \
+             org.freedesktop.login1.Session SetBrightness ssu backlight intel_backlight 11520"
+        )
+    );
+    let osd = fs::read_to_string(session.root.join("qs.log")).unwrap();
+    assert_eq!(
+        osd.lines().last(),
+        Some("-p /usr/share/punar/shell ipc call osd brightness 60 display")
+    );
+
+    // A key never drives the panel dark: -100% lands on the 1% floor.
+    let output = run(&["--json", "display", "brightness", "-100%"]);
+    let state: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(state["brightness"], 192);
+
+    let output = run(&["--json", "display", "brightness", "--keyboard", "0%"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = fs::read_to_string(session.root.join("busctl.log")).unwrap();
+    assert!(
+        log.lines()
+            .last()
+            .unwrap()
+            .ends_with("SetBrightness ssu leds tpacpi::kbd_backlight 0"),
+        "{log}"
+    );
+
+    // Reading moves nothing.
+    let before = log.lines().count();
+    let output = run(&["--json", "display", "brightness"]);
+    assert_eq!(output.status.code(), Some(0));
+    let after = fs::read_to_string(session.root.join("busctl.log")).unwrap();
+    assert_eq!(after.lines().count(), before);
+
+    assert_eq!(
+        run(&["display", "brightness", "150%"]).status.code(),
+        Some(2)
+    );
+    assert_eq!(run(&["display", "brightness", "up"]).status.code(), Some(2));
+}
+
+/// A virtual machine has no backlight: the verb says so and exits 6.
+#[test]
+fn without_a_backlight_brightness_exits_six_and_says_why() {
+    let session = Session::start(desktop);
+    fs::create_dir_all(session.root.join("sys/class/backlight")).unwrap();
+    let bus = fake_busctl(&session.root, &[]);
+    let output = session
+        .command(&["display", "brightness", "+5%"])
+        .env("PATH", with_path(&[&bus]))
+        .env("PUNAR_SYSFS_ROOT", session.root.join("sys"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no display backlight"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        !session.root.join("busctl.log").exists(),
+        "nothing was sent"
+    );
+}
+
+const XKB_FIXTURE: &str = "! layout\n  us  English (US)\n  de  German\n  ru  Russian\n\
+                           ! variant\n  nodeadkeys  de: German (no dead keys)\n  phonetic  ru: Russian (phonetic)\n";
+
+/// A fake punard answering `capabilities.set` (and logging the request),
+/// with `deny` choosing a refusal instead.
+fn fake_punard(dir: &Path, deny: bool) -> PathBuf {
+    use std::io::{BufRead, BufReader};
+    fs::create_dir_all(dir).unwrap();
+    let socket = dir.join("punard.sock");
+    let log = dir.join("punard.log");
+    let listener = UnixListener::bind(&socket).unwrap();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let request: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap();
+            writeln!(file, "{request}").unwrap();
+            let answer = if deny {
+                json!({"v": 1, "id": request["id"], "error": {"code": "denied",
+                    "message": "Setting system.keymap requires an administrator.",
+                    "details": {"capability": "system.keymap"}}})
+            } else {
+                json!({"v": 1, "id": request["id"], "result": {"changed": true, "descriptor": {
+                    "capability": "system.keymap",
+                    "current_state": request["params"]["desired_state"]}}})
+            };
+            let mut stream = stream;
+            let _ = writeln!(stream, "{answer}");
+        }
+    });
+    socket
+}
+
+fn fake_hyprctl(dir: &Path) -> PathBuf {
+    let bin = dir.join("hyprbin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("hyprctl");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\necho ok\n",
+            dir.join("hyprctl.log").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+fn keyboard_env(session: &Session) -> (PathBuf, PathBuf) {
+    let xkb = session.root.join("evdev.lst");
+    fs::write(&xkb, XKB_FIXTURE).unwrap();
+    let vconsole = session.root.join("vconsole.conf");
+    (xkb, vconsole)
+}
+
+/// The person sets their layout: punard is asked (the capability, the
+/// canonical value), the session file is rewritten as data with the Latin
+/// lead and the switch chord, and the live compositor gets the same three
+/// values, each quoted as a Lua string.
+#[test]
+fn keyboard_layout_set_asks_punard_renders_and_applies_live() {
+    let session = Session::start(desktop);
+    let (xkb, vconsole) = keyboard_env(&session);
+    let punard = fake_punard(&session.root, false);
+    let hypr = fake_hyprctl(&session.root);
+    let run = |args: &[&str]| {
+        session
+            .command(args)
+            .env("PATH", with_path(&[&hypr]))
+            .env("PUNARD_SOCKET", &punard)
+            .env("PUNAR_XKB_LIST", &xkb)
+            .env("PUNAR_VCONSOLE_CONF", &vconsole)
+            .output()
+            .unwrap()
+    };
+    let output = run(&["--json", "keyboard", "layout", "set", "ru"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(result["device"], "ru");
+    assert_eq!(result["session"]["kb_layout"], "us,ru");
+    assert_eq!(result["session"]["kb_options"], "grp:alts_toggle");
+    assert_eq!(result["session_applied"], true);
+
+    let request: Value = serde_json::from_str(
+        fs::read_to_string(session.root.join("punard.log"))
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request["method"], "capabilities.set");
+    assert_eq!(
+        request["params"],
+        json!({"capability": "system.keymap", "desired_state": "ru"})
+    );
+    let file = fs::read_to_string(session.root.join("run/punar/session/input.lua")).unwrap();
+    assert!(file.contains("kb_layout = \"us,ru\","), "{file}");
+    assert!(file.contains("DATA ONLY"), "{file}");
+    let hyprctl = fs::read_to_string(session.root.join("hyprctl.log")).unwrap();
+    assert_eq!(
+        hyprctl.lines().last(),
+        Some(
+            "eval hl.config({ input = { kb_layout = 'us,ru', kb_variant = '', \
+             kb_options = 'grp:alts_toggle' } })"
+        )
+    );
+
+    // Not installed, or not a layout at all: refused before punard is asked.
+    let asked = fs::read_to_string(session.root.join("punard.log")).unwrap();
+    for bad in ["fr", "us+nodeadkeys", "us'); os.execute('x", "us,de,ru,us"] {
+        let output = run(&["keyboard", "layout", "set", bad]);
+        assert_eq!(output.status.code(), Some(2), "{bad}: {}", stderr(&output));
+    }
+    assert_eq!(
+        fs::read_to_string(session.root.join("punard.log")).unwrap(),
+        asked
+    );
+}
+
+/// A refusal from punard is the answer: exit 3, nothing rendered.
+#[test]
+fn keyboard_layout_set_refused_by_punard_changes_nothing() {
+    let session = Session::start(desktop);
+    let (xkb, vconsole) = keyboard_env(&session);
+    let punard = fake_punard(&session.root, true);
+    let hypr = fake_hyprctl(&session.root);
+    let output = session
+        .command(&["keyboard", "layout", "set", "de"])
+        .env("PATH", with_path(&[&hypr]))
+        .env("PUNARD_SOCKET", &punard)
+        .env("PUNAR_XKB_LIST", &xkb)
+        .env("PUNAR_VCONSOLE_CONF", &vconsole)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(!session.root.join("run/punar/session/input.lua").exists());
+    assert!(!session.root.join("hyprctl.log").exists());
+}
+
+/// Session start: the device's layout from vconsole; the greeter's choice
+/// adopted through punard when it is given; used for this session alone when
+/// punard will not take it.
+#[test]
+fn keyboard_layout_render_adopts_the_login_screens_choice() {
+    let session = Session::start(desktop);
+    let (xkb, vconsole) = keyboard_env(&session);
+    fs::write(&vconsole, "XKBLAYOUT=de\nXKBVARIANT=nodeadkeys\n").unwrap();
+    let render = |punard: &Path, adopt: Option<&str>| {
+        let mut args = vec!["--json", "keyboard", "layout", "render"];
+        if let Some(adopt) = adopt {
+            args.extend(["--adopt", adopt]);
+        }
+        session
+            .command(&args)
+            .env("PUNARD_SOCKET", punard)
+            .env("PUNAR_XKB_LIST", &xkb)
+            .env("PUNAR_VCONSOLE_CONF", &vconsole)
+            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+            .output()
+            .unwrap()
+    };
+    let nowhere = session.root.join("no-punard.sock");
+    let output = render(&nowhere, None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(result["kb_layout"], "de");
+    assert_eq!(result["kb_variant"], "nodeadkeys");
+    assert_eq!(result["adopted"], false);
+
+    let accepting = fake_punard(&session.root.join("ok"), false);
+    let output = render(&accepting, Some("ru"));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(
+        (result["kb_layout"].as_str(), result["adopted"].as_bool()),
+        (Some("us,ru"), Some(true))
+    );
+
+    // punard unreachable: this session still types what was chosen.
+    let output = render(&nowhere, Some("ru"));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(
+        (result["kb_layout"].as_str(), result["adopted"].as_bool()),
+        (Some("us,ru"), Some(false))
+    );
+    assert!(
+        stderr(&output).contains("the device keeps de+nodeadkeys"),
+        "{}",
+        stderr(&output)
+    );
+
+    // A value nobody installed is never adopted or rendered.
+    let output = render(&accepting, Some("xx"));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(result["kb_layout"], "de");
+}
+
+fn keyboards(request: &str) -> String {
+    match request {
+        "j/devices" => json!({"keyboards": [
+            {"name": "virtual-keyboard", "main": false, "layout": "us", "active_keymap": "English (US)"},
+            {"name": "at-translated-set-2-keyboard", "main": true, "layout": "us,ru",
+             "variant": ",", "options": "grp:alts_toggle", "active_keymap": "Russian"}
+        ]})
+        .to_string(),
+        "j/binds" => json!([
+            {"modmask": 64, "key": "Return", "description": "Open terminal", "submap": ""},
+            {"modmask": 64, "key": "Q", "description": "Close window", "submap": ""},
+            {"modmask": 0, "key": "H", "description": "Resize narrower", "submap": "resize"},
+            {"modmask": 64, "key": "mouse:272", "description": "", "submap": ""}
+        ])
+        .to_string(),
+        other => desktop(other),
+    }
+}
+
+#[test]
+fn keyboard_layout_status_reports_the_device_the_session_and_what_is_typing() {
+    let session = Session::start(keyboards);
+    let (xkb, vconsole) = keyboard_env(&session);
+    fs::write(&vconsole, "XKBLAYOUT=ru\n").unwrap();
+    let output = session
+        .command(&["--json", "keyboard", "layout"])
+        .env("PUNAR_XKB_LIST", &xkb)
+        .env("PUNAR_VCONSOLE_CONF", &vconsole)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let status: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(status["device"], "ru");
+    assert_eq!(status["layouts"][0]["description"], "Russian");
+    assert_eq!(status["layouts"][0]["latin"], false);
+    assert_eq!(status["live"]["active_keymap"], "Russian");
+    assert_eq!(status["switch_chord"], "both Alt keys together");
+
+    let output = session
+        .command(&["--json", "keyboard", "layout", "list", "de"])
+        .env("PUNAR_XKB_LIST", &xkb)
+        .output()
+        .unwrap();
+    let list: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(
+        list["layouts"],
+        json!([{"name": "de+nodeadkeys", "description": "German (no dead keys)"}])
+    );
+}
+
+/// `keys list` is the compositor's own table: the one PUNAR+/ renders.
+#[test]
+fn keys_list_is_the_compositors_bind_table() {
+    let session = Session::start(keyboards);
+    let output = session.run(&["--json", "keys", "list", "--filter", "TERMINAL"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let binds: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(binds.as_array().unwrap().len(), 1);
+    assert_eq!(binds[0]["key"], "Return");
+    let output = session.run(&["keys", "list"]);
+    let text = stdout(&output);
+    assert!(
+        text.contains("PUNAR + RETURN") || text.contains("Punar + Return"),
+        "{text}"
+    );
+    assert!(text.contains("in resize mode"), "{text}");
+    assert!(
+        !text.to_lowercase().contains("mouse:272"),
+        "undescribed binds stay out: {text}"
+    );
+}
+
+/// A per-workspace preset needs a workspace, and names only real ones; the
+/// status reads the script's store, validated.
+#[test]
+fn layout_per_workspace_refusals_and_status() {
+    let session = Session::start(desktop);
+    assert_eq!(session.run(&["layout", "default"]).status.code(), Some(2));
+    assert_eq!(
+        session
+            .run(&["layout", "columns", "--workspace", "0"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        session
+            .run(&["layout", "columns", "--workspace", "special:x"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        session
+            .run(&["layout", "restore", "--workspace", "3"])
+            .status
+            .code(),
+        Some(2)
+    );
+    fs::create_dir_all(session.root.join("home/.local/state/punar")).unwrap();
+    fs::write(
+        session
+            .root
+            .join("home/.local/state/punar/workspace-layouts.json"),
+        r#"{"version":1,"workspaces":{"3":"columns","4":"evil","x":"stack","0":"rows"}}"#,
+    )
+    .unwrap();
+    let output = session.run(&["--json", "layout", "status"]);
+    let status: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(status["workspaces"], json!({"3": "columns"}));
+    assert_eq!(
+        status["active"],
+        json!({"id": 3, "preset": "columns", "own": true})
+    );
+}
+
+/// The Mac-style grammar is the person's preference file, and the compositor
+/// re-reads its binds.
+#[test]
+fn clipboard_keys_write_the_preference_and_reload_the_binds() {
+    let session = Session::start(desktop);
+    let hypr = fake_hyprctl(&session.root);
+    let run = |args: &[&str]| {
+        session
+            .command(args)
+            .env("PATH", with_path(&[&hypr]))
+            .env_remove("XDG_CONFIG_HOME")
+            .output()
+            .unwrap()
+    };
+    let output = run(&["--json", "keyboard", "clipboard-keys"]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&output)).unwrap()["clipboard_keys"],
+        "standard"
+    );
+    let output = run(&["--json", "keyboard", "clipboard-keys", "on"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(result, json!({"clipboard_keys": "mac", "reloaded": true}));
+    let saved: Value = serde_json::from_str(
+        &fs::read_to_string(session.root.join("home/.config/punar/keyboard.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved, json!({"version": 1, "clipboardKeys": "mac"}));
+    assert_eq!(
+        fs::read_to_string(session.root.join("hyprctl.log")).unwrap(),
+        "reload\n"
+    );
+    run(&["keyboard", "clipboard-keys", "off"]);
+    let saved: Value = serde_json::from_str(
+        &fs::read_to_string(session.root.join("home/.config/punar/keyboard.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["clipboardKeys"], "standard");
 }

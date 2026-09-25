@@ -91,6 +91,10 @@ pub const EXIT_DENIED: u8 = 3;
 /// and executed nothing (contract section 14.1).
 pub const EXIT_APPROVAL_REQUIRED: u8 = 4;
 pub const EXIT_UNREACHABLE: u8 = 5;
+/// SMP-1405 WP-02: what the verb drives is not present — no backlight in a
+/// virtual machine, no media player running. Not a failure and not a
+/// refusal: a script can tell "nothing to do here" from "it broke".
+pub const EXIT_ABSENT: u8 = 6;
 
 /// The wire code that carries exit 4 (contract section 14.1).
 pub const CODE_APPROVAL_REQUIRED: &str = "approval_required";

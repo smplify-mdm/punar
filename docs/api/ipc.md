@@ -1946,7 +1946,10 @@ or path other than the confirmed target device. An installed system returns
   names unchanged). Non-TTY stdout or `NO_COLOR` strips ANSI.
 - Exit codes (D-014 Sect III): `0` success · `1` runtime/daemon error ·
   `2` usage (clap) · `3` denied · `4` approval_required (reserved until M9) ·
-  `5` daemon unreachable.
+  `5` daemon unreachable · `6` not present (SMP-1405 WP-02): what the verb
+  drives is absent, not broken — `display brightness` on a machine with no
+  backlight (every VM), `media` with no player running. A script can tell
+  "nothing to do here" from a failure without parsing text.
 - **M4 verbs:** `punarctl policy effective` (D-014 table over 5.7) and
   `punarctl policy explain <path>` (spec section 40 layout verbatim over
   5.8; personal-mode strings "Personal preference" / "OS default",

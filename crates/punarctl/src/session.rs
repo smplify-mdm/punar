@@ -24,8 +24,10 @@ use crate::hypr::{self, HyprError};
 /// start and CI run it too (docs/development/milestone-2.md section 4).
 const LAYOUT_SCRIPT: &str = "/usr/lib/punar/punar-layout.sh";
 /// What `layout <preset>` accepts: the five presets and the script's verbs.
-pub const LAYOUT_ARGS: [&str; 9] = [
-    "balanced", "columns", "rows", "focus", "stack", "next", "prev", "restore", "status",
+/// `default` is for `--workspace` only: it gives a workspace back to the
+/// session's preset.
+pub const LAYOUT_ARGS: [&str; 10] = [
+    "balanced", "columns", "rows", "focus", "stack", "next", "prev", "restore", "status", "default",
 ];
 const PRESETS: [&str; 5] = ["balanced", "columns", "rows", "focus", "stack"];
 
@@ -103,6 +105,15 @@ pub enum NotificationsCommand {
 pub enum DisplayCommand {
     /// Every connected display: mode, scale and position.
     List,
+    /// The backlight: `get`, `set 40%`, `40%`, `+5%` or `-5%`. Through this
+    /// session's own logind object; a machine with no backlight exits 6.
+    Brightness {
+        #[arg(allow_hyphen_values = true, num_args = 0..=2)]
+        change: Vec<String>,
+        /// The keyboard backlight instead of the display's.
+        #[arg(long)]
+        keyboard: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,10 +126,14 @@ pub enum AudioCommand {
         #[arg(allow_hyphen_values = true)]
         change: String,
     },
-    /// Mute the output: on, off, or toggle (the default).
+    /// Mute the output, or the microphone with --input: on, off, or toggle
+    /// (the default).
     Mute {
         #[arg(value_parser = ["on", "off", "toggle"])]
         state: Option<String>,
+        /// The default input (the microphone) instead of the output.
+        #[arg(long)]
+        input: bool,
     },
 }
 
@@ -461,13 +476,88 @@ fn current_preset() -> (String, &'static str) {
     }
 }
 
-pub fn layout(preset: &str, style: &Style, json_output: bool) -> ExitCode {
+/// The per-workspace presets punar-layout.sh keeps, validated as the script
+/// validates them: a workspace number and one of the five presets.
+fn workspace_presets() -> Vec<(i64, String)> {
+    let path = std::env::var("XDG_STATE_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute())
+                .map(|home| home.join(".local/state"))
+        })
+        .map(|dir| dir.join("punar/workspace-layouts.json"));
+    let Some(document) = path
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<(i64, String)> = document
+        .get("workspaces")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, preset)| {
+            let id = workspace_address(id).filter(|id| *id <= 9999)?;
+            let preset = preset.as_str().filter(|p| PRESETS.contains(p))?;
+            Some((id, preset.to_string()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `active`, or a workspace number, as the script takes it.
+fn workspace_target(raw: &str) -> Option<String> {
+    if raw == "active" {
+        return Some(raw.to_string());
+    }
+    workspace_address(raw)
+        .filter(|id| *id <= 9999)
+        .map(|id| id.to_string())
+}
+
+pub fn layout(preset: &str, workspace: Option<&str>, style: &Style, json_output: bool) -> ExitCode {
+    let target = match workspace {
+        None if preset == "default" => {
+            return refuse(
+                "`default` gives one workspace back to the session's preset, so it needs \
+                 --workspace <number|active>.",
+                2,
+            );
+        }
+        None => None,
+        Some(raw) => match workspace_target(raw) {
+            Some(target) => Some(target),
+            None => {
+                return refuse(
+                    &format!(
+                        "{raw:?} is not a workspace, so no layout was changed.\n\
+                         Next step: give a workspace number, or `active`."
+                    ),
+                    2,
+                );
+            }
+        },
+    };
+    if target.is_some() && preset == "restore" {
+        return refuse("`restore` covers every workspace; drop --workspace.", 2);
+    }
     if preset != "status" {
         // Refuse before running anything when there is no compositor.
         if let Err(error) = hypr::request("version") {
             return hypr_fail(error);
         }
-        let result = Command::new(LAYOUT_SCRIPT)
+        let mut command = Command::new(LAYOUT_SCRIPT);
+        if let Some(target) = &target {
+            command.args(["--workspace", target]);
+        }
+        let result = command
             .arg(preset)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -495,17 +585,50 @@ pub fn layout(preset: &str, style: &Style, json_output: bool) -> ExitCode {
         }
     }
     let (current, source) = current_preset();
+    let workspaces = workspace_presets();
+    let active = hypr::json("activeworkspace")
+        .ok()
+        .and_then(|w| w.get("id").and_then(Value::as_i64));
+    let active_preset = active.and_then(|id| {
+        workspaces
+            .iter()
+            .find(|(ws, _)| *ws == id)
+            .map(|(_, preset)| preset.clone())
+    });
     if json_output {
-        return print_json(&json!({ "preset": current, "source": source }));
+        let map: serde_json::Map<String, Value> = workspaces
+            .iter()
+            .map(|(id, preset)| (id.to_string(), json!(preset)))
+            .collect();
+        return print_json(&json!({
+            "preset": current,
+            "source": source,
+            "workspaces": map,
+            "active": active.map(|id| json!({
+                "id": id,
+                "preset": active_preset.clone().unwrap_or_else(|| current.clone()),
+                "own": active_preset.is_some(),
+            })),
+        }));
     }
     let mut out = fmt::masthead(style, "Layout", "this session");
-    out.push_str(&fmt::rows(
-        style,
-        &[Row::new("Preset", &current, Slot::Ok, source)],
-    ));
+    let mut rows = vec![Row::new("Preset", &current, Slot::Ok, source)];
+    for (id, preset) in &workspaces {
+        rows.push(Row::new(
+            &format!("Workspace {id}"),
+            preset,
+            Slot::Neutral,
+            if active == Some(*id) {
+                "its own preset · focused"
+            } else {
+                "its own preset"
+            },
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
     out.push_str(&fmt::note(
         style,
-        "balanced · columns · rows · focus · stack · next · prev",
+        "balanced · columns · rows · focus · stack · next · prev · --workspace <n|active>",
     ));
     print!("{out}");
     ExitCode::SUCCESS
@@ -923,7 +1046,9 @@ pub fn notifications(command: NotificationsCommand, style: &Style, json_output: 
 // ---------------------------------------------------------------------------
 
 pub fn display(command: DisplayCommand, style: &Style, json_output: bool) -> ExitCode {
-    let DisplayCommand::List = command;
+    if let DisplayCommand::Brightness { change, keyboard } = command {
+        return crate::brightness::brightness(&change, keyboard, style, json_output);
+    }
     match hypr::json("monitors") {
         Ok(Value::Array(monitors)) => {
             if json_output {
@@ -1060,9 +1185,14 @@ pub fn audio(command: AudioCommand, style: &Style, json_output: bool) -> ExitCod
                 );
             }
         },
-        AudioCommand::Mute { state } => Some(vec![
+        AudioCommand::Mute { state, input } => Some(vec![
             "set-mute".to_string(),
-            "@DEFAULT_AUDIO_SINK@".into(),
+            if *input {
+                "@DEFAULT_AUDIO_SOURCE@"
+            } else {
+                "@DEFAULT_AUDIO_SINK@"
+            }
+            .into(),
             match state.as_deref() {
                 Some("on") => "1",
                 Some("off") => "0",
