@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use crate::discovery::{self, Organization};
 use crate::identity::{self, Csr, Record, Store};
 use crate::protocol::{CallError, ErrorCode, error_line, parse_request_line, result_line};
-use crate::upstream::{Api, Enrolled, UpstreamError};
+use crate::upstream::{Api, Bundle, Enrolled, UpstreamError};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const LINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -343,21 +343,8 @@ impl Daemon {
     fn policy_fetch(&self, params: Option<&Value>) -> Result<Value, CallError> {
         let record = self.authorized(params)?;
         let api = self.api(self.call_budget)?;
-        match api.bundle(&record.device_id).map_err(upstream_refusal)? {
-            None => Ok(json!({ "policies": [] })),
-            Some(bundle) => {
-                // A bundle exists but this release carries no Punar policy
-                // payload: nothing is applied, and the fact is logged rather
-                // than reported as a refusal punard would misread as "is the
-                // control plane running?".
-                eprintln!(
-                    "punar-smplifyd: a {}-byte bundle (delivery {}) is assigned to this device but carries no Punar policy; ignored",
-                    bundle.bytes.len(),
-                    bundle.delivery_id.as_deref().unwrap_or("unknown")
-                );
-                Ok(json!({ "policies": [] }))
-            }
-        }
+        let bundle = api.bundle(&record.device_id).map_err(upstream_refusal)?;
+        Ok(policy_answer(bundle.as_ref()))
     }
 
     /// One report. punard reads the answer within its own timeout for the
@@ -498,6 +485,33 @@ fn retry_delay(base: Duration, failures: u32) -> Duration {
 enum PinTenantKey {
     First,
     Never,
+}
+
+/// The `policy.fetch` answer for what Smplify delivered, with the marker
+/// that says what an empty list means (docs/api/ipc.md section 5.9). punard
+/// withdraws an organization's policy only on `"none"`, so the two empty
+/// answers must never look alike: 204 is Smplify saying nothing is assigned;
+/// a bundle this release cannot read is something assigned that must not
+/// wipe the policy the device already enforces.
+///
+/// When the bundle carries a Punar payload (slice 2), one that fails its
+/// signature check is an error, never an empty list.
+fn policy_answer(bundle: Option<&Bundle>) -> Value {
+    match bundle {
+        None => json!({ "policies": [], "assignment": "none" }),
+        Some(bundle) => {
+            // A bundle exists but this release carries no Punar policy
+            // payload: nothing is applied, and the fact is logged rather
+            // than reported as a refusal punard would misread as "is the
+            // control plane running?".
+            eprintln!(
+                "punar-smplifyd: a {}-byte bundle (delivery {}) is assigned to this device but carries no Punar policy; ignored",
+                bundle.bytes.len(),
+                bundle.delivery_id.as_deref().unwrap_or("unknown")
+            );
+            json!({ "policies": [], "assignment": "unusable" })
+        }
+    }
 }
 
 fn param_str(params: Option<&Value>, key: &str) -> Result<String, CallError> {
@@ -823,6 +837,25 @@ mod tests {
         report("compliance.report", "report");
         assert_eq!(arrived().len(), 7, "and waits longer after failing again");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Nothing assigned and something assigned that this release cannot use
+    /// are both an empty list, and only the marker tells punard which: only
+    /// the first may withdraw the policy the device enforces.
+    #[test]
+    fn policy_fetch_says_what_an_empty_list_means() {
+        assert_eq!(
+            policy_answer(None),
+            json!({"policies": [], "assignment": "none"})
+        );
+        let bundle = Bundle {
+            bytes: vec![0x1f, 0x8b, 0, 0],
+            delivery_id: Some("dlv-1".into()),
+        };
+        assert_eq!(
+            policy_answer(Some(&bundle)),
+            json!({"policies": [], "assignment": "unusable"})
+        );
     }
 
     #[test]
