@@ -420,7 +420,11 @@ struct TestDaemon {
 
 fn write_nss_files(dir: &Path) -> (PathBuf, PathBuf) {
     let group_file = dir.join("group");
-    fs::write(&group_file, "root:x:0:\npunar:x:970:\n").unwrap();
+    fs::write(
+        &group_file,
+        "root:x:0:\npunar:x:970:\npunar-admin:x:971:punar\n",
+    )
+    .unwrap();
     let passwd_file = dir.join("passwd");
     fs::write(
         &passwd_file,

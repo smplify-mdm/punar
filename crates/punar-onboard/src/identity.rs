@@ -22,6 +22,13 @@ const UID_MAX_EXCLUSIVE: u32 = 60_000;
 const SUBID_START: u32 = 100_000;
 const SUBID_COUNT: u32 = 65_536;
 
+/// The group whose members administer the device (F0-S1; docs/api/ipc.md
+/// section 23; docs/design/onboarding.md section 1.6). The first account is
+/// created in it, and the materializer keeps a device from ever booting with
+/// no member. punard reads and edits the same name
+/// (`crates/punard/src/admins.rs`, which pins it with a test).
+pub const ADMIN_GROUP: &str = "punar-admin";
+
 #[derive(Clone, Debug)]
 pub struct IdentityPaths {
     pub state_dir: PathBuf,
@@ -518,6 +525,7 @@ impl IdentityStore {
             // A per-user primary group may not reuse the stable admission gid.
             return Err(IdentityError::AdmissionGroup);
         }
+        let groups = with_device_admin(self.platform.as_ref(), groups)?;
         let home = home_dir.to_string_lossy().into_owned();
         let account = AccountRecord {
             v: 1,
@@ -669,7 +677,72 @@ impl IdentityStore {
             .get("displayName")
             .and_then(serde_json::Value::as_str)
             .ok_or(IdentityError::Corrupt)?;
+        let account = self.ensure_device_admin(account, &account_path);
         self.materialize_account(account, device_name)
+    }
+
+    /// NEVER ZERO ADMINISTRATORS (F0-S1). A device set up before the role
+    /// existed has an owner and no administrator, and an update must not
+    /// leave it that way — nobody could change its policy, updates or
+    /// enrollment again. So on every boot, before the account is published:
+    /// when no account on the device holds the role, the device owner gets it.
+    ///
+    /// WHO THE OWNER IS. The account onboarding recorded as completing first
+    /// run (`completed.json`), which is the account this materializer
+    /// publishes. It is the first account by construction: onboarding creates
+    /// exactly one, and refuses a second first run. A device with more
+    /// accounts than that was not set up by Punar's onboarding and has no
+    /// record to rank them by, so this names the recorded owner and nobody
+    /// else — never the most recent sign-in, never the lowest uid.
+    ///
+    /// ONCE, NOT ALWAYS. When any account already holds the role this does
+    /// nothing, so an administrator who hands the role to someone else and
+    /// then gives up their own is not overruled at the next boot. The
+    /// persisted record is written, so the grant survives; if the write fails
+    /// the owner still holds the role for this boot, and the next boot tries
+    /// again.
+    ///
+    /// An image without the group (an older release booted after a
+    /// rollback) is left exactly as it was.
+    fn ensure_device_admin(
+        &self,
+        mut account: AccountRecord,
+        account_path: &Path,
+    ) -> AccountRecord {
+        if account.groups.iter().any(|group| group == ADMIN_GROUP) {
+            return account;
+        }
+        if !matches!(self.platform.lookup("group", ADMIN_GROUP), Ok(Some(_))) {
+            return account;
+        }
+        if self.any_account_administers() {
+            return account;
+        }
+        account.groups.push(ADMIN_GROUP.to_string());
+        if let Err(error) = write_json_atomic(account_path, &account, 0o600) {
+            eprintln!(
+                "punar-onboard: the device owner {} holds the administrator role for this \
+                 boot, but it could not be recorded ({error}); the next boot tries again",
+                account.username
+            );
+        }
+        account
+    }
+
+    /// Whether any readable account record on this device holds the role. A
+    /// corrupt record is skipped: one damaged file must not make every other
+    /// account's role invisible, and "none" here only ever adds a role.
+    fn any_account_administers(&self) -> bool {
+        let Ok(entries) = fs::read_dir(self.paths.accounts_dir()) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .any(|entry| {
+                read_json::<AccountRecord>(&entry.path().join("account.json"))
+                    .is_ok_and(|record| record.groups.iter().any(|group| group == ADMIN_GROUP))
+            })
     }
 
     fn materialize_account(
@@ -885,10 +958,31 @@ impl IdentityStore {
                     .join(format!("{}:{group}.membership", journal.username)),
             );
         }
+        paths.push(
+            self.paths
+                .runtime_userdb
+                .join(format!("{}:{ADMIN_GROUP}.membership", journal.username)),
+        );
         paths.push(self.paths.runtime_subuid.clone());
         paths.push(self.paths.runtime_subgid.clone());
         paths
     }
+}
+
+/// The first account administers the device (F0-S1, OD-1(a)): append the
+/// administrator group when the image has one. An image that predates the
+/// role creates the account without it, and the first boot of an image that
+/// has it grants it then ([`IdentityStore::materialize`]).
+fn with_device_admin(
+    platform: &dyn IdentityPlatform,
+    mut groups: Vec<String>,
+) -> Result<Vec<String>, IdentityError> {
+    if platform.lookup("group", ADMIN_GROUP)?.is_some()
+        && !groups.iter().any(|group| group == ADMIN_GROUP)
+    {
+        groups.push(ADMIN_GROUP.to_string());
+    }
+    Ok(groups)
 }
 
 fn existing_supplementary_groups<const N: usize>(
@@ -1185,6 +1279,8 @@ mod tests {
     struct FakePlatform {
         hostname: Rc<RefCell<String>>,
         fail_after_materialize: Rc<Cell<bool>>,
+        /// An image from before the administrator role: no such group.
+        without_admin_group: Rc<Cell<bool>>,
     }
 
     impl FakePlatform {
@@ -1192,6 +1288,7 @@ mod tests {
             Self {
                 hostname: Rc::new(RefCell::new("original-host".to_string())),
                 fail_after_materialize: Rc::new(Cell::new(fail_after_materialize)),
+                without_admin_group: Rc::new(Cell::new(false)),
             }
         }
     }
@@ -1210,6 +1307,8 @@ mod tests {
 
         fn lookup(&self, database: &str, key: &str) -> Result<Option<String>, IdentityError> {
             let value = match (database, key) {
+                ("group", ADMIN_GROUP) if self.without_admin_group.get() => None,
+                ("group", ADMIN_GROUP) => Some(format!("{ADMIN_GROUP}:x:903:")),
                 ("group", "punar") => Some("punar:x:900:".to_string()),
                 ("group", "video") => Some("video:x:901:".to_string()),
                 ("group", "input") => Some("input:x:902:".to_string()),
@@ -1513,6 +1612,139 @@ mod tests {
         );
         assert!(paths.runtime_userdb.join("alice.user").exists());
         assert!(paths.runtime_userdb.join("1000.user").is_symlink());
+    }
+
+    // ---- the device administrator (F0-S1) ------------------------------
+
+    fn account_groups(paths: &IdentityPaths) -> Vec<String> {
+        let dir = fs::read_dir(paths.accounts_dir())
+            .unwrap()
+            .flatten()
+            .find(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .unwrap();
+        read_json::<AccountRecord>(&dir.path().join("account.json"))
+            .unwrap()
+            .groups
+    }
+
+    fn set_account_groups(paths: &IdentityPaths, groups: &[&str]) {
+        let dir = fs::read_dir(paths.accounts_dir())
+            .unwrap()
+            .flatten()
+            .find(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .unwrap();
+        let path = dir.path().join("account.json");
+        let mut record: AccountRecord = read_json(&path).unwrap();
+        record.groups = groups.iter().map(|g| g.to_string()).collect();
+        write_json_atomic(&path, &record, 0o600).unwrap();
+    }
+
+    #[test]
+    fn the_first_account_administers_the_device() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(FakePlatform::new(false)));
+        store
+            .create_first_account("alice", "three amber rivers", "Alice Workstation")
+            .unwrap();
+        assert!(account_groups(&paths).iter().any(|g| g == ADMIN_GROUP));
+        assert!(
+            paths
+                .runtime_userdb
+                .join(format!("alice:{ADMIN_GROUP}.membership"))
+                .is_file(),
+            "the role is published as a login would see it"
+        );
+    }
+
+    /// The upgrade path: a device set up before the role has an owner and no
+    /// administrator, and its first boot on an image with the role must fix
+    /// that without anyone asking — and must not fix it twice.
+    #[test]
+    fn an_upgraded_device_gives_its_owner_the_role_once() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(FakePlatform::new(false)));
+        store
+            .create_first_account("alice", "three amber rivers", "Alice Workstation")
+            .unwrap();
+        // What an older onboarding left behind.
+        set_account_groups(&paths, &["punar", "video", "input"]);
+        let edge = paths
+            .runtime_userdb
+            .join(format!("alice:{ADMIN_GROUP}.membership"));
+        fs::remove_file(&edge).unwrap();
+
+        store.materialize().unwrap();
+        assert!(
+            account_groups(&paths).iter().any(|g| g == ADMIN_GROUP),
+            "the grant is recorded, not only published"
+        );
+        assert!(edge.is_file());
+
+        // Another account already administers the device: the owner is left
+        // as they chose to be.
+        set_account_groups(&paths, &["punar"]);
+        fs::remove_file(&edge).unwrap();
+        let other = paths.accounts_dir().join("acct_00000000000000bb");
+        fs::create_dir_all(&other).unwrap();
+        let mut bob: AccountRecord = read_json(
+            &fs::read_dir(paths.accounts_dir())
+                .unwrap()
+                .flatten()
+                .find(|e| e.path() != other && !e.file_name().to_string_lossy().starts_with('.'))
+                .unwrap()
+                .path()
+                .join("account.json"),
+        )
+        .unwrap();
+        bob.account_id = "acct_00000000000000bb".into();
+        bob.username = "bob".into();
+        bob.uid = 1001;
+        bob.groups = vec!["punar".into(), ADMIN_GROUP.into()];
+        write_json_atomic(&other.join("account.json"), &bob, 0o600).unwrap();
+        store.materialize().unwrap();
+        assert!(
+            !edge.exists(),
+            "an existing administrator is never overruled"
+        );
+    }
+
+    #[test]
+    fn an_image_without_the_role_changes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let platform = FakePlatform::new(false);
+        platform.without_admin_group.set(true);
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(platform));
+        store
+            .create_first_account("alice", "three amber rivers", "Alice Workstation")
+            .unwrap();
+        assert!(!account_groups(&paths).iter().any(|g| g == ADMIN_GROUP));
+        store.materialize().unwrap();
+        assert!(!account_groups(&paths).iter().any(|g| g == ADMIN_GROUP));
+    }
+
+    #[test]
+    fn a_rolled_back_first_run_leaves_no_administrator_edge() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(FakePlatform::new(true)));
+        assert!(
+            store
+                .create_first_account("alice", "three amber rivers", "Alice Workstation")
+                .is_err()
+        );
+        assert!(
+            !paths
+                .runtime_userdb
+                .join(format!("alice:{ADMIN_GROUP}.membership"))
+                .exists()
+        );
     }
 
     #[test]

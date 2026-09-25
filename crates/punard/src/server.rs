@@ -28,7 +28,7 @@ use punar_common::approval::{
     RequesterPeer, ResolvedBy,
 };
 use punar_common::audit::{
-    AGENT_SESSION_NONE, AuditActor, AuditOutcome, AuditWriter, PROJECT_ID_SYSTEM,
+    AGENT_SESSION_NONE, AUDIT_GROUP, AuditActor, AuditOutcome, AuditWriter, PROJECT_ID_SYSTEM,
     RESOURCE_CAPABILITY_REGISTRY, count_events, next_event_id, tail,
 };
 use punar_common::install::{
@@ -36,20 +36,21 @@ use punar_common::install::{
     InstallRecoveryAckParams, InstallRecoveryMode, InstallStatusResult,
 };
 use punar_common::ipc::{
-    ApprovalIdParams, ApprovalsConsumeResult, ApprovalsCreateParams, ApprovalsListResult,
-    ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams,
-    AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
-    CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
-    ENROLLMENT_TERMS_NOT_ACCEPTED, EnrollPolicyStatus, EnrollStartParams, EnrollStartResult,
-    EnrollStatusResult, EnrollStopParams, EnrollStopResult, EnrollmentTerm, ErrorCode, FirstSync,
-    IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo,
-    PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams,
-    PolicyExplainResult, PolicyRefresh, PolicySetParams, PolicySetResult, PolicySourceRef,
-    PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult,
-    ReconcileEntry, ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response,
-    SERVER_READ_TIMEOUT, StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams,
-    WebAppsGetParams, WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams,
-    organization_name, term_safe_name,
+    AdminsSetParams, ApprovalIdParams, ApprovalsConsumeResult, ApprovalsCreateParams,
+    ApprovalsListResult, ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams,
+    AppsRemoveParams, AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams,
+    CapabilitiesSetParams, CapabilityCompliance, Classification as WireClassification,
+    ComplianceBlock, ComplianceState, ENROLLMENT_TERMS_NOT_ACCEPTED, EnrollPolicyStatus,
+    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopParams, EnrollStopResult,
+    EnrollmentTerm, ErrorCode, FirstSync, IpcError, LastQuery, LastSync, LocalAdminStatus,
+    MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry,
+    PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult, PolicyRefresh,
+    PolicySetParams, PolicySetResult, PolicySourceRef, PrivilegeRequestParams,
+    PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry,
+    ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT,
+    StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams, WebAppsGetParams,
+    WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams, organization_name,
+    term_safe_name,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
@@ -89,9 +90,10 @@ use crate::inventory::{
 };
 use crate::pi_update::{PiUpdateEngine, PiUpdateError, PiUpdateSources};
 use crate::policy::{
-    ApplicationPolicyAction, ApplicationPolicyLayer, ApplicationPolicyReason, DEVICE_ADMIN_RANK,
-    EffectiveDocument, Layer, LocalAdminLayer, compute_effective, evaluate_application_policy,
-    evaluate_webapp_policy, load_policy_dir, resolve_local_admin, write_effective_debug_copy,
+    AdminRosterLayer, ApplicationPolicyAction, ApplicationPolicyLayer, ApplicationPolicyReason,
+    DEVICE_ADMIN_RANK, EffectiveDocument, Layer, LocalAdminLayer, compute_effective,
+    evaluate_application_policy, evaluate_webapp_policy, load_policy_dir, resolve_local_admin,
+    write_effective_debug_copy,
 };
 use crate::policy_set::{self, CanonicalSet, PrepareError, Rejection};
 use crate::state::{
@@ -108,9 +110,11 @@ use crate::util::{
 };
 use crate::webapps::{WebAppError, WebAppManager};
 
+mod admins;
 mod m9;
 mod policy_refresh;
 
+use admins::RosterScope;
 use m9::MutationAuthority;
 use policy_refresh::{
     REASON_ANSWER_TOO_LARGE, REASON_UNUSABLE_ASSIGNMENT, RefreshBackoff, RefreshResult,
@@ -175,6 +179,11 @@ struct UpdateWords {
     agent_may_not: &'static str,
     /// The command a person runs to do it themselves.
     retry: String,
+    /// Whether this verb changes what everyone on the device runs, and so
+    /// needs the device-administrator role (F0-S1). Installing and rolling
+    /// back do; checking only refreshes the verified channel cache, reaches
+    /// nobody, and stays open to any person who confirms their password.
+    reaches_everyone: bool,
 }
 
 const ENROLL_STOP_WORDS: EnrollmentWords = EnrollmentWords {
@@ -315,6 +324,13 @@ pub struct DaemonConfig {
     /// prove the ACCEPT half of `policy.set` — the half that matters and the
     /// one a hardcoded `/run` path leaves to the VM gate alone.
     pub reauth_ticket_dir: PathBuf,
+    /// Onboarding's persistent account records
+    /// (`/var/lib/punar/identity/accounts`): where the device-administrator
+    /// role of an onboarded account lives (F0-S1, [`crate::admins`]).
+    pub identity_accounts_dir: PathBuf,
+    /// The nss-systemd drop-in directory (`/run/userdb`) the role is
+    /// published to, and read back from, as a login would see it.
+    pub userdb_dir: PathBuf,
     /// The boot clock every expiry decision reads — grants, approvals and
     /// re-authentication tickets (SMP-1405). [`SystemClock`] in production;
     /// tests substitute a `ManualClock` to prove expiry and reboot without
@@ -412,6 +428,8 @@ impl DaemonConfig {
             inventory_sources: CollectorSources::default(),
             approvals_file,
             reauth_ticket_dir: PathBuf::from(crate::reauth::TICKET_DIR),
+            identity_accounts_dir: PathBuf::from("/var/lib/punar/identity/accounts"),
+            userdb_dir: PathBuf::from("/run/userdb"),
             trusted_clock: Arc::new(SystemClock::new()),
             ai_defaults_file: PathBuf::from(punar_common::aipolicy::AI_DEFAULTS_FILE),
             console_uid: DEFAULT_CONSOLE_UID,
@@ -503,6 +521,11 @@ struct Inner {
     /// edit local policy at all (SPEC section 44.5). Reloaded with the org
     /// layers on every enrollment transition.
     local_admin: Mutex<Vec<LocalAdminLayer>>,
+    /// Organization opinions about who administers this device (F0-S1,
+    /// contract section 23.4). Reloaded and cleared exactly where
+    /// `local_admin` is, for the same reason: an org's roster must not
+    /// outlive its enrollment.
+    admin_roster: Mutex<Vec<AdminRosterLayer>>,
     /// Ranks 1–4 (and stored-rank overrides): policy.d drops. Loaded at
     /// startup; since M5 the **enrollment chain** reloads them live
     /// (`enroll.start` writes + reloads, `enroll.stop` empties), and every
@@ -669,13 +692,12 @@ impl Daemon {
                 .initialize_status_file()
                 .map_err(|error| io::Error::other(error.to_string()))?;
         }
-        let audit = AuditWriter::open(&cfg.audit_path)?;
-        // Group ownership (root:punar) is the daemon's job, not the
-        // writer's; meaningful only when running as root (tests are not).
-        if let Some(gid) = lookup_gid(&cfg.group_file, &cfg.group) {
-            let _ = std::os::unix::fs::chown(&cfg.audit_path, Some(0), Some(gid));
-        }
-        let mut audit = audit;
+        // The trail is root:punar-audit, a group no person is in (F0-S3): a
+        // person reads their own events through `audit.tail`. With no such
+        // group (an image from before it) the file stays root:root 0640 —
+        // never falling back to `punar`, which is every account.
+        let mut audit =
+            AuditWriter::open_in_group(&cfg.audit_path, lookup_gid(&cfg.group_file, AUDIT_GROUP))?;
         let mut audit_events = count_events(&cfg.audit_path)?;
 
         // Layer stores. Migration must run before regular seeding so the
@@ -843,6 +865,7 @@ impl Daemon {
                 admin_policy,
                 org_layers: Mutex::new(loaded.layers),
                 local_admin: Mutex::new(loaded.local_admin),
+                admin_roster: Mutex::new(loaded.admin_roster),
                 application_policy: Mutex::new(loaded.applications),
                 effective: Mutex::new(effective),
                 tracker: Mutex::new(ComplianceTracker::default()),
@@ -1183,6 +1206,18 @@ fn admin_may_override(entry: &punar_policy::EffectiveEntry<Value>) -> bool {
     entry.provenance.rank > DEVICE_ADMIN_RANK
         || (entry.provenance.kind == punar_policy::SourceKind::DeviceSpecificOverride
             && entry.provenance.rank >= DEVICE_ADMIN_RANK)
+}
+
+/// Whether an audit event belongs to the device rather than to a person
+/// (F0-S3): it names no person — a daemon, the device, the organization — or
+/// it is root administering the device. Root is not a person on a Punar
+/// device (nobody signs in as root), and what root changed is what every
+/// person on the device lives with.
+fn audit_event_is_the_devices(event: &AuditEvent) -> bool {
+    matches!(
+        event.source,
+        PrincipalKind::Service | PrincipalKind::Device | PrincipalKind::Organization
+    ) || event.user_id.as_deref() == Some("root")
 }
 
 fn source_ref(provenance: &Provenance) -> PolicySourceRef {
@@ -1914,7 +1949,7 @@ impl Inner {
             }
             Method::CapabilitiesGet(params) => self.handle_capabilities_get(params),
             Method::CapabilitiesSet(params) => self.handle_capabilities_set(peer, params),
-            Method::AuditTail(params) => self.handle_audit_tail(params),
+            Method::AuditTail(params) => self.handle_audit_tail(peer, params),
             Method::Reconcile => self.handle_reconcile(peer),
             Method::PolicyEffective => Ok(to_value(self.handle_policy_effective())),
             Method::PolicyExplain(params) => self.handle_policy_explain(params),
@@ -1963,6 +1998,8 @@ impl Inner {
             Method::InstallApply(params) => self.handle_install_apply(peer, params),
             Method::InstallRecoveryAck(params) => self.handle_install_recovery_ack(peer, params),
             Method::InstallStatus => Ok(to_value(self.installer.status())),
+            Method::AdminsList => self.handle_admins_list(peer),
+            Method::AdminsSet(params) => self.handle_admins_set(peer, params),
         }
     }
 
@@ -2004,6 +2041,7 @@ impl Inner {
                 doing: "Checking for updates",
                 agent_may_not: "check this device's update channel",
                 retry: "punarctl update check".to_string(),
+                reaches_everyone: false,
             },
         )?;
 
@@ -2099,6 +2137,16 @@ impl Inner {
     ) -> Result<AuditActor, IpcError> {
         let actor = self.actor_of(peer);
         self.refuse_agent_system_update(peer, &actor, action, resource, words.agent_may_not)?;
+        if words.reaches_everyone {
+            self.require_device_admin(
+                peer,
+                &actor,
+                action,
+                resource,
+                words.doing,
+                RosterScope::Governed,
+            )?;
+        }
         if peer.uid != 0 && ticket.is_none() {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
@@ -2209,6 +2257,7 @@ impl Inner {
                 doing: "Installing an update",
                 agent_may_not: "replace or roll back the operating system",
                 retry: format!("punarctl update apply {}", params.version),
+                reaches_everyone: true,
             },
         )?;
         let _guard = self.update_lock.lock().unwrap();
@@ -2407,6 +2456,7 @@ impl Inner {
                 doing: "Rolling back the operating system",
                 agent_may_not: "replace or roll back the operating system",
                 retry: "punarctl update rollback".to_string(),
+                reaches_everyone: true,
             },
         )?;
         let _guard = self.update_lock.lock().unwrap();
@@ -4132,7 +4182,17 @@ impl Inner {
         tracker.fail_counts.remove(capability);
     }
 
-    fn handle_audit_tail(&self, params: &AuditTailParams) -> Result<Value, IpcError> {
+    /// `audit.tail` (contract section 5.5, scoped by F0-S3): the last `n`
+    /// events of the trail as THIS caller may see them.
+    ///
+    /// Root sees everything. Anyone else sees their own events and the
+    /// device's — events no person is attributed to (a daemon, the device,
+    /// the organization) and root's administration of the device — and every
+    /// other person's are withheld and only counted. The window is the last
+    /// `n` lines of the trail, filtered, so a busy neighbour shortens what a
+    /// person sees rather than making the read scan further back; `withheld`
+    /// says by how much, which is the honest answer to "is this everything?".
+    fn handle_audit_tail(&self, peer: &Peer, params: &AuditTailParams) -> Result<Value, IpcError> {
         let n = params.effective_n() as usize;
         let tail = tail(&self.cfg.audit_path, n)
             .map_err(|e| self.internal(&format!("reading the audit log failed: {e}")))?;
@@ -4143,7 +4203,19 @@ impl Inner {
                 tail.malformed_lines
             );
         }
-        Ok(json!({ "events": tail.events }))
+        if peer.uid == 0 {
+            return Ok(json!({ "events": tail.events, "withheld": 0 }));
+        }
+        let mut own = vec![format!("uid:{}", peer.uid), self.actor_of(peer).user_id];
+        if let Some(name) = self.admin_sources().username_of(peer.uid) {
+            own.push(name);
+        }
+        let (events, withheld): (Vec<AuditEvent>, Vec<AuditEvent>) =
+            tail.events.into_iter().partition(|event| {
+                let user = event.user_id.as_deref().unwrap_or_default();
+                own.iter().any(|name| name == user) || audit_event_is_the_devices(event)
+            });
+        Ok(json!({ "events": events, "withheld": withheld.len() }))
     }
 
     /// M4 reconcile (contract section 5.6): one synchronous pass of the
@@ -4668,9 +4740,21 @@ impl Inner {
             ));
         }
 
-        // 6. Who is asking. Root needs no ticket — it has no lock screen to
+        // 6. Who is asking. Device policy binds everyone who uses this
+        //    machine, so a person must hold the administrator role (F0-S1,
+        //    contract section 23) — checked before their ticket is spent, so
+        //    a password is never used up on a change they may not make. Root
+        //    needs no role and no ticket — it has no lock screen to
         //    re-authenticate against, and it could edit the store directly in
         //    any case, so demanding one would be theatre.
+        self.require_device_admin(
+            peer,
+            &actor,
+            "policy.set",
+            id,
+            "Changing device policy",
+            RosterScope::Governed,
+        )?;
         if peer.uid != 0 {
             let Some(ticket) = params.ticket.as_deref() else {
                 self.log_audit(AuditEvent::denial(
@@ -4871,6 +4955,15 @@ impl Inner {
         retry: &str,
     ) -> Result<(), IpcError> {
         self.refuse_agent_enrollment_change(peer, actor, action, words, retry)?;
+        // Who manages a device decides for everyone on it (F0-S1).
+        self.require_device_admin(
+            peer,
+            actor,
+            action,
+            RESOURCE_ENROLLMENT,
+            words.doing,
+            RosterScope::Governed,
+        )?;
         self.require_enrollment_ticket(peer, actor, action, ticket, words, retry)
     }
 
@@ -5391,6 +5484,7 @@ impl Inner {
         // refresh commits the set again, document included.
         *self.org_layers.lock().unwrap() = loaded.layers;
         *self.local_admin.lock().unwrap() = loaded.local_admin;
+        *self.admin_roster.lock().unwrap() = loaded.admin_roster;
         *self.application_policy.lock().unwrap() = loaded.applications;
         *self.org_policy_loaded.lock().unwrap() = match installed {
             Installed::Whole => Some(set.revision()),
@@ -5653,6 +5747,18 @@ impl Inner {
         // holds no lock against an enroll.start that commits a non-removable
         // enrollment in between.
         self.refuse_kept_enrollment(&actor)?;
+        // Leaving decides for everyone on the device, so it needs the role —
+        // the device's OWN list, never the organization's: an organization
+        // that could forbid every local administrator could keep a device it
+        // enrolled as removable (F0-S1, contract section 23.4).
+        self.require_device_admin(
+            peer,
+            &actor,
+            "enroll.stop",
+            RESOURCE_ENROLLMENT,
+            ENROLL_STOP_WORDS.doing,
+            RosterScope::DeviceOnly,
+        )?;
         self.require_enrollment_ticket(
             peer,
             &actor,
@@ -5764,6 +5870,7 @@ impl Inner {
         // happens to restart. Every layer this enrollment installed is cleared
         // in the same breath, and this one belongs in that list.
         self.local_admin.lock().unwrap().clear();
+        self.admin_roster.lock().unwrap().clear();
         if let Err(e) = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]) {
             eprintln!("punard: enroll.stop could not remove rendered browser policy: {e}");
         }

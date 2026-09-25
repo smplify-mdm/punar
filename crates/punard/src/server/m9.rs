@@ -392,15 +392,29 @@ impl Inner {
         }
 
         // Section 48: a live, unexpired, unrevoked grant for exactly this
-        // capability makes a non-root peer's mutation legitimate.
-        {
+        // capability makes a non-root peer's mutation legitimate — while its
+        // holder is still a device administrator (F0-S1). A grant is minted
+        // only for an administrator who confirmed their password, and every
+        // registered capability is device-wide state; taking the role away
+        // must take the grant's effect away with it, not leave a window of
+        // up to an hour open behind a revocation.
+        let live_grant = {
             let mut store = self.approvals.lock().unwrap();
             self.sweep_approvals(&mut store);
-            if let Some(grant) = store.live_grant(peer.uid, id, self.trusted_now().as_ref()) {
-                return Ok(MutationAuthority::Grant {
-                    grant_id: grant.grant_id.clone(),
-                });
-            }
+            store
+                .live_grant(peer.uid, id, self.trusted_now().as_ref())
+                .map(|grant| grant.grant_id.clone())
+        };
+        if let Some(grant_id) = live_grant {
+            self.require_device_admin(
+                peer,
+                actor,
+                "capabilities.set",
+                id,
+                "Changing a device setting",
+                RosterScope::Governed,
+            )?;
+            return Ok(MutationAuthority::Grant { grant_id });
         }
 
         // The unchanged M3/M5 denial. M5 amendment (contract section 5.4):
@@ -843,6 +857,70 @@ impl Inner {
             ));
         }
 
+        // --- Rule 4 (F0-S1, contract section 23.2): approving a change to
+        // the device is acting on everyone who uses it. A `capability_set`
+        // executes on this call and a `privilege_request` mints a grant to
+        // change a device setting, so a person other than root must be a
+        // device administrator AND confirm their password now — the role is
+        // checked first, so a person without it never spends a password on
+        // an answer they cannot give. Denying changes nothing, and a
+        // `credential_request` issues the person's own credential to their
+        // own session; neither needs either.
+        if params.decision == ResolveDecision::Approved
+            && matches!(
+                env.kind,
+                ApprovalKind::CapabilitySet | ApprovalKind::PrivilegeRequest
+            )
+        {
+            let doing = match env.kind {
+                ApprovalKind::PrivilegeRequest => "Approving time to change a device setting",
+                _ => "Approving a change to a device setting",
+            };
+            self.require_device_admin(
+                peer,
+                &actor,
+                "approval.resolve",
+                id,
+                doing,
+                RosterScope::Governed,
+            )?;
+            let retry = format!("punarctl approvals resolve {id} --decision approved");
+            if peer.uid != 0 && params.ticket.is_none() {
+                self.log_audit(self.m9_event(
+                    &actor,
+                    "approval.resolve",
+                    id,
+                    Decision::Deny,
+                    "reauthentication_required",
+                    vec![env.policy.policy_id.clone()],
+                ));
+                return Err(IpcError::with_details(
+                    ErrorCode::Denied,
+                    format!(
+                        "{doing} needs your password, and this answer did not carry a \
+                         confirmation.\n\
+                         Policy: personal defaults — a change that reaches everyone on \
+                         this device is confirmed at the moment it is made.\n\
+                         Next step: approve it in the approval overlay, which asks for \
+                         your password, or run `{retry}` in a terminal."
+                    ),
+                    json!({
+                        "decision": "deny",
+                        "approval_id": id,
+                        "reason": "reauthentication_required",
+                    }),
+                ));
+            }
+            self.spend_reauth_ticket(
+                peer,
+                &actor,
+                "approval.resolve",
+                id,
+                params.ticket.as_deref(),
+                &retry,
+            )?;
+        }
+
         let mut resolved = env;
         resolved.approval.status = params.decision.status();
         resolved.resolved_at = Some(utc_now_rfc3339());
@@ -1185,7 +1263,21 @@ impl Inner {
             ));
         }
 
+        // A grant lets its holder change a registered capability, and every
+        // registered capability is device-wide state (the firewall, the
+        // hostname, the time zone, the update channel, browser policy). So
+        // only an administrator may ask for one (F0-S1). Refused here, where
+        // it costs nothing, rather than at `approvals.resolve`, where the
+        // person would already have typed a password for it.
         let cap = self.lookup(&params.capability)?;
+        self.require_device_admin(
+            peer,
+            &actor,
+            "privilege.request",
+            id,
+            "Asking for time to change a device setting",
+            RosterScope::Governed,
+        )?;
         let risk = cap.descriptor().risk;
         let minutes = punar_common::approval::clamp_grant_minutes(params.duration_minutes);
         let user = self.peer_user(peer);

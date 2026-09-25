@@ -82,7 +82,13 @@ impl TestDaemon {
         fs::create_dir_all(&dir).unwrap();
 
         let group_file = dir.join("group");
-        fs::write(&group_file, "root:x:0:\npunar:x:970:\n").unwrap();
+        // `punar` (uid 1000) administers the device, as a first account
+        // does (F0-S1); `other` (uid 1001) does not.
+        fs::write(
+            &group_file,
+            "root:x:0:\npunar:x:970:\npunar-admin:x:971:punar\n",
+        )
+        .unwrap();
         let passwd_file = dir.join("passwd");
         fs::write(
             &passwd_file,
@@ -133,6 +139,7 @@ punar-agent-notasession.scope\n",
             // image installs.
             ai_defaults_file: dir.join("absent-ai-defaults.yaml"),
             trusted_clock: clock.clone(),
+            reauth_ticket_dir: dir.join("tickets"),
             ..DaemonConfig::new(dir.join("punard.sock"), state_dir, dir.join("audit.jsonl"))
         };
         let daemon = Daemon::new(cfg, registry).unwrap();
@@ -171,6 +178,7 @@ punar-agent-notasession.scope\n",
             console_uid: CONSOLE_UID,
             ai_defaults_file: self.dir.join("absent-ai-defaults.yaml"),
             trusted_clock: self.clock.clone(),
+            reauth_ticket_dir: self.dir.join("tickets"),
             ..DaemonConfig::new(
                 self.dir.join(format!("punard-{}.sock", self.sockets)),
                 self.dir.join("state"),
@@ -250,11 +258,41 @@ punar-agent-notasession.scope\n",
         .unwrap();
     }
 
+    /// Answer an approval the way the overlay does. Approving a device
+    /// change needs the console user's fresh password confirmation (F0-S1,
+    /// contract section 23.2), so an approval carries one minted for
+    /// `CONSOLE_UID` on this daemon's boot clock — root and a denial need
+    /// none, and a ticket never helps a peer the rule refuses first.
     fn resolve(&self, approval_id: &str, decision: &str) -> Value {
-        self.call(
-            "approvals.resolve",
-            Some(json!({ "approval_id": approval_id, "decision": decision })),
-        )
+        let mut params = json!({ "approval_id": approval_id, "decision": decision });
+        if decision == "approved" {
+            params["ticket"] = json!(self.mint_ticket(CONSOLE_UID));
+        }
+        self.call("approvals.resolve", Some(params))
+    }
+
+    /// A ticket exactly as punar-authd mints one, stamped on this daemon's
+    /// boot clock, with a fresh token each time.
+    fn mint_ticket(&self, uid: u32) -> String {
+        use punar_common::trusted_time::TrustedClock;
+        use std::os::unix::fs::DirBuilderExt;
+        let seq = TEST_SEQ.fetch_add(1, Ordering::SeqCst);
+        let token = format!("{:064x}", u128::from(seq) + 0xabc0_0000);
+        let per_uid = self.dir.join("tickets").join(uid.to_string());
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&per_uid)
+            .unwrap();
+        // A clock the test has made unreadable mints what punar-authd would
+        // mint then: a ticket with no stamp, which nothing accepts.
+        let body = self
+            .clock
+            .now()
+            .map(|stamp| serde_json::to_vec(&stamp).unwrap())
+            .unwrap_or_default();
+        fs::write(per_uid.join(&token), body).unwrap();
+        token
     }
 
     /// A peer inside a managed agent scope. `uid` is deliberately a

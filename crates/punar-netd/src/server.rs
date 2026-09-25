@@ -97,7 +97,14 @@ impl Daemon {
         if let Some(parent) = cfg.audit_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let audit = AuditWriter::open(&cfg.audit_path)?;
+        // The shared trail is root:punar-audit (F0-S3), a group no person is
+        // in. This writer used to leave the group to the others; a trail it
+        // created or rotated first was then root:root until one of them
+        // restarted.
+        let audit = AuditWriter::open_in_group(
+            &cfg.audit_path,
+            lookup_gid(&cfg.group_file, punar_common::audit::AUDIT_GROUP),
+        )?;
         let device_id = read_device_id(&cfg.device_id_path);
         let daemon = Self {
             inner: Arc::new(Inner {
