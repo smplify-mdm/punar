@@ -105,6 +105,10 @@ stage_punar_binaries() {
     install -d "${extra}/usr/lib/punar"
     install -m 0750 "${cargo_target}/release/punar-pim-launch" \
         "${extra}/usr/lib/punar/punar-pim-launch"
+    # punard's unprivileged download helper. World-executable because it runs
+    # as punar-fetch@.service's dynamic user, never as root.
+    install -m 0755 "${cargo_target}/release/punar-fetch" \
+        "${extra}/usr/lib/punar/punar-fetch"
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
         "${dev_extra}/usr/bin/"
@@ -123,6 +127,11 @@ stage_punar_binaries() {
     readelf -h "${extra}/usr/lib/punar/punar-pim-launch" \
         | grep -q 'Machine:.*AArch64' || {
         echo "error: punar-pim-launch is not an AArch64 binary" >&2
+        exit 1
+    }
+    readelf -h "${extra}/usr/lib/punar/punar-fetch" \
+        | grep -q 'Machine:.*AArch64' || {
+        echo "error: punar-fetch is not an AArch64 binary" >&2
         exit 1
     }
     readelf -h "${dev_extra}/usr/bin/punar-mock-smplify" \

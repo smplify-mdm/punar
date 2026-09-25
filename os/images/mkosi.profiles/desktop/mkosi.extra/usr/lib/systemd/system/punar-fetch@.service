@@ -1,0 +1,81 @@
+# One download, one unprivileged process (crates/punard/src/fetch.rs).
+# Instantiated by punar-fetch.socket with punard's connection on stdin.
+#
+# The helper is the only Punar program that runs the downloader, and this is
+# what it has: a dynamic user that exists only while it runs; no capabilities
+# and no way to gain any; a read-only file system with no /home, /var or /run
+# to read; no devices; IPv4 and IPv6 sockets only, and none to this machine's
+# own services apart from the DNS stub. The one thing it can write is the
+# descriptor punard sent, an empty private file punard created and verifies
+# afterwards.
+#
+# Measured under systemd 257 (Debian trixie) with the shipped helper: the
+# exposure `systemd-analyze security punar-fetch@x.service` reports is 1.1;
+# DNS through the stub, TLS and a real transfer work; 127.0.0.1, localhost
+# and 169.254.169.254 never connect; and inside the sandbox /var holds only a
+# private tmp, /run only systemd/resolve, /etc/machine-id, /home and /root
+# are unreadable and an AF_UNIX socket cannot be created.
+#
+# check-release-image.sh A19 fails a release tree in which any other unit or
+# Punar program runs the downloader, or in which this unit loses DynamicUser=,
+# its empty capability sets, ProtectSystem=strict or its address families.
+[Unit]
+Description=Punar unprivileged download (connection %i)
+Documentation=file:/usr/share/doc/punar/ipc.md
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/punar/punar-fetch
+StandardInput=socket
+StandardOutput=journal
+StandardError=journal
+# The longest transfer a request may ask for is an hour (MAX_FETCH_SECONDS);
+# this is the outer bound on the whole instance.
+RuntimeMaxSec=3700
+
+DynamicUser=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+UMask=0077
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+PrivateIPC=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+# Nothing under /var or /run is the helper's business: account records, device
+# state and every other service's runtime files stay out of reach, and so does
+# the machine identifier. /run/systemd/resolve stays, because /etc/resolv.conf
+# points into it.
+TemporaryFileSystem=/var:ro /run:ro
+BindReadOnlyPaths=-/run/systemd/resolve
+InaccessiblePaths=-/etc/machine-id
+
+# Network: IPv4 and IPv6 only. No AF_UNIX, so neither D-Bus nor any local
+# service socket can be reached; name lookups fall back from nss-resolve to
+# the resolver stub at 127.0.0.53, the one loopback address allowed.
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressAllow=127.0.0.53
+IPAddressDeny=localhost link-local multicast
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+DevicePolicy=closed
+KeyringMode=private

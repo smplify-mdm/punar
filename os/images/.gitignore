@@ -61,5 +61,10 @@ arm64/mkosi.extra/usr/bin/
 arm64/mkosi.extra/usr/share/punar/oci/
 arm64/mkosi.profiles/desktop/mkosi.extra/usr/bin/
 arm64/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-pim-launch
+# punard's unprivileged download helper, compiled and staged by each lane's
+# container-build.sh beside punar-pim-launch.
+mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-fetch
+amd64-debian/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-fetch
+arm64/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-fetch
 arm64/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci/
 arm64/mkosi.profiles/dev/mkosi.extra/usr/bin/

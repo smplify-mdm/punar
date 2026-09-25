@@ -16,6 +16,10 @@ Description=Punar control-plane daemon (typed capability API)
 # it, never Requires it — cached policy must keep enforcing with the agent
 # down (SPEC section 55).
 After=punar-smplifyd.service
+# Every download punard makes goes through the unprivileged helper behind this
+# socket (crates/punard/src/fetch.rs); punard never runs a downloader itself.
+Wants=punar-fetch.socket
+After=punar-fetch.socket
 # /run/punard, /var/lib/punar, /var/log/punar come from
 # tmpfiles.d/punard.conf; systemd-tmpfiles-setup orders before basic.target,
 # which every default-dependency service (this one) starts after.

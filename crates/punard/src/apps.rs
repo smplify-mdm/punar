@@ -12,7 +12,7 @@ use crate::util::SpawnBusyRetry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -192,7 +192,9 @@ struct Inspection {
 pub struct AppManager {
     catalog: Catalog,
     flatpak_bin: PathBuf,
-    curl_bin: PathBuf,
+    /// The unprivileged download helper's socket. A vendor package is
+    /// downloaded by `punar-fetch`, never by punard (crate::fetch).
+    fetch_socket: PathBuf,
     bsdtar_bin: PathBuf,
     vendor_root: PathBuf,
     vendor_desktop_dir: PathBuf,
@@ -242,7 +244,7 @@ impl AppManager {
         Ok(Self {
             catalog,
             flatpak_bin,
-            curl_bin: PathBuf::from("/usr/bin/curl"),
+            fetch_socket: PathBuf::from(crate::fetch::DEFAULT_FETCH_SOCKET),
             bsdtar_bin: PathBuf::from("/usr/bin/bsdtar"),
             vendor_root: PathBuf::from("/var/lib/punar-apps"),
             // XDG_DATA_DIRS entries are data roots; desktop files live in
@@ -272,13 +274,13 @@ impl AppManager {
     #[cfg(test)]
     fn with_vendor_paths(
         mut self,
-        curl_bin: PathBuf,
+        fetch_socket: PathBuf,
         bsdtar_bin: PathBuf,
         vendor_root: PathBuf,
         desktop_dir: PathBuf,
         config_dir: PathBuf,
     ) -> Self {
-        self.curl_bin = curl_bin;
+        self.fetch_socket = fetch_socket;
         self.bsdtar_bin = bsdtar_bin;
         self.vendor_root = vendor_root;
         self.vendor_desktop_dir = desktop_dir;
@@ -887,31 +889,22 @@ impl AppManager {
         fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).map_err(backend_io)?;
         let outcome = (|| {
             let package = staging.join("package.deb");
-            let max_size = byte_size.to_string();
-            let output = package.to_string_lossy().into_owned();
-            let result = run_with_timeout(
-                &self.curl_bin,
-                &[
-                    "--fail",
-                    "--location",
-                    "--silent",
-                    "--show-error",
-                    "--proto",
-                    "=https",
-                    "--proto-redir",
-                    "=https",
-                    "--max-filesize",
-                    &max_size,
-                    "--output",
-                    &output,
-                    url,
-                ],
-                INSTALL_TIMEOUT,
-            )
-            .map_err(backend_io)?;
-            if !result.success {
-                return Err(AppError::Backend(clean_backend_error(&result.stderr)));
-            }
+            // The helper writes into this one private descriptor and
+            // nothing else; the size and digest checks below decide whether
+            // what it wrote is the package the signed catalog pinned.
+            let staged = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&package)
+                .map_err(backend_io)?;
+            crate::fetch::FetchClient::new(&self.fetch_socket)
+                .fetch(
+                    &crate::fetch::FetchRequest::vendor(url, *byte_size, INSTALL_TIMEOUT),
+                    &staged,
+                )
+                .map_err(|error| AppError::Backend(clean_backend_error(&error.to_string())))?;
+            drop(staged);
             let observed_size = fs::metadata(&package).map_err(backend_io)?.len();
             if observed_size != *byte_size {
                 return Err(AppError::Verification(format!(
@@ -2019,14 +2012,9 @@ fn validate_catalog(catalog: &Catalog) -> Result<(), AppError> {
             } = source
             {
                 has_vendor_source = true;
-                let allowed_origin = url
-                    .starts_with("https://persistent.oaistatic.com/codex-app-prod/linux/deb/")
-                    || url.starts_with(
-                        "https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/",
-                    )
-                    || url.starts_with(
-                        "https://downloads.slack-edge.com/desktop-releases/linux/x64/",
-                    );
+                // The same fixed origins the download helper enforces, so a
+                // catalog entry the helper would refuse is refused here first.
+                let allowed_origin = crate::fetch::validate_vendor_url(url).is_ok();
                 let normalized_payload = normalize_archive_path(payload_root);
                 let normalized_executable = normalize_archive_path(executable);
                 let normalized_icon = normalize_archive_path(icon_path);
@@ -2921,17 +2909,23 @@ mod tests {
         .unwrap();
         let curl_log = dir.join("curl-argv");
 
+        // The downloader runs inside the real helper protocol: a helper
+        // thread serves `crate::fetch::serve` on `fetch.sock`, exactly as the
+        // shipped punar-fetch does, and this fixture prints the package on
+        // its standard output.
         let curl = dir.join("curl");
         fs::write(
             &curl,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nout=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output' ]; then shift; out=$1; fi\n  shift\ndone\ncp '{}' \"$out\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\ncat '{}'\n",
                 curl_log.display(),
                 package.display()
             ),
         )
         .unwrap();
         fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        let fetcher = dir.join("fetch.sock");
+        crate::fetch::testing::spawn_helper(&fetcher, &curl);
 
         let bsdtar = dir.join("bsdtar");
         fs::write(
@@ -2944,7 +2938,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&bsdtar, fs::Permissions::from_mode(0o755)).unwrap();
-        (dir, curl, bsdtar, digest, byte_size)
+        (dir, fetcher, bsdtar, digest, byte_size)
     }
 
     #[test]
@@ -2965,7 +2959,7 @@ mod tests {
 
     #[test]
     fn vendor_package_install_is_digest_pinned_scriptless_and_drops_setuid() {
-        let (dir, curl, bsdtar, digest, byte_size) = vendor_fixture();
+        let (dir, fetcher, bsdtar, digest, byte_size) = vendor_fixture();
         let catalog = write_vendor_catalog(&dir, &digest, byte_size);
         let vendor_root = dir.join("installed");
         let desktop_dir = dir.join("share/applications");
@@ -2974,7 +2968,7 @@ mod tests {
             .unwrap()
             .with_arch("x86_64")
             .with_vendor_paths(
-                curl,
+                fetcher,
                 bsdtar,
                 vendor_root.clone(),
                 desktop_dir.clone(),
@@ -3034,7 +3028,7 @@ mod tests {
 
     #[test]
     fn vendor_custom_uri_scheme_is_registered_only_while_installed() {
-        let (dir, curl, bsdtar, digest, byte_size) = vendor_fixture();
+        let (dir, fetcher, bsdtar, digest, byte_size) = vendor_fixture();
         let catalog = write_vendor_catalog(&dir, &digest, byte_size);
         let mut document: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
         document["apps"][0]["uriSchemes"] = json!(["claude"]);
@@ -3048,7 +3042,7 @@ mod tests {
             .unwrap()
             .with_arch("x86_64")
             .with_vendor_paths(
-                curl,
+                fetcher,
                 bsdtar,
                 vendor_root,
                 desktop_dir.clone(),
@@ -3074,7 +3068,7 @@ mod tests {
 
     #[test]
     fn catalog_rejects_reserved_or_nonvendor_uri_handlers() {
-        let (dir, _curl, _bsdtar, digest, byte_size) = vendor_fixture();
+        let (dir, _fetcher, _bsdtar, digest, byte_size) = vendor_fixture();
         let catalog = write_vendor_catalog(&dir, &digest, byte_size);
         let original: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
 
@@ -3106,14 +3100,14 @@ mod tests {
     /// app: installed means a manifest exists; the version is the manifest's.
     #[test]
     fn installed_vendor_apps_are_read_from_their_manifests() {
-        let (dir, curl, bsdtar, digest, byte_size) = vendor_fixture();
+        let (dir, fetcher, bsdtar, digest, byte_size) = vendor_fixture();
         let catalog = write_vendor_catalog(&dir, &digest, byte_size);
         let vendor_root = dir.join("installed");
         let manager = AppManager::load(Some(&catalog), PathBuf::from("/bin/false"))
             .unwrap()
             .with_arch("x86_64")
             .with_vendor_paths(
-                curl,
+                fetcher,
                 bsdtar,
                 vendor_root.clone(),
                 dir.join("share/applications"),
@@ -3150,7 +3144,7 @@ mod tests {
 
     #[test]
     fn vendor_catalog_refuses_arbitrary_origins_and_escaping_paths() {
-        let (dir, _curl, _bsdtar, digest, byte_size) = vendor_fixture();
+        let (dir, _fetcher, _bsdtar, digest, byte_size) = vendor_fixture();
         let catalog_path = write_vendor_catalog(&dir, &digest, byte_size);
         let mut catalog: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
         catalog["apps"][0]["sources"][0]["url"] = json!("https://example.test/app.deb");

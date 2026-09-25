@@ -1,0 +1,33 @@
+# The unprivileged download helper's socket (crates/punard/src/fetch.rs).
+#
+# punard is root and used to run the downloader itself for update-channel
+# metadata, release artifacts and catalog-pinned vendor packages. It no longer
+# runs one at all: it opens the file the bytes belong in, privately, and hands
+# that one descriptor over this socket to punar-fetch@.service, which runs with
+# no privilege and no writable file system. punard then verifies the signature
+# or digest of what arrived and alone moves it into place.
+#
+# Accept=yes: every download is its own short-lived instance that serves one
+# request and exits, so no process that parses network data outlives the
+# transfer, and no instance shares state with another.
+[Unit]
+Description=Punar unprivileged download helper socket
+Documentation=file:/usr/share/doc/punar/ipc.md
+
+[Socket]
+# One record each way, with the destination descriptor attached to the
+# request; SOCK_SEQPACKET keeps the two together.
+ListenSequentialPacket=/run/punar-fetch/request.sock
+# Root only: punard is the one client, and the helper refuses any other uid
+# even if this changed.
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Accept=yes
+MaxConnections=8
+RemoveOnStop=yes
+
+# NO [Install] SECTION. punard.service Wants= and is ordered after this socket,
+# which is its whole lifetime: nothing else may ask for a download. Staying out
+# of sockets.target also keeps the reviewed enabled-unit manifests unchanged.

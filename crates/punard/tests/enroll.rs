@@ -2637,7 +2637,7 @@ fn configure_update_channel(cfg: &mut DaemonConfig, dir: &Path) {
         repository_url_file: dir.join("update-repository.url"),
         repository_url_owner_uid: rustix::process::geteuid().as_raw(),
         repository_dir: repository,
-        curl_bin: dir.join("curl"),
+        fetch_socket: dir.join("fetch.sock"),
         trusted_keys_dir: keys,
         cached_channel: cfg.state_dir.join("update/verified-channel.json"),
         cached_signature: cfg.state_dir.join("update/verified-channel.json.sig"),

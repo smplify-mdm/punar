@@ -646,7 +646,15 @@ fn punard_opens_no_listening_socket_for_admin_traffic() {
                     "{rel} names {forbidden}: punar opens no network surface (law 1)"
                 );
             }
-            for (n, line) in text.lines().enumerate() {
+            // Test-only code is a fixture, not a listener punard constructs:
+            // crate::fetch's tests stand a helper up on a tempdir socket in
+            // place of systemd's punar-fetch.socket. Everything from a file's
+            // first `#[cfg(test)]` on is test code in this crate.
+            for (n, line) in text
+                .lines()
+                .enumerate()
+                .take_while(|(_, line)| line.trim() != "#[cfg(test)]")
+            {
                 if line.contains("UnixListener::bind") || line.contains("net::listen(") {
                     listener_sites.push(format!("{rel}:{}", n + 1));
                 }

@@ -1198,7 +1198,10 @@ requires the catalog digest, caller-confirmed digest and observed digest to
 agree before fixed-argv installation and resulting-commit verification.
 
 For `vendor_deb`, the same field confirms the signed-catalog package digest.
-punard downloads only from the catalog's closed vendor origin, enforces exact
+The package is downloaded by the unprivileged `punar-fetch` helper (see
+`update.check`), never by punard, into one private staging descriptor punard
+hands it; the helper refuses any URL outside the catalog's closed vendor
+origins and follows redirects over HTTPS only. punard then enforces exact
 byte size and SHA-256, extracts only `data.tar.xz` into a root-owned staging
 tree, rejects unsafe paths/file types/symlinks, clears setuid/setgid bits, and
 generates its own desktop entry. Debian control archives and maintainer scripts
@@ -1418,12 +1421,27 @@ transport issues two fixed HTTPS GETs beneath
 `<base>/<channel>/<architecture>/<boot-platform>/`: `channel.json` and its
 detached raw 64-byte signature. The file must be a non-symlink regular file
 owned by uid 0 and not group/other writable; only one unambiguous `https://`
-base URL is accepted. Curl configuration is disabled, redirects are refused,
-TLS 1.2 is the minimum, connect/overall time and response bytes are bounded,
-and downloads land in private `0600` staging files. Neither device identity
-nor current version appears in the request path or query. A configured HTTPS
-source is authoritative: invalid configuration or network failure never
-downgrades to removable media.
+base URL is accepted. Neither device identity nor current version appears in
+the request path or query. A configured HTTPS source is authoritative: invalid
+configuration or network failure never downgrades to removable media.
+
+punard does not download anything itself. It creates each private `0600`
+staging file in its `0700` cache and passes that one open descriptor, with
+the URL and a byte and time bound, to `punar-fetch` over the root-only
+`SOCK_SEQPACKET` socket `/run/punar-fetch/request.sock`
+(`punar-fetch.socket`, `Accept=yes`). Each request is its own
+`punar-fetch@.service` instance: a dynamic user with no capabilities, a
+read-only file system without `/home`, `/var` or `/run`, IPv4 and IPv6 sockets
+only, and no loopback address but the resolver stub, so it cannot reach this
+machine's own services or a link-local metadata endpoint. The helper serves
+only uid 0, only a request carrying exactly one empty regular file, and it
+builds the downloader's argument list itself: configuration files disabled,
+HTTPS only, TLS 1.2 minimum, redirects refused, connect and overall time and
+response bytes bounded, and any transfer that fails or overruns its bound is
+emptied rather than left partial. The update URL must pass the same
+validation as the base. punard then verifies the bytes exactly as before, so
+a compromised helper can at worst make an update fail. The helper's protocol
+and both halves of it are in `crates/punard/src/fetch.rs`.
 
 When that configuration file is absent, the same transaction reads the
 bounded pair from `/run/punar/update-source` for offline CI and recovery media.
