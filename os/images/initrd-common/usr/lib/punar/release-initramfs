@@ -249,19 +249,16 @@ keep_binary() {
 }
 
 # Keep what initrd-switch-root.service itself runs, as PID 1 has loaded it
-# (drop-ins included).
+# (drop-ins included). The boot step refuses when PID 1 does not say; a dry
+# run has no PID 1 to ask (systemctl in a chroot answers nothing and succeeds)
+# and says it uses the fixed set instead.
 keep_switch_root_commands() {
     local show word found=no
     resolve /usr/bin/systemctl || keep_nothing "cannot resolve /usr/bin/systemctl"
-    if ! show=$("$ROOT$RESOLVED" show --value \
+    show=$("$ROOT$RESOLVED" show --value \
             --property=ExecCondition --property=ExecStartPre \
             --property=ExecStart --property=ExecStartPost \
-            initrd-switch-root.service 2>/dev/null); then
-        [ "$MODE" = dry-run ] \
-            || keep_nothing "cannot read the commands of initrd-switch-root.service"
-        log "dry run: no PID 1 to ask for initrd-switch-root.service's commands; using the fixed set"
-        return 0
-    fi
+            initrd-switch-root.service 2>/dev/null) || show=''
     for word in $show; do
         case $word in
             path=/*)
@@ -270,8 +267,10 @@ keep_switch_root_commands() {
                 ;;
         esac
     done
-    [ "$found" = yes ] \
-        || keep_nothing "initrd-switch-root.service shows no command to keep"
+    [ "$found" = yes ] && return 0
+    [ "$MODE" = dry-run ] \
+        || keep_nothing "PID 1 reported no command for initrd-switch-root.service"
+    log "dry run: no PID 1 reported initrd-switch-root.service's commands; using the fixed set"
 }
 
 KEPT_BYTES=0

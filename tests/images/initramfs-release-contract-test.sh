@@ -391,27 +391,25 @@ mklink systemctl.loop "${WORK}/link-loop/usr/bin/systemctl"
 mklink systemctl "${WORK}/link-loop/usr/bin/systemctl.loop"
 check_refusal 'a symlink loop' "${WORK}/link-loop" 'cannot resolve /usr/bin/systemctl'
 
-make_debian_tree "${WORK}/no-command" "${DEBIAN_SYSTEMCTL_LIBS}"
-mkexe "${WORK}/no-command/usr/bin/systemctl" '#!/bin/sh
-printf "\n\n\n"'
-check_refusal 'initrd-switch-root.service shows no command' "${WORK}/no-command" \
-    'initrd-switch-root.service shows no command to keep'
-
 make_debian_tree "${WORK}/no-loader" "${DEBIAN_SYSTEMCTL_LIBS}"
 rm "${WORK}/no-loader/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
 check_refusal 'no dynamic loader' "${WORK}/no-loader" 'no dynamic loader'
 
-# Without a PID 1 to ask, only a dry run may fall back to the fixed set.
-make_debian_tree "${WORK}/no-pid1" "${DEBIAN_SYSTEMCTL_LIBS}"
-mkexe "${WORK}/no-pid1/usr/bin/systemctl" '#!/bin/sh
-exit 1'
-no_pid1_output="$(run_dry "${WORK}/no-pid1")"
-grep -Fq 'dry run: no PID 1 to ask' <<< "${no_pid1_output}" \
-    || fail 'a dry run without PID 1 did not say it used the fixed set'
-check_tree 'the fixed set alone' "${WORK}/no-pid1" "${DEBIAN_KEEP[@]}"
-# The boot step itself must refuse in that case.
-grep -Fq '|| keep_nothing "cannot read the commands of initrd-switch-root.service"' "${HELPER}" \
-    || fail 'the boot step does not refuse when it cannot read initrd-switch-root.service'
+# Without a PID 1 to report initrd-switch-root.service's commands (systemctl
+# failing, or answering nothing as it does in a chroot), only a dry run may
+# fall back to the fixed set; the boot step refuses.
+for variant in 'exit 1' 'printf "\n\n\n"'; do
+    rm -rf "${WORK}/no-pid1"
+    make_debian_tree "${WORK}/no-pid1" "${DEBIAN_SYSTEMCTL_LIBS}"
+    mkexe "${WORK}/no-pid1/usr/bin/systemctl" "#!/bin/sh
+${variant}"
+    no_pid1_output="$(run_dry "${WORK}/no-pid1")"
+    grep -Fq 'dry run: no PID 1 reported' <<< "${no_pid1_output}" \
+        || fail "a dry run without PID 1 (${variant}) did not say it used the fixed set"
+    check_tree "the fixed set alone (${variant})" "${WORK}/no-pid1" "${DEBIAN_KEEP[@]}"
+done
+grep -Fq '|| keep_nothing "PID 1 reported no command for initrd-switch-root.service"' "${HELPER}" \
+    || fail 'the boot step does not refuse when PID 1 reports no switch-root command'
 
 # --- Never through a mount boundary -----------------------------------------
 # The boot step reads the real mount table: another file system below / is
