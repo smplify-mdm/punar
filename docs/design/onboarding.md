@@ -383,6 +383,55 @@ path on the device, so a `punard` that will not start is a device with no
 local administrative authority at all (**§1.6.2**). Neither reverses §1.6.
 Both are conditions on shipping it.
 
+### 1.6.0 The device administrator — a role, not a privilege (F0-S1, 2026-09-25)
+
+*(Added with the first-party apps foundation; owner decision OD-1. The
+posture above is unchanged: nobody holds root, `wheel` or a sudoers rule.)*
+
+**Decision: the first account onboarded is the device's administrator.** It is
+created in the system group **`punar-admin`**, which the image ships empty
+(release gate A18). The role is not a privilege level — it grants no shell, no
+ambient authority and no capability. It is the answer punard needs to a
+question a password cannot answer: *may this person act on the other people
+who use this device?*
+
+A password proves who is asking. Before F0, any person on a device could
+confirm their own password and then change device policy, enroll or unenroll
+the device, or install and roll back what it runs — for everyone. An action
+that **reaches another person** (signals or ends another uid's process or
+session or a system service, reveals another person's data, or changes
+device-wide state such as an `/etc` file or device policy) now needs uid 0 or
+a device administrator who has just confirmed their password; an agent is
+always refused; every attempt is audited (docs/api/ipc.md §23). JIT grants
+(§1.6) still apply on top: an administrator who wants fifteen minutes on the
+firewall asks for them, and only an administrator may.
+
+- **Handing the role on:** `punarctl admins add <name>` and
+  `punarctl admins remove <name>`, confirmed with the administrator's password.
+  **The last administrator can never be removed.** `punarctl admins list`
+  shows who administers the device, to anyone on it.
+- **Where it lives:** the account record's `groups` array (§1.9) and the
+  runtime edge `/run/userdb/<user>:punar-admin.membership` the materializer
+  publishes from it. A revocation takes effect at the person's next action,
+  not at their next login.
+- **Upgrades never leave a device without one.** On every boot, before the
+  account is published, the materializer gives the **device owner** — the
+  account `completed.json` records as having completed first run, which is the
+  first account by construction — the role *when no account on the device
+  holds it*. A device set up before the role existed therefore comes out of
+  its first boot on the new image with its owner as administrator, and a
+  device whose administrator has already handed the role on is left alone.
+- **An enrolled device's organization may decide instead**, through
+  `spec.security.localAdmin.administrators`: pin the list, or turn local
+  administration off. Leaving an enrollment the organization made removable
+  always follows the device's own list.
+
+**Why the first account, and not "nobody until someone asks".** A device on
+which nobody may change device policy, updates or enrollment is a device its
+owner cannot keep current — the §1.6.2 lockout, made permanent. The first
+person to set up a device owns it; the role follows ownership, and the
+organization can override it on a device it manages.
+
 ### 1.6.1 The first hour — and the self-service set that keeps JIT from becoming a prompt storm
 
 *(Added 2026-08-26 after a hard-nosed walk of a real first hour. §1.6's

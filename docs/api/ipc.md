@@ -1,4 +1,4 @@
-# Punar local IPC — `punard` wire contract (v1, Milestones 3–5; M7 sibling socket in §10–§11; M8 ledger in §12–§13; M9 approvals, privilege and the secret broker in §14–§16)
+# Punar local IPC — `punard` wire contract (v1, Milestones 3–5; M7 sibling socket in §10–§11; M8 ledger in §12–§13; M9 approvals, privilege and the secret broker in §14–§16; F0 device administrators, passwords and the first-party app reservations in §23–§27)
 
 Mail, Calendar and Reminders use a separate profile-scoped service and closed
 contract: [`pim-ipc.md`](pim-ipc.md). PIM content and account operations are
@@ -15,6 +15,15 @@ Everything in this document is binding on `punard` (server) and `punarctl`
 (`punard`/`punarctl` responsibilities), section 60 (hard safety constraints —
 no generic root RPC), section 61 (local IPC security), section 73
 (denial-message voice), section 74.4 (security tests).
+
+**F0 amendment (additive, still `v: 1`; PLAN.md §2.1, §2.4):** a
+**device-administrator role** and the rule for actions that reach other
+people (§23) — applied to the existing device-wide methods, which a person
+without the role can no longer use; two methods, `admins.list` and
+`admins.set` (§23.3), taking the table from 45 names to 47; the password
+rules every client follows (§23.5); and the names, section numbers and
+skeletons the first-party apps will add (§24–§27), reserved and answering
+`unknown_method` until each milestone lands its handler.
 
 **M9 amendment (additive, still `v: 1`):** punard gains
 `approvals.*` and `privilege.*` (§14), a new root-owned side file
@@ -203,49 +212,51 @@ run-as-root method, by architecture (spec section 10 "Prohibited:
 RunRootShell(command)"; section 60). The 74.4 security test probes this via
 `punarctl debug rpc system.exec` and must get `unknown_method`.
 
-| Method              | AuthZ                 | Mutating | Audited |
-|---------------------|-----------------------|----------|---------|
-| `status`            | any connected peer    | no       | no      |
-| `device.posture`    | any connected peer    | no       | no      |
-| `capabilities.list` | any connected peer    | no       | no      |
-| `capabilities.get`  | any connected peer    | no       | no      |
-| `capabilities.set`  | **root only (uid 0)** | yes      | always (allow and deny, success and failure) |
-| `audit.tail`        | any connected peer    | no       | no      |
-| `reconcile`         | **root only (uid 0)** | no in M3 (re-verify only); **yes since M4** (remediates per policy, section 5.6) | always |
-| `policy.effective` (M4) | any connected peer | no      | no      |
-| `policy.explain` (M4)   | any connected peer | no      | no      |
-| `policy.set`            | **root, or a re-authenticated member of the admission group; agent-attributed peers are refused whatever their uid** | yes | always (allow and deny) |
-| `enroll.start` (M5)     | root, or a person with a fresh `punar-authd` ticket; agents never (section 5.9) | yes  | always  |
-| `enroll.status` (M5)    | any connected peer | no      | no      |
-| `enroll.stop` (M5)      | nobody, where the organization enrolled the device as not removable; otherwise root, or a person with a fresh `punar-authd` ticket; agents never (section 5.11) | yes  | always  |
-| `approvals.list` / `approvals.get` (M9) | any connected peer | no (lazy expiry sweep) | no |
-| `approvals.create` (M9) | **root only (uid 0)** | yes | always |
-| `approvals.resolve` (M9) | **human only** (§14.5) | yes (may execute) | always |
-| `approvals.consume` (M9) | **root only (uid 0)** | yes | always |
-| `privilege.request` (M9) | any connected peer **except agent-attributed peers** | yes | always |
-| `privilege.status` (M9) | any connected peer | no (lazy expiry sweep) | no |
-| `privilege.revoke` (M9) | grant owner or root | yes | always |
-| `apps.catalog` | any connected peer | no | no |
-| `apps.list` | any connected peer | no | no |
-| `apps.install` | **human; managed policy decides when enrolled** | yes | always |
-| `apps.remove` | **human; managed policy decides when enrolled** | yes | always |
-| `apps.update` | **human; managed policy decides per installed app** | yes | always |
-| `webapps.list` / `webapps.get` | any connected peer; own uid only | no | no |
-| `webapps.install` / `webapps.uninstall` | **human; own uid; managed policy decides when enrolled** | yes | always |
-| `webapps.context_create` / `webapps.context_delete` | **human; own uid; reserved contexts protected** | yes | always |
-| `pim.mail.open` | **human with a verified live desktop session; own uid only** | no | agent denials |
-| `pim.mail.account_add` | **human with a verified live desktop session; own uid only** | verified account transaction | agent denials |
-| `pim.mail.account_manage` | **human with a verified live desktop session; own uid only** | account removal only after explicit in-window confirmation | agent denials |
-| `update.status` | any connected peer | no | no |
-| `update.check` | **root, or a person with a fresh `punar-authd` ticket; agents never, at any uid** (§5.17) | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) |
-| `update.apply` | **root, or a person with a fresh `punar-authd` ticket; agent attribution is a hard denial before uid** (§5.17a) | yes, inactive slot only | always |
-| `update.reconcile_candidate` | **root boot service only in normal operation; agent attribution is a hard denial before uid** | Pi selector/finalization only | required durable outcome audit before pending removal |
-| `update.rollback` | **root, or a person with a fresh `punar-authd` ticket; agent attribution is a hard denial before uid** (§5.17c) | yes, local selector only | always |
-| `install.targets` | any connected peer, **live environment only** | no | no |
-| `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) |
-| `install.apply` | **root attended installer or independently signed unattended provisioner; live environment only** | yes | always (`success`, `denied`, `failure`) |
-| `install.recovery_ack` | **root attended installer or signed unattended provisioner; live environment only** | recovery checkpoint only | denials; successful custody is `install.recovery_key/enrolled` |
-| `install.status` | any connected peer, **live environment only** | no | no |
+| Method              | AuthZ                 | Mutating | Audited | Device admin (§23) |
+|---------------------|-----------------------|----------|---------|---|
+| `status`            | any connected peer    | no       | no      | — |
+| `device.posture`    | any connected peer    | no       | no      | — |
+| `capabilities.list` | any connected peer    | no       | no      | — |
+| `capabilities.get`  | any connected peer    | no       | no      | — |
+| `capabilities.set`  | **root only (uid 0)** | yes      | always (allow and deny, success and failure) | **yes** on the grant path, re-checked each use (§23.2) |
+| `audit.tail`        | any connected peer    | no       | no      | — |
+| `reconcile`         | **root only (uid 0)** | no in M3 (re-verify only); **yes since M4** (remediates per policy, section 5.6) | always | — |
+| `policy.effective` (M4) | any connected peer | no      | no      | — |
+| `policy.explain` (M4)   | any connected peer | no      | no      | — |
+| `policy.set`            | **root, or a re-authenticated member of the admission group; agent-attributed peers are refused whatever their uid** | yes | always (allow and deny) | **yes** (§23.2) |
+| `enroll.start` (M5)     | root, or a person with a fresh `punar-authd` ticket; agents never (section 5.9) | yes  | always  | **yes** (§23.2) |
+| `enroll.status` (M5)    | any connected peer | no      | no      | — |
+| `enroll.stop` (M5)      | nobody, where the organization enrolled the device as not removable; otherwise root, or a person with a fresh `punar-authd` ticket; agents never (section 5.11) | yes  | always  | **yes**, the device's own list (§23.4) |
+| `approvals.list` / `approvals.get` (M9) | any connected peer | no (lazy expiry sweep) | no | — |
+| `approvals.create` (M9) | **root only (uid 0)** | yes | always | — |
+| `approvals.resolve` (M9) | **human only** (§14.5) | yes (may execute) | always | **yes** to approve a `capability_set` or `privilege_request`, with a ticket (§23.2) |
+| `approvals.consume` (M9) | **root only (uid 0)** | yes | always | — |
+| `privilege.request` (M9) | any connected peer **except agent-attributed peers** | yes | always | **yes** (§23.2) |
+| `privilege.status` (M9) | any connected peer | no (lazy expiry sweep) | no | — |
+| `privilege.revoke` (M9) | grant owner or root | yes | always | — |
+| `apps.catalog` | any connected peer | no | no | — |
+| `apps.list` | any connected peer | no | no | — |
+| `apps.install` | **human; managed policy decides when enrolled** | yes | always | — |
+| `apps.remove` | **human; managed policy decides when enrolled** | yes | always | — |
+| `apps.update` | **human; managed policy decides per installed app** | yes | always | — |
+| `webapps.list` / `webapps.get` | any connected peer; own uid only | no | no | — |
+| `webapps.install` / `webapps.uninstall` | **human; own uid; managed policy decides when enrolled** | yes | always | — |
+| `webapps.context_create` / `webapps.context_delete` | **human; own uid; reserved contexts protected** | yes | always | — |
+| `pim.mail.open` | **human with a verified live desktop session; own uid only** | no | agent denials | — |
+| `pim.mail.account_add` | **human with a verified live desktop session; own uid only** | verified account transaction | agent denials | — |
+| `pim.mail.account_manage` | **human with a verified live desktop session; own uid only** | account removal only after explicit in-window confirmation | agent denials | — |
+| `update.status` | any connected peer | no | no | — |
+| `update.check` | **root, or a person with a fresh `punar-authd` ticket; agents never, at any uid** (§5.17) | verified cache only | always (`success`, `noop`, `denied`, `unreachable`, `failure`) | — |
+| `update.apply` | **root, or a person with a fresh `punar-authd` ticket; agent attribution is a hard denial before uid** (§5.17a) | yes, inactive slot only | always | **yes** (§23.2) |
+| `update.reconcile_candidate` | **root boot service only in normal operation; agent attribution is a hard denial before uid** | Pi selector/finalization only | required durable outcome audit before pending removal | — |
+| `update.rollback` | **root, or a person with a fresh `punar-authd` ticket; agent attribution is a hard denial before uid** (§5.17c) | yes, local selector only | always | **yes** (§23.2) |
+| `install.targets` | any connected peer, **live environment only** | no | no | — |
+| `install.plan` | **root only, live environment only** | no | always (`success`, `refused`, `failure`) | — |
+| `install.apply` | **root attended installer or independently signed unattended provisioner; live environment only** | yes | always (`success`, `denied`, `failure`) | — |
+| `install.recovery_ack` | **root attended installer or signed unattended provisioner; live environment only** | recovery checkpoint only | denials; successful custody is `install.recovery_key/enrolled` | — |
+| `install.status` | any connected peer, **live environment only** | no | no | — |
+| `admins.list` (F0) | any connected peer | no | no | — |
+| `admins.set` (F0) | **root, or a device administrator with a fresh `punar-authd` ticket; agents never, at any uid** (§23.3) | yes | always | **yes** |
 
 "Any connected peer" = admission already proved root-or-group-`punar`
 (section 1.2). Root-only is a fixed M3 rule named `personal-defaults`;
@@ -482,11 +493,24 @@ Two amendments, both additive:
 ### 5.5 `audit.tail`
 
 Params: `{"n": 20}` (optional; default 20; max 1000 — larger values are
-clamped, not errors). Result: `{"events": [ {...AuditEvent...}, ... ]}` —
-newest last, each element schema-conformant
+clamped, not errors). Result: `{"events": [ {...AuditEvent...}, ... ],
+"withheld": 0}` — newest last, each element schema-conformant
 (`schemas/audit/audit-event.json`). The daemon reads the file; clients never
-need read access to `/var/log/punar/audit.jsonl` (its 0640 root:punar mode is
-a debugging convenience, not the API).
+need read access to `/var/log/punar/audit.jsonl`, and since F0 no person has
+it (§6).
+
+**Scoped per caller (F0-S3).** The window is the last `n` lines of the
+trail. **Root** receives all of them. **Anyone else** receives their own
+events — `user_id` equal to their resolved name or `uid:<n>` — and the
+**device's**: events no person is attributed to (`source` `service`,
+`device` or `organization`) and root's administration of the device
+(`user_id: "root"`). Every other person's events are left out and counted
+in **`withheld`** (additive; `v: 1` allows it, and a client that predates it
+ignores it). A busy neighbour therefore shortens what a person sees rather
+than making the read scan further back, and `withheld` says by how much.
+`punarctl audit tail` prints the count. Reading another person's events is
+§23's "reveals another person's data", and the only path to it today is
+root.
 
 ### 5.6 `reconcile`
 
@@ -759,17 +783,25 @@ depend on *who is asking* is settled before a password is requested:
    punard cannot read its clock is refused as `reauthentication_expired`,
    and is spent all the same.
 
+**F0 amendment (§23):** between steps 5 and 6, a caller other than root must
+be a **device administrator** — refused with `device_admin_required` before
+their ticket is spent, and audited. Device policy binds everyone who uses the
+machine; a person without the role asks one who has it.
+
 `policy.set` is deliberately **not** root-only. There is no sudo on a Punar
 desktop, so "root only" would mean "nobody can do this at the keyboard".
 
 From a terminal, `punarctl policy set <path> <value> --reason "…"` and
 `punarctl policy clear <path> --reason "…"` ask for the person's password on
-the controlling terminal and relay it to `punar-authd`, exactly as `enroll`
-and `update` do. Scripts, and System Control's helper, pipe
-`punar-auth --admin`'s answer into `--ticket-stdin` instead: `ok <ticket>` as
-it prints it, or the bare 64-character ticket. A `denied` or malformed line is
-refused by punarctl before anything is sent. With neither a terminal nor the
-flag, the request goes without a ticket and the refusal
+the controlling terminal with echo off and send it straight to `punar-authd`'s
+socket, exactly as `enroll`, `update`, `approvals resolve` and `admins` do
+(§23.5). Scripts hand a password or a ticket over **a socket** —
+`--password-fd N` or `--ticket-fd N` — and System Control uses
+`--password-from-parent`. `--ticket-stdin` is gone: a pipe on stdin can be
+read by any program running as the person before punarctl reads it, and the
+flag is refused with a message naming its replacements. A `denied` or
+malformed ticket is refused by punarctl before anything is sent. With neither
+a terminal nor a source, the request goes without a ticket and the refusal
 (`reauthentication_required`) names the terminal command.
 
 Result — a pin:
@@ -1802,9 +1834,16 @@ or path other than the confirmed target device. An installed system returns
 ## 6. Audit contract (spec section 53)
 
 - File: `/var/log/punar/audit.jsonl` — one `AuditEvent` JSON object per line,
-  `O_APPEND`, created `0640 root:punar` by `punard`; directory
-  `0750 root:punar` via tmpfiles. Writes only by `punard`; reads for humans
-  via `punarctl audit tail` (through the daemon).
+  `O_APPEND`, created **`0640 root:punar-audit`**; directory
+  **`0750 root:punar-audit`** via tmpfiles (F0-S3). The four writers —
+  `punard`, `punar-agentd`, `punar-secrets`, `punar-netd` — each create the
+  live file, its rotation (`.1`) and its lock in that group
+  (`AuditWriter::open_in_group`), and tmpfiles re-owns all three on every
+  boot, so an upgrade closes the old path. **`punar-audit` has no person in
+  it** (release gate A17): the trail used to be group `punar`, which is every
+  account, so every person could read every person's events. Reads for
+  humans go through `punarctl audit tail`, which the daemon scopes to the
+  caller (§5.5).
 - Every event conforms to `schemas/audit/audit-event.json` — all 12 required
   fields present. M3 population rules for fields the daemon cannot yet fill
   from a richer context:
@@ -2651,19 +2690,22 @@ re-checked against their shipped-schema patterns on **both** write and
 load, so the projection onto `ledger-summary.json` stays conformant even
 if a producer upstream ever regressed.
 
-### 13.2 `/run/punar-agentd/ledger.json` (the panel's view)
+### 13.2 `/run/punar-agentd/ledger.json` (the device-wide side file)
 
 Not IPC — the ledger's sibling of section 11's `agents.json`, written
-atomically by `punar-agentd` at the same points, so `punar-shell` can
-render the D-005 ledger section with an event-driven `FileView` and no
-socket client.
+atomically by `punar-agentd` at the same points.
 
-- **`0640 root:punar`, inside the root-owned `/run/punar-agentd`
-  directory** — deliberately *not* in world-readable `/run/punar` beside
-  `status.json`/`agents.json`. A ledger is personal data: (a) only group
-  `punar` (the agentd socket's own admission set, section 10.1) may read
-  it, and (b) because the directory is root-owned, a local user cannot
-  unlink it and substitute a forgery.
+- **`0640 root:punar-audit`, inside the root-owned `/run/punar-agentd`
+  directory** (F0 amendment). It holds **every** person's sessions, and a
+  ledger is personal data, so no person may read it: `punar-audit` has no
+  human member (§6). It was `0640 root:punar` — readable by every account —
+  so on a shared device each person could read each person's agent ledger.
+  Because the directory is root-owned, a local user cannot unlink the file
+  and substitute a forgery.
+- **The AI panel no longer reads it.** It runs `punarctl agents access
+  <session> --json` — `agents.access`, owner or root (§12.2) — on the
+  person's own action, and renders the answer: a per-person view through the
+  same command a terminal runs.
 - Content: per-session ledger views — the same rows `agents.access`
   returns (`entries`, event refs, `not_yet_observed`, `retention`,
   `privacy`). `agents.json` keeps **only** the counts fingerprint
@@ -4005,3 +4047,337 @@ An enrolled `org-*` context reports
 `not_yet_observed:[{"category":"per_context_network_policy","milestone":"phase_2"}]`.
 M12's delivered project/principal network enforcement does not make a
 same-uid Chromium profile a separately routed cgroup.
+
+---
+
+## 23. Device administrators and actions that reach other people (F0)
+
+Before F0 there was no owner or administrator on a Punar device: every person
+was equal, and any person could mint an `Admin` ticket with their own password
+(§5.8a). A ticket proves *who* is asking. It never proved that the person may
+act on *other people*. This section adds that second question, and applies it
+to every existing method that needs it.
+
+### 23.1 The rule
+
+An action **reaches another person** when it does any of these:
+
+- signals, freezes or ends another uid's process, scope or session, or a
+  system service;
+- reveals another person's data;
+- changes device-wide state that every person on the device depends on — an
+  `/etc` file, device policy, who manages the device, what the operating
+  system runs.
+
+Such an action needs **uid 0, or a device administrator who has just
+confirmed their password** (a fresh `punar-authd` ticket, spent by the call it
+was typed for — §5.8a's ticket rules, unchanged). An **agent-attributed
+caller is always refused**, at any uid — the wide agent test of §14.5 rule 1 —
+before either question is asked. **Every attempt is audited**, allowed or
+refused.
+
+**The order is part of the rule.** Every check that does not depend on who is
+asking is settled first (a malformed request, a pinned value, a
+non-removable enrollment, the last administrator); then the role; then the
+ticket. The role is checked **before** the ticket is spent, so a person
+without the role never uses up a password on a call that cannot succeed, and
+their ticket is still theirs to spend on something they may do.
+
+**The refusal** is `denied`:
+
+```json
+{"code": "denied",
+ "message": "Changing device policy reaches everyone who uses this device, so it needs a device administrator, and bob is not one.\nAdministrators: alice.\nPolicy: personal defaults — an action that reaches other people needs an administrator who has just confirmed their password (docs/api/ipc.md section 23).\nNext step: ask alice to do it, or to make you an administrator with `punarctl admins add bob`.",
+ "details": {"decision": "deny", "reason": "device_admin_required",
+             "user": "bob", "administrators": ["alice"],
+             "administrators_policy": "local", "policy_ids": []}}
+```
+
+`administrators_policy` is `local`, `pinned` or `none` (§23.4); when an
+organization decides, the message names it and `policy_ids` cites its
+document. The audit event is the ordinary denial (§6) with
+`result: "device_admin_required"` and, when an organization decides, its
+`policy_ids`.
+
+### 23.2 Where it applies today
+
+The rule applies to every existing method that reaches another person. A
+person who could use these before F0 with their own password now needs the
+role as well.
+
+| Method | What reaches others | Roster (§23.4) | Ticket |
+|---|---|---|---|
+| `policy.set` | device policy, for everyone | organization's, else the device's | yes (unchanged) |
+| `enroll.start` | who manages the device | organization's, else the device's | yes (unchanged) |
+| `enroll.stop` | who manages the device | **the device's own list only** | yes (unchanged) |
+| `update.apply`, `update.rollback` | what the operating system runs | organization's, else the device's | yes (unchanged) |
+| `privilege.request` | a window to change a registered capability; every registered capability is device-wide (firewall, hostname, time zone, update channel, browser policy) | organization's, else the device's | no — refused up front so nobody types a password for a request they cannot approve |
+| `approvals.resolve` with `decision: approved` on a `capability_set` or `privilege_request` approval | executes a device-wide change, or mints the grant for one | organization's, else the device's | **yes — new optional `ticket` param**; `reauthentication_required` without one |
+| `capabilities.set` on the grant path (§14.8) | a device-wide change | organization's, else the device's | no — the grant was minted with one; the **role is re-checked at every use**, so taking it away takes the grant's effect away |
+| `admins.set` | who may act on everyone | organization's, else the device's | yes |
+
+Reviewed and left as they are, with the reason:
+
+- `update.check` refreshes the verified channel cache and changes nothing any
+  person runs; it keeps its ticket and needs no role.
+- `apps.install`, `apps.update` and `apps.remove` act on the signed catalog's
+  system-wide packages, never on another person's data (per-user application
+  data is kept on removal), and are governed by the organization's application
+  policy while enrolled. They are listed for the owner's review before a
+  device can hold more than one onboarded account.
+- `webapps.*`, `pim.mail.*` and `punar-secrets`' `credential.*` are scoped to
+  the caller's own uid by `SO_PEERCRED`.
+- `approvals.resolve` with `decision: denied`, or on a `credential_request`,
+  changes nothing device-wide (a credential approval issues the person's own
+  credential to their own session).
+- On sibling sockets: `agents.end`, `ledger.purge`, `agents.access` and
+  `alerts.dismiss` are owner-or-root already; `query.answer`,
+  `network.apply` and `approvals.create`/`consume` are root-only;
+  `relay.set` is the console owner's personal preference.
+- `reconcile`, `update.reconcile_candidate` and `install.*` are root-only.
+
+### 23.3 `admins.list`, `admins.set`
+
+`admins.list` — any admitted peer; params none; never audited. A person must
+be able to find out whom to ask.
+
+```json
+{"mode": "local",
+ "administrators": ["alice"],
+ "accounts": [{"user": "alice", "uid": 1000, "administrator": true, "origin": "onboarded"},
+              {"user": "bob",   "uid": 1001, "administrator": false, "origin": "onboarded"}],
+ "source": null,
+ "group": "punar-admin",
+ "caller": {"user": "bob", "root": false, "administrator": false}}
+```
+
+`source` is the organization's policy source (§5.7's shape) when one decides;
+`accounts[].administrator` is the effective answer under `mode`. `origin` is
+`onboarded`, or `image` for an account an image ships in `/etc/group` (the
+development image only; release gate A18 refuses one in a release).
+
+`admins.set` — params `{"user": "bob", "administrator": true, "ticket":
+"<64 hex>"}` (`deny_unknown_fields`; `ticket` absent only for root). Always
+audited, `action: "admins.set"`, `resource: "account/<user>"`. The ladder:
+
+1. an agent-shaped peer, at any uid → `denied` (`agent_scope`);
+2. an organization roster in `pinned` or `none` mode → `denied`
+   (`administrators_set_by_organization`), naming it: the local list is inert
+   while it decides;
+3. not an account name → `invalid_params`; no such account → `not_found`; an
+   `image` account → `invalid_params` (`image_account`);
+4. **removing the last administrator** → `denied` (`last_administrator`,
+   audited with that result). A device always keeps one;
+5. the caller is not an administrator → `denied` (`device_admin_required`);
+6. no ticket → `denied` (`reauthentication_required`); the ticket is spent;
+7. the account's record, then its runtime membership, is changed; audited
+   `success`, or `noop` when it already stood as asked.
+
+Result: `{"user": "bob", "administrator": true, "changed": true,
+"administrators": ["alice", "bob"]}`. From a terminal:
+`punarctl admins list`, `punarctl admins add <user>`,
+`punarctl admins remove <user>` (each asks for the caller's password, §23.5).
+
+### 23.4 Where the role lives, how the first account gets it, and who can pin it
+
+**The role is membership in the system group `punar-admin`**, created empty on
+every lane by the image (release gate A18). A Punar account is a systemd
+userdb record, so membership lives in two places, kept in step:
+
+- the **persistent** truth, the `groups` array of the account's record at
+  `/var/lib/punar/identity/accounts/<id>/account.json` (docs/design/
+  onboarding.md §1.9);
+- the **runtime** edge `/run/userdb/<user>:punar-admin.membership`, which the
+  account materializer publishes from that record at every boot and which is
+  what nss-systemd, and so every login, sees.
+
+punard reads the runtime view — what a login would see — and never the
+caller's process groups: a process keeps the groups it logged in with, and a
+revocation that waited for the revoked person to log out would not be one.
+`admins.set` writes the record first and the edge second; a crash between the
+two is healed by the next boot's materialization.
+
+**The first account holds the role.** Onboarding creates the first account in
+`punar-admin` when the image has the group (OD-1(a)).
+
+**No update leaves a device with no administrator.** On every boot, before
+the account is published, the materializer checks the device's records: when
+**no account holds the role**, the **device owner** gets it and the grant is
+recorded. The device owner is the account onboarding recorded as completing
+first run (`/var/lib/punar/onboarding/completed.json`) — the first account by
+construction, since onboarding creates exactly one and refuses a second first
+run. A device that already has an administrator is left alone, so an
+administrator who hands the role on and then steps down is not overruled. An
+image without the group (an older release after a rollback) is left exactly
+as it was.
+
+**An organization can decide instead**, while the device is enrolled, through
+`spec.security.localAdmin.administrators` in its desired state
+(`schemas/desired-state/desired-state.json`):
+
+| `mode` | Who administers the device | `admins.set` |
+|---|---|---|
+| absent | the device's own `punar-admin` members | allowed |
+| `local` | the same, stated explicitly | allowed |
+| `pinned` + `accounts: [...]` | exactly the named accounts | refused, naming the organization |
+| `none` | nobody at the device; only root and the organization | refused, naming the organization |
+
+A present-but-unreadable value refuses daemon start rather than falling back
+to the device's own list, as `policyEditing` does (§5.7). **Leaving an
+enrollment the organization made removable always follows the device's own
+list**, whatever the roster says: an organization that could forbid every
+local administrator could keep a device it enrolled as removable. The roster
+is reloaded and cleared with the organization's other layers on every
+enrollment transition.
+
+<!-- F0-S4 -->
+### 23.5 Passwords and tickets from clients (F0-S4)
+
+Every client that turns a person's password into a ticket uses one library,
+`punar-reauth` (`crates/punar-reauth`), and takes the password from exactly
+two kinds of place:
+
+1. **the controlling terminal**, with echo off, canonical mode and suspend
+   disabled;
+2. **a descriptor that `fstat` proves is a socket**.
+
+**Pipes, standard input and argv are refused.** Any process running as the
+same uid can open `/proc/<pid>/fd/<n>` of a dumpable process; for a pipe or a
+file that open succeeds and hands back a second reader that can take the
+secret first, while for a socket it fails with `ENXIO`. argv and the
+environment are readable in `/proc/<pid>/cmdline` and `environ` outright.
+
+**Holders are not dumpable.** Before it reads a secret, a holder calls
+`harden()`: `PR_SET_DUMPABLE=0` (which also closes its `/proc/<pid>/fd`,
+`mem` and `environ` to other processes of the same uid) and `RLIMIT_CORE=0`.
+The password, the request body and the ticket live in `Zeroizing` memory. The
+ticket comes from `punar-authd`'s socket directly; no client spawns
+`punar-auth` with the password on a pipe.
+
+**The command-line convention** (every `punarctl` verb that needs a password:
+`policy set|clear`, `enroll start|stop`, `update check|apply|rollback`,
+`approvals resolve`, `admins add|remove`):
+
+- no flag — ask on the terminal; with no terminal, send no ticket and print
+  punard's refusal;
+- `--password-fd N` — the password, one line, on descriptor N, which must be
+  a socket (descriptors 0–2 are refused);
+- `--ticket-fd N` — a ticket (`ok <ticket>` or the bare 64 hex), on a socket;
+- `--password-from-parent` — for a graphical parent that cannot hand a child
+  a descriptor. punarctl opens a listening socket at a fresh name inside
+  `$XDG_RUNTIME_DIR/punar-reauth` (a `0700` directory of the caller, checked;
+  `/run/user/<uid>` when the environment names nothing private), prints
+  `password-socket <path>` as its **first line of standard output**, and
+  accepts one connection. It keeps the connection only if `SO_PEERCRED` says
+  it comes from **its parent process, running as the same uid**; anything
+  else is refused and nothing is read. The name is removed the moment a
+  connection is accepted. System Control and the approval overlay use this.
+- `--ticket-stdin` and `--password-stdin` are refused with exit 2 and a
+  message naming the replacements.
+
+Descriptor numbers become owned descriptors through `pidfd_getfd` on the
+process's own pidfd, which needs no `unsafe`; a seccomp filter that refuses
+it (Docker's default profile) is reported as such, and the terminal still
+works.
+
+**What this does not stop, stated rather than implied:** another program of
+the same person that watches `punar-reauth` can race to replace the
+rendezvous socket between the moment its path is printed and the moment the
+parent connects, and receive what the parent sends. That needs an active
+attacker already running as the person; closing it needs the prompt itself to
+move into a trusted process that owns the input surface, which is open work.
+The lock screen's own relay (`punar-auth`, stdin pipe) is not yet moved onto
+this library.
+<!-- /F0-S4 -->
+
+---
+
+## 24. punard additions for the first-party apps (reserved)
+
+The first-party apps plan (PLAN.md §2.4) adds names to this socket over five
+milestones. This amendment reserves every one of them now, so no other change
+can take a name, and assigns the sections their contracts will live in. **A
+reserved name has no handler and answers `unknown_method`**, exactly as a name
+nobody proposed, until the milestone that brings its handler moves it into
+`Method::NAMES`. `Method::RESERVED` in `crates/punar-common/src/ipc.rs` is the
+list, and `the_reserved_names_are_exactly_the_amendments_list` pins it.
+
+| Name | Milestone | What it will be | §23 |
+|---|---|---|---|
+| `resources.sample` | M2 Activity | a bounded sample of per-app CPU, memory, I/O and GPU for the caller's own units; root sees system units | reads only |
+| `process.signal` | M2 Activity | TERM, KILL, STOP or CONT to one pidfd-pinned process, never a protected set (PID 1, kernel threads, Punar daemons, greetd, the compositor, the lock) | **yes** for another uid or a system unit |
+| `sysfiles.list` | M5 Editor | the registry of editable system files (`hosts` only at first) and their state | reads only |
+| `sysfiles.apply` | M5 Editor | replace one registered file from a sealed memfd (the descriptor rule below) | **yes** |
+| `sysfiles.revert` | M5 Editor | restore the previous version of one registered file | **yes** |
+| `storage.share_mount` | Files P2 | mount one allowlisted network share | **yes** |
+| `storage.share_unmount` | Files P2 | unmount one | **yes** |
+| `storage.share_list` | Files P2 | the caller's shares | reads only |
+| `storage.share_forget` | Files P2 | drop a remembered share and its credential | **yes** |
+
+With F0 the table is 47 names; after M2, M5 and Files P2 it is 56. Terminal
+adds nothing here: its `terminal.policy` capability uses `policy.*`.
+`apps.catalog` gains an optional `{mime}` parameter in Files P2; that is an
+additive param, not a name.
+
+**The descriptor rule.** A method that takes a secret or a content blob names
+a descriptor number in its JSON, and punard fetches that descriptor from the
+caller by pid with `pidfd_getfd` and requires a sealed memfd, exactly as
+`install.apply` does (`read_peer_descriptor`,
+`crates/punard/src/install.rs`). There is no SCM_RIGHTS on the NDJSON socket
+and no per-method socket. `pidfd_getfd` keeps working under Yama
+`ptrace_scope=1` because punard holds `CAP_SYS_PTRACE` (F0-S2,
+`usr/lib/sysctl.d/50-punar-yama.conf`).
+
+## 25. Sibling contract: `punar-logd` (reserved)
+
+Skeleton; nothing here is built. The Logs milestone (M1) writes the contract.
+
+- Socket `/run/punar-logd/logd.sock`, `0660 root:punar`, `Accept=yes` — one
+  short-lived process per connection, nothing resident at idle.
+- Closed table: `logs.sources`, `logs.query`, `logs.wait`, `logs.get`,
+  `logs.boots`, `logs.units`, `logs.unlock`, `logs.lock`, `logs.export`.
+  Anything else answers `unknown_method`.
+- Scopes: a person's own journal; the device's (`device`); and `system`,
+  which reveals other people's data — **`logs.unlock` into `system` scope is a
+  §23 action**: root, or a device administrator with a fresh ticket; agents
+  never; always audited through punard (§26).
+- Streaming is allowed on this socket only (`logs.wait`); the main socket's
+  one-request-per-connection rule (§8) is unchanged.
+- The broker runs as `punar-logs`, which is **not** in group `punar`: it
+  cannot open `punard.sock` or `agentd.sock`, and reaches punard only through
+  §26.
+
+## 26. Internal socket: punard ← `punar-logd` (reserved)
+
+Skeleton; nothing here is built.
+
+- Socket `/run/punard/logs.sock`, `0660 root:punar-logs`; `SO_PEERCRED` must
+  be the `punar-logs` uid.
+- Closed table: `logs.authorize` (spend a person's ticket and apply §23 for a
+  `system` unlock), `logs.audit` (append one Logs audit event through punard's
+  writer), `logs.policy` (the effective `diagnostics.*` policy).
+- This is the one new inter-daemon edge (`punar-logd → punard`); §18.4's graph
+  stays acyclic.
+
+## 27. Per-session app sockets (reserved)
+
+Skeleton; nothing here is built. Every first-party app host serves its window
+and its terminal verbs on sockets under the person's runtime directory:
+
+| Socket | Owner | Closed table |
+|---|---|---|
+| `$XDG_RUNTIME_DIR/punar/terminal/control.sock` | the Terminal UI | `open`, `list`, `focus`, `close`, `restore`, `status` |
+| `$XDG_RUNTIME_DIR/punar/activity/control.sock`, `…/punar/logs/control.sock` | the hosts | navigation, and `ready` or `state`, only |
+| `$XDG_RUNTIME_DIR/punar-editor/host.sock` | the Editor host | `punarctl edit` requests, and the host ↔ editor table |
+| each host's private `ui.sock` | the hosts | the window protocol: framing and caps only |
+
+Rules every one of them keeps:
+
+- **same-uid admission**: `SO_PEERCRED` uid equals the socket owner's, in a
+  `0700` directory;
+- **agent scopes refused**: a peer whose cgroup names `punar-agent-*.scope`
+  is refused, as on every Punar socket that can act;
+- **closed tables**: fixed method names, `deny_unknown_fields`, bounded
+  frames; no generic execution, ever (§8);
+- anything that reaches another person goes to punard and is decided there
+  by §23 — a per-session socket never decides it.
