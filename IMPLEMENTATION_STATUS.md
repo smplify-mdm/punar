@@ -268,8 +268,12 @@ Deliverables (spec section 76, Milestone 1):
   the lock screen.
   After the WP-02 review: every chord works under every keyboard layout (the
   number row by key code; PUNAR+F1 and PUNAR+ALT+Tab twins for / and [ ]),
-  the keyboard layout is set only from the person's own seat session, the
-  install seed applies only on a device with no account yet, the login
+  the keyboard layout is set only from the person's own seat session (since
+  the F0 merge: the device's layout is a device administrator's change with
+  a fresh password, each person's own layout is theirs with none, and the
+  login screen's choice is the one session's it signs in to; keys-check
+  proves that split on its next run, and the overlay proofs above predate
+  it), the install seed applies only on a device with no account yet, the login
   screen names variants and forgets a stale choice, the look toggles are
   kept as data (`punarctl window look`), and keys-check also proves the
   French number row, the Mac-style clipboard keys in a terminal, the
