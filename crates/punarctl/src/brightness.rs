@@ -177,24 +177,29 @@ pub fn find(root: &Path, which: Which) -> Option<Device> {
 }
 
 /// The raw value a change lands on, clamped to the floor and the maximum.
+///
+/// A step is taken from the exact raw value the device holds, never from its
+/// rounded percentage, and moves at least one raw level. Many firmware
+/// backlights have eight to sixteen levels; there, 5% of the range rounds to
+/// nothing, and a step computed from the rounded percentage rounds back to
+/// the level it started on, so the key did nothing (review finding: at 4 of
+/// 7, both +5% and -5% stayed at 4).
 pub fn target(device: &Device, which: Which, change: &Change) -> Option<u64> {
+    let raw_of = |percent: u32| (device.max * u64::from(percent) + 50) / 100;
+    // The display's floor is 1% of its range, and never zero on a coarse
+    // device: 1% of a seven-level panel rounds to 0, which is off, not dim.
     let floor = match which {
-        Which::Display => DISPLAY_FLOOR_PERCENT,
+        Which::Display => raw_of(DISPLAY_FLOOR_PERCENT).max(1),
         Which::Keyboard => 0,
     };
-    let current = device.percent() as i64;
-    let percent = match change {
+    let step = |percent: u32| raw_of(percent).max(u64::from(percent > 0));
+    let raw = match change {
         Change::Get => return None,
-        Change::Set(p) => *p as i64,
-        Change::Up(p) => current + *p as i64,
-        Change::Down(p) => current - *p as i64,
-    }
-    .clamp(floor as i64, 100) as u64;
-    let raw = (device.max * percent + 50) / 100;
-    // A floor above zero must stay above zero on a coarse device: 1% of a
-    // seven-step keyboard LED rounds to 0, which is off, not dim.
-    let raw = if floor > 0 { raw.max(1) } else { raw };
-    Some(raw.min(device.max))
+        Change::Set(p) => raw_of(*p),
+        Change::Up(p) => device.current.saturating_add(step(*p)),
+        Change::Down(p) => device.current.saturating_sub(step(*p)),
+    };
+    Some(raw.clamp(floor, device.max))
 }
 
 fn refuse(message: &str, code: u8) -> ExitCode {
@@ -403,6 +408,44 @@ mod tests {
         assert_eq!(
             target(&device(2, 3), Which::Keyboard, &Change::Down(100)),
             Some(0)
+        );
+    }
+
+    /// Review finding: on a coarse backlight the keys froze, because a step
+    /// was computed from the rounded percentage and rounded back.
+    #[test]
+    fn every_step_moves_a_coarse_backlight_at_least_one_level() {
+        // Seven levels at 4: 5% of the range is less than one level.
+        let seven = device(4, 7);
+        assert_eq!(target(&seven, Which::Display, &Change::Up(5)), Some(5));
+        assert_eq!(target(&seven, Which::Display, &Change::Down(5)), Some(3));
+        assert_eq!(target(&seven, Which::Display, &Change::Up(1)), Some(5));
+        // Ten levels at 6: -5% used to land back on 6.
+        let ten = device(6, 10);
+        assert_eq!(target(&ten, Which::Display, &Change::Down(5)), Some(5));
+        assert_eq!(target(&ten, Which::Display, &Change::Up(5)), Some(7));
+        // The ends still hold: never past the top, never below the floor.
+        assert_eq!(
+            target(&device(7, 7), Which::Display, &Change::Up(5)),
+            Some(7)
+        );
+        assert_eq!(
+            target(&device(1, 7), Which::Display, &Change::Down(5)),
+            Some(1)
+        );
+        // A three-level keyboard light walks one level per key.
+        assert_eq!(
+            target(&device(1, 3), Which::Keyboard, &Change::Up(34)),
+            Some(2)
+        );
+        assert_eq!(
+            target(&device(1, 3), Which::Keyboard, &Change::Down(34)),
+            Some(0)
+        );
+        // A fine panel keeps the percentage step it always had.
+        assert_eq!(
+            target(&device(960, 19200), Which::Display, &Change::Up(5)),
+            Some(1920)
         );
     }
 

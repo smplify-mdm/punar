@@ -713,17 +713,12 @@ fn clipboard_keys(mode: Option<String>, style: &Style, json_output: bool) -> Exi
     let mut out = fmt::masthead(style, "Clipboard keys", "this person");
     let rows = if current == "mac" {
         vec![
-            Row::new(
-                "Copy",
-                "Punar + C",
-                Slot::Ok,
-                "Ctrl + Shift + C in a terminal",
-            ),
+            Row::new("Copy", "Punar + C", Slot::Ok, "Ctrl + Insert in a terminal"),
             Row::new(
                 "Paste",
                 "Punar + V",
                 Slot::Ok,
-                "Ctrl + Shift + V in a terminal",
+                "Shift + Insert in a terminal",
             ),
             Row::new("Cut", "Punar + X", Slot::Ok, ""),
             Row::new(

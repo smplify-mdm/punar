@@ -675,6 +675,15 @@ fn a_missing_microphone_is_absent_not_unreachable() {
         "{}",
         stderr(&output)
     );
+    // Each sentence starts its own line, flush left (the message once
+    // carried the source's indentation into what the person reads).
+    for line in ["Why: PipeWire answers", "Next step: connect one"] {
+        assert!(
+            stderr(&output).lines().any(|l| l.starts_with(line)),
+            "{line}: {}",
+            stderr(&output)
+        );
+    }
     let output = session
         .command(&["--json", "audio", "status"])
         .env("PATH", with_path(&[&bin]))

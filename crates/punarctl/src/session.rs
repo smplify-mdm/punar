@@ -1281,8 +1281,8 @@ fn volume_arg(change: &str) -> Option<String> {
 fn audio_absent(what: &str, why: &str) -> ExitCode {
     refuse(
         &format!(
-            "This machine has no {what} PipeWire can use, so nothing was changed.
-             Why: PipeWire answers but reports no default {what} ({}).
+            "This machine has no {what} PipeWire can use, so nothing was changed.\n\
+             Why: PipeWire answers but reports no default {what} ({}).\n\
              Next step: connect one; the key works as soon as PipeWire sees it.",
             if why.is_empty() {
                 "wpctl gave no reason"
