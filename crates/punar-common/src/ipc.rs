@@ -105,12 +105,26 @@ pub const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 /// M5 (contract sections 2, 5.9): raised per-request processing bound for
 /// `enroll.start` — the pipeline contains a full reconcile pass and, on
-/// TCG, nft operations are slow.
-pub const ENROLL_START_PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+/// TCG, nft operations are slow. Its own control-plane calls spend at most
+/// 35 s, its reconcile pass 25 s more (punard's
+/// `ENROLL_CONTROL_PLANE_BUDGET` and `RECONCILE_CONTROL_PLANE_BUDGET`), and
+/// its local work [`SERVER_PROCESS_TIMEOUT`]: 70 s.
+pub const ENROLL_START_PROCESS_TIMEOUT: Duration = Duration::from_secs(70);
 /// M5 (contract sections 2, 7): raised client response timeout for
 /// `punarctl enroll start` only, covering [`ENROLL_START_PROCESS_TIMEOUT`]
 /// with margin.
 pub const ENROLL_START_CLIENT_TIMEOUT: Duration = Duration::from_secs(90);
+/// M5 (contract sections 2, 5.6): the processing bound of `reconcile` on an
+/// enrolled device. Its local work keeps [`SERVER_PROCESS_TIMEOUT`]; its
+/// calls to the control plane (the policy fetch, the compliance and
+/// inventory reports, the query pull) share one budget of 25 s, waits
+/// behind other calls included (punard's `RECONCILE_CONTROL_PLANE_BUDGET`),
+/// and a call that does not fit in what is left is not sent: 10 + 25 s.
+pub const RECONCILE_PROCESS_TIMEOUT: Duration = Duration::from_secs(35);
+/// M5 (contract section 2): `punarctl reconcile`'s response timeout,
+/// covering [`RECONCILE_PROCESS_TIMEOUT`] with margin, so the timer's
+/// `punard-reconcile.service` does not fail on a slow or black-holed link.
+pub const RECONCILE_CLIENT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// `punarctl` process exit codes (Plate D-014 section III; docs/api/ipc.md
 /// section 7).
@@ -3995,9 +4009,12 @@ mod tests {
 
     #[test]
     fn enroll_timeout_bounds_cover_each_other() {
-        // Contract section 2: the 90 s client budget must cover the 60 s
-        // processing bound with margin.
+        // Contract section 2: the 90 s client budget must cover the 70 s
+        // processing bound with margin, and punarctl's wait for a reconcile
+        // the pass's.
         assert!(ENROLL_START_CLIENT_TIMEOUT > ENROLL_START_PROCESS_TIMEOUT);
+        assert!(RECONCILE_CLIENT_TIMEOUT > RECONCILE_PROCESS_TIMEOUT);
+        assert!(RECONCILE_PROCESS_TIMEOUT > SERVER_PROCESS_TIMEOUT);
     }
 
     // -- M4 typed results (contract sections 5.1, 5.6–5.8) ------------------

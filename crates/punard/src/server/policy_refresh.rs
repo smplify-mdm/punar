@@ -261,7 +261,7 @@ enum Commit {
 
 impl Inner {
     /// One refresh opportunity. See the module documentation.
-    pub(super) fn refresh_policy_if_enrolled(&self, actor: &AuditActor) {
+    pub(super) fn refresh_policy_if_enrolled(&self, actor: &AuditActor, budget: &CallBudget) {
         let epoch = {
             let slot = self.enrollment.lock().unwrap();
             if slot.is_none() {
@@ -278,7 +278,7 @@ impl Inner {
 
         // The network call holds no lock and no guard: an enrollment change
         // may run meanwhile, and is caught below by its epoch.
-        let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+        let client = self.control_plane().within(budget.clone());
         let failed = match client.policy_fetch(&token) {
             Ok(fetched) => {
                 // Checking and committing hold the enrollment guard, and

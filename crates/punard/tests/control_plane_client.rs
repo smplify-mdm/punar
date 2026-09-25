@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use punar_common::Redacted;
 use punard::enroll::{
-    Assignment, ControlPlaneClient, FetchedPolicy, MAX_ANSWER_BYTES, UpstreamError,
+    AgentQueue, Assignment, CallBudget, ControlPlaneClient, FetchedPolicy, MAX_ANSWER_BYTES,
+    UpstreamError,
 };
 use serde_json::{Value, json};
 
@@ -145,4 +146,84 @@ fn a_refusals_words_are_cleaned_where_punard_reads_them() {
         other => panic!("expected Refused, got {other:?}"),
     }
     served.join().unwrap();
+}
+
+/// A control plane that serves one connection at a time, in the order they
+/// arrive, as the built-in agent does, answering each `result: {}` after
+/// `delay`: how many connections it has accepted so far.
+fn one_at_a_time(
+    delay: std::time::Duration,
+    calls: usize,
+) -> (
+    PathBuf,
+    std::sync::Arc<AtomicU32>,
+    std::thread::JoinHandle<()>,
+) {
+    let dir = std::env::temp_dir().join(format!(
+        "punard-cp-queue-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("control-plane.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let accepted = std::sync::Arc::new(AtomicU32::new(0));
+    let counted = std::sync::Arc::clone(&accepted);
+    let served = std::thread::spawn(move || {
+        for _ in 0..calls {
+            let (mut stream, _) = listener.accept().unwrap();
+            counted.fetch_add(1, Ordering::SeqCst);
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            std::thread::sleep(delay);
+            let _ = stream.write_all(&answer(json!({})));
+        }
+    });
+    (socket, accepted, served)
+}
+
+/// The agent answers one call at a time, so a call sent while another is in
+/// flight waits for it before its own turn begins. A client that shares
+/// punard's queue waits for its answer from the end of the calls ahead of
+/// it, not from when it sent it: two reports that each take the agent three
+/// of their five seconds both get through, instead of the second being read
+/// as "unreachable" after the agent delivered it.
+#[test]
+fn a_call_queued_behind_another_waits_its_turn_out() {
+    let (socket, _, served) = one_at_a_time(std::time::Duration::from_secs(3), 2);
+    let queue = std::sync::Arc::new(AgentQueue::default());
+    let token = Redacted::new("tok_x".to_string());
+    std::thread::scope(|scope| {
+        let reports: Vec<_> = (0..2)
+            .map(|_| {
+                let client = ControlPlaneClient::new(&socket).behind(queue.clone());
+                let token = &token;
+                scope.spawn(move || client.inventory_report(token, &json!({})))
+            })
+            .collect();
+        for report in reports {
+            let answered = report.join().unwrap();
+            assert!(answered.is_ok(), "{answered:?}");
+        }
+    });
+    served.join().unwrap();
+}
+
+/// A call whose whole wait does not fit in what its budget has left is not
+/// sent at all: the control plane never sees it, so it can never be one the
+/// agent carried out and punard gave up on.
+#[test]
+fn a_call_that_does_not_fit_its_budget_is_not_sent() {
+    let (socket, accepted, _served) = one_at_a_time(std::time::Duration::ZERO, 1);
+    let token = Redacted::new("tok_x".to_string());
+    let budget = CallBudget::new(std::time::Duration::from_secs(4));
+    let client = ControlPlaneClient::new(&socket).within(budget.clone());
+    match client.inventory_report(&token, &json!({})) {
+        Err(UpstreamError::Unreachable(why)) => assert!(why.starts_with("not sent"), "{why}"),
+        other => panic!("expected a call not sent, got {other:?}"),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(accepted.load(Ordering::SeqCst), 0, "nothing reached it");
+    assert!(budget.left() > std::time::Duration::from_millis(3900));
 }

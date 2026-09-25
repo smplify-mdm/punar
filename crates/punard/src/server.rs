@@ -72,10 +72,11 @@ use crate::browser_policy::persist_rendered_browser_policy;
 use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
-    Assignment, ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, INVENTORY_RETRY_BASE,
-    InventoryRetry, InventorySources, LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE,
-    OrgRecord, OrganizationViewRecord, PolicyRefreshRecord, StatusSummary, UpstreamError,
-    compliance_report_body, inventory_body, inventory_resend_due, load_device_token,
+    AgentQueue, Assignment, CallBudget, ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET,
+    ENROLL_CONTROL_PLANE_BUDGET, Enrollment, INVENTORY_RETRY_BASE, InventoryRetry,
+    InventorySources, LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE, OrgRecord,
+    OrganizationViewRecord, PolicyRefreshRecord, RECONCILE_CONTROL_PLANE_BUDGET, StatusSummary,
+    UpstreamError, compliance_report_body, inventory_body, inventory_resend_due, load_device_token,
     load_enrollment, load_organization_view, organization_view_summary, save_device_token,
     save_enrollment, save_enrollment_durable, save_organization_view, write_status_summary,
 };
@@ -124,19 +125,19 @@ pub const RESOURCE_ENROLLMENT: &str = "enrollment";
 /// punard reported the device unenrolled — so the next attempt met a stale
 /// one. Dropping this releases it, best effort and exactly like
 /// `enroll.stop`'s release: the local rollback never waits on the network.
-struct UncommittedRegistration<'a> {
-    client: &'a ControlPlaneClient,
+struct UncommittedRegistration {
+    client: ControlPlaneClient,
     token: Option<Redacted<String>>,
 }
 
-impl UncommittedRegistration<'_> {
+impl UncommittedRegistration {
     /// The enrollment is committed: keep the identity.
     fn commit(mut self) {
         self.token = None;
     }
 }
 
-impl Drop for UncommittedRegistration<'_> {
+impl Drop for UncommittedRegistration {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
             if let Err(e) = self.client.unregister(&token) {
@@ -362,6 +363,9 @@ pub struct DaemonConfig {
     /// How long an inventory that failed to go out first waits before it is
     /// sent again ([`INVENTORY_RETRY_BASE`]); shorter in tests.
     pub inventory_retry_base: Duration,
+    /// What one reconcile pass may spend on the control plane
+    /// ([`RECONCILE_CONTROL_PLANE_BUDGET`]); shorter in tests.
+    pub reconcile_control_plane_budget: Duration,
 }
 
 impl DaemonConfig {
@@ -417,6 +421,7 @@ impl DaemonConfig {
             update_transaction_sources,
             pi_update_sources,
             inventory_retry_base: INVENTORY_RETRY_BASE,
+            reconcile_control_plane_budget: RECONCILE_CONTROL_PLANE_BUDGET,
         }
     }
 }
@@ -553,6 +558,9 @@ struct Inner {
     /// commit, without holding the state lock across the network + reconcile
     /// pipeline.
     enroll_in_progress: AtomicBool,
+    /// Every control-plane call in flight, so each waits behind the others
+    /// ([`AgentQueue`]).
+    control_plane_queue: Arc<AgentQueue>,
     /// How many refresh opportunities a failing policy fetch still skips
     /// ([`RefreshBackoff`]). In memory: a restart tries at once.
     policy_refresh_backoff: Mutex<RefreshBackoff>,
@@ -843,6 +851,7 @@ impl Daemon {
                 approvals: Mutex::new(approvals),
                 ai: Mutex::new(ai),
                 enroll_in_progress: AtomicBool::new(false),
+                control_plane_queue: Arc::new(AgentQueue::default()),
                 policy_refresh_backoff: Mutex::new(RefreshBackoff::default()),
                 policy_rejected_offer: Mutex::new(None),
                 policy_local_refusal: Mutex::new(None),
@@ -885,7 +894,8 @@ impl Daemon {
     /// every capability has a section 52 state before the socket opens.
     pub fn boot_reconcile(&self) {
         let inner = &self.inner;
-        let report = inner.reconcile_and_remediate(&AuditActor::daemon());
+        let budget = CallBudget::new(inner.cfg.reconcile_control_plane_budget);
+        let report = inner.reconcile_and_remediate(&AuditActor::daemon(), &budget);
         *inner.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
     }
 
@@ -2717,7 +2727,7 @@ impl Inner {
                     recovery_key,
                     identity,
                 )?;
-                let client = ControlPlaneClient::new(self.cfg.control_plane_socket.clone());
+                let client = self.control_plane();
                 loop {
                     match self.installer.attempt_organization_recovery(
                         &params.plan_token,
@@ -4127,8 +4137,13 @@ impl Inner {
         // The organization's policy first, so a changed set is what this
         // pass enforces and reports (SPEC section 42: load desired state,
         // then diff). A no-op on a personal device.
-        self.refresh_policy_if_enrolled(&actor);
-        let report = self.reconcile_and_remediate(&actor);
+        // One budget for the pass's calls to the control plane, the fetch
+        // and the reports together (RECONCILE_CONTROL_PLANE_BUDGET), so a
+        // pass on a slow or black-holed link still answers inside
+        // punarctl's wait for it.
+        let budget = CallBudget::new(self.cfg.reconcile_control_plane_budget);
+        self.refresh_policy_if_enrolled(&actor, &budget);
+        let report = self.reconcile_and_remediate(&actor, &budget);
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
         Ok(to_value(report))
     }
@@ -4144,7 +4159,7 @@ impl Inner {
     ///
     /// M3 result fields keep their M3 meaning: `drift` / `drift_count`
     /// describe the **pre-remediation** observation.
-    fn reconcile_and_remediate(&self, actor: &AuditActor) -> ReconcileResult {
+    fn reconcile_and_remediate(&self, actor: &AuditActor, budget: &CallBudget) -> ReconcileResult {
         // M9: the lazy expiry sweep rides the existing reconcile timer, so
         // an unattended device still retires lapsed approvals and grants
         // without punard growing a timer of its own (SPEC section 6.3).
@@ -4225,7 +4240,7 @@ impl Inner {
         // reconcile timer is the sync cadence; no new timers, no new
         // wakeup sources. The section 9 summary file is refreshed
         // afterwards (write-on-change only).
-        self.sync_if_enrolled(actor);
+        self.sync_if_enrolled(actor, budget);
         self.publish_status_summary();
 
         let compliance = self.tracker.lock().unwrap().block(&self.registry);
@@ -5101,7 +5116,9 @@ impl Inner {
             .filter(|c| !c.is_empty())
             .map(|c| Redacted::new(c.to_string()));
         // Discover.
-        let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+        let client = self
+            .control_plane()
+            .within(CallBudget::new(ENROLL_CONTROL_PLANE_BUDGET));
         let org_doc = client
             .org_discover(domain)
             .map_err(|e| fail_audit(self.upstream_error("discover", e)))?;
@@ -5243,7 +5260,9 @@ impl Inner {
         // From here to the commit point every refusal releases the identity
         // the control plane just issued; see [`UncommittedRegistration`].
         let registration = UncommittedRegistration {
-            client: &client,
+            // Its own client, outside the budget: a registration is released
+            // however long enrolling took.
+            client: self.control_plane(),
             token: Some(token.clone()),
         };
         // The attestation step is SIMULATED (milestone-5.md section 5.2):
@@ -5358,7 +5377,10 @@ impl Inner {
         // the first compliance + inventory report; failures there queue
         // per SPEC section 55 — they never fail enrollment.
         *self.last_sync_outcome.lock().unwrap() = None;
-        let report = self.reconcile_and_remediate(&actor);
+        let report = self.reconcile_and_remediate(
+            &actor,
+            &CallBudget::new(self.cfg.reconcile_control_plane_budget),
+        );
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
         let first_sync = self
             .last_sync_outcome
@@ -5678,7 +5700,7 @@ impl Inner {
         // unenrollment is a local restore that must succeed offline (SPEC
         // section 55), so a failure here is logged and never blocks it.
         if let Some(token) = self.device_token.lock().unwrap().as_ref() {
-            let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+            let client = self.control_plane();
             if let Err(e) = client.unregister(token) {
                 eprintln!(
                     "punard: enroll.stop could not release the upstream identity ({e:?}); \
@@ -5724,7 +5746,10 @@ impl Inner {
 
         // One pass against the restored personal document (the sync hook
         // no-ops — no enrollment — and the status file flips to personal).
-        let report = self.reconcile_and_remediate(&actor);
+        let report = self.reconcile_and_remediate(
+            &actor,
+            &CallBudget::new(self.cfg.reconcile_control_plane_budget),
+        );
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
 
         let removed_policy_ids = enrollment.policy_ids();
@@ -5804,7 +5829,7 @@ impl Inner {
     /// inventory that failed waits before it is sent again unless it changed
     /// ([`InventoryRetry`]); `enroll.sync` is audited on **transitions
     /// only**.
-    fn sync_if_enrolled(&self, actor: &AuditActor) {
+    fn sync_if_enrolled(&self, actor: &AuditActor, budget: &CallBudget) {
         let (enrollment, epoch) = {
             let slot = self.enrollment.lock().unwrap();
             (slot.clone(), self.enrollment_epoch.load(Ordering::SeqCst))
@@ -5815,7 +5840,7 @@ impl Inner {
             return;
         };
         let token = self.device_token.lock().unwrap().clone();
-        let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+        let client = self.control_plane().within(budget.clone());
 
         // Compliance: overall + per-category states. Nothing else — no
         // values, no hostnames, no events (SPEC sections 24, 54).
@@ -6025,6 +6050,13 @@ impl Inner {
         if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
             eprintln!("punard: could not persist enrollment sync state: {e}");
         }
+    }
+
+    /// A control-plane client whose calls wait behind every other call this
+    /// daemon has in flight ([`AgentQueue`]).
+    fn control_plane(&self) -> ControlPlaneClient {
+        ControlPlaneClient::new(&self.cfg.control_plane_socket)
+            .behind(Arc::clone(&self.control_plane_queue))
     }
 
     /// A client for the single inter-daemon edge. Constructed per use — it

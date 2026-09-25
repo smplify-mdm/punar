@@ -63,7 +63,7 @@ pub const PROTOCOL_VERSION: u64 = 1;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// M5 (contract sections 2, 7): `enroll start` runs a full enrollment
-/// pipeline server-side (60 s processing bound), so its client budget is
+/// pipeline server-side (70 s processing bound), so its client budget is
 /// raised to 90 s — for that one verb only.
 pub const ENROLL_START_TIMEOUT: Duration = Duration::from_secs(90);
 

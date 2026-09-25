@@ -4755,9 +4755,19 @@ fn main() -> ExitCode {
         },
         Command::Reconcile => {
             let hostname = local_hostname();
-            rpc(&client, json, "reconcile", None, |v| {
-                views::reconcile(&style, v, &hostname)
-            })
+            // An enrolled device's pass also talks to the control plane,
+            // within a budget of its own (contract section 2): waiting only
+            // the ordinary 15 s would fail the timer's unit on a slow link.
+            match client.call_with_timeout(
+                "reconcile",
+                None,
+                punar_common::ipc::RECONCILE_CLIENT_TIMEOUT,
+            ) {
+                Ok(result) => {
+                    render_or_json(json, &result, |v| views::reconcile(&style, v, &hostname))
+                }
+                Err(error) => fail(&error),
+            }
         }
         Command::Policy { command } => match command {
             // Milestone 4: the policy verbs are daemon-backed (contract

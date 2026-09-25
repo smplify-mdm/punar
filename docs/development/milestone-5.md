@@ -214,7 +214,7 @@ exactly like the M4 additions per ipc.md §3.3). Design here.
 ### 5.1 `enroll.start {org_domain}` — root-only, audited
 
 Pipeline (one synchronous request; ipc.md documents the raised per-request
-processing bound of 60 s for this method — the chain contains a full
+processing bound of 70 s for this method — the chain contains a full
 reconcile pass and, on TCG, nft operations are slow):
 
 1. **Guard** — already enrolled → error `conflict` (new additive error
@@ -888,7 +888,7 @@ compliance grammar; DESIGN_LANGUAGE §8.
 
 Asserted, not yet verified (lands with implementation, checked by CI):
 every §10.2 assertion; enroll.start total latency under TCG within the
-60 s processing / 90 s client bounds; FileView pickup latency vs the ≤10 s
+70 s processing / 90 s client bounds; FileView pickup latency vs the ≤10 s
 screenshot wait; mock RSS; the m5-report/screenshot export additions.
 M4's CI run was **in flight** at planning time — if it lands red, its
 fixes precede M5 implementation; nothing in this plan assumes its outcome

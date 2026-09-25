@@ -92,14 +92,25 @@ each direction. No length prefixes, no binary framing.
   Client side: `punarctl` uses 5 s connect / 15 s response, and renders
   failure in section-73 voice ("The Punar daemon is not reachable…", next
   step: `systemctl status punard`).
-  **M5 amendment (one method):** `enroll.start` (section 5.9) is processed
-  under a **60 s** bound — its pipeline contains upstream calls plus a full
+  **M5 amendment (two methods):** `enroll.start` (section 5.9) is processed
+  under a **70 s** bound — its pipeline contains upstream calls plus a full
   reconcile pass, which TCG runs make slow — and `punarctl` uses a 90 s
-  response timeout for the `enroll start`/`enroll stop` verbs. Every other
-  method keeps the 10 s/15 s bounds unchanged. On an enrolled device a
-  `reconcile` also fetches the organization's policy first (section 5.6),
-  one control-plane call of at most 5 s, so the pass still fits `punarctl`'s
-  15 s.
+  response timeout for the `enroll start`/`enroll stop` verbs. On an
+  enrolled device a `reconcile` also talks to the control plane: it fetches
+  the organization's policy first (section 5.6) and reports afterwards. The
+  pass's calls share one budget of **25 s**, waits behind other calls
+  included: `policy.fetch`, `compliance.report`, `inventory.report` and
+  `queries.pending` wait at most 5 + 9 + 5 + 5 = 24 s (each at least a
+  second longer than `punar-smplifyd` may spend on it), answering queries
+  gets what is left, and a call that no longer fits is not sent — its report
+  stays pending for the next pass. So `reconcile` is processed under a
+  **35 s** bound (its local work's 10 s and the 25 s), and `punarctl
+  reconcile` waits 45 s. `enroll.start`'s own three calls share 35 s
+  (5 + 14 + 5 = 24 s, and room to wait behind one report of a pass already
+  in flight), its reconcile pass 25 s more: 70 s with its local work. The
+  agent serves one call at a time, so each call's wait starts behind every
+  call punard already has in flight, never from when it was sent. Every
+  other method keeps the 10 s/15 s bounds unchanged.
   **Application amendment:** `apps.catalog` may spend 30 s verifying remote
   metadata (`punarctl`: 45 s), while `apps.install`, `apps.update`, and
   `apps.remove` have bounded 30-minute/30-minute/10-minute per-app backend

@@ -59,8 +59,9 @@ pub const DEFAULT_STATUS_FILE: &str = "/run/punar/status.json";
 
 /// Per-call read/write timeout on the control-plane socket, for every method
 /// [`call_timeout`] does not name. `enroll.start` makes three calls, then
-/// a reconcile pass with its reports; all of them waited out in full still
-/// fit its 60 s processing bound (ipc.md section 2).
+/// a reconcile pass with its reports; each group spends within its own
+/// budget ([`ENROLL_CONTROL_PLANE_BUDGET`], [`RECONCILE_CONTROL_PLANE_BUDGET`]),
+/// and both still fit its 70 s processing bound (ipc.md section 2).
 pub const CONTROL_PLANE_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `enroll.register`'s timeout. The control plane registers with the
@@ -86,6 +87,110 @@ pub fn call_timeout(method: &str) -> Duration {
         "enroll.register" => REGISTER_CALL_TIMEOUT,
         "compliance.report" => COMPLIANCE_REPORT_CALL_TIMEOUT,
         _ => CONTROL_PLANE_CALL_TIMEOUT,
+    }
+}
+
+/// The most one reconcile pass spends on the control plane: every call it
+/// makes together, the time each waits behind calls already in flight
+/// included ([`CallBudget`], docs/api/ipc.md section 2). Its calls, in order,
+/// are `policy.fetch`, `compliance.report`, `inventory.report` and
+/// `queries.pending`, which wait at most 5 + 9 + 5 + 5 = 24 s with nothing
+/// ahead of them; answering queries uses what is left, 5 s a question. A call
+/// that no longer fits is not sent (a report stays pending for the next
+/// pass), so however the link fails, a pass is done with the control plane
+/// inside this, and `punarctl reconcile` waits for the pass's local work on
+/// top of it (`punar_common::ipc::RECONCILE_PROCESS_TIMEOUT`).
+pub const RECONCILE_CONTROL_PLANE_BUDGET: Duration = Duration::from_secs(25);
+
+/// The same for `enroll.start`'s own calls, before its reconcile pass:
+/// `org.discover`, `enroll.register` and `policy.fetch`, 5 + 14 + 5 = 24 s,
+/// and room to wait behind one compliance report of a pass already in flight
+/// (9 s). A registration that cannot fit is never sent, so it can never be
+/// one Smplify recorded and punard gave up on.
+pub const ENROLL_CONTROL_PLANE_BUDGET: Duration = Duration::from_secs(35);
+
+/// What punard has asked the control plane and not yet heard back from, and
+/// when at the latest each answer is due. The built-in agent serves one
+/// connection at a time, in the order they arrive, so a call is answered
+/// only after every call ahead of it: punard waits for it from the latest of
+/// their deadlines, not from when it was sent, and a call queued behind
+/// another is never read as "unreachable" while the agent is still getting
+/// to it. One per daemon, shared by every client it makes: the timer's
+/// pass, a root administrator's reconcile and `enroll.start` can overlap,
+/// each on its own connection thread.
+#[derive(Debug, Default)]
+pub struct AgentQueue {
+    due: std::sync::Mutex<Vec<(u64, Instant)>>,
+    tickets: std::sync::atomic::AtomicU64,
+}
+
+/// One call's place in an [`AgentQueue`], until its answer is read or given
+/// up on.
+struct Ticket<'a> {
+    queue: &'a AgentQueue,
+    id: u64,
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        self.queue
+            .due
+            .lock()
+            .unwrap()
+            .retain(|(id, _)| *id != self.id);
+    }
+}
+
+impl AgentQueue {
+    /// Connect behind every call in flight, for a call the agent may take
+    /// `own` over, and say when its answer is due: `own` after the latest
+    /// answer already due. The connection is made under the queue's lock, so
+    /// the agent accepts calls in the order their deadlines were given.
+    /// Nothing is sent when `fits` refuses the wait.
+    fn connect(
+        &self,
+        socket: &Path,
+        own: Duration,
+        fits: impl FnOnce(Duration) -> Result<(), UpstreamError>,
+    ) -> Result<(UnixStream, Instant, Ticket<'_>), UpstreamError> {
+        let mut due = self.due.lock().unwrap();
+        let now = Instant::now();
+        let free = due.iter().map(|(_, at)| *at).max().unwrap_or(now).max(now);
+        let deadline = free + own;
+        fits(deadline - now)?;
+        let stream = UnixStream::connect(socket)
+            .map_err(|e| UpstreamError::transport("connect failed", &e))?;
+        let id = self
+            .tickets
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        due.push((id, deadline));
+        Ok((stream, deadline, Ticket { queue: self, id }))
+    }
+}
+
+/// The time a group of control-plane calls may spend together, waiting
+/// behind other calls included: one reconcile pass
+/// ([`RECONCILE_CONTROL_PLANE_BUDGET`]), or `enroll.start`'s own calls
+/// ([`ENROLL_CONTROL_PLANE_BUDGET`]). A call is sent only when its whole wait
+/// fits in what is left, so punard never gives up early on a call the agent
+/// may still complete; one that does not fit is not sent at all, and reads
+/// as unreachable.
+#[derive(Debug, Clone)]
+pub struct CallBudget(std::sync::Arc<std::sync::Mutex<Duration>>);
+
+impl CallBudget {
+    pub fn new(total: Duration) -> CallBudget {
+        CallBudget(std::sync::Arc::new(std::sync::Mutex::new(total)))
+    }
+
+    /// What is left to spend.
+    pub fn left(&self) -> Duration {
+        *self.0.lock().unwrap()
+    }
+
+    fn spend(&self, spent: Duration) {
+        let mut left = self.0.lock().unwrap();
+        *left = left.saturating_sub(spent);
     }
 }
 
@@ -164,20 +269,68 @@ impl UpstreamError {
 /// section 4.3).
 pub struct ControlPlaneClient {
     socket: PathBuf,
+    queue: Option<std::sync::Arc<AgentQueue>>,
+    budget: Option<CallBudget>,
 }
 
 impl ControlPlaneClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         ControlPlaneClient {
             socket: socket.into(),
+            queue: None,
+            budget: None,
         }
     }
 
+    /// Wait for each answer behind the calls `queue` knows are in flight.
+    pub fn behind(mut self, queue: std::sync::Arc<AgentQueue>) -> Self {
+        self.queue = Some(queue);
+        self
+    }
+
+    /// Spend from `budget`, and send nothing that does not fit in it.
+    pub fn within(mut self, budget: CallBudget) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
     fn call(&self, method: &str, params: Value) -> Result<Value, UpstreamError> {
-        let stream = UnixStream::connect(&self.socket)
-            .map_err(|e| UpstreamError::transport("connect failed", &e))?;
-        let _ = stream.set_read_timeout(Some(call_timeout(method)));
-        let _ = stream.set_write_timeout(Some(call_timeout(method)));
+        let started = Instant::now();
+        let result = self.call_timed(method, params);
+        if let Some(budget) = &self.budget {
+            budget.spend(started.elapsed());
+        }
+        result
+    }
+
+    fn call_timed(&self, method: &str, params: Value) -> Result<Value, UpstreamError> {
+        let own = call_timeout(method);
+        let fits = |wait: Duration| match &self.budget {
+            Some(budget) if wait > budget.left() => Err(UpstreamError::Unreachable(format!(
+                "not sent: {method} may take {} s with the calls ahead of it, and this \
+                 pass has {} s left for the control plane",
+                wait.as_secs(),
+                budget.left().as_secs()
+            ))),
+            _ => Ok(()),
+        };
+        let (stream, deadline, _ticket) = match &self.queue {
+            Some(queue) => {
+                let (stream, deadline, ticket) = queue.connect(&self.socket, own, fits)?;
+                (stream, deadline, Some(ticket))
+            }
+            None => {
+                fits(own)?;
+                let stream = UnixStream::connect(&self.socket)
+                    .map_err(|e| UpstreamError::transport("connect failed", &e))?;
+                (stream, Instant::now() + own, None)
+            }
+        };
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
+        let _ = stream.set_read_timeout(Some(wait));
+        let _ = stream.set_write_timeout(Some(wait));
 
         let request = json!({
             "v": 1,
@@ -2277,6 +2430,49 @@ mod tests {
                 call_timeout(method)
             );
         }
+    }
+
+    /// The calls one reconcile pass makes, waited out in full, fit its
+    /// budget, and the budget and the pass's local work fit what punarctl
+    /// waits for a reconcile: the timer's unit cannot fail on a slow or
+    /// black-holed link. enroll.start's own calls, with one report of a pass
+    /// already in flight ahead of them, and its pass fit its bound the same
+    /// way.
+    #[test]
+    fn a_reconcile_pass_and_an_enrollment_fit_what_punarctl_waits() {
+        use punar_common::ipc::{
+            ENROLL_START_CLIENT_TIMEOUT, ENROLL_START_PROCESS_TIMEOUT, RECONCILE_CLIENT_TIMEOUT,
+            RECONCILE_PROCESS_TIMEOUT, SERVER_PROCESS_TIMEOUT,
+        };
+        let sum = |methods: &[&str], each: &dyn Fn(&str) -> Duration| -> Duration {
+            methods.iter().map(|method| each(method)).sum()
+        };
+        let pass = [
+            "policy.fetch",
+            "compliance.report",
+            "inventory.report",
+            CP_METHOD_QUERIES_PENDING,
+        ];
+        let agent = sum(&pass, &punar_smplifyd::budget::call_budget);
+        let waits = sum(&pass, &call_timeout);
+        assert_eq!(agent, Duration::from_secs(20), "4 + 8 + 4 + 4");
+        assert_eq!(waits, Duration::from_secs(24), "5 + 9 + 5 + 5");
+        assert!(waits <= RECONCILE_CONTROL_PLANE_BUDGET);
+        assert!(
+            SERVER_PROCESS_TIMEOUT + RECONCILE_CONTROL_PLANE_BUDGET <= RECONCILE_PROCESS_TIMEOUT
+        );
+        assert!(RECONCILE_PROCESS_TIMEOUT < RECONCILE_CLIENT_TIMEOUT);
+
+        let own = sum(
+            &["org.discover", "enroll.register", "policy.fetch"],
+            &call_timeout,
+        );
+        assert!(own + call_timeout("compliance.report") <= ENROLL_CONTROL_PLANE_BUDGET);
+        assert!(
+            ENROLL_CONTROL_PLANE_BUDGET + RECONCILE_CONTROL_PLANE_BUDGET + SERVER_PROCESS_TIMEOUT
+                <= ENROLL_START_PROCESS_TIMEOUT
+        );
+        assert!(ENROLL_START_PROCESS_TIMEOUT < ENROLL_START_CLIENT_TIMEOUT);
     }
 
     #[test]

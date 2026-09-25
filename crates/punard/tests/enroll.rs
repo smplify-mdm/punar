@@ -94,6 +94,9 @@ struct ControlPlaneState {
     /// Refuse `org.discover` of an unknown domain with this message: words
     /// the control plane chose.
     not_found_message: Mutex<Option<String>>,
+    /// Take every request and answer none: a link that drops everything past
+    /// the connection.
+    black_hole: AtomicBool,
     /// Serve a desired state that turns local policy editing off
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
@@ -385,6 +388,12 @@ fn serve_connection(stream: UnixStream, state: &ControlPlaneState) {
         let params = request.get("params").cloned().unwrap_or(json!({}));
         state.methods.lock().unwrap().push(method.to_string());
         state.lines.lock().unwrap().push(line.clone());
+        if state.black_hole.load(Ordering::SeqCst) {
+            // Held until punard stops waiting and hangs up.
+            line.clear();
+            let _ = reader.read_line(&mut line);
+            break;
+        }
         let response = match state.handle(method, &params) {
             Ok(result) => json!({"v": 1, "id": id, "result": result}),
             Err((code, message)) => {
@@ -4002,6 +4011,51 @@ fn a_set_the_device_cannot_install_backs_off_like_a_failed_fetch() {
     let refresh = last_refresh(&daemon);
     assert_eq!(refresh["result"], "failed", "{refresh}");
     assert_eq!(refresh["reason"], "io", "{refresh}");
+}
+
+/// A reconcile pass spends at most its budget on the control plane,
+/// however the link fails, so punarctl's wait for it (and the timer's unit)
+/// never runs out: on a link that takes every request and answers none, the
+/// policy fetch is waited out, and the reports that no longer fit in what is
+/// left are not sent at all, staying pending for the next pass.
+#[test]
+fn a_pass_on_a_black_holed_link_ends_inside_its_budget() {
+    // Room for the fetch and a compliance report on a link that answers
+    // (5 + 9 s waited out would not fit, 0 + 9 does); on one that does not,
+    // the fetch alone is waited out.
+    const BUDGET: Duration = Duration::from_secs(10);
+    let dir = test_dir("black-hole");
+    let control_plane = ControlPlane::start(&dir);
+    let state = &control_plane.state;
+    let daemon = TestDaemon::start_with(
+        &dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        Vec::new(),
+        |cfg| cfg.reconcile_control_plane_budget = BUDGET,
+    );
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    state.methods.lock().unwrap().clear();
+
+    state.black_hole.store(true, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    daemon.result("reconcile", None);
+    let took = started.elapsed();
+    assert!(took < BUDGET + Duration::from_secs(1), "{took:?}");
+    assert_eq!(
+        *state.methods.lock().unwrap(),
+        ["policy.fetch"],
+        "the reports did not fit, and were not sent"
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["pending"], true, "{status}");
+
+    // The link back: the next pass sends what was pending.
+    state.black_hole.store(false, Ordering::SeqCst);
+    let reports = state.compliance.lock().unwrap().len();
+    daemon.result("reconcile", None);
+    assert_eq!(state.compliance.lock().unwrap().len(), reports + 1);
 }
 
 /// The common case costs one request and nothing else: no file in policy.d
