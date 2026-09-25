@@ -173,6 +173,49 @@ for name, reason in FILE_EXCEPTIONS.items():
     if len(reason) < 30:
         problems.append(f"the exception for {name} needs a real reason")
 
+# PasswordRun (F0-S4) hands a password to the command it starts, so what it
+# starts is held to more than the rule above: every `<run>.start(argv, …)` on a
+# PasswordRun instance passes punarctl's own argv — a literal, or a local
+# variable whose assignment is made only of literals — and every one of those
+# carries --password-from-parent, the socket handoff PasswordRun implements.
+# Anything else would hand a password to a program nobody reviewed, or leave
+# punarctl waiting on a terminal it does not have.
+password_starts = 0
+for qml in sorted(shell.rglob("*.qml")):
+    relative = str(qml.relative_to(shell))
+    text = qml.read_text()
+    runs = re.findall(r"PasswordRun\s*\{\s*id:\s*(\w+)", text)
+    for run in runs:
+        for call in re.finditer(re.escape(run) + r"\.start\(\s*(\[|[A-Za-z_]\w*)", text):
+            line = text[: call.start()].count("\n") + 1
+            where = f"shell/punar-shell/{relative}:{line}"
+            if call.group(1) == "[":
+                statement = text[call.end(1) - 1 : text.find("]", call.end(1)) + 1]
+            else:
+                assigned = None
+                for assignment in re.finditer(
+                    r"(?:\bvar\s+)?\b" + re.escape(call.group(1)) + r"\s*=([^;]*);",
+                    text[: call.start()],
+                ):
+                    assigned = assignment.group(1)
+                if assigned is None:
+                    problems.append(f"{where}: {run}.start() is given {call.group(1)}, which is never assigned a literal argv")
+                    continue
+                statement = assigned
+            literals = re.findall(r"\[[^\[\]]*\]", statement)
+            if not literals:
+                problems.append(f"{where}: {run}.start() is not given a literal argv")
+                continue
+            for literal in literals:
+                first = FIRST.match(literal)
+                if first is None or first.group(1) not in PUNARCTL:
+                    problems.append(f"{where}: {run}.start() would hand a password to {literal[:40]}…, not punarctl")
+                if '"--password-from-parent"' not in literal:
+                    problems.append(f"{where}: {run}.start() runs an argv without --password-from-parent")
+            password_starts += 1
+if password_starts == 0:
+    problems.append("no PasswordRun.start() call was found; the DYNAMIC entry for PasswordRun is unchecked")
+
 # The funnels are only safe while their callers pass literals: the scan above
 # must have seen literal argvs through each of them.
 for funnel in ["runMutation", ".ask", "root.run", "runWindowVerb"]:

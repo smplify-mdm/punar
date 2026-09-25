@@ -1870,7 +1870,12 @@ DeferredSurfaceBase {
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             font.weight: 500
-                            text: "No ledger recorded for this session yet"
+                            // A refusal is agentd's answer for a session
+                            // that is someone else's (owner-or-root), said
+                            // as such rather than as an empty ledger.
+                            text: Ledger.refusal(win.currentId) !== ""
+                                ? Ledger.refusal(win.currentId)
+                                : "No ledger recorded for this session yet"
                             elide: Text.ElideRight
                         }
                     }

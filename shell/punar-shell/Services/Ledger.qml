@@ -18,11 +18,13 @@ pragma Singleton
 //
 // WHEN IT ASKS. On user action only — opening the panel, moving to a
 // session, a purge that went through — never on a clock. One process at a
-// time; a request made while one runs replaces any earlier queued one.
+// time; requests made while one runs wait their turn, each at most once.
 //
-// Fail CLOSED: no answer, a refusal or an unparsable one reads as "no ledger
-// recorded for this session yet" — never an error surface of its own. What
-// went wrong is kept in `error` for the panel's agentd line.
+// Fail CLOSED: no answer or an unparsable one reads as "no ledger recorded
+// for this session yet" — never an error surface of its own — and what went
+// wrong is kept in `error` for the panel's agentd line. A refusal because the
+// session is another person's is an answer, not a failure: it is kept in
+// `refusals`, and the panel shows that reason instead.
 
 import QtQuick
 import Quickshell
@@ -41,12 +43,19 @@ Singleton {
     // yet" from "this session has no rows".
     property bool loaded: false
 
-    // The last refusal or failure, in punarctl's words ("" when the last
-    // ask was answered).
+    // The last failure to get an answer, in punarctl's words ("" when the
+    // last ask was answered, or refused because the session is someone
+    // else's — that is an answer, kept in `refusals`).
     property string error: ""
 
-    // The session to ask about once the running ask finishes.
-    property string queued: ""
+    // session_id → why agentd would not show it: the session belongs to
+    // another person (`agents.access` is owner-or-root). Kept so the panel
+    // can say so, and so walking the rail does not ask again for each row.
+    property var refusals: ({})
+
+    // Sessions to ask about once the running ask finishes, oldest first,
+    // each at most once.
+    property var queue: []
 
     // The record for one session, or null. Callers must treat null as
     // "nothing recorded yet", never as an error.
@@ -58,7 +67,13 @@ Singleton {
     }
 
     function has(sessionId: string): bool {
-        return root.view(sessionId) !== null;
+        return root.view(sessionId) !== null || root.refusal(sessionId) !== "";
+    }
+
+    /// Why agentd would not show this session to this person, or "".
+    function refusal(sessionId: string): string {
+        var why = root.refusals[sessionId];
+        return typeof why === "string" ? why : "";
     }
 
     /// Ask agentd for one of this person's sessions. Fixed argv, never a
@@ -67,7 +82,8 @@ Singleton {
         if (sessionId === "")
             return;
         if (access.running) {
-            root.queued = sessionId;
+            if (sessionId !== access.sessionId && root.queue.indexOf(sessionId) < 0)
+                root.queue = root.queue.concat([sessionId]);
             return;
         }
         access.sessionId = sessionId;
@@ -76,15 +92,25 @@ Singleton {
             access.running = true;
         } catch (e) {
             root.error = "punarctl could not be started";
+            root.next();
         }
     }
 
-    /// Re-ask for every session already on hand (panel open). The newest
-    /// asked-for session goes first; the rest follow one at a time.
+    /// Re-ask for every session already on hand (panel open), one process at
+    /// a time. A session refused as someone else's is not asked again.
     function refresh(): void {
         var ids = Object.keys(root.views);
         for (var i = 0; i < ids.length; i++)
             root.fetch(ids[i]);
+    }
+
+    function next(): void {
+        if (root.queue.length === 0)
+            return;
+        var rest = root.queue.slice(1);
+        var id = root.queue[0];
+        root.queue = rest;
+        root.fetch(id);
     }
 
     function keep(sessionId: string, record: var): void {
@@ -95,6 +121,14 @@ Singleton {
         root.views = next;
         root.updatedAt = new Date().toISOString();
         root.loaded = true;
+    }
+
+    function refuse(sessionId: string, why: string): void {
+        var next = ({});
+        for (var key in root.refusals)
+            next[key] = root.refusals[key];
+        next[sessionId] = why;
+        root.refusals = next;
     }
 
     Process {
@@ -127,14 +161,16 @@ Singleton {
                 } else {
                     root.error = "agents access answered something unreadable";
                 }
+            } else if (exitCode === 3) {
+                // punarctl's "denied": the ledger is another person's. That
+                // is agentd answering, not failing, so it is not an error.
+                root.refuse(asked, "This session belongs to another person; only they, or root, can read its ledger.");
+                root.error = "";
             } else {
                 var said = String(accessErr.text).trim().split("\n")[0];
                 root.error = said !== "" ? said : "punarctl exited with " + exitCode;
             }
-            var next = root.queued;
-            root.queued = "";
-            if (next !== "" && next !== asked)
-                root.fetch(next);
+            root.next();
         })
     }
 }
