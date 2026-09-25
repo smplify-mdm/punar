@@ -5,29 +5,57 @@
 # reads five os-release keys and the hostname, applies nothing, decides
 # nothing, and answers only root on its own socket. punard remains the single
 # process that mutates the OS.
+#
+# DORMANT UNTIL ENROLLED (smplify-enrollment.md section 3.4). Nothing enables
+# this unit: punar-smplifyd.socket starts it on punard's first call, which a
+# device that never enrolls never makes. While it holds anything of an
+# identity it stays resident, and an enrolled device's agent is hard to stop:
+# a root `systemctl stop` or `restart` is refused, a kill is restarted, and
+# the ways left (mask then stop, a runtime drop-in, a freeze, deleting the
+# identity) are each noticed by punard within one reconcile pass and audited
+# as enroll.agent agent_unavailable. Once it holds nothing it exits with 75,
+# which this unit treats as a clean exit it does not restart, and the socket
+# starts it again on the next call.
 [Unit]
 Description=Punar built-in Smplify device agent (identity and transport)
 Documentation=file:/usr/share/doc/punar/smplify-enrollment.md
-After=network-online.target
-Wants=network-online.target
+Requires=punar-smplifyd.socket
+After=punar-smplifyd.socket
+# Deliberately neither After= nor Wants=network-online.target: punard's boot
+# reconcile makes the first call on an enrolled device, and an activation
+# that waited for the network would hold punard's start behind it. The agent
+# answers "unreachable" for a link that is not up yet, like any other.
+#
+# Only a dependency may stop it (shutdown, or the socket's own dependency
+# stop); an administrator's stop is refused.
+RefuseManualStop=yes
+# Never stop restarting it: with a start limit, a few kills in a row would
+# leave an enrolled device unmanaged until reboot. The socket's own trigger
+# limit (punar-smplifyd.socket) catches an agent that cannot start at all.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=punar-smplifyd
 Group=punar-smplifyd
 ExecStart=/usr/bin/punar-smplifyd run
-# The socket lives here, 0600, in a directory root can traverse. Root is the
-# only peer the daemon answers (SO_PEERCRED); the mode keeps everyone else
-# from even connecting.
-RuntimeDirectory=punar-smplifyd
-RuntimeDirectoryMode=0755
+# No RuntimeDirectory=: the socket and its 0700 directory are the socket
+# unit's. A RuntimeDirectory= here is removed whenever the service stops,
+# taking the socket node with it, and every later call would find no socket
+# at all (measured, smplify-enrollment.md section 3.4).
+#
 # Key, certificate, CA and the token digest: 0600 files in a 0700 directory
 # the service user owns. Nothing else on the device can read the key.
 StateDirectory=punar-smplifyd
 StateDirectoryMode=0700
 UMask=0077
-Restart=on-failure
+# Every exit is restarted but the dormant one: 75 is the agent saying it
+# holds no identity (punar_smplifyd::activation::DORMANT_EXIT_STATUS), a
+# clean exit the socket undoes on the next call.
+Restart=always
 RestartSec=10s
+RestartPreventExitStatus=75
+SuccessExitStatus=75
 TimeoutStopSec=5s
 
 # Same discipline as punar-pimd@.service: no capabilities, no devices, no
@@ -60,7 +88,7 @@ IPAccounting=yes
 StandardOutput=journal
 StandardError=journal
 
-# Deliberately no [Install]: the image ships the multi-user.target.wants
-# symlink itself (like punard.service), and the release check's byte-exact
-# enabled-units manifest lists exactly that one link. An [Install] section
-# would let the preset add a second link under /etc and fail A9.
+# Deliberately no [Install] and no wants link anywhere: the socket starts
+# this unit, and an enablement would run the agent on every device, enrolled
+# or not. An [Install] section would also let a preset add a link under /etc
+# and fail the release check's byte-exact enabled-units manifest (A9).

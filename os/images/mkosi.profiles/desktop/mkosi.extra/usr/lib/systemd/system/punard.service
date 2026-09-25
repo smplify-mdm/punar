@@ -12,10 +12,15 @@
 
 [Unit]
 Description=Punar control-plane daemon (typed capability API)
-# punard dials punar-smplifyd's socket during enrollment and sync: order after
-# it, never Requires it — cached policy must keep enforcing with the agent
-# down (SPEC section 55).
-After=punar-smplifyd.service
+# punard is the only client of punar-smplifyd's socket, and the socket is the
+# whole of the agent's lifetime on a device that never enrolls: Wants= it,
+# never Requires= it, because cached policy must keep enforcing with the
+# agent down (SPEC section 55), and punard reports an agent that is not
+# there as management interrupted. Ordered after the socket, so the first
+# call finds it listening, and after the service, so at shutdown punard
+# stops first and an agent call in flight can finish.
+Wants=punar-smplifyd.socket
+After=punar-smplifyd.socket punar-smplifyd.service
 # /run/punard, /var/lib/punar, /var/log/punar come from
 # tmpfiles.d/punard.conf; systemd-tmpfiles-setup orders before basic.target,
 # which every default-dependency service (this one) starts after.

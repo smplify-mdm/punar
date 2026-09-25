@@ -35,6 +35,20 @@
 # summed PSS of the pids in every Punar service cgroup (§2.3 canonical
 # metric — cgroup attribution, never process-name matching).
 #
+# The built-in Smplify agent is dormant until enrolled
+# (docs/development/smplify-enrollment.md section 3.4), so it is not summed
+# above. On the measured image, which never enrolls, it must not be running
+# at all, and its socket must be listening for the day it does:
+#
+#   PUNAR_SMPLIFYD_PROCS != 0                  ::error:: -> exit 1
+#   PUNAR_SMPLIFYD_SOCKET != active            ::error:: -> exit 1
+#   either absent or malformed                 ::error:: -> exit 1
+#                                              (all EVEN under TCG: a
+#                                              resident agent on a device that
+#                                              never enrolled is a privacy
+#                                              failure, not an emulation
+#                                              artifact)
+#
 # The same five-minute window carries enforceable idle-CPU and first-party
 # write contracts (PERFORMANCE_BUDGETS.md §1.3–1.4/§2.4–2.5):
 #
@@ -143,6 +157,8 @@ ZRAM_PRESENT="$(get_field PUNAR_ZRAM_PRESENT)"
 ZRAM_DISKSIZE_MB="$(get_field PUNAR_ZRAM_DISKSIZE_MB)"
 ZRAM_ALGORITHM="$(get_field PUNAR_ZRAM_ALGORITHM)"
 ZRAM_SWAP_ACTIVE="$(get_field PUNAR_ZRAM_SWAP_ACTIVE)"
+SMPLIFYD_PROCS="$(get_field PUNAR_SMPLIFYD_PROCS)"
+SMPLIFYD_SOCKET="$(get_field PUNAR_SMPLIFYD_SOCKET)"
 require_number PUNAR_RAM_MEAN_MB "${MEAN_MB}"
 require_number PUNAR_RAM_MAX_MB "${MAX_MB}"
 
@@ -212,6 +228,26 @@ case "${SERVICES_MB:-missing}" in
         fi
         ;;
 esac
+
+# --- The Smplify agent, dormant until enrolled. Every accelerator: a
+# resident agent on a device that never enrolled is not an emulation effect.
+case "${SMPLIFYD_PROCS:-missing}" in
+    0)
+        echo "==> OK: no Smplify agent process on the unenrolled image (dormant until enrolled)"
+        ;;
+    ''|missing|*[!0-9]*)
+        annotate error "PUNAR_SMPLIFYD_PROCS is '${SMPLIFYD_PROCS:-missing}' — the sampler did not report whether the Smplify agent runs on the unenrolled image (docs/development/smplify-enrollment.md section 3.4)"
+        fail=1
+        ;;
+    *)
+        annotate error "${SMPLIFYD_PROCS} Smplify agent process(es) at stabilized idle on a device that never enrolled — the agent must be dormant until enrollment (docs/development/smplify-enrollment.md section 3.4)"
+        fail=1
+        ;;
+esac
+if [ "${SMPLIFYD_SOCKET:-missing}" != active ]; then
+    annotate error "punar-smplifyd.socket is '${SMPLIFYD_SOCKET:-missing}', not active — enrollment could not start the agent (docs/development/smplify-enrollment.md section 3.4)"
+    fail=1
+fi
 
 # --- Stabilized idle CPU + writes. Absence fails on every accelerator: it
 # means the shipped sampler did not produce the evidence, not that emulation
@@ -308,4 +344,4 @@ if [ "${fail}" -eq 1 ]; then
     echo "==> FAIL: stabilized-idle performance budget gate" >&2
     exit 1
 fi
-echo "==> PASS: stabilized-idle performance gate (RAM + services PSS + CPU + first-party writes + zram)"
+echo "==> PASS: stabilized-idle performance gate (RAM + services PSS + dormant agent + CPU + first-party writes + zram)"

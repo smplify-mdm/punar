@@ -10,6 +10,7 @@ MISSING_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-missing.
 OFFLINE_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-offline.txt"
 NO_ZRAM_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-no-zram.txt"
 SHORT_WINDOW_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-short-window.txt"
+SMPLIFYD_RESIDENT_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-smplifyd-resident.txt"
 UNIT_DIR="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system"
 
 # cpu.stat/io.stat are not portable assumptions unless accounting is explicit
@@ -78,4 +79,28 @@ if "${CHECKER}" "${SHORT_WINDOW_REPORT}" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "PASS: stabilized-idle checker gates KVM/HVF CPU+writes + connected five-minute idle + zram, rejects missing facts, and TCG-downgrades numeric evidence"
+# The Smplify agent is dormant until enrolled: a resident agent, a missing
+# count and a socket that is not listening each fail, even under TCG.
+WORK="$(mktemp -d)"
+trap 'rm -rf "${WORK}"' EXIT
+if "${CHECKER}" "${SMPLIFYD_RESIDENT_REPORT}" >/dev/null 2>&1; then
+    echo "FAIL: a report with a Smplify agent running on an unenrolled image passed" >&2
+    exit 1
+fi
+sed 's/^PUNAR_SMPLIFYD_PROCS=0$/PUNAR_SMPLIFYD_PROCS=2/' "${TCG_REPORT}" > "${WORK}/tcg-resident.txt"
+if "${CHECKER}" "${WORK}/tcg-resident.txt" >/dev/null 2>&1; then
+    echo "FAIL: a resident Smplify agent was downgraded under TCG" >&2
+    exit 1
+fi
+grep -v '^PUNAR_SMPLIFYD_PROCS=' "${PASS_REPORT}" > "${WORK}/no-count.txt"
+if "${CHECKER}" "${WORK}/no-count.txt" >/dev/null 2>&1; then
+    echo "FAIL: a report without the Smplify agent's process count passed" >&2
+    exit 1
+fi
+sed 's/^PUNAR_SMPLIFYD_SOCKET=active$/PUNAR_SMPLIFYD_SOCKET=failed/' "${PASS_REPORT}" > "${WORK}/no-socket.txt"
+if "${CHECKER}" "${WORK}/no-socket.txt" >/dev/null 2>&1; then
+    echo "FAIL: a report whose Smplify agent socket is not listening passed" >&2
+    exit 1
+fi
+
+echo "PASS: stabilized-idle checker gates KVM/HVF CPU+writes + connected five-minute idle + zram + the dormant Smplify agent, rejects missing facts, and TCG-downgrades numeric evidence"

@@ -16,7 +16,12 @@ SAMPLE_INTERVAL="${PUNAR_RAM_SAMPLE_INTERVAL:-10}"
 RUN_DIR=/run/punar
 EXPORT_PORT=/dev/virtio-ports/punar.export
 RUNTIME_REPORT="${RUN_DIR}/runtime-report.txt"
-PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service punar-netd.service punar-smplifyd.service"
+# The resident first-party services. punar-smplifyd is deliberately not one:
+# it is dormant until the device enrolls (smplify-enrollment.md section 3.4),
+# so on the measured, unenrolled image it has no process at all, and the
+# sampler reports that count (PUNAR_SMPLIFYD_PROCS) for check-budgets.sh to
+# hold at zero instead of summing a daemon that is not there.
+PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service punar-netd.service"
 
 mkdir -p "${RUN_DIR}"
 : > "${RUNTIME_REPORT}"
@@ -294,6 +299,22 @@ if [ "${all_units_ok}" -eq 1 ]; then
 fi
 emit_fact "PUNAR_SERVICES_RSS_MB=${services_rss}"
 echo "punar: idle-ram: summed PSS over: ${PUNAR_SERVICE_UNITS}"
+
+# DORMANT UNTIL ENROLLED, observed on the running machine at the same moment.
+# A device that never enrolled runs no Smplify code: systemd holds the agent's
+# listening socket and nothing behind it runs until punard's first call, which
+# an unenrolled punard never makes. The count is of the agent's own cgroup (a
+# missing cgroup is none), and the socket's state says the door is there for
+# the day the device does enroll. check-budgets.sh fails the image unless the
+# count is 0 and the socket is active; the agent's enrolled cost is measured on
+# an enrolled device, never inferred from this image.
+smplifyd_procs=0
+smplifyd_cgroup=/sys/fs/cgroup/system.slice/punar-smplifyd.service/cgroup.procs
+if [ -r "${smplifyd_cgroup}" ]; then
+    smplifyd_procs="$(awk 'END { print NR }' "${smplifyd_cgroup}")"
+fi
+emit_fact "PUNAR_SMPLIFYD_PROCS=${smplifyd_procs}"
+emit_fact "PUNAR_SMPLIFYD_SOCKET=$(systemctl is-active punar-smplifyd.socket 2>/dev/null || true)"
 
 # WHO IS ACTUALLY HOLDING THE MEMORY. The whole-system idle figure has drifted
 # 115 MB above its target and the only attribution available was "the commit

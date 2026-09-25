@@ -53,6 +53,12 @@ CLI and is excluded while not running).
 | Target      | < 100 MB total idle RSS/PSS where measurable |
 | MVP ceiling | < 150 MB                                  |
 
+The built-in Smplify agent (`punar-smplifyd`) is not part of this idle total
+on a device that never enrolled, because it does not run there at all: it is
+dormant until enrolled (`docs/development/smplify-enrollment.md` §3.4), and
+the gate holds its process count at zero (§2.3). Its resident cost on an
+enrolled device is **unmeasured** until it is measured on one.
+
 ### 1.3 Idle CPU
 
 | Tier   | Budget                          |
@@ -202,6 +208,20 @@ at the 10-minute mark, and the reported value is the mean over the window
   new daemon, and only then reconsider the topology
   (`docs/development/milestone-9.md` §11,
   `docs/development/milestone-12.md` §12).
+- **`punar-smplifyd` is not summed, and its absence is gated instead.** The
+  built-in Smplify agent is dormant until enrolled
+  (`docs/development/smplify-enrollment.md` §3.4): systemd holds its socket,
+  and nothing behind it runs until punard's first call, which a device that
+  never enrolls never makes. The measured image never enrolls, so summing the
+  agent would make `PUNAR_SERVICES_RSS_MB` `absent` rather than say anything
+  true. The sampler instead reports `PUNAR_SMPLIFYD_PROCS` (the agent's
+  cgroup, a missing cgroup counting as none) and `PUNAR_SMPLIFYD_SOCKET`, and
+  `tests/performance/check-budgets.sh` fails the image, on every accelerator,
+  unless the count is 0 and the socket is `active`. Leaving the agent out of
+  the sum is honest only together with that gate. Its cost on an enrolled
+  device is **unmeasured** until it is measured on one: the container figures
+  in the activation design (about 1 MiB PSS idle, measured outside socket
+  activation and before any TLS or check-in) are not a budget number.
 - M11 adds no resident service: Browser and installed web apps run as user
   applications in the session slice. Their one-context PSS and second-context
   delta are recorded separately and do not masquerade as service or idle RAM.

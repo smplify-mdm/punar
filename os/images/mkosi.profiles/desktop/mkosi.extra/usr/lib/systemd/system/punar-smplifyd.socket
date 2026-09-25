@@ -1,0 +1,56 @@
+# punar-smplifyd's socket: the built-in Smplify agent runs only while it is
+# needed (docs/development/smplify-enrollment.md section 3.4).
+#
+# WHY A SOCKET UNIT. Punar is independent of Smplify, and a personal device
+# that never enrolls must run no Smplify code at all. systemd holds this one
+# listening descriptor; nothing behind it runs until punard's first call,
+# which on a device that never enrolls never comes (punard calls the agent
+# only for `enroll.start` and while enrolled). Once started, the agent stays
+# resident while it holds anything of an identity and exits with status 75
+# once it holds none (see punar-smplifyd.service).
+#
+# Accept=no: one agent serves every call, because it keeps state between
+# them (the organization `org.discover` resolved for `enroll.register`, the
+# check-in backoff) and serves one call at a time in arrival order, which
+# punard's call budgets rely on. Calls queued while the agent exits are
+# answered by the next instance: systemd keeps the socket.
+#
+# NO [Install] SECTION, for the reason punar-onboardd.socket records: a
+# WantedBy= makes a preset create a second enablement under /etc, the
+# reviewed enabled-unit manifests then differ per lane, and release
+# assertion A9 fails. punard.service Wants= this socket instead, which is
+# the whole of its required lifetime: punard is its only client.
+#
+# tests/images/smplifyd-activation-contract-test.sh holds this unit to the
+# path punard dials and to the settings below.
+[Unit]
+Description=Punar built-in Smplify device agent socket
+Documentation=file:/usr/share/doc/punar/smplify-enrollment.md
+# Stopping the socket would stop the agent with it (the service Requires=
+# it). Only a dependency may stop it, which is how shutdown works; a root
+# `systemctl stop` is refused. What root can still do (mask then stop, a
+# runtime drop-in) is detected by punard and audited as enroll.agent
+# agent_unavailable (docs/api/ipc.md section 6).
+RefuseManualStop=yes
+
+[Socket]
+ListenStream=/run/punar-smplifyd/api.sock
+# Root is the only peer the agent answers (SO_PEERCRED uid 0); the mode
+# keeps everyone else from even connecting, and the directory from seeing
+# the socket at all.
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Accept=no
+FileDescriptorName=api
+# An agent that cannot start (a missing or crashing binary) with a call
+# queued would be started again the moment it exits, forever. At twenty
+# starts in ten seconds the socket gives up instead: punard then reads
+# connection_refused, reports management interrupted and audits it. Normal
+# use starts the agent at most a few times a minute: it stays resident while
+# enrolled, and exits only when nothing of an identity is left. Recovery,
+# once the cause is fixed: `systemctl start punar-smplifyd.socket` as root,
+# or a reboot.
+TriggerLimitIntervalSec=10s
+TriggerLimitBurst=20

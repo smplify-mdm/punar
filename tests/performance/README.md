@@ -77,6 +77,11 @@ the canonical window fixed in
   and max;
 - per service: `cpu.stat usage_usec` and `io.stat wbytes` deltas from the
   `punard`, `punar-agentd`, `punar-secrets`, and `punar-netd` systemd cgroups;
+- the built-in Smplify agent, dormant until enrolled: `PUNAR_SMPLIFYD_PROCS`,
+  the process count of its `punar-smplifyd.service` cgroup (none when the
+  cgroup does not exist), and `PUNAR_SMPLIFYD_SOCKET`, the state of the socket
+  that would start it. The measured image never enrolls, so the agent is not
+  in the resident services' PSS, and the gate below holds its count at 0;
 - periodic work: the persistent, low-priority `punar-background.slice`
   accumulates timer-triggered reconcile and agent-discovery work even though
   their individual oneshot cgroups disappear between samples;
@@ -121,6 +126,7 @@ not drift from it:
 | combined first-party service PSS > target | 100 MB | `::warning::`, job passes |
 | any first-party cgroup idle CPU ≥ ceiling | 0.50% of one CPU | `::error::`, job **fails** |
 | combined first-party writes > ceiling | 98,304 B / 5 min | `::error::`, job **fails** |
+| Smplify agent process on the unenrolled image, or its socket not active | 0 processes, socket `active` | `::error::`, job **fails**, including under TCG |
 | any required runtime fact missing | — | `::error::`, job **fails**, including under TCG |
 | whole-guest writes | informational | recorded and uploaded for diagnosis, not attributed to Punar |
 
