@@ -57,6 +57,24 @@ for nf in /usr/lib/systemd/network/50-punar-dhcp.network \
         "$(grep -c '^IPv6PrivacyExtensions=yes' "${nf}" 2>/dev/null || echo 0)"
 done
 
+# Name resolution stays on unicast DNS (usr/lib/systemd/resolved.conf.d/
+# 50-punar.conf): LLMNR and multicast DNS would announce this machine's name to
+# every neighbour on a shared network and let any of them answer a single-label
+# lookup. Asserted from the running resolver, not the file, so an override the
+# file cannot see still fails here.
+resolved_protocols="$(resolvectl status 2>/dev/null | awk '
+    /^Global/ { global = 1; next }
+    /^Link / { global = 0 }
+    global && /Protocols:/ { sub(/^[[:space:]]*Protocols:[[:space:]]*/, ""); print; exit }')"
+case " ${resolved_protocols} " in
+    *" -LLMNR "*) note "ok   resolved reports LLMNR off globally (${resolved_protocols})" ;;
+    *) note "FAIL resolved does not report LLMNR off globally (got '${resolved_protocols}')"; FAILED=1 ;;
+esac
+case " ${resolved_protocols} " in
+    *" -mDNS "*) note "ok   resolved reports multicast DNS off globally" ;;
+    *) note "FAIL resolved does not report multicast DNS off globally (got '${resolved_protocols}')"; FAILED=1 ;;
+esac
+
 # --- 2. a wireless interface, simulated ------------------------------------
 if [ -e /sys/class/ieee80211 ] || modprobe mac80211_hwsim 2>/dev/null; then
     wifi_dev=""
