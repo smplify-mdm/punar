@@ -2700,12 +2700,16 @@ fn privacy_ledger_json(
 /// root-owned directory inside `/run/punard`, readable by root and this uid
 /// alone, on purpose — the file that tells a human what they are about to
 /// authorize must not sit in a user-writable directory, nor be readable by
-/// anyone else on the device (F0 review).
-fn approvals_summary() -> std::path::PathBuf {
-    punar_common::approval::approvals_summary_path(
-        Path::new(punar_common::approval::APPROVALS_SUMMARY_DIR),
-        rustix::process::getuid().as_raw(),
-    )
+/// anyone else on the device (F0 review). `None` for root, which gets no
+/// view (root reads the socket): its wait re-checks at the slow cadence.
+fn approvals_summary() -> Option<std::path::PathBuf> {
+    let uid = rustix::process::getuid().as_raw();
+    (uid != 0).then(|| {
+        punar_common::approval::approvals_summary_path(
+            Path::new(punar_common::approval::APPROVALS_SUMMARY_DIR),
+            uid,
+        )
+    })
 }
 
 /// The redraw cadence of `approvals wait`'s countdown. One second, and
@@ -2897,7 +2901,7 @@ fn approvals_wait(
     // watched (no punard, or no read permission) degrades to a slower
     // re-check rather than failing — a missing summary file is a calm
     // state, not an error surface.
-    let watch = watch::DirWatch::on(&approvals_summary()).ok();
+    let watch = approvals_summary().and_then(|view| watch::DirWatch::on(&view).ok());
     let mut since_recheck = Duration::ZERO;
     let live = std::io::stderr().is_terminal();
 
@@ -3054,7 +3058,7 @@ fn approvals_watch(
         print!("{out}");
     }
 
-    let watch = watch::DirWatch::on(&approvals_summary()).ok();
+    let watch = approvals_summary().and_then(|view| watch::DirWatch::on(&view).ok());
     // The last status printed for each approval id still listed.
     let mut printed: std::collections::BTreeMap<String, String> = Default::default();
     let mut first = true;
