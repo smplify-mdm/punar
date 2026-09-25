@@ -94,6 +94,45 @@ else
     FAILED=1
 fi
 
+# --- the person holds no device group ----------------------------------------
+# Every account, this one included, is kept out of `input` and `video`
+# (docs/design/onboarding.md section 1.7). `input` would let any program the
+# person runs open /dev/input and read every keystroke typed on the machine,
+# the lock screen's passphrase included; `video` reads the screen. The desktop
+# does not need either: the compositor takes its keyboard, pointer and DRM
+# devices from logind on the active seat, and every later group in this file
+# drives that same session through them.
+person_groups=" $(id -nG 2>/dev/null) "
+for retired_group in input video; do
+    case "${person_groups}" in
+        *" ${retired_group} "*)
+            note "FAIL the desktop user is in the ${retired_group} group (groups:${person_groups})"
+            FAILED=1
+            ;;
+        *) note "ok   the desktop user is not in the ${retired_group} group" ;;
+    esac
+done
+input_nodes=0
+input_opened=""
+for input_node in /dev/input/event*; do
+    [ -e "${input_node}" ] || continue
+    input_nodes=$((input_nodes + 1))
+    # A subshell, so a refused open ends only the subshell: `:` is a special
+    # builtin, and a redirection error on one may end the whole script.
+    if (: < "${input_node}") 2>/dev/null; then
+        input_opened="${input_opened} ${input_node}"
+    fi
+done
+if [ "${input_nodes}" -eq 0 ]; then
+    note "FAIL no /dev/input/event* node exists, so the keystroke boundary went unexercised"
+    FAILED=1
+elif [ -n "${input_opened}" ]; then
+    note "FAIL the desktop user can open input devices directly:${input_opened}"
+    FAILED=1
+else
+    note "ok   the desktop user can open none of the ${input_nodes} /dev/input/event* nodes"
+fi
+
 # --- session env discovery (m2-check.sh pattern) -----------------------------
 XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR

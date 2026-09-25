@@ -22,6 +22,25 @@ const UID_MAX_EXCLUSIVE: u32 = 60_000;
 const SUBID_START: u32 = 100_000;
 const SUBID_COUNT: u32 = 65_536;
 
+/// The supplementary groups a person's account is created in: `punar`, the
+/// filesystem admission gate on punard's socket, and nothing else.
+const ACCOUNT_GROUPS: [&str; 1] = ["punar"];
+
+/// Groups an account must never hold, and that earlier onboarding granted.
+///
+/// `input` lets any process running as the person open every
+/// `/dev/input/event*` node, which is a keylogger's whole requirement: every
+/// keystroke in every application, the lock screen's passphrase included.
+/// `video` is raw DRM and framebuffer access, which reads the screen. The
+/// session needs neither. logind hands the compositor its input and DRM
+/// devices through `TakeDevice` on the active seat, and its `uaccess` ACLs
+/// follow the seat, not the account, so they end when the session does
+/// (docs/design/onboarding.md section 1.7).
+///
+/// Materialization strips both from a stored record on the next boot, so an
+/// account created by an older image loses them without being recreated.
+const RETIRED_GROUPS: [&str; 2] = ["input", "video"];
+
 #[derive(Clone, Debug)]
 pub struct IdentityPaths {
     pub state_dir: PathBuf,
@@ -512,8 +531,7 @@ impl IdentityStore {
         }
         create_private_dir(stage_dir)?;
 
-        let groups =
-            existing_supplementary_groups(self.platform.as_ref(), ["punar", "video", "input"])?;
+        let groups = existing_supplementary_groups(self.platform.as_ref(), ACCOUNT_GROUPS)?;
         if !groups.iter().any(|group| group == "punar") || admission_gid == gid {
             // A per-user primary group may not reuse the stable admission gid.
             return Err(IdentityError::AdmissionGroup);
@@ -657,12 +675,26 @@ impl IdentityStore {
             .accounts_dir()
             .join(&marker.account_id)
             .join("account.json");
-        let account: AccountRecord = read_json(&account_path)?;
+        let mut account: AccountRecord = read_json(&account_path)?;
         if account.account_id != marker.account_id
             || account.username != marker.username
             || account.uid != marker.uid
         {
             return Err(IdentityError::Corrupt);
+        }
+        // An account created by an older image was put in `input` and
+        // `video`. The stored record is the authority every later boot reads,
+        // so correct it there, before anything is published, rather than
+        // only skipping the groups in /run and leaving the record to disagree.
+        if account
+            .groups
+            .iter()
+            .any(|group| RETIRED_GROUPS.contains(&group.as_str()))
+        {
+            account
+                .groups
+                .retain(|group| !RETIRED_GROUPS.contains(&group.as_str()));
+            write_json_atomic(&account_path, &account, 0o600)?;
         }
         let device: serde_json::Value = read_json(&self.paths.state_dir.join("device.json"))?;
         let device_name = device
@@ -713,7 +745,26 @@ impl IdentityStore {
                 .runtime_userdb
                 .join(format!("{}.group", account.gid)),
         )?;
-        for group in &account.groups {
+        // A retired membership published earlier in this boot (by an older
+        // punar-onboardd, or before the record above was corrected) must not
+        // outlive this pass: nss-systemd reads group membership from these
+        // names alone.
+        for group in RETIRED_GROUPS {
+            let stale = self
+                .paths
+                .runtime_userdb
+                .join(format!("{username}:{group}.membership"));
+            match fs::remove_file(&stale) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(storage(error)),
+            }
+        }
+        for group in account
+            .groups
+            .iter()
+            .filter(|group| !RETIRED_GROUPS.contains(&group.as_str()))
+        {
             write_json_atomic(
                 &self
                     .paths
@@ -878,7 +929,9 @@ impl IdentityStore {
             );
             paths.push(self.paths.runtime_userdb.join(format!("{id}.{suffix}")));
         }
-        for group in ["punar", "video", "input"] {
+        // Retired groups too: a transaction an older binary started may have
+        // published them, and a rollback removes everything it could have.
+        for group in ACCOUNT_GROUPS.iter().chain(RETIRED_GROUPS.iter()) {
             paths.push(
                 self.paths
                     .runtime_userdb
@@ -1537,6 +1590,119 @@ mod tests {
             fs::read_to_string(home.join("profile")).unwrap(),
             "private defaults\n"
         );
+    }
+
+    fn account_json(paths: &IdentityPaths) -> PathBuf {
+        let dir = fs::read_dir(paths.accounts_dir())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        dir.path().join("account.json")
+    }
+
+    /// The machine has `input` and `video` groups (the fake platform answers
+    /// for both, as every substrate does), and a new account is still put in
+    /// neither: membership is the account's grant, not the group's existence.
+    #[test]
+    fn a_new_account_is_in_the_admission_group_and_nothing_else() {
+        let temp = TempDir::new().unwrap();
+        let (_store, paths, _code) = recovery_store(&temp);
+        let account: AccountRecord = read_json(&account_json(&paths)).unwrap();
+        assert_eq!(account.groups, ["punar"]);
+        assert!(
+            paths
+                .runtime_userdb
+                .join("alice:punar.membership")
+                .is_file()
+        );
+        for group in RETIRED_GROUPS {
+            assert!(
+                !paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership"))
+                    .exists(),
+                "a new account must not be published in {group}"
+            );
+        }
+    }
+
+    /// The upgrade path: an account an older image created in `input` and
+    /// `video`, with those memberships already published in /run, loses both
+    /// on the next materialization, in the stored record and in /run, and
+    /// keeps everything else.
+    #[test]
+    fn materialize_takes_input_and_video_away_from_an_existing_account() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let record_path = account_json(&paths);
+        let mut legacy: serde_json::Value = read_json(&record_path).unwrap();
+        legacy["groups"] = json!(["punar", "video", "input"]);
+        write_json_atomic(&record_path, &legacy, 0o600).unwrap();
+        for group in RETIRED_GROUPS {
+            write_json_atomic(
+                &paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership")),
+                &json!({}),
+                0o644,
+            )
+            .unwrap();
+        }
+
+        store.materialize().unwrap();
+
+        let account: AccountRecord = read_json(&record_path).unwrap();
+        assert_eq!(account.groups, ["punar"]);
+        assert_eq!(account.username, "alice");
+        assert_eq!(account.auth.kinds, ["password"]);
+        assert_eq!(
+            fs::metadata(&record_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            paths
+                .runtime_userdb
+                .join("alice:punar.membership")
+                .is_file()
+        );
+        for group in RETIRED_GROUPS {
+            assert!(
+                !paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership"))
+                    .exists(),
+                "materialize left alice in {group}"
+            );
+        }
+        let before = fs::read(&record_path).unwrap();
+        store.materialize().unwrap();
+        assert_eq!(
+            fs::read(&record_path).unwrap(),
+            before,
+            "a record with nothing to take away is not rewritten"
+        );
+    }
+
+    /// Even a record that still names a retired group is never published
+    /// in it: the /run edge is filtered on its own, not only through the
+    /// record's correction.
+    #[test]
+    fn a_retired_group_is_never_published_even_from_an_uncorrected_record() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let mut account: AccountRecord = read_json(&account_json(&paths)).unwrap();
+        account.groups = vec!["punar".into(), "input".into()];
+        store
+            .materialize_account(account, "Alice Workstation")
+            .unwrap();
+        assert!(
+            paths
+                .runtime_userdb
+                .join("alice:punar.membership")
+                .is_file()
+        );
+        assert!(!paths.runtime_userdb.join("alice:input.membership").exists());
     }
 
     #[test]
