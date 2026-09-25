@@ -5,14 +5,23 @@
 //! network source is a root-owned HTTPS base URL. If it is absent, a fixed
 //! directory transport remains available for offline recovery media and CI.
 //! Neither transport lets the caller choose an origin, path or trust key.
+//!
+//! The verified cache answers a non-forced check for 15 minutes, and that
+//! age is measured on the boot clock (SMP-1405) from the moment the fetch
+//! began, never from the file's mtime against the wall clock: a clock stepped
+//! back could otherwise keep serving a stale "nothing newer" long after a
+//! release shipped. The stamp lives in memory, so a punard restart, a
+//! suspend or a reboot simply fetches again.
 
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use punar_common::trusted_time::{BootStamp, BootWindow, SystemClock, TrustedClock, elapsed_ms};
 use punar_common::update::{
     Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, ReleaseTarget, ReleaseVersion,
     UpdateChannel, UpdateCheckResult, UpdateSlot, UpdateTrustError, cohort_bucket,
@@ -130,11 +139,28 @@ pub struct PreparedRelease {
 
 pub struct UpdateCheckEngine {
     sources: UpdateCheckSources,
+    /// The boot clock the cache's age is measured on.
+    clock: Arc<dyn TrustedClock>,
+    /// When this engine last wrote a verified channel document, on the boot
+    /// clock. `None` — never, since this punard started, or the clock could
+    /// not be read — means the cache is not fresh and the next check
+    /// fetches.
+    verified_at: Mutex<Option<BootStamp>>,
 }
 
 impl UpdateCheckEngine {
+    /// An engine reading the machine's own boot clock.
     pub fn new(sources: UpdateCheckSources) -> Self {
-        Self { sources }
+        Self::with_clock(sources, Arc::new(SystemClock::new()))
+    }
+
+    /// An engine measuring cache age on `clock` (punard passes its own).
+    pub fn with_clock(sources: UpdateCheckSources, clock: Arc<dyn TrustedClock>) -> Self {
+        Self {
+            sources,
+            clock,
+            verified_at: Mutex::new(None),
+        }
     }
 
     pub fn check(
@@ -148,13 +174,18 @@ impl UpdateCheckEngine {
         let keys = ReleaseKeySet::load_dir(&self.sources.trusted_keys_dir)
             .map_err(|error| untrusted("trusted_keys", error))?;
 
-        let cached = !force && self.cache_is_fresh();
-        let (document, signature, metadata_age_seconds) = if cached {
+        let fresh_age = if force { None } else { self.fresh_cache_age() };
+        let cached = fresh_age.is_some();
+        // The cache's age starts BEFORE the fetch, not after it: a slow
+        // network (up to the downloader's timeout) must not add its own
+        // duration to the 15 minutes a "nothing newer" answer is reused for.
+        // Stored only once the verified bytes are safely on disk.
+        let fetch_started = if cached { None } else { self.clock.now() };
+        let (document, signature, metadata_age_seconds) = if let Some(age) = fresh_age {
             let document = read_cache(&self.sources.cached_channel, CHANNEL_DOCUMENT_MAX)
                 .map_err(|error| untrusted("cached_metadata", error))?;
             let signature = read_cache(&self.sources.cached_signature, SIGNATURE_MAX)
                 .map_err(|error| untrusted("cached_signature", error))?;
-            let age = file_age_seconds(&self.sources.cached_channel).unwrap_or(0);
             (document, signature, age)
         } else {
             let (document, signature) = self.fetch_fresh(&target)?;
@@ -179,6 +210,10 @@ impl UpdateCheckEngine {
             // Signature first, then signature file, then document last. A
             // power loss can at worst leave a mismatched pair that re-verifies
             // as untrusted; it cannot make unverified bytes authoritative.
+            // The previous freshness stamp stops vouching for the files the
+            // moment they start to change, so a write that fails halfway
+            // leaves the cache stale rather than fresh and mismatched.
+            *self.verified_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
             ensure_private_parent(&self.sources.cached_channel)
                 .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
             ensure_private_parent(&self.sources.cached_signature)
@@ -187,6 +222,7 @@ impl UpdateCheckEngine {
                 .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
             write_atomic_synced(&self.sources.cached_channel, &document, 0o600)
                 .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
+            *self.verified_at.lock().unwrap_or_else(|e| e.into_inner()) = fetch_started;
         }
 
         Ok(check_result(
@@ -409,11 +445,27 @@ impl UpdateCheckEngine {
         &self.sources.trusted_keys_dir
     }
 
-    fn cache_is_fresh(&self) -> bool {
-        self.sources.cached_channel.is_file()
-            && self.sources.cached_signature.is_file()
-            && file_age_seconds(&self.sources.cached_channel)
-                .is_some_and(|age| age <= self.sources.cache_max_age_seconds)
+    /// The verified cache's age in whole seconds while it may still answer a
+    /// non-forced check, or `None` when it must not: files missing, never
+    /// written by this engine, another boot, a clock that went backwards or
+    /// cannot be read, or older than `cache_max_age_seconds` less the drift
+    /// allowance. All on the boot clock; the wall clock and the files'
+    /// mtimes are not inputs.
+    fn fresh_cache_age(&self) -> Option<u64> {
+        if !self.sources.cached_channel.is_file() || !self.sources.cached_signature.is_file() {
+            return None;
+        }
+        let verified_at = self
+            .verified_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let now = self.clock.now()?;
+        let window = BootWindow::of_secs(verified_at.clone(), self.sources.cache_max_age_seconds);
+        if !window.is_open(Some(&now)) {
+            return None;
+        }
+        u64::try_from(elapsed_ms(&verified_at, &now)? / 1_000).ok()
     }
 
     fn fetch_fresh(&self, target: &ReleaseTarget) -> Result<(Vec<u8>, Vec<u8>), UpdateCheckError> {
@@ -936,16 +988,6 @@ fn require_equal<T: Eq>(
     }
 }
 
-fn file_age_seconds(path: &Path) -> Option<u64> {
-    fs::metadata(path)
-        .ok()?
-        .modified()
-        .ok()?
-        .elapsed()
-        .ok()
-        .map(|age| age.as_secs())
-}
-
 fn ensure_private_parent(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
@@ -1031,6 +1073,158 @@ mod tests {
             .check(UpdateChannel::Stable, "dev_00123", false)
             .unwrap();
         assert!(cached.cached);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A clock whose raw time is whatever a file says, so a fake downloader
+    /// — another process — can let time pass in the middle of a fetch.
+    #[derive(Debug)]
+    struct FileClock(PathBuf);
+
+    impl TrustedClock for FileClock {
+        fn now(&self) -> Option<BootStamp> {
+            let raw_bt_ms = fs::read_to_string(&self.0).ok()?.trim().parse().ok()?;
+            Some(BootStamp {
+                boot_id: "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b".to_string(),
+                raw_bt_ms,
+                sleep_ms: 0,
+                suspends: 0,
+            })
+        }
+    }
+
+    /// The cache's age starts when the fetch STARTS. A fetch that takes 20 s
+    /// must not buy the cached answer 20 s more than its 15 minutes, nor
+    /// report itself 20 s younger than it is.
+    #[test]
+    fn the_cache_ages_from_the_start_of_the_fetch() {
+        use punar_common::trusted_time::live_budget_ms;
+
+        let root = root("slow-fetch");
+        let (engine, _) = fixture(&root);
+        let now_file = root.join("raw-bt-ms");
+        fs::write(&now_file, "1000").unwrap();
+        fs::write(
+            &engine.sources.repository_url_file,
+            "https://updates.example.test/punar/\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            &engine.sources.repository_url_file,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        // The document download takes 20 s on the boot clock.
+        let curl = &engine.sources.curl_bin;
+        fs::write(
+            curl,
+            format!(
+                "#!/bin/sh\nout=\nurl=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output' ]; then shift; out=$1; else url=$1; fi\n  shift\ndone\ncase \"$url\" in\n  *.sig) cp '{}' \"$out\" ;;\n  *.json) echo 21000 > '{}'; cp '{}' \"$out\" ;;\n  *) exit 2 ;;\nesac\n",
+                engine
+                    .sources
+                    .repository_dir
+                    .join("channel.json.sig")
+                    .display(),
+                now_file.display(),
+                engine
+                    .sources
+                    .repository_dir
+                    .join("channel.json")
+                    .display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(curl, fs::Permissions::from_mode(0o755)).unwrap();
+        let engine = UpdateCheckEngine::with_clock(
+            engine.sources.clone(),
+            Arc::new(FileClock(now_file.clone())),
+        );
+
+        assert!(
+            !engine
+                .check(UpdateChannel::Stable, "dev_00123", false)
+                .unwrap()
+                .cached
+        );
+        // Just after the fetch returned: already 20 s old.
+        let cached = engine
+            .check(UpdateChannel::Stable, "dev_00123", false)
+            .unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.metadata_age_seconds, 20);
+        // The window closes at its budget from the START of the fetch.
+        let budget = live_budget_ms(DEFAULT_CACHE_MAX_AGE as i64 * 1_000);
+        fs::write(&now_file, (1_000 + budget - 1).to_string()).unwrap();
+        assert!(
+            engine
+                .check(UpdateChannel::Stable, "dev_00123", false)
+                .unwrap()
+                .cached
+        );
+        fs::write(&now_file, (1_000 + budget).to_string()).unwrap();
+        assert!(
+            !engine
+                .check(UpdateChannel::Stable, "dev_00123", false)
+                .unwrap()
+                .cached,
+            "stale at the budget from the start of the fetch, not its end"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The cache's 15 minutes are measured on the boot clock (SMP-1405): the
+    /// edge is the drift-shortened budget, and a reboot or an unreadable
+    /// clock sends the next check back to the source. The files' mtimes are
+    /// not consulted, so stepping the wall clock back revives nothing.
+    #[test]
+    fn the_cache_ages_on_the_boot_clock_and_not_by_mtime() {
+        use punar_common::trusted_time::{ManualClock, live_budget_ms};
+
+        let root = root("boot-clock");
+        let (engine, _) = fixture(&root);
+        let clock = Arc::new(ManualClock::new(
+            "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b",
+            1_000,
+        ));
+        let engine = UpdateCheckEngine::with_clock(engine.sources.clone(), clock.clone());
+        let check = || {
+            engine
+                .check(UpdateChannel::Stable, "dev_00123", false)
+                .unwrap()
+        };
+
+        assert!(!check().cached, "nothing verified yet in this boot");
+        let budget = live_budget_ms(DEFAULT_CACHE_MAX_AGE as i64 * 1_000);
+        clock.advance_ms(budget - 1);
+        let cached = check();
+        assert!(cached.cached);
+        assert_eq!(cached.metadata_age_seconds, 899);
+
+        // An mtime from 1970 changes nothing either way.
+        let file = fs::File::options()
+            .write(true)
+            .open(&engine.sources.cached_channel)
+            .unwrap();
+        file.set_modified(std::time::UNIX_EPOCH).unwrap();
+        drop(file);
+        assert!(check().cached);
+
+        clock.advance_ms(1);
+        assert!(!check().cached, "the budget itself is stale");
+        // That check re-fetched and re-stamped the cache.
+        assert!(check().cached);
+
+        clock.reboot("9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b", 1_000);
+        assert!(
+            !check().cached,
+            "a cache verified in another boot is not fresh"
+        );
+
+        clock.set(None);
+        assert!(
+            !check().cached,
+            "an unreadable clock never serves the cache"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

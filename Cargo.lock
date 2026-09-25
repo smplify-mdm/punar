@@ -1126,6 +1126,7 @@ name = "punar-auth"
 version = "0.1.0"
 dependencies = [
  "pam-client2",
+ "punar-common",
  "rustix",
  "serde",
  "serde_json",

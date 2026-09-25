@@ -31,9 +31,9 @@ ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-# This service never sets the clock, and privilege grants and approvals
-# expire by it: ProtectClock drops CAP_SYS_TIME and refuses the
-# clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
+# This service never sets the clock, and audit times and the deadlines that
+# must outlive a reboot still read it: ProtectClock drops CAP_SYS_TIME and
+# refuses the clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
 ProtectClock=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes

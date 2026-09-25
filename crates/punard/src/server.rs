@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,6 +53,7 @@ use punar_common::ipc::{
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
+use punar_common::trusted_time::{BootStamp, BootWindow, SystemClock, TrustedClock};
 use punar_common::update::{
     UpdateApplyParams, UpdateApplyResult, UpdateChannel, UpdateCheckParams, UpdateCheckResult,
     UpdateRollbackParams, UpdateStatusResult,
@@ -314,6 +315,13 @@ pub struct DaemonConfig {
     /// prove the ACCEPT half of `policy.set` — the half that matters and the
     /// one a hardcoded `/run` path leaves to the VM gate alone.
     pub reauth_ticket_dir: PathBuf,
+    /// The boot clock every expiry decision reads — grants, approvals and
+    /// re-authentication tickets (SMP-1405). [`SystemClock`] in production;
+    /// tests substitute a `ManualClock` to prove expiry and reboot without
+    /// sleeping. Not reachable from the command line or the environment: a
+    /// daemon whose clock could be chosen from outside would be a daemon
+    /// whose expiries could be, too.
+    pub trusted_clock: Arc<dyn TrustedClock>,
     /// M9: the uid an agent-raised approval is routed to — the console
     /// user. 1000 in the image (`punar`); injectable for tests. Not a
     /// presence check: see `Inner::console_user`.
@@ -404,6 +412,7 @@ impl DaemonConfig {
             inventory_sources: CollectorSources::default(),
             approvals_file,
             reauth_ticket_dir: PathBuf::from(crate::reauth::TICKET_DIR),
+            trusted_clock: Arc::new(SystemClock::new()),
             ai_defaults_file: PathBuf::from(punar_common::aipolicy::AI_DEFAULTS_FILE),
             console_uid: DEFAULT_CONSOLE_UID,
             agentd_socket: PathBuf::from(crate::agentd::DEFAULT_AGENTD_SOCKET),
@@ -646,7 +655,10 @@ impl Daemon {
         installer_sources.live_audit_path = cfg.audit_path.clone();
         let installer = Installer::new(installer_sources);
         let update_status = UpdateStatusEngine::new(cfg.update_status_sources.clone());
-        let update_check = UpdateCheckEngine::new(cfg.update_check_sources.clone());
+        let update_check = UpdateCheckEngine::with_clock(
+            cfg.update_check_sources.clone(),
+            cfg.trusted_clock.clone(),
+        );
         let inventory =
             InventoryCollector::new(cfg.inventory_sources.clone(), cfg.flatpak_bin.clone());
         let update_transaction =
@@ -4693,7 +4705,7 @@ impl Inner {
                 &self.cfg.reauth_ticket_dir,
                 peer.uid,
                 ticket,
-                SystemTime::now(),
+                self.cfg.trusted_clock.as_ref(),
             ) {
                 self.log_audit(AuditEvent::denial(
                     &self.device_id,
@@ -5001,7 +5013,7 @@ impl Inner {
             &self.cfg.reauth_ticket_dir,
             peer.uid,
             ticket.unwrap_or_default(),
-            SystemTime::now(),
+            self.cfg.trusted_clock.as_ref(),
         ) else {
             return Ok(());
         };

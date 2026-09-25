@@ -19,7 +19,11 @@ thiserror = { workspace = true }
 # workspace tree for punard's SO_PEERCRED; the `fs` feature adds no new
 # crate. `flock` is not reachable from safe std, and workspace crates are
 # #![forbid(unsafe_code)].
-rustix = { workspace = true }
+# `time` (SMP-1405, trusted time P0a): clock_gettime(2) for CLOCK_MONOTONIC_RAW,
+# CLOCK_BOOTTIME and CLOCK_MONOTONIC, which expiry now measures instead of the
+# wall clock. A feature of the same crate: no new package enters the tree, and
+# the vDSO call stays inside rustix's audited unsafe.
+rustix = { workspace = true, features = ["time"] }
 # M13-U release verification. These are already workspace dependencies used
 # by recovery-key escrow; adding them here creates no second cryptographic
 # implementation or unpinned supply-chain edge. Release signatures are raw

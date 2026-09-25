@@ -40,6 +40,7 @@ use punar_common::ipc::{
     read_line_bounded,
 };
 use punar_common::time::{unix_now_millis, utc_now_rfc3339};
+use punar_common::trusted_time::{SystemClock, TrustedClock};
 use punar_common::{AuditEvent, Decision, PrincipalKind};
 use serde_json::{Value, json};
 
@@ -56,7 +57,7 @@ use crate::protocol::{
     RESULT_ISSUANCE_FLOOD, RESULT_ISSUED, RESULT_PENDING, RESULT_REVOKED,
     RESULT_UPSTREAM_UNREACHABLE, SECRETS_SOCKET_PATH, SecretsRequest,
 };
-use crate::store::{FillBytes, IssueError, Presented, TokenStore, system_entropy};
+use crate::store::{FillBytes, IssueError, Now, Presented, TokenStore, system_entropy};
 use crate::util::{lookup_gid, username_or_uid};
 
 /// Daemon configuration. Every path is injectable so the whole daemon runs
@@ -90,12 +91,18 @@ pub struct SecretsConfig {
     /// [`system_entropy`] (`getrandom(2)`); tests substitute a
     /// deterministic filler. Not reachable from the CLI.
     pub entropy: FillBytes,
-    /// Wall clock, in Unix seconds. [`Clock::System`] in production;
-    /// tests substitute [`Clock::Fixed`] so that TTL expiry is proven
-    /// **without** sleeping through a real TTL. Not reachable from the
-    /// CLI — a daemon whose clock could be set from outside would be a
-    /// daemon whose expiries could be, too.
+    /// Wall clock, in Unix seconds — **display only** since SMP-1405: the
+    /// `issued_at` / `expires_at` strings people read. [`Clock::System`] in
+    /// production; tests substitute [`Clock::Fixed`], including to roll it
+    /// back and show that nothing depends on it.
     pub clock: Clock,
+    /// The boot clock every credential TTL is decided on
+    /// ([`punar_common::trusted_time`]). [`SystemClock`] in production;
+    /// tests substitute a `ManualClock` so that expiry is proven **without**
+    /// sleeping through a real TTL. Not reachable from the CLI — a daemon
+    /// whose clock could be set from outside would be a daemon whose
+    /// expiries could be, too.
+    pub trusted_clock: Arc<dyn TrustedClock>,
 }
 
 impl SecretsConfig {
@@ -124,6 +131,7 @@ impl SecretsConfig {
             io_timeout: SERVER_READ_TIMEOUT,
             entropy: system_entropy,
             clock: Clock::System,
+            trusted_clock: Arc::new(SystemClock::new()),
         }
     }
 
@@ -416,14 +424,14 @@ impl Inner {
     // -- reads ----------------------------------------------------------
 
     fn handle_status(&self) -> Value {
-        let now = self.cfg.clock.now();
+        let now = self.cfg.trusted_clock.now();
         let store = self.store.lock().unwrap();
         json!({
             "protocol": punar_common::ipc::PROTOCOL_VERSION,
             "provider": PROVIDER_MOCK,
             "attestation": ATTESTATION_SIMULATED,
             "classes": self.catalog.classes.len(),
-            "issued": store.live(now),
+            "issued": store.live(now.as_ref()),
             "persisted": false,
             "approval_engine": self.approvals.socket().display().to_string(),
         })
@@ -652,7 +660,10 @@ impl Inner {
         policy_id: &str,
         approval_id: Option<&str>,
     ) -> Result<Value, IpcError> {
-        let now = self.cfg.clock.now();
+        let now = Now {
+            wall_secs: self.cfg.clock.now(),
+            trusted: self.cfg.trusted_clock.now(),
+        };
         let ttl = class.effective_ttl(requested_ttl);
         let issued = {
             let mut store = self.store.lock().unwrap();
@@ -661,7 +672,7 @@ impl Inner {
                 ttl,
                 requester.uid,
                 requester.agent_session_id.as_deref(),
-                now,
+                &now,
             )
         };
         let (token, record) = match issued {
@@ -723,6 +734,7 @@ impl Inner {
                         .to_string(),
                 ));
             }
+            Err(IssueError::NoClock) => return Err(clock_unreadable("issued")),
         };
 
         // Audit before answering. If the trail cannot be written the token
@@ -781,10 +793,15 @@ impl Inner {
         peer: &Peer,
         params: &CredentialValidateParams,
     ) -> Result<Value, IpcError> {
-        let now = self.cfg.clock.now();
+        // Without a readable boot clock the broker cannot say whether any
+        // credential is still valid, so it says that — and leaves the map
+        // alone, rather than expiring every token over a failed read.
+        let Some(now) = self.cfg.trusted_clock.now() else {
+            return Err(clock_unreadable("validated"));
+        };
         let presented = {
             let mut store = self.store.lock().unwrap();
-            store.present(&params.value, params.credential.as_deref(), now)
+            store.present(&params.value, params.credential.as_deref(), Some(&now))
         };
         match presented {
             // A successful validate is deliberately **not** audited: it
@@ -794,7 +811,7 @@ impl Inner {
                 "valid": true,
                 "credential": record.credential,
                 "expires_at": record.expires_at,
-                "expires_in": record.remaining_secs(now),
+                "expires_in": record.remaining_secs(Some(&now)),
                 "provider": PROVIDER_MOCK,
                 "attestation": ATTESTATION_SIMULATED,
             })),
@@ -1021,12 +1038,14 @@ impl Inner {
     }
 }
 
-/// A source of wall-clock seconds.
+/// A source of wall-clock seconds, for the `issued_at` / `expires_at`
+/// strings people read. **It decides nothing**: credential expiry is on the
+/// boot clock ([`SecretsConfig::trusted_clock`], SMP-1405).
 ///
 /// An enum rather than a function pointer because a test clock has to be
 /// *per-daemon* state: the daemon reads the clock on its own connection
 /// threads, and a process-global test clock would make concurrently
-/// running tests move each other's expiries. [`Clock::Fixed`] is not
+/// running tests move each other's timestamps. [`Clock::Fixed`] is not
 /// reachable from the CLI — only code constructing a [`SecretsConfig`]
 /// directly (the tests) can select it, so a shipped daemon always reads
 /// the real clock.
@@ -1034,8 +1053,8 @@ impl Inner {
 pub enum Clock {
     /// The wall clock (production).
     System,
-    /// A clock the test moves by hand, so TTL expiry is proven without
-    /// sleeping through a real TTL.
+    /// A clock the test moves by hand — including backwards, to show that
+    /// rolling the wall clock back stretches nothing.
     Fixed(Arc<std::sync::atomic::AtomicU64>),
 }
 
@@ -1049,15 +1068,31 @@ impl Clock {
     }
 }
 
-/// Wall-clock seconds since the Unix epoch.
+/// Wall-clock seconds since the Unix epoch, for display timestamps only.
 ///
 /// `punar_common::time` exposes milliseconds (audit event ids) and RFC 3339
-/// formatting; credential expiry is a whole-second comparison, so the
-/// conversion lives here rather than widening the shared module for one
-/// caller. A clock beyond `u64` seconds saturates instead of wrapping,
-/// which makes every token look expired — the fail-closed direction.
+/// formatting; the display strings want whole seconds, so the conversion
+/// lives here rather than widening the shared module for one caller. A
+/// clock beyond `u64` seconds saturates instead of wrapping. Nothing is
+/// decided from this value.
 fn now_secs() -> u64 {
     u64::try_from(unix_now_millis() / 1000).unwrap_or(u64::MAX)
+}
+
+/// The answer when the boot clock cannot be read. Credentials expire on
+/// that clock, so without it nothing is issued and nothing is confirmed
+/// valid (SMP-1405). `what` is `issued` or `validated`.
+fn clock_unreadable(what: &str) -> IpcError {
+    IpcError::new(
+        ErrorCode::Internal,
+        format!(
+            "This device could not read its boot clock, so no credential was {what}.\n\
+             Policy: os default — a credential's lifetime is measured on that clock, and \
+             a lifetime that cannot be measured is not one Punar hands out or vouches for.\n\
+             Next step: this is a system fault; check the journal for punar-secrets, then \
+             ask again."
+        ),
+    )
 }
 
 /// The answer to a token this broker does not know. **Not audited** — see

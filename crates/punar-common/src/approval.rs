@@ -40,6 +40,7 @@ use serde_json::Value;
 
 use crate::descriptor::Risk;
 use crate::principal::PrincipalKind;
+use crate::trusted_time::{BootStamp, BootWindow};
 
 // ---------------------------------------------------------------------------
 // Constants (docs/api/ipc.md section 14.4; design plan sections 4.1–4.2, 7)
@@ -328,6 +329,13 @@ pub struct ApprovalEnvelope {
     pub consumed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<Execution>,
+    /// **What decides expiry** (SMP-1405): the TTL as a window on the boot
+    /// clock, opened when the approval was raised. `approval.expires_at` is
+    /// the same instant on the wall clock, kept for people to read and never
+    /// compared with anything. Absent on a record an older punard wrote, and
+    /// an absent window is a lapsed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<BootWindow>,
 }
 
 /// The requesting peer's credentials at `accept()` time.
@@ -340,20 +348,25 @@ pub struct RequesterPeer {
 }
 
 impl ApprovalEnvelope {
-    /// Whether this approval can still be answered at `now_secs`.
-    pub fn is_answerable(&self, now_secs: u64) -> bool {
-        self.approval.status == ApprovalStatus::Pending && !self.has_lapsed(now_secs)
+    /// Whether this approval can still be answered at `now`.
+    pub fn is_answerable(&self, now: Option<&BootStamp>) -> bool {
+        self.approval.status == ApprovalStatus::Pending && !self.has_lapsed(now)
     }
 
-    /// Whether the wall clock has passed `expires_at`.
+    /// Whether the TTL has run out on the boot clock.
     ///
-    /// An unparsable `expires_at` counts as **lapsed**: a record whose
-    /// expiry cannot be reasoned about must not authorize anything.
-    pub fn has_lapsed(&self, now_secs: u64) -> bool {
-        match crate::time::unix_seconds_from_rfc3339(&self.approval.expires_at) {
-            Some(expires) => now_secs >= expires,
-            None => true,
-        }
+    /// Lapsed unless every one of these holds: the record carries a
+    /// [`lifetime`](Self::lifetime) (an older punard's record does not), the
+    /// clock could be read (`now` is `Some`), `now` is the same boot with no
+    /// suspend since the approval was raised, and the drift-shortened window
+    /// is still open
+    /// ([`crate::trusted_time::BootWindow::is_open`]). The wall clock is not
+    /// an input, so rolling it back — or reading it as 1970 — changes nothing.
+    /// An unparsable `expires_at` is also lapsed: a damaged record
+    /// authorizes nothing, whatever its window says.
+    pub fn has_lapsed(&self, now: Option<&BootStamp>) -> bool {
+        let readable = crate::time::unix_seconds_from_rfc3339(&self.approval.expires_at).is_some();
+        !(readable && self.lifetime.as_ref().is_some_and(|w| w.is_open(now)))
     }
 }
 
@@ -382,21 +395,31 @@ pub struct Grant {
     /// verbatim into the audit event).
     pub reason: String,
     pub granted_at: String,
+    /// When the window ends on the **wall** clock, for people to read. The
+    /// decision is [`lifetime`](Self::lifetime), which may close earlier:
+    /// by the drift allowance, and at the next suspend or reboot.
     pub expires_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
+    /// **What decides expiry** (SMP-1405): the granted minutes as a window
+    /// on the boot clock. A grant lapses at reboot and at suspend. Absent on
+    /// a grant an older punard wrote, and such a grant is dead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<BootWindow>,
 }
 
 impl Grant {
-    /// Whether this grant authorizes anything at `now_secs`.
+    /// Whether this grant authorizes anything at `now`.
     ///
-    /// An unparsable `expires_at` counts as expired — fail closed.
-    pub fn is_live(&self, now_secs: u64) -> bool {
-        if self.revoked_at.is_some() {
-            return false;
-        }
-        crate::time::unix_seconds_from_rfc3339(&self.expires_at)
-            .is_some_and(|expires| now_secs < expires)
+    /// Live only while unrevoked, with a readable `expires_at`, a
+    /// [`lifetime`](Self::lifetime), a readable clock, the same boot with no
+    /// suspend since it was granted, and the drift-shortened window still
+    /// open. Everything else is dead — fail
+    /// closed. The wall clock is not an input.
+    pub fn is_live(&self, now: Option<&BootStamp>) -> bool {
+        self.revoked_at.is_none()
+            && crate::time::unix_seconds_from_rfc3339(&self.expires_at).is_some()
+            && self.lifetime.as_ref().is_some_and(|w| w.is_open(now))
     }
 }
 
@@ -624,6 +647,19 @@ mod tests {
             resolved_by: None,
             consumed_at: None,
             execution: None,
+            lifetime: Some(BootWindow::of_secs(stamp(1_000), APPROVAL_TTL_DEFAULT_SECS)),
+        }
+    }
+
+    const BOOT: &str = "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b";
+    const NEXT_BOOT: &str = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b";
+
+    fn stamp(raw_bt_ms: i64) -> BootStamp {
+        BootStamp {
+            boot_id: BOOT.to_string(),
+            raw_bt_ms,
+            sleep_ms: 0,
+            suspends: 0,
         }
     }
 
@@ -807,29 +843,70 @@ mod tests {
         assert_eq!(clamp_grant_minutes(Some(600)), GRANT_MAX_MINUTES);
     }
 
+    /// The TTL is a window on the boot clock. Its drift-shortened budget is
+    /// 300 000 − 60 ms, and the boundary is exact.
     #[test]
-    fn expiry_is_evaluated_against_the_clock_and_fails_closed() {
+    fn an_approval_lapses_on_the_boot_clock_and_fails_closed() {
         let mut env = envelope();
-        // 2026-08-25T10:05:00Z
-        let expires = crate::time::unix_seconds_from_rfc3339(&env.approval.expires_at).unwrap();
-        assert!(env.is_answerable(expires - 1));
-        assert!(!env.is_answerable(expires));
-        assert!(env.has_lapsed(expires + 1));
+        let budget = crate::trusted_time::live_budget_ms(300_000);
+        assert!(env.is_answerable(Some(&stamp(1_000))));
+        assert!(env.is_answerable(Some(&stamp(1_000 + budget - 1))));
+        assert!(!env.is_answerable(Some(&stamp(1_000 + budget))));
+        assert!(env.has_lapsed(Some(&stamp(1_000 + budget))));
 
+        // No readable clock, another boot, or a clock that went backwards:
+        // lapsed, every one.
+        assert!(env.has_lapsed(None));
+        let rebooted = BootStamp {
+            boot_id: NEXT_BOOT.to_string(),
+            raw_bt_ms: 1_001,
+            sleep_ms: 0,
+            suspends: 0,
+        };
+        assert!(
+            env.has_lapsed(Some(&rebooted)),
+            "an approval lapses at reboot"
+        );
+        assert!(env.has_lapsed(Some(&stamp(999))));
+
+        // A record an older punard wrote has no window, and is lapsed now.
+        let legacy = ApprovalEnvelope {
+            lifetime: None,
+            ..envelope()
+        };
+        assert!(legacy.has_lapsed(Some(&stamp(1_000))));
+        assert!(!legacy.is_answerable(Some(&stamp(1_000))));
+
+        // A damaged expires_at authorizes nothing, whatever the window says.
         env.approval.expires_at = "whenever".to_string();
         assert!(
-            env.has_lapsed(0),
+            env.has_lapsed(Some(&stamp(1_000))),
             "an unreadable expiry must count as lapsed"
         );
-        assert!(!env.is_answerable(0));
 
         env.approval.expires_at = "2026-08-25T10:05:00Z".to_string();
         env.approval.status = ApprovalStatus::Approved;
-        assert!(!env.is_answerable(expires - 1), "terminal is terminal");
+        assert!(
+            !env.is_answerable(Some(&stamp(1_000))),
+            "terminal is terminal"
+        );
+    }
+
+    /// The wall clock is not an input. An `expires_at` far in the future —
+    /// what a clock rolled back to last year would make of it — keeps
+    /// nothing alive once the boot clock says the window closed.
+    #[test]
+    fn rolling_the_wall_clock_back_cannot_revive_an_approval() {
+        let mut env = envelope();
+        env.approval.expires_at = "2126-08-25T10:05:00Z".to_string();
+        assert!(env.has_lapsed(Some(&stamp(1_000 + 300_000))));
+        // And one in the distant past closes nothing the boot clock keeps open.
+        env.approval.expires_at = "1970-01-01T00:00:00Z".to_string();
+        assert!(!env.has_lapsed(Some(&stamp(1_001))));
     }
 
     #[test]
-    fn a_grant_is_live_only_while_unrevoked_and_unexpired() {
+    fn a_grant_is_live_only_while_unrevoked_unexpired_and_on_this_boot() {
         let grant = Grant {
             v: 1,
             grant_id: "gnt_2b8e11c4".to_string(),
@@ -841,25 +918,90 @@ mod tests {
             granted_at: "2026-08-25T10:00:00Z".to_string(),
             expires_at: "2026-08-25T10:15:00Z".to_string(),
             revoked_at: None,
+            lifetime: Some(BootWindow::of_secs(stamp(0), 15 * 60)),
         };
-        let expires = crate::time::unix_seconds_from_rfc3339(&grant.expires_at).unwrap();
-        assert!(grant.is_live(expires - 1));
-        assert!(!grant.is_live(expires));
+        let budget = crate::trusted_time::live_budget_ms(15 * 60_000);
+        assert_eq!(budget, 900_000 - 180);
+        assert!(grant.is_live(Some(&stamp(budget - 1))));
+        assert!(!grant.is_live(Some(&stamp(budget))));
+        assert!(
+            !grant.is_live(None),
+            "an unreadable clock keeps nothing live"
+        );
+
+        let rebooted = BootStamp {
+            boot_id: NEXT_BOOT.to_string(),
+            raw_bt_ms: 1,
+            sleep_ms: 0,
+            suspends: 0,
+        };
+        assert!(!grant.is_live(Some(&rebooted)), "grants lapse at reboot");
+
+        // A suspend closes the grant too, a minute into fifteen: the kernel
+        // may have under-counted the sleep, so nothing is judged across it.
+        let resumed = BootStamp {
+            boot_id: BOOT.to_string(),
+            raw_bt_ms: 60_000 + 30_000,
+            sleep_ms: 30_000,
+            suspends: 1,
+        };
+        assert!(!grant.is_live(Some(&resumed)), "grants lapse at suspend");
+        let counted_only = BootStamp {
+            sleep_ms: 0,
+            raw_bt_ms: 60_000,
+            ..resumed.clone()
+        };
+        assert!(
+            !grant.is_live(Some(&counted_only)),
+            "a suspend the kernel counted but did not measure closes it too"
+        );
+        let mut env = envelope();
+        assert!(env.is_answerable(Some(&stamp(2_000))));
+        assert!(
+            !env.is_answerable(Some(&resumed)),
+            "so do pending approvals"
+        );
+        env.approval.status = ApprovalStatus::Approved;
+        assert!(env.has_lapsed(Some(&resumed)));
 
         let revoked = Grant {
             revoked_at: Some("2026-08-25T10:01:00Z".to_string()),
             ..grant.clone()
         };
-        assert!(!revoked.is_live(expires - 1));
+        assert!(!revoked.is_live(Some(&stamp(1))));
+
+        let legacy = Grant {
+            lifetime: None,
+            ..grant.clone()
+        };
+        assert!(
+            !legacy.is_live(Some(&stamp(1))),
+            "a grant an older punard wrote carries no window and is dead"
+        );
 
         let unreadable = Grant {
             expires_at: "later".to_string(),
             ..grant
         };
         assert!(
-            !unreadable.is_live(0),
+            !unreadable.is_live(Some(&stamp(1))),
             "fail closed on an unreadable expiry"
         );
+    }
+
+    /// The window is an additive sibling: a record without one still parses
+    /// (and is then lapsed), and a record with one round-trips.
+    #[test]
+    fn the_lifetime_is_additive_on_the_wire() {
+        let mut value = serde_json::to_value(envelope()).unwrap();
+        assert_eq!(value["lifetime"]["start"]["boot_id"], BOOT);
+        assert_eq!(value["lifetime"]["start"]["suspends"], 0);
+        assert_eq!(value["lifetime"]["duration_ms"], 300_000);
+        assert!(value["approval"].get("lifetime").is_none());
+        value.as_object_mut().unwrap().remove("lifetime");
+        let legacy: ApprovalEnvelope = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.lifetime, None);
+        assert!(legacy.has_lapsed(Some(&stamp(1_000))));
     }
 
     /// The summary file must not carry a spoofable display name (see

@@ -35,9 +35,9 @@ After=punar-agentd.service
 Type=oneshot
 Slice=punar-background.slice
 ExecStart=/usr/bin/punarctl agents scan --trigger timer
-# This service never sets the clock, and privilege grants and approvals
-# expire by it: ProtectClock drops CAP_SYS_TIME and refuses the
-# clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
+# This service never sets the clock, and audit times and the deadlines that
+# must outlive a reboot still read it: ProtectClock drops CAP_SYS_TIME and
+# refuses the clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
 ProtectClock=yes
 StandardOutput=journal
 StandardError=journal

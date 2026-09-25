@@ -471,8 +471,10 @@ jobs:
       - name: Test native-vendor OAuth sandbox contract
         run: ./tests/images/vendor-sandbox-contract-test.sh
 
-      # Privilege grants and approvals expire by the wall clock, so nothing
-      # but root may move it: no DHCP-supplied NTP server, no timedated
+      # Audit times and the deadlines that outlive a reboot read the wall
+      # clock (grants, approvals, tickets and credentials expire on the boot
+      # clock since SMP-1405), so nothing but root may move it: no
+      # DHCP-supplied NTP server, no timedated
       # set-time/set-ntp/set-local-rtc from a session, and ProtectClock=yes on
       # every Punar service that is not a reviewed exclusion.
       - name: Test that the network and the session cannot set the clock

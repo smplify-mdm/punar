@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use punar_common::ipc::EXIT_APPROVAL_REQUIRED;
+use punar_common::trusted_time::{ManualClock, TrustedClock};
 use punar_secrets::attribution::{Peer, PeerSource};
 use punar_secrets::server::{Clock, Daemon, DaemonHandle, SecretsConfig};
 use punar_secrets::testsupport::{
@@ -23,16 +24,21 @@ use punar_secrets::testsupport::{
 };
 use serde_json::{Value, json};
 
-/// Where every test's clock starts. Each broker gets its **own** clock,
+/// Where every test's clock starts. Each broker gets its **own** clocks,
 /// so tests running in parallel cannot move each other's expiries.
 const T0: u64 = 1_760_000_000;
+/// The boot the broker's boot clock reports.
+const BOOT: &str = "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b";
 
 struct TestBroker {
     dir: PathBuf,
     socket: PathBuf,
     audit: PathBuf,
     punard: Option<MockPunard>,
+    /// The wall clock: display strings only.
     clock: Arc<AtomicU64>,
+    /// The boot clock: every expiry decision.
+    trusted: Arc<ManualClock>,
     handle: Option<DaemonHandle>,
 }
 
@@ -64,6 +70,8 @@ impl TestBroker {
         cfg.peer_source = peer;
         let clock = Arc::new(AtomicU64::new(T0));
         cfg.clock = Clock::Fixed(Arc::clone(&clock));
+        let trusted = Arc::new(ManualClock::new(BOOT, 3_600_000));
+        cfg.trusted_clock = trusted.clone();
         tweak(&mut cfg);
 
         let daemon = Daemon::new(cfg).expect("broker starts");
@@ -74,6 +82,7 @@ impl TestBroker {
             audit,
             punard: Some(punard),
             clock,
+            trusted,
             handle: Some(handle),
         }
     }
@@ -83,9 +92,17 @@ impl TestBroker {
         self.punard.as_ref().expect("the mock engine is alive")
     }
 
-    /// Move this broker's clock forward by `secs`.
+    /// Let `secs` pass: both clocks move forward together, as they do on a
+    /// machine nobody is tampering with.
     fn advance(&self, secs: u64) {
         self.clock.fetch_add(secs, Ordering::SeqCst);
+        self.trusted.advance_secs(secs);
+    }
+
+    /// Step the WALL clock back by `secs`, as a DHCP-supplied NTP server or
+    /// a person with timedated could. The boot clock does not move.
+    fn roll_wall_clock_back(&self, secs: u64) {
+        self.clock.fetch_sub(secs, Ordering::SeqCst);
     }
 
     /// One request, one response, one connection.
@@ -281,7 +298,9 @@ fn a_token_validates_until_its_ttl_lapses_then_expires_exactly_once() {
     );
     assert_eq!(valid["valid"], json!(true));
     assert_eq!(valid["credential"], json!("github"));
-    assert_eq!(valid["expires_in"], json!(5));
+    // 5 000 ms less the 1 ms drift allowance, floored to whole seconds: the
+    // broker never promises more than the window it enforces.
+    assert_eq!(valid["expires_in"], json!(4));
     assert!(
         broker.events_for("credential.expire").is_empty(),
         "a successful validate is not audited (spec 6.4)"
@@ -309,6 +328,57 @@ fn a_token_validates_until_its_ttl_lapses_then_expires_exactly_once() {
     let error = broker.err("credential.validate", Some(json!({"value": token})));
     assert_eq!(error["code"], json!("not_found"));
     assert_eq!(broker.events_for("credential.expire").len(), 1);
+}
+
+/// The hole SMP-1405 closes. Rolling the wall clock back — a year, here —
+/// used to push every credential's deadline out with it. Expiry is on the
+/// boot clock now, and the boot clock cannot be set.
+#[test]
+fn rolling_the_wall_clock_back_does_not_stretch_a_credential() {
+    let broker = TestBroker::start(PeerSource::Fixed(Peer::user(1000)));
+    let issued = broker.ok(
+        "credential.request",
+        Some(json!({"credential": "github", "ttl": 5})),
+    );
+    let token = value_of(&issued);
+
+    broker.advance(6);
+    broker.roll_wall_clock_back(365 * 24 * 3600);
+    let error = broker.err("credential.validate", Some(json!({"value": token})));
+    assert_eq!(error["code"], json!("expired"));
+    assert_eq!(broker.events_for("credential.expire").len(), 1);
+}
+
+/// A broker that cannot read its boot clock issues nothing and vouches for
+/// nothing — and does not throw away the credentials it holds over it.
+#[test]
+fn an_unreadable_boot_clock_issues_and_validates_nothing() {
+    let broker = TestBroker::start(PeerSource::Fixed(Peer::user(1000)));
+    let issued = broker.ok(
+        "credential.request",
+        Some(json!({"credential": "github", "ttl": 60})),
+    );
+    let token = value_of(&issued);
+    let before = broker.trusted.now();
+
+    broker.trusted.set(None);
+    let refused = broker.err(
+        "credential.request",
+        Some(json!({"credential": "github", "ttl": 60})),
+    );
+    assert_eq!(refused["code"], json!("internal"));
+    assert!(refused["message"].as_str().unwrap().contains("boot clock"));
+    let unjudged = broker.err("credential.validate", Some(json!({"value": token})));
+    assert_eq!(unjudged["code"], json!("internal"));
+    assert!(
+        broker.events_for("credential.expire").is_empty(),
+        "an unreadable clock is not an expiry, and is not audited as one"
+    );
+
+    // Readable again, and the credential it held is still good.
+    broker.trusted.set(before);
+    let valid = broker.ok("credential.validate", Some(json!({"value": token})));
+    assert_eq!(valid["valid"], json!(true));
 }
 
 #[test]

@@ -43,6 +43,13 @@ publish.workspace = true
 # real change in kind and the owner may wish to revisit it.
 pam-client2 = { version = "=0.5.5", default-features = false }
 
+# The workspace's shared crate, for exactly one thing: the boot-clock stamp a
+# ticket carries (punar_common::trusted_time, SMP-1405). punard judges a
+# ticket's age against the same type and the same clock read, so the format
+# has one definition on both sides of the handoff instead of two that could
+# drift. Everything it pulls in is already in the workspace tree; nothing new
+# is locked, and no libpam dependency flows the other way.
+punar-common = { workspace = true }
 rustix = { workspace = true, features = ["net", "rand"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
