@@ -78,6 +78,14 @@ SEQUENCES = {
     "cyrillic": lambda: typed("ghbdtn") + chord("ret"),
     "punar-0": lambda: chord("meta_l", "0"),
     "punar-1": lambda: chord("meta_l", "1"),
+    # The 2 key: under AZERTY it types é, and the workspace bind still fires.
+    "punar-2": lambda: chord("meta_l", "2"),
+    "punar-f1": lambda: chord("meta_l", "f1"),
+    # The Mac-style clipboard keys, then Return on its own.
+    "punar-c": lambda: chord("meta_l", "c"),
+    "punar-v": lambda: chord("meta_l", "v"),
+    "return": lambda: chord("ret"),
+    "punar-ctrl-t": lambda: chord("meta_l", "ctrl", "t"),
     "punar-alt-2": lambda: chord("meta_l", "alt", "2"),
     "punar-m": lambda: chord("meta_l", "m"),
     "punar-o": lambda: chord("meta_l", "o"),

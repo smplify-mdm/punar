@@ -434,8 +434,12 @@ if [ "${HARDWARE_ACCEL}" -eq 1 ]; then
     # because group 3 waits for the timer to fire ON ITS OWN, and a timer
     # firing is wall clock under any accelerator). Raised from M9's 3600 to
     # keep the same headroom now that an eleventh bounded in-guest exercise
-    # sits between the RAM result and the export.
-    DEFAULT_EXPORT_TIMEOUT=4200
+    # sits between the RAM result and the export. And the SMP-1405 WP-02
+    # keys exercise (punar-keys-check.service, bounded 10 min in-guest:
+    # real keys over QMP, two configuration reloads, two lock/unlock cycles
+    # and about forty short waits; a minute or two under KVM) runs after the
+    # surface costs and before the milestone checks, so 600 s more.
+    DEFAULT_EXPORT_TIMEOUT=4800
     echo "==> using ${ACCEL} hardware acceleration (${ARCH})"
 else
     ACCEL="tcg"
@@ -462,8 +466,10 @@ else
     # quickshell/grim round trips are the slow parts) and the M10 shadow-AI
     # exercise (bounded 15 min in-guest; its 300 s detection-timer wait is
     # wall clock, so it costs the same under TCG, and the quickshell/grim
-    # round trips and the mock enroll/unenroll cycle are the slow parts).
-    DEFAULT_EXPORT_TIMEOUT=9600
+    # round trips and the mock enroll/unenroll cycle are the slow parts)
+    # and the WP-02 keys exercise (bounded 10 min in-guest; the reloads and
+    # the quickshell round trips are the slow parts under TCG).
+    DEFAULT_EXPORT_TIMEOUT=10200
     warn "native KVM/HVF unavailable for ${ARCH}: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"
@@ -491,6 +497,11 @@ DESKTOP_SERIAL_ARGS=(-device virtio-serial-pci)
 # A keyboard and an absolute pointer the host can press through QMP: the keys
 # exercise (keys-check.sh, SMP-1405 WP-02) asks tools/qmp-keys.py for real key
 # chords and pointer drags, so the grammar is proven as a person uses it.
+# THIS CHANGED THE MEASURED MACHINE: from WP-02 on, the desktop gate's VM has
+# these two virtio input devices, so idle-RAM figures before and after it are
+# not strictly like for like (two more kernel input drivers and their event
+# nodes, and libinput devices in the compositor). PERFORMANCE_BUDGETS.md
+# records the change beside the figure.
 DESKTOP_INPUT_ARGS=(-device virtio-keyboard-pci -device virtio-tablet-pci)
 
 if [ "${ARCH}" = "x86_64" ]; then

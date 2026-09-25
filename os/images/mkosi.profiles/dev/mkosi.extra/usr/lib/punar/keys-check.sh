@@ -4,24 +4,33 @@
 #
 # WHAT IT PROVES, on the running desktop:
 #   * the keyboard layout is one device setting: the person at the machine
-#     sets it with `punarctl keyboard layout set` (punard's person-scoped
-#     system.keymap, audited under their name), /etc/vconsole.conf records
-#     it, the session's data file and the live compositor load it, and the
-#     lock screen names it;
+#     sets it with `punarctl keyboard layout set` from their own session
+#     (punard's person-scoped system.keymap, audited under their name),
+#     /etc/vconsole.conf records it, the session's data file and the live
+#     compositor load it, and the lock screen names it; the same uid from
+#     OUTSIDE the seat session (this very service) is refused;
+#   * the login screen's choice, as session start adopts it, becomes the
+#     device's layout, and a configuration load (the path session start
+#     takes) reads it: live input:kb_layout and the lock screen follow;
 #   * a layout that cannot type Latin letters (Russian, the plan's
 #     acceptance case) is loaded behind a US first group with the both-Alt
 #     switch chord, so PUNAR+Return still opens a terminal, after the chord
 #     that terminal receives Cyrillic, and a letter bind (PUNAR+M) still
 #     fires while Russian is the active group;
 #   * a workspace keeps its own layout preset, live and across sessions;
-#   * the brightness, microphone and media keys' verbs say "not present"
-#     (exit 6) for hardware this VM lacks, and no brightness row is drawn;
-#   * the login screen's choice, as session start adopts it, becomes the
-#     device's layout under the signed-in person's name;
-#   * the keys do what the grammar says, pressed as REAL KEYS: Alt+Tab, the
-#     tenth workspace, a quiet move, maximize, pop-out, pointer move and
-#     resize with PUNAR held, swap, toggle split, the file manager, next
-#     workspace and the workspace wheel.
+#   * the brightness and media keys' verbs say "not present" (exit 6) for
+#     hardware this VM lacks, and no brightness row is drawn; the microphone
+#     key mutes and unmutes a real PipeWire source (a virtual one this
+#     check creates), and says "not present" when there is none;
+#   * the keys do what the grammar says, pressed as REAL KEYS: Alt+Tab (and
+#     how long a quick switch takes), the tenth workspace, a quiet move,
+#     maximize, pop-out, pointer move and resize with PUNAR held, swap,
+#     toggle split, the file manager, next workspace, the workspace wheel,
+#     the Mac-style clipboard keys in a terminal (paste arrives, copy never
+#     interrupts), and a look toggle that survives a configuration reload;
+#   * under French (AZERTY), whose number row types & é " … unshifted, the
+#     workspace keys still work (they are bound by key code) and PUNAR+F1
+#     opens the shortcut help that PUNAR+/ cannot reach there.
 #
 # HOW KEYS ARE PRESSED. The desktop gate (tools/boot-test.sh) runs
 # tools/qmp-keys.py beside QEMU. This script prints `PUNAR_QMP_KEYS <id>
@@ -37,7 +46,11 @@
 # tools/boot-test.sh, including a missing report.
 #
 # It leaves the session as it found it: the device's layout is set back, the
-# probe windows are closed and workspace 1 is focused again.
+# probe windows are closed and workspace 1 is focused again. (Setting the
+# layout back records it as the person's preference; its value is the one
+# the device had, and the OS default it stands in for is persisted once and
+# never changes, so nothing a person sees differs. The VM is discarded after
+# the gate.)
 #
 # Predicates below are invoked indirectly through `wait_for` (shellcheck
 # cannot see that; the surfaces-check.sh precedent).
@@ -114,10 +127,53 @@ cleanup() {
     done
     PROBES=""
     if [ -n "${ORIGINAL_LAYOUT}" ]; then
-        "${CTL}" keyboard layout set "${ORIGINAL_LAYOUT}" >/dev/null 2>&1 || true
+        in_session keyboard layout set "${ORIGINAL_LAYOUT}" >/dev/null 2>&1 || true
         ORIGINAL_LAYOUT=""
     fi
+    if [ "${CLIPBOARD_KEYS_ON}" = yes ]; then
+        "${CTL}" keyboard clipboard-keys off >/dev/null 2>&1 || true
+        CLIPBOARD_KEYS_ON=no
+    fi
+    if [ -n "${TEST_MIC}" ]; then
+        pw-cli destroy "${TEST_MIC}" >/dev/null 2>&1 || true
+        TEST_MIC=""
+    fi
     "${CTL}" workspace focus 1 >/dev/null 2>&1 || true
+}
+CLIPBOARD_KEYS_ON=no
+TEST_MIC=""
+
+# RUN FROM THE SEAT SESSION. This check is a system service running as the
+# person's uid; the keyboard layout is granted only to a call from the
+# person's own session on the seat (punard's seat-presence check), which is
+# where their terminal and System Control run it. So the compositor starts
+# the command, in the session's scope, as a key bind would; its output and
+# exit status come back through files. Arguments are layout values and
+# flags, checked against a fixed character set before they are written.
+SESSION_RUN_N=0
+in_session() {
+    SESSION_RUN_N=$((SESSION_RUN_N + 1))
+    sr_dir="${XDG_RUNTIME_DIR}/punar/keys-session-${SESSION_RUN_N}"
+    rm -rf "${sr_dir}"
+    mkdir -p "${sr_dir}"
+    sr_args=""
+    for sr_arg in "$@"; do
+        case "${sr_arg}" in
+            ''|*[!A-Za-z0-9_+,.%-]*) note "# in_session: refusing argument '${sr_arg}'"; return 2 ;;
+        esac
+        sr_args="${sr_args} '${sr_arg}'"
+    done
+    printf '#!/bin/sh\n%s%s >%s/out 2>%s/err\necho $? >%s/rc.tmp\nmv %s/rc.tmp %s/rc\n' \
+        "${CTL}" "${sr_args}" "${sr_dir}" "${sr_dir}" "${sr_dir}" "${sr_dir}" "${sr_dir}" \
+        > "${sr_dir}/run.sh"
+    hyprctl dispatch "hl.dsp.exec_cmd('sh ${sr_dir}/run.sh')" >/dev/null 2>&1
+    if ! wait_for 30 test -s "${sr_dir}/rc"; then
+        note "# in_session: '$*' did not finish in 30 s"
+        return 124
+    fi
+    cat "${sr_dir}/out"
+    cat "${sr_dir}/err" >&2
+    return "$(cat "${sr_dir}/rc")"
 }
 
 if [ -z "${HIS}" ] || [ -z "${WAYLAND_DISPLAY}" ]; then
@@ -209,15 +265,17 @@ fi
 # --- 1a. the login screen's choice, as session start adopts it -------------
 # greetd starts a session with PUNAR_KEYMAP only after a successful sign-in
 # (punar-onboard's greetd tests), and session.sh then runs exactly this
-# command before the compositor reads the file. The dev image signs in
-# without the login screen, so the check makes session start's own call as
-# the seated person and follows the choice to the device, the audit log and
-# the session's data file.
+# command, in the session, before the compositor reads the file. The dev
+# image signs in without the login screen, so the check makes session
+# start's own call from the seated session and follows the choice to the
+# device, the audit log, the session's data file, and then through a
+# configuration load (what the compositor does at start) to the live
+# compositor and the lock screen.
 case "${ORIGINAL}" in
-    de|de[+,]*) GREETER_CHOICE=fr ;;
-    *) GREETER_CHOICE=de ;;
+    de|de[+,]*) GREETER_CHOICE=fr; GREETER_NAME=French ;;
+    *) GREETER_CHOICE=de; GREETER_NAME=German ;;
 esac
-adopt="$("${CTL}" --json keyboard layout render --adopt "${GREETER_CHOICE}" 2>/run/punar/keys-adopt.txt)"
+adopt="$(in_session --json keyboard layout render --adopt "${GREETER_CHOICE}" 2>/run/punar/keys-adopt.txt)"
 if [ "$(printf '%s' "${adopt}" | jq -r '.adopted // false' 2>/dev/null)" = true ]; then
     ORIGINAL_LAYOUT="${ORIGINAL}"
     note "ok   session start adopted the login screen's ${GREETER_CHOICE} as the device's layout"
@@ -234,10 +292,34 @@ fi
 adopter="$("${CTL}" --json audit tail -n 20 2>/dev/null \
     | jq -r '[.events[]? | select(.action == "capabilities.set" and .resource == "system.keymap" and .decision == "allow")] | last | .user_id // ""')"
 check_eq "the adoption is audited under the person's name" "$(id -un)" "${adopter}"
+# The compositor reads that file when it loads its configuration, at start
+# and on every reload; a reload is the same path, taken now. (A compositor
+# that ignored the file would still pass everything above.)
+hyprctl reload >/dev/null 2>&1
+layout_is() { [ "$(option input:kb_layout)" = "$1" ]; }
+if wait_for 10 layout_is "${GREETER_CHOICE}"; then
+    note "ok   a configuration load reads the file: live input:kb_layout = ${GREETER_CHOICE}"
+else
+    fail "a configuration load did not take the file: live input:kb_layout = '$(option input:kb_layout)', not ${GREETER_CHOICE}"
+fi
+lock_names() { case "$(ipc lock keyboard)" in "Keyboard $1"*) return 0 ;; *) return 1 ;; esac; }
+ipc lock lock >/dev/null
+if wait_for 10 lock_is locked; then
+    if wait_for 10 lock_names "${GREETER_NAME}"; then
+        note "ok   the lock screen names the login screen's layout: $(ipc lock keyboard)"
+    else
+        fail "the lock screen's layout line is '$(ipc lock keyboard)', not ${GREETER_NAME}"
+    fi
+    ipc lock submit "punar" >/dev/null
+    wait_for 15 lock_is unlocked || fail "the session did not unlock after the layout check"
+else
+    fail "the session did not lock"
+fi
 
-if "${CTL}" keyboard layout set ru > /run/punar/keys-set.txt 2>&1; then
+# --- 1. (cont.) the person sets the device's layout from their session ------
+if in_session keyboard layout set ru > /run/punar/keys-set.txt 2>&1; then
     ORIGINAL_LAYOUT="${ORIGINAL}"
-    note "ok   punarctl keyboard layout set ru, as $(id -un), without an administrator"
+    note "ok   punarctl keyboard layout set ru, from $(id -un)'s session, without an administrator"
 else
     fail "punarctl keyboard layout set ru was refused: $(head -c 300 /run/punar/keys-set.txt)"
 fi
@@ -252,6 +334,14 @@ else
 fi
 check_eq "live input:kb_layout (Latin first)" "us,ru" "$(option input:kb_layout)"
 check_eq "live input:kb_options (the switch chord)" "grp:alts_toggle" "$(option input:kb_options)"
+
+# The same uid, OUTSIDE the seat session: this check is a system service, as
+# a user service, a D-Bus-activated app or an agent's escaped helper would be
+# a process that is not the person's session. It must be refused, and the
+# device must not change.
+"${CTL}" keyboard layout set us+dvorak > /run/punar/keys-outside.txt 2>&1
+check_eq "the same uid outside the seat session is refused (exit 3)" 3 "$?"
+check_eq "and the device's layout did not change" "XKBLAYOUT=ru" "$(grep '^XKBLAYOUT=' /etc/vconsole.conf 2>/dev/null)"
 
 # --- 1b. a workspace keeps its own layout preset -----------------------------
 # The rule is applied live with one hl.workspace_rule; the compositor's own
@@ -282,7 +372,10 @@ fi
 # The brightness, microphone and media keys run punarctl verbs that say when
 # what they drive is absent (exit 6, "not present") and draw nothing. This VM
 # has no backlight, no sound card and no media player; if one ever appears,
-# the verb must work instead, so each branch is read from the machine.
+# the verb must work instead, so each branch is read from the machine. (A
+# media player needs a D-Bus service the image does not ship, so the media
+# keys' positive case is punarctl's own test against a fake bus; WP-03's
+# audio panel brings the in-VM one.)
 if ls /sys/class/backlight/* >/dev/null 2>&1; then
     "${CTL}" display brightness get >/dev/null 2>&1
     check_eq "display brightness reads the backlight this machine has" 0 "$?"
@@ -300,11 +393,7 @@ else
         note "ok   no brightness row was drawn (the OSD is '$(ipc osd state)')"
     fi
 fi
-if wpctl inspect @DEFAULT_AUDIO_SOURCE@ >/dev/null 2>&1; then
-    "${CTL}" audio mute --input >/dev/null 2>&1
-    check_eq "the microphone key mutes the microphone this machine has" 0 "$?"
-    "${CTL}" audio mute --input >/dev/null 2>&1 || fail "the microphone key did not unmute"
-else
+if ! wpctl inspect @DEFAULT_AUDIO_SOURCE@ >/dev/null 2>&1; then
     "${CTL}" audio mute --input > /run/punar/keys-mic.txt 2>&1
     check_eq "the microphone key with no microphone exits 6 (not present)" 6 "$?"
     if grep -q 'no microphone' /run/punar/keys-mic.txt; then
@@ -313,26 +402,53 @@ else
         fail "the microphone refusal does not say why: $(head -c 200 /run/punar/keys-mic.txt)"
     fi
 fi
+# The microphone key against a REAL PipeWire source. The VM has no sound
+# card, so after the absent case above this creates a virtual source (a
+# null sink shaped as Audio/Source, which PipeWire treats like any other
+# source), makes it the default, and the key must mute it and unmute it.
+mic_muted() { wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null | grep -q MUTED; }
+mic_ready() { wpctl inspect @DEFAULT_AUDIO_SOURCE@ >/dev/null 2>&1; }
+if ! command -v pw-cli >/dev/null 2>&1; then
+    fail "pw-cli is not in the image, so the microphone key cannot be proven against a real source"
+elif mic_ready; then
+    note "# this machine has a microphone of its own; it is used as it is"
+else
+    pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = punar-keys-mic media.class = Audio/Source/Virtual audio.position = [ MONO ] object.linger = true }' \
+        >/run/punar/keys-mic-create.txt 2>&1
+    TEST_MIC="$(pw-cli ls Node 2>/dev/null | awk '
+        /^[[:space:]]*id [0-9]+,/ { id = $2; sub(/,/, "", id) }
+        /node.name = "punar-keys-mic"/ { print id; exit }')"
+    if [ -n "${TEST_MIC}" ]; then
+        wpctl set-default "${TEST_MIC}" >/dev/null 2>&1
+    fi
+    wait_for 10 mic_ready || fail "the virtual microphone did not become the default source ($(head -c 200 /run/punar/keys-mic-create.txt))"
+fi
+if mic_ready; then
+    mic_was_muted=no
+    mic_muted && mic_was_muted=yes
+    "${CTL}" audio mute --input > /run/punar/keys-mic.txt 2>&1
+    check_eq "the microphone key toggles a real source's mute" 0 "$?"
+    if [ "${mic_was_muted}" = no ]; then
+        if wait_for 5 mic_muted; then
+            note "ok   the source is muted"
+        else
+            fail "the microphone key left the source unmuted: $(wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>&1)"
+        fi
+    fi
+    "${CTL}" audio mute --input >/dev/null 2>&1 || fail "the second microphone key press failed"
+    if [ "${mic_was_muted}" = no ] && mic_muted; then
+        fail "the second microphone key press did not unmute the source"
+    fi
+    if [ -n "${TEST_MIC}" ]; then
+        pw-cli destroy "${TEST_MIC}" >/dev/null 2>&1 || true
+        TEST_MIC=""
+    fi
+fi
 if busctl --user list 2>/dev/null | grep -q '^org\.mpris\.MediaPlayer2\.'; then
     note "# a media player is running; the media key's absent case is not exercised"
 else
     "${CTL}" media play-pause > /run/punar/keys-media.txt 2>&1
     check_eq "the play/pause key with no media player exits 6 (not present)" 6 "$?"
-fi
-
-# --- 2. the lock screen names the layout -------------------------------------
-lock_password="punar"
-ipc lock lock >/dev/null
-if wait_for 10 lock_is locked; then
-    lock_keyboard="$(ipc lock keyboard)"
-    case "${lock_keyboard}" in
-        "Keyboard "*"Alt + Alt switches") note "ok   the lock screen names the layout: ${lock_keyboard}" ;;
-        *) fail "the lock screen's layout line is '${lock_keyboard}'" ;;
-    esac
-    ipc lock submit "${lock_password}" >/dev/null
-    wait_for 15 lock_is unlocked || fail "the session did not unlock after the layout check"
-else
-    fail "the session did not lock"
 fi
 
 # --- 3. the key driver answers: a probe window receives typed text ----------
@@ -391,6 +507,21 @@ if [ -n "${PROBE_B}" ] && focus_window "${PROBE_B}"; then
         fi
         press punar-m
         wait_for 10 field_is "${PROBE_B}" .fullscreen 0 || fail "PUNAR+M did not restore the window under Russian"
+        # The lock screen names the layout the password field types in NOW,
+        # followed through Hyprland's activelayout event, not the first one.
+        ipc lock lock >/dev/null
+        if wait_for 10 lock_is locked; then
+            if wait_for 10 lock_names Russian; then
+                note "ok   the lock screen names the active layout: $(ipc lock keyboard)"
+            else
+                fail "the lock screen says '$(ipc lock keyboard)' while Russian is the active layout"
+            fi
+            ipc lock submit "punar" >/dev/null
+            wait_for 15 lock_is unlocked || fail "the session did not unlock after the Russian lock check"
+            focus_window "${PROBE_B}" || true
+        else
+            fail "the session did not lock under Russian"
+        fi
     fi
     press alts
     wait_for 10 keymap_has "English (US)" || fail "the switch chord did not return to English"
@@ -405,10 +536,15 @@ PROBES="${PROBES} ${PROBE_C}"
 if [ -n "${PROBE_A}" ] && [ -n "${PROBE_B}" ] && [ -n "${PROBE_C}" ]; then
     focus_window "${PROBE_A}"; focus_window "${PROBE_B}"; focus_window "${PROBE_C}"
     switch_started="$(date +%s)"
+    switch_started_ms="$(date +%s%3N)"
     press alt-tab
     if wait_for 10 is_active "${PROBE_B}"; then
         switch_secs=$(( $(date +%s) - switch_started ))
-        note "ok   Alt+Tab went back to the previous window (${switch_secs} s)"
+        # From the request on the console to the focus change, in ms. It
+        # includes the host driver's serial polling (up to 250 ms) and the
+        # chord's pacing (4 x 40 ms), so the switch itself is the rest; the
+        # figure is recorded for the J14 comparison, not budgeted here.
+        note "ok   Alt+Tab went back to the previous window ($(( $(date +%s%3N) - switch_started_ms )) ms from request to focus)"
         # The switcher finishes on its own five seconds after a MISSED
         # release. Finishing sooner is the proof that releasing Alt did it.
         if [ "${switch_secs}" -ge 4 ]; then
@@ -597,6 +733,99 @@ fi
 # Moving a workspace between monitors (PUNAR+ALT+arrows) needs a second
 # monitor, which this VM does not have; hyprland-verify.sh proves the binds
 # parse and keybind-contract-test.sh that they exist.
+
+# --- 9c. the Mac-style clipboard keys, in a terminal --------------------------
+# Turned on as a person does (`punarctl keyboard clipboard-keys on`, which
+# reloads the configuration). In a terminal PUNAR+V must paste (Shift+Insert)
+# and PUNAR+C must copy (Ctrl+Insert), and never send Ctrl+C, which would
+# interrupt the program. The probe is a real foot window (class foot, which
+# the terminal tag names) reading one line: PUNAR+C first, then PUNAR+V,
+# then Return. Interrupted, it writes nothing; pasted into, it writes the
+# clipboard's text.
+paste_bound() { hyprctl binds -j 2>/dev/null | jq -e 'any(.[]; .description == "Paste")' >/dev/null 2>&1; }
+paste_unbound() { ! paste_bound; }
+clip_address() { clients | jq -r '[.[] | select(.title == "punar-keys-clip")][0].address // ""'; }
+clip_mapped() { [ -n "$(clip_address)" ]; }
+if "${CTL}" keyboard clipboard-keys on >/dev/null 2>&1 && wait_for 10 paste_bound; then
+    CLIPBOARD_KEYS_ON=yes
+    note "ok   the Mac-style clipboard keys are bound once the setting is on"
+    printf 'punarpaste' | wl-copy
+    CLIP_OUT="${XDG_RUNTIME_DIR}/punar/keys-probe-clip.txt"
+    rm -f "${CLIP_OUT}"
+    foot --title punar-keys-clip "${PROBE_SCRIPT}" "${CLIP_OUT}" >/dev/null 2>&1 &
+    PROBE_CLIP=""
+    if wait_for 20 clip_mapped; then
+        PROBE_CLIP="$(clip_address)"
+        PROBES="${PROBES} ${PROBE_CLIP}"
+    fi
+    if [ -n "${PROBE_CLIP}" ] && focus_window "${PROBE_CLIP}"; then
+        press punar-c
+        press punar-v
+        press return
+        if wait_for 15 file_is "${CLIP_OUT}" punarpaste; then
+            note "ok   in a terminal PUNAR+V pasted and PUNAR+C did not interrupt the program"
+        else
+            fail "the terminal probe wrote '$(cat "${CLIP_OUT}" 2>/dev/null)': PUNAR+C interrupted it, or PUNAR+V did not paste"
+        fi
+    else
+        fail "the terminal probe for the clipboard keys did not open or take focus"
+    fi
+    "${CTL}" keyboard clipboard-keys off >/dev/null 2>&1
+    CLIPBOARD_KEYS_ON=no
+    wait_for 10 paste_unbound || fail "the clipboard keys stayed bound after clipboard-keys off"
+else
+    fail "the Mac-style clipboard keys were not bound after punarctl keyboard clipboard-keys on"
+fi
+
+# --- 9d. a look toggle, kept across a configuration reload ------------------
+# PUNAR+CTRL+T runs `punarctl window look transparency toggle`: the live
+# session turns translucent, the choice is written as data, and a reload
+# (the same path as the next sign-in) keeps it. Pressed again, it goes back.
+opacity() { hyprctl -j getoption decoration:active_opacity 2>/dev/null | jq -r '.float // ""'; }
+translucent() { opacity | awk '{ exit !($1 > 0.95 && $1 < 0.97) }'; }
+opaque() { opacity | awk '{ exit !($1 > 0.99) }'; }
+press punar-ctrl-t
+if wait_for 10 translucent; then
+    note "ok   PUNAR+CTRL+T made the windows translucent ($(opacity))"
+    check_eq "the look is kept as data" true "$("${CTL}" --json window look 2>/dev/null | jq -r '.transparency')"
+    hyprctl reload >/dev/null 2>&1
+    sleep 1
+    if wait_for 10 translucent; then
+        note "ok   the look survived a configuration reload"
+    else
+        fail "a reload dropped the look (active_opacity $(opacity))"
+    fi
+    press punar-ctrl-t
+    wait_for 10 opaque || fail "a second PUNAR+CTRL+T did not make the windows opaque again ($(opacity))"
+else
+    fail "PUNAR+CTRL+T left active_opacity at '$(opacity)'"
+fi
+
+# --- 9e. French (AZERTY): the number row and the help key --------------------
+# On AZERTY the number row types & é " … unshifted, so digit keysyms never
+# match; the workspace keys are bound by key code and must still work. And
+# `/` is Shift+: there, so PUNAR+/ cannot be pressed at all; PUNAR+F1 opens
+# the same shortcut help on every layout.
+shortcuts_open() { [ "$(ipc shortcuts state)" = open ]; }
+if in_session keyboard layout set fr > /run/punar/keys-fr.txt 2>&1 && wait_for 10 layout_is fr; then
+    "${CTL}" workspace focus 1 >/dev/null 2>&1
+    wait_for 10 on_workspace 1 || fail "workspace 1 did not take focus before the AZERTY keys"
+    press punar-2
+    if wait_for 10 on_workspace 2; then
+        note "ok   under AZERTY, PUNAR+2 (the key that types é) reached workspace 2"
+    else
+        fail "under AZERTY, PUNAR+2 left the session on workspace $(active_workspace)"
+    fi
+    press punar-f1
+    if wait_for 10 shortcuts_open; then
+        note "ok   under AZERTY, PUNAR+F1 opened the shortcut help"
+        ipc shortcuts close >/dev/null
+    else
+        fail "under AZERTY, PUNAR+F1 did not open the shortcut help (state '$(ipc shortcuts state)')"
+    fi
+else
+    fail "the French layout did not load: live '$(option input:kb_layout)' $(head -c 200 /run/punar/keys-fr.txt)"
+fi
 
 # --- 10. the layout goes back, and the compositor follows ----------------------
 cleanup

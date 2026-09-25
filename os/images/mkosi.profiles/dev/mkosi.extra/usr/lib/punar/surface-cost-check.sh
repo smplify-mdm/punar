@@ -209,7 +209,46 @@ surface_closed() {
     [ "$(ipc surfaceprobe surfaceState | tr -d '[:space:]\"')" = "closed" ]
 }
 
+# WINDOWS TO DRAW. The overview and the Alt+Tab switcher draw one wireframe
+# per window, so measured on an empty desktop both cost almost nothing and
+# the switcher's budget below would pass trivially (SMP-1405 WP-02 review).
+# Three plain terminal windows are opened before the overview's first
+# sample and kept until the end, so both surfaces are measured drawing the
+# same three windows; the switcher's budget is refused if fewer than two
+# were there to draw.
+COST_WINDOWS_OPEN=no
+cost_window_count() {
+    hyprctl -j clients 2>/dev/null \
+        | jq '[.[] | select((.class // "") | startswith("punar-cost-"))] | length' 2>/dev/null \
+        || echo 0
+}
+cost_windows_mapped() { [ "$(cost_window_count)" -ge 3 ]; }
+open_cost_windows() {
+    [ "${COST_WINDOWS_OPEN}" = no ] || return 0
+    COST_WINDOWS_OPEN=yes
+    for cost_n in 1 2 3; do
+        foot --app-id "punar-cost-${cost_n}" sleep 900 >/dev/null 2>&1 &
+    done
+    if wait_for 30 cost_windows_mapped; then
+        note "# three windows open for the overview and the switcher to draw"
+    else
+        note "# only $(cost_window_count) of three windows mapped for the overview and the switcher"
+    fi
+}
+close_cost_windows() {
+    [ "${COST_WINDOWS_OPEN}" = yes ] || return 0
+    for cost_address in $(hyprctl -j clients 2>/dev/null \
+            | jq -r '.[] | select((.class // "") | startswith("punar-cost-")) | .address' 2>/dev/null); do
+        punarctl window close --address "${cost_address}" >/dev/null 2>&1 || true
+    done
+}
+
+SWITCHER_WINDOWS=0
 for surface in ${SURFACES}; do
+    case "${surface}" in
+        overview) open_cost_windows ;;
+        windowswitcher) SWITCHER_WINDOWS="$(cost_window_count)" ;;
+    esac
     sample=1
     while [ "${sample}" -le "${SAMPLES}" ]; do
         if ! start_probe; then
@@ -351,13 +390,18 @@ switcher_delta="$(median_of windowswitcher 5)"
 overview_delta="$(median_of overview 5)"
 switcher_map="$(median_of windowswitcher 9)"
 overview_map="$(median_of overview 9)"
+close_cost_windows
+if [ "${SWITCHER_WINDOWS:-0}" -lt 2 ] 2>/dev/null; then
+    note "FAIL windowswitcher budget: measured with ${SWITCHER_WINDOWS:-0} window(s) to draw; an empty strip proves nothing"
+    FAILED=1
+fi
 case "${switcher_delta}${overview_delta}${switcher_map}${overview_map}" in
     ''|*[!0-9-]*)
         note "FAIL windowswitcher budget: medians unavailable (switcher ${switcher_delta:-?}/${switcher_map:-?}, overview ${overview_delta:-?}/${overview_map:-?})"
         FAILED=1 ;;
     *)
         if [ "${switcher_delta}" -le "${overview_delta}" ] && [ "${switcher_map}" -le "${overview_map}" ]; then
-            note "ok windowswitcher budget: resident ${switcher_delta} <= ${overview_delta} KiB and first map ${switcher_map} <= ${overview_map} ms (overview)"
+            note "ok windowswitcher budget: resident ${switcher_delta} <= ${overview_delta} KiB and first map ${switcher_map} <= ${overview_map} ms (overview), both drawing ${SWITCHER_WINDOWS} windows"
         else
             note "FAIL windowswitcher budget: resident ${switcher_delta} KiB / first map ${switcher_map} ms exceeds the overview's ${overview_delta} KiB / ${overview_map} ms"
             FAILED=1

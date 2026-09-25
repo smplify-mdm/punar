@@ -18,9 +18,10 @@ Description=Punar keys, keyboard layout and window grammar exercise (CI)
 [Service]
 Type=oneshot
 User=punar
-# Bounded waits inside: about thirty waits of 5-20 s, each ending on first
-# success. Well under two minutes under KVM; the rest is TCG headroom.
-TimeoutStartSec=8min
+# Bounded waits inside: about forty waits of 5-30 s, each ending on first
+# success, two configuration reloads and two lock/unlock cycles. A minute or
+# two under KVM; the rest is TCG headroom (tools/boot-test.sh counts it).
+TimeoutStartSec=10min
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStart=/usr/lib/punar/keys-check.sh

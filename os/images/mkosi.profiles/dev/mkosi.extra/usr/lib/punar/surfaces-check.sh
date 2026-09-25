@@ -1571,8 +1571,57 @@ case "${sc_untried}" in
         note "FAIL the not-tried-yet hint still suggests the command center after it was opened: ${sc_untried}"
         FAILED=1 ;;
     *)
-        note "ok   the not-tried-yet hint leaves out what was used (${sc_untried:-nothing left to suggest})" ;;
+        note "ok   the not-tried-yet hint leaves out what was used (${sc_untried:-empty})" ;;
 esac
+# NOT VACUOUS: an empty hint passes the line above, and so would a surface
+# that failed to load. The terminal's answer is the oracle (terminal parity):
+# the shell writes the family list at its first start, `punarctl keys list
+# --untried` reads the same file, and every row the hint names must be one
+# the terminal also calls untried. Only a person who tried everything gets
+# an empty hint, and then the terminal must agree.
+sc_tried_file="${HOME:-/home/punar}/.local/state/punar/shortcuts-tried.json"
+if jq -e '.version == 1 and (.families | type) == "array" and (.families | length) > 0' \
+        "${sc_tried_file}" >/dev/null 2>&1; then
+    note "ok   the shell wrote the tried-keys file the terminal reads ($(jq '.families | length' "${sc_tried_file}") families)"
+else
+    note "FAIL the shell did not write ${sc_tried_file}, so the terminal cannot give the same hint"
+    FAILED=1
+fi
+sc_cli_untried="$(punarctl --json keys list --untried 2>/dev/null | jq -r '.[].description' 2>/dev/null)"
+if [ -n "${sc_cli_untried}" ] && [ -z "${sc_untried}" ]; then
+    note "FAIL the hint is empty while the terminal still lists untried keys: $(printf '%s' "${sc_cli_untried}" | tr '\n' '|')"
+    FAILED=1
+elif [ -z "${sc_cli_untried}" ] && [ -n "${sc_untried}" ]; then
+    note "FAIL the hint suggests '${sc_untried}' while the terminal lists nothing untried"
+    FAILED=1
+else
+    sc_hint_rows=0
+    sc_hint_bad=""
+    # Entries are "<chord>  <description>", joined by "   ·   ". A folded
+    # row ("Workspace 1…10") stands for its family, so it is matched by the
+    # description it starts with ("Workspace ").
+    sc_hints="$(printf '%s\n' "${sc_untried}" | sed 's/   ·   /\n/g')"
+    while IFS= read -r sc_hint; do
+        sc_label="$(printf '%s' "${sc_hint}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^.*  //')"
+        [ -n "${sc_label}" ] || continue
+        sc_hint_rows=$((sc_hint_rows + 1))
+        sc_base="$(printf '%s' "${sc_label}" | sed 's/[0-9][0-9]*…[0-9][0-9]*$//')"
+        if ! printf '%s\n' "${sc_cli_untried}" \
+                | awk -v b="${sc_base}" 'index($0, b) == 1 { found = 1 } END { exit !found }'; then
+            sc_hint_bad="${sc_hint_bad} '${sc_label}'"
+        fi
+    done <<SC_HINTS
+${sc_hints}
+SC_HINTS
+    if [ -n "${sc_hint_bad}" ]; then
+        note "FAIL the hint suggests keys the terminal does not call untried:${sc_hint_bad}"
+        FAILED=1
+    elif [ "${sc_hint_rows}" -gt 0 ]; then
+        note "ok   the hint's ${sc_hint_rows} suggestion(s) are all untried in the terminal's answer too"
+    else
+        note "ok   every key family was tried, and the terminal agrees"
+    fi
+fi
 
 ipc shortcuts close >/dev/null 2>&1 || true
 
