@@ -329,6 +329,19 @@ else
     emit_fact "PUNAR_ZRAM_SWAP_ACTIVE=no"
 fi
 
+# SETTINGS THAT CHANGE WHAT "USED" MEANS, recorded beside the figure and
+# never changed here. Transparent huge pages raise min_free_kbytes (khugepaged
+# sizes the watermarks for them), and MemAvailable leaves that reserve out, so
+# a system with THP off reports roughly 130 MiB less "used" at 8 GiB without
+# using less memory. No comparison may quietly trade one for the other; the
+# benchmark harness (tools/bench) records the same facts on every system it
+# measures. The PUNAR_IDLE_ prefix carries them into ram-report.txt.
+thp_mode="$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)"
+thp_defrag="$(sed -n 's/.*\[\([a-z+]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null)"
+emit_fact "PUNAR_IDLE_THP_MODE=${thp_mode:-unsupported}"
+emit_fact "PUNAR_IDLE_THP_DEFRAG=${thp_defrag:-unsupported}"
+emit_fact "PUNAR_IDLE_MIN_FREE_KBYTES=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null || echo absent)"
+
 ram_procs="${RUN_DIR}/ram-processes.txt"
 ram_process_memory="${RUN_DIR}/ram-process-memory.txt"
 ram_process_raw="${RUN_DIR}/ram-process-memory.raw"
