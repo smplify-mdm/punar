@@ -47,6 +47,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_units;
 pub mod agentd;
 pub mod aipolicy;
 pub mod approvals;
@@ -57,6 +58,7 @@ pub mod browser_policy;
 pub mod capability;
 pub mod device;
 pub mod enroll;
+pub mod fetch;
 pub mod hardware;
 pub mod install;
 pub mod inventory;

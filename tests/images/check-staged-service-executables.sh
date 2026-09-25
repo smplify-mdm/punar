@@ -33,7 +33,7 @@ check_unit_dir() {
                 binary="${binary#?}"
             done
             case "${binary}" in
-                /usr/bin/punar*) ;;
+                /usr/bin/punar*|/usr/lib/punar/punar-*) ;;
                 *) continue ;;
             esac
 

@@ -38,6 +38,10 @@
 #      unknown_method surfaced, nonzero exit
 #   11 device class is observed from Linux facts; the typed force seam
 #      exercises workstation/laptop/appliance and mutates no safety state
+#   12 downloads run in the unprivileged fetch helper: its socket listens
+#      root-only, its unit's exposure is at most 2.0, punard's own binary
+#      names no downloader, and in punard's mount namespace the downloaders
+#      cannot be executed at all
 set -u
 
 RUN_DIR=/run/punar
@@ -269,6 +273,54 @@ for method in system.exec shell.run; do
         FAILED=1
     fi
 done
+
+# --- 12. downloads run in the unprivileged helper, never in punard ----------
+# punard is root and hands every update and vendor download to
+# punar-fetch@.service over a root-only socket (crates/punard/src/fetch.rs):
+# a dynamic user with no capabilities, a read-only file system and no local
+# network. Asserted on the running machine, not the unit file: the socket
+# listens and only root can reach it, systemd's own exposure score for the
+# helper stays at or under 2.0, the running punard's binary names no
+# downloader, and punard could not run one if it tried, by path or through
+# PATH: in its mount namespace (/proc/PID/root) each downloader is systemd's
+# mode-0000 inaccessible node, which nothing can execute.
+check_eq "punar-fetch.socket listens" "active" \
+    "$(systemctl is-active punar-fetch.socket 2>/dev/null)"
+check_eq "the fetch socket is root-only" "600 root:root" \
+    "$(stat -c '%a %U:%G' /run/punar-fetch/request.sock 2>/dev/null)"
+fetch_exposure="$(systemd-analyze security --no-pager punar-fetch@m3-probe.service 2>/dev/null \
+    | sed -n 's/.*Overall exposure level for [^:]*: \([0-9.]*\).*/\1/p')"
+if [ -z "${fetch_exposure}" ]; then
+    note "FAIL systemd-analyze reported no exposure for punar-fetch@.service"
+    FAILED=1
+elif awk -v exposure="${fetch_exposure}" 'BEGIN { exit !(exposure <= 2.0) }'; then
+    note "ok   punar-fetch@.service exposure ${fetch_exposure} <= 2.0"
+else
+    note "FAIL punar-fetch@.service exposure ${fetch_exposure} > 2.0"
+    FAILED=1
+fi
+punard_pid="$(systemctl show -p MainPID --value punard.service 2>/dev/null)"
+if [ -z "${punard_pid}" ] || [ "${punard_pid}" = 0 ]; then
+    note "FAIL punard has no main process to inspect"
+    FAILED=1
+elif grep -a -q -e /usr/bin/curl -e /usr/bin/wget "/proc/${punard_pid}/exe" 2>/dev/null; then
+    note "FAIL the running punard names a downloader; it must hand downloads to punar-fetch"
+    FAILED=1
+else
+    note "ok   the running punard does not name a downloader"
+fi
+downloaders_seen=0
+for downloader in /usr/bin/curl /usr/bin/wget; do
+    [ -e "${downloader}" ] || continue
+    downloaders_seen=$((downloaders_seen + 1))
+    if [ -n "${punard_pid}" ] && [ "${punard_pid}" != 0 ]; then
+        check_eq "punard's namespace makes ${downloader} inaccessible (mode as punard sees it)" "0" \
+            "$(stat -L -c '%a' "/proc/${punard_pid}/root${downloader}" 2>/dev/null)"
+    fi
+done
+if [ "${downloaders_seen}" -eq 0 ]; then
+    note "ok   no downloader is installed for punard to reach"
+fi
 
 # --- verdict -----------------------------------------------------------------
 if [ "${FAILED}" -eq 0 ]; then

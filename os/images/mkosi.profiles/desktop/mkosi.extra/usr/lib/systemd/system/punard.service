@@ -12,18 +12,43 @@
 
 [Unit]
 Description=Punar control-plane daemon (typed capability API)
-# punard dials punar-smplifyd's socket during enrollment and sync: order after
-# it, never Requires it — cached policy must keep enforcing with the agent
-# down (SPEC section 55).
-After=punar-smplifyd.service
+# punard is the only client of punar-smplifyd's socket, and the socket is the
+# whole of the agent's lifetime on a device that never enrolls: Wants= it,
+# never Requires= it, because cached policy must keep enforcing with the
+# agent down (SPEC section 55), and punard reports an agent that is not
+# there as management interrupted. Ordered after the socket, so the first
+# call finds it listening, and after the service, so at shutdown punard
+# stops first and an agent call in flight can finish.
+Wants=punar-smplifyd.socket
+After=punar-smplifyd.socket punar-smplifyd.service
+# Every download punard makes goes through the unprivileged helper behind this
+# socket (crates/punard/src/fetch.rs); punard never runs a downloader itself.
+Wants=punar-fetch.socket
+After=punar-fetch.socket
 # /run/punard, /var/lib/punar, /var/log/punar come from
 # tmpfiles.d/punard.conf; systemd-tmpfiles-setup orders before basic.target,
 # which every default-dependency service (this one) starts after.
+#
+# punard is what notices every other way management is stopped
+# (docs/development/smplify-enrollment.md section 3.4), so it must not be
+# the easy one. Only a dependency may stop it (shutdown); an administrator's
+# `systemctl stop` or `restart` is refused, and any exit, a kill included,
+# is restarted, with no start limit a few kills in a row could exhaust. What
+# root has left (mask then kill, a drop-in, isolating another target) is
+# noticed: a mask or drop-in by the unit check on the next pass, and the gap
+# in reconcile passes when they resume (`enroll.gap`).
+RefuseManualStop=yes
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/punard run
-Restart=on-failure
+Restart=always
+# At once after a kill, backing off to 30 s between restarts when it keeps
+# failing, so a crash at start never spins.
+RestartSec=1s
+RestartSteps=5
+RestartMaxDelaySec=30s
 # The stabilized-idle gate reads this unit's cgroup counters on every kernel.
 # Do not rely on a parent slice or distribution default to enable controllers.
 CPUAccounting=yes
@@ -33,6 +58,13 @@ IOAccounting=yes
 # /etc/localtime (the full sandbox profile is later-milestone work).
 # NoNewPrivileges is compatible with nft (root's own privileges, no setuid).
 NoNewPrivileges=yes
+# punard never runs a downloader: every download goes through the unprivileged
+# helper behind punar-fetch.socket. Making the downloaders inaccessible in
+# punard's mount namespace turns that from a code convention into a property
+# of the running daemon: an exec of either, by path or through PATH, from
+# punard or anything it starts, fails. check-release-image.sh A19 keeps this
+# line.
+InaccessiblePaths=-/usr/bin/curl -/usr/bin/wget
 PrivateTmp=yes
 ProtectHome=yes
 StandardOutput=journal

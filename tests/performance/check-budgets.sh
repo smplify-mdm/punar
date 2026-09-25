@@ -35,12 +35,64 @@
 # summed PSS of the pids in every Punar service cgroup (§2.3 canonical
 # metric — cgroup attribution, never process-name matching).
 #
+# The built-in Smplify agent is dormant until enrolled
+# (docs/development/smplify-enrollment.md section 3.4), so it is not summed
+# above. On the measured image, which never enrolls, it must never have
+# started this boot (an agent started during boot and dormant thirty seconds
+# later leaves no process to count), must not be running, and its socket must
+# be listening for the day it does:
+#
+#   PUNAR_SMPLIFYD_START_MONOTONIC_US != 0     ::error:: -> exit 1
+#   PUNAR_SMPLIFYD_PROCS != 0                  ::error:: -> exit 1
+#   PUNAR_SMPLIFYD_SOCKET != active            ::error:: -> exit 1
+#   any of them absent or malformed            ::error:: -> exit 1
+#                                              (all EVEN under TCG: a
+#                                              resident agent on a device that
+#                                              never enrolled is a privacy
+#                                              failure, not an emulation
+#                                              artifact)
+#
 # The same five-minute window carries enforceable idle-CPU and first-party
 # write contracts (PERFORMANCE_BUDGETS.md §1.3–1.4/§2.4–2.5):
 #
 #   max first-party cgroup >= 0.50% of one CPU    ::error:: -> exit 1
 #   combined Punar service writes > 98,304 bytes  ::error:: -> exit 1
 #   short/missing runtime, network or zram facts  ::error:: -> exit 1
+#
+# The initrd must also have freed the unpacked initramfs before switch-root
+# (punar-release-initramfs.service; PERFORMANCE_BUDGETS.md §4.1). On the arm64
+# release image with Linux 7.1 it otherwise stayed resident as Unevictable
+# memory for the whole boot (MEASURED; 7.0 to 7.2 INFER). The helper acts only
+# on those kernels and logs "not needed" elsewhere. The kernel's own memory
+# figures, not just the helper's word, must show the pages went, and nothing
+# may go wrong between the release and the switch. Behaviors, not budgets, so
+# they fail on every accelerator:
+#
+#   PUNAR_IDLE_INITRAMFS_RELEASED not yes/not-needed  ::error:: -> exit 1
+#   released, FREED_KB <= KEPT_KB                     ::error:: -> exit 1
+#   released, DROP_KB * 2 < FREED_KB                  ::error:: -> exit 1
+#   released, LATE_WARNINGS != 0                      ::error:: -> exit 1
+#   PUNAR_IDLE_UNEVICTABLE_KB, PUNAR_IDLE_KERNEL      context only
+# The whole guest's writes are attributed, context only, never gated on
+# volume: the journal (systemd-journald.service), every top-level cgroup
+# together, and the kernel/filesystem metadata no cgroup was charged for,
+# which is the device total minus the cgroups. The sampler's arithmetic is
+# checked, because a remainder computed as root PLUS children counts every
+# charged byte twice, and so is the device total itself, against the
+# diskstats total the same report carries for the same disks (a device total
+# that is itself root plus children agrees with its own remainder, and only
+# the independent figure shows it):
+#
+#   attribution facts missing or malformed      ::error:: -> exit 1
+#   kernel/fs != device - cgroups (floor 0)     ::error:: -> exit 1
+#   |device - diskstats| > slack                ::error:: -> exit 1
+#   cgroups - device > slack                    ::error:: -> exit 1
+#
+# slack = 512 KiB + 1/32 of the diskstats total: the root's io.stat counts a
+# write when it is submitted and diskstats when it completes, so writes in
+# flight at either edge of the window may be in one and not yet the other.
+# The measured window's two totals were identical (8,616 sectors each); a
+# double count is at least every charged byte (1,208,320 in that window).
 #
 # CPU is stored in hundredths of a percentage point (`bps`): 50 is 0.50%.
 # The write ceiling is the engineering interpretation recorded after two
@@ -138,11 +190,26 @@ IDLE_CPU_MAX_BPS="$(get_field PUNAR_IDLE_CPU_MAX_BPS)"
 IDLE_SERVICE_WRITE_BYTES="$(get_field PUNAR_IDLE_SERVICE_WRITE_BYTES)"
 IDLE_SYSTEM_CPU_BPS="$(get_field PUNAR_IDLE_SYSTEM_CPU_BPS)"
 IDLE_BLOCK_WRITE_BYTES="$(get_field PUNAR_IDLE_BLOCK_WRITE_BYTES)"
+INITRAMFS_RELEASED="$(get_field PUNAR_IDLE_INITRAMFS_RELEASED)"
+INITRAMFS_FREED_KB="$(get_field PUNAR_IDLE_INITRAMFS_FREED_KB)"
+INITRAMFS_KEPT_KB="$(get_field PUNAR_IDLE_INITRAMFS_KEPT_KB)"
+INITRAMFS_DROP_KB="$(get_field PUNAR_IDLE_INITRAMFS_DROP_KB)"
+INITRAMFS_LATE_WARNINGS="$(get_field PUNAR_IDLE_INITRAMFS_LATE_WARNINGS)"
+IDLE_KERNEL="$(get_field PUNAR_IDLE_KERNEL)"
+UNEVICTABLE_KB="$(get_field PUNAR_IDLE_UNEVICTABLE_KB)"
+WRITE_DEVICE_BYTES="$(get_field PUNAR_IDLE_WRITE_DEVICE_BYTES)"
+WRITE_DEVICE_SOURCE="$(get_field PUNAR_IDLE_WRITE_DEVICE_SOURCE)"
+WRITE_JOURNALD_BYTES="$(get_field PUNAR_IDLE_WRITE_JOURNALD_BYTES)"
+WRITE_CGROUPS_BYTES="$(get_field PUNAR_IDLE_WRITE_CGROUPS_BYTES)"
+WRITE_KERNEL_FS_BYTES="$(get_field PUNAR_IDLE_WRITE_KERNEL_FS_BYTES)"
 NETWORK_ONLINE="$(get_field PUNAR_NETWORK_ONLINE)"
 ZRAM_PRESENT="$(get_field PUNAR_ZRAM_PRESENT)"
 ZRAM_DISKSIZE_MB="$(get_field PUNAR_ZRAM_DISKSIZE_MB)"
 ZRAM_ALGORITHM="$(get_field PUNAR_ZRAM_ALGORITHM)"
 ZRAM_SWAP_ACTIVE="$(get_field PUNAR_ZRAM_SWAP_ACTIVE)"
+SMPLIFYD_PROCS="$(get_field PUNAR_SMPLIFYD_PROCS)"
+SMPLIFYD_STARTED="$(get_field PUNAR_SMPLIFYD_START_MONOTONIC_US)"
+SMPLIFYD_SOCKET="$(get_field PUNAR_SMPLIFYD_SOCKET)"
 require_number PUNAR_RAM_MEAN_MB "${MEAN_MB}"
 require_number PUNAR_RAM_MAX_MB "${MAX_MB}"
 
@@ -213,6 +280,39 @@ case "${SERVICES_MB:-missing}" in
         ;;
 esac
 
+# --- The Smplify agent, dormant until enrolled. Every accelerator: a
+# resident agent on a device that never enrolled is not an emulation effect.
+case "${SMPLIFYD_PROCS:-missing}" in
+    0)
+        echo "==> OK: no Smplify agent process on the unenrolled image (dormant until enrolled)"
+        ;;
+    ''|missing|*[!0-9]*)
+        annotate error "PUNAR_SMPLIFYD_PROCS is '${SMPLIFYD_PROCS:-missing}' — the sampler did not report whether the Smplify agent runs on the unenrolled image (docs/development/smplify-enrollment.md section 3.4)"
+        fail=1
+        ;;
+    *)
+        annotate error "${SMPLIFYD_PROCS} Smplify agent process(es) at stabilized idle on a device that never enrolled — the agent must be dormant until enrollment (docs/development/smplify-enrollment.md section 3.4)"
+        fail=1
+        ;;
+esac
+case "${SMPLIFYD_STARTED:-missing}" in
+    0)
+        echo "==> OK: the Smplify agent never started this boot"
+        ;;
+    ''|missing|*[!0-9]*)
+        annotate error "PUNAR_SMPLIFYD_START_MONOTONIC_US is '${SMPLIFYD_STARTED:-missing}' — the sampler did not report whether the Smplify agent started this boot (docs/development/smplify-enrollment.md section 3.4)"
+        fail=1
+        ;;
+    *)
+        annotate error "the Smplify agent started this boot (at ${SMPLIFYD_STARTED} us) on a device that never enrolled — something called it; it must stay dormant until enrollment (docs/development/smplify-enrollment.md section 3.4)"
+        fail=1
+        ;;
+esac
+if [ "${SMPLIFYD_SOCKET:-missing}" != active ]; then
+    annotate error "punar-smplifyd.socket is '${SMPLIFYD_SOCKET:-missing}', not active — enrollment could not start the agent (docs/development/smplify-enrollment.md section 3.4)"
+    fail=1
+fi
+
 # --- Stabilized idle CPU + writes. Absence fails on every accelerator: it
 # means the shipped sampler did not produce the evidence, not that emulation
 # was slow. Numeric CPU/write breaches follow RAM's TCG downgrade rule.
@@ -220,6 +320,49 @@ if [ "${RUNTIME_PRESENT}" != "yes" ]; then
     annotate error "idle runtime facts are incomplete or missing (PUNAR_IDLE_RUNTIME_PRESENT='${RUNTIME_PRESENT:-missing}') — every Punar service cgroup must expose CPU and I/O counters"
     fail=1
 fi
+case "${INITRAMFS_RELEASED}" in
+    not-needed)
+        echo "==> OK: the initrd did not need to free the unpacked initramfs on Linux ${IDLE_KERNEL:-unknown} (the helper acts only on 7.0 to 7.2); Unevictable ${UNEVICTABLE_KB:-missing} kB at the end of the window (context only)"
+        ;;
+    yes)
+        initramfs_ok=1
+        for field_and_value in \
+            "PUNAR_IDLE_INITRAMFS_FREED_KB:${INITRAMFS_FREED_KB}" \
+            "PUNAR_IDLE_INITRAMFS_KEPT_KB:${INITRAMFS_KEPT_KB}" \
+            "PUNAR_IDLE_INITRAMFS_DROP_KB:${INITRAMFS_DROP_KB#-}" \
+            "PUNAR_IDLE_INITRAMFS_LATE_WARNINGS:${INITRAMFS_LATE_WARNINGS}"; do
+            case "${field_and_value#*:}" in
+                ''|*[!0-9]*)
+                    annotate error "the initramfs release evidence is incomplete: ${field_and_value%%:*}='${field_and_value#*:}' (PERFORMANCE_BUDGETS.md §4.1)"
+                    initramfs_ok=0
+                    ;;
+            esac
+        done
+        if [ "${initramfs_ok}" -eq 1 ]; then
+            if [ "${INITRAMFS_FREED_KB}" -le "${INITRAMFS_KEPT_KB}" ]; then
+                annotate error "the initramfs release freed ${INITRAMFS_FREED_KB} KiB but kept ${INITRAMFS_KEPT_KB} KiB — the keep set must be the small part (PERFORMANCE_BUDGETS.md §4.1)"
+                initramfs_ok=0
+            fi
+            if [ "$((INITRAMFS_DROP_KB * 2))" -lt "${INITRAMFS_FREED_KB}" ]; then
+                annotate error "the initramfs release unlinked ${INITRAMFS_FREED_KB} KiB but Unevictable + Shmem fell only ${INITRAMFS_DROP_KB} KiB — the pages did not go (PERFORMANCE_BUDGETS.md §4.1)"
+                initramfs_ok=0
+            fi
+            if [ "${INITRAMFS_LATE_WARNINGS}" -ne 0 ]; then
+                annotate error "${INITRAMFS_LATE_WARNINGS} warning-or-worse journal entries between the initramfs release and the switch-root — something still needed a program it deleted (journalctl -b -p warning)"
+                initramfs_ok=0
+            fi
+        fi
+        if [ "${initramfs_ok}" -eq 1 ]; then
+            echo "==> OK: the initrd freed the unpacked initramfs before switch-root on Linux ${IDLE_KERNEL:-unknown}: ${INITRAMFS_FREED_KB} KiB unlinked, Unevictable + Shmem down ${INITRAMFS_DROP_KB} KiB, ${INITRAMFS_KEPT_KB} KiB kept, no warnings before the switch; Unevictable ${UNEVICTABLE_KB:-missing} kB at the end of the window (context only)"
+        else
+            fail=1
+        fi
+        ;;
+    *)
+        annotate error "the unpacked initramfs was not freed before switch-root (PUNAR_IDLE_INITRAMFS_RELEASED='${INITRAMFS_RELEASED:-missing}') — punar-release-initramfs.service refused, failed or did not run, so on Linux ${IDLE_KERNEL:-unknown} it may stay resident for the whole boot (PERFORMANCE_BUDGETS.md §4.1)"
+        fail=1
+        ;;
+esac
 if [ "${NETWORK_ONLINE}" != "yes" ]; then
     annotate error "stabilized idle was not DHCP-connected (PUNAR_NETWORK_ONLINE='${NETWORK_ONLINE:-missing}') — the canonical method requires a live non-loopback link and default route"
     fail=1
@@ -231,6 +374,10 @@ for field_and_value in \
     "PUNAR_IDLE_SERVICE_WRITE_BYTES:${IDLE_SERVICE_WRITE_BYTES}" \
     "PUNAR_IDLE_SYSTEM_CPU_BPS:${IDLE_SYSTEM_CPU_BPS}" \
     "PUNAR_IDLE_BLOCK_WRITE_BYTES:${IDLE_BLOCK_WRITE_BYTES}" \
+    "PUNAR_IDLE_WRITE_DEVICE_BYTES:${WRITE_DEVICE_BYTES}" \
+    "PUNAR_IDLE_WRITE_JOURNALD_BYTES:${WRITE_JOURNALD_BYTES}" \
+    "PUNAR_IDLE_WRITE_CGROUPS_BYTES:${WRITE_CGROUPS_BYTES}" \
+    "PUNAR_IDLE_WRITE_KERNEL_FS_BYTES:${WRITE_KERNEL_FS_BYTES}" \
     "PUNAR_ZRAM_DISKSIZE_MB:${ZRAM_DISKSIZE_MB}"; do
     field="${field_and_value%%:*}"
     value="${field_and_value#*:}"
@@ -241,6 +388,55 @@ for field_and_value in \
             ;;
     esac
 done
+
+case "${WRITE_DEVICE_SOURCE:-missing}" in
+    cgroup-root|diskstats) ;;
+    *)
+        annotate error "check-budgets: field PUNAR_IDLE_WRITE_DEVICE_SOURCE is '${WRITE_DEVICE_SOURCE:-missing}', not cgroup-root or diskstats"
+        fail=1
+        ;;
+esac
+
+is_number() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+if is_number "${WRITE_DEVICE_BYTES}" && is_number "${WRITE_CGROUPS_BYTES}" \
+        && is_number "${WRITE_KERNEL_FS_BYTES}" && is_number "${WRITE_JOURNALD_BYTES}"; then
+    expected_kernel_fs=0
+    if [ "${WRITE_CGROUPS_BYTES}" -le "${WRITE_DEVICE_BYTES}" ]; then
+        expected_kernel_fs=$((WRITE_DEVICE_BYTES - WRITE_CGROUPS_BYTES))
+    fi
+    if [ "${WRITE_KERNEL_FS_BYTES}" -ne "${expected_kernel_fs}" ]; then
+        annotate error "the idle-write attribution does not add up: kernel/filesystem metadata ${WRITE_KERNEL_FS_BYTES} bytes, but the device wrote ${WRITE_DEVICE_BYTES} and the top-level cgroups ${WRITE_CGROUPS_BYTES} (expected ${expected_kernel_fs}; a remainder of root plus children counts every charged byte twice)"
+        fail=1
+    fi
+    if is_number "${IDLE_BLOCK_WRITE_BYTES}"; then
+        slack=$((524288 + IDLE_BLOCK_WRITE_BYTES / 32))
+        apart=$((WRITE_DEVICE_BYTES - IDLE_BLOCK_WRITE_BYTES))
+        [ "${apart}" -lt 0 ] && apart=$((-apart))
+        if [ "${apart}" -gt "${slack}" ]; then
+            annotate error "the idle-write device total (${WRITE_DEVICE_BYTES} bytes, ${WRITE_DEVICE_SOURCE:-?}) is ${apart} bytes from the disks' own diskstats total (${IDLE_BLOCK_WRITE_BYTES}), more than writes in flight explain (${slack}): a device total of root plus children counts every charged byte twice"
+            fail=1
+        fi
+        if [ "${WRITE_CGROUPS_BYTES}" -gt $((WRITE_DEVICE_BYTES + slack)) ]; then
+            annotate error "the top-level cgroups report $((WRITE_CGROUPS_BYTES - WRITE_DEVICE_BYTES)) bytes more than the device wrote (${WRITE_DEVICE_BYTES}), more than writes in flight explain (${slack}): the cgroup sum counts something twice (nested cgroups summed, or another device's writes)"
+            fail=1
+        fi
+    fi
+    other_cgroups=$((WRITE_CGROUPS_BYTES - WRITE_JOURNALD_BYTES))
+    if is_number "${IDLE_SERVICE_WRITE_BYTES}"; then
+        other_cgroups=$((other_cgroups - IDLE_SERVICE_WRITE_BYTES))
+    fi
+    echo "    idle writes, whole guest (context only, ${WRITE_DEVICE_SOURCE:-?}): ${WRITE_DEVICE_BYTES} bytes ="
+    echo "                 ${WRITE_JOURNALD_BYTES} journal (systemd-journald.service)"
+    echo "               + ${IDLE_SERVICE_WRITE_BYTES:-?} Punar first-party services"
+    echo "               + ${other_cgroups} every other cgroup"
+    echo "               + ${WRITE_KERNEL_FS_BYTES} kernel/filesystem metadata (no cgroup charged)"
+    if [ "${other_cgroups}" -lt 0 ]; then
+        annotate warning "the journal and Punar's services together report more writes than every top-level cgroup (${other_cgroups} bytes): the counters were flushed at different moments"
+    fi
+fi
 
 if [ -n "${IDLE_WINDOW_MS}" ] && case "${IDLE_WINDOW_MS}" in *[!0-9]*) false ;; *) true ;; esac \
     && [ "${IDLE_WINDOW_MS}" -lt 300000 ]; then
@@ -308,4 +504,4 @@ if [ "${fail}" -eq 1 ]; then
     echo "==> FAIL: stabilized-idle performance budget gate" >&2
     exit 1
 fi
-echo "==> PASS: stabilized-idle performance gate (RAM + services PSS + CPU + first-party writes + zram)"
+echo "==> PASS: stabilized-idle performance gate (RAM + services PSS + dormant agent + CPU + first-party writes + zram)"

@@ -364,7 +364,7 @@ fn configure_update_fixture(
         repository_url_file: dir.join("update-repository.url"),
         repository_url_owner_uid: rustix::process::geteuid().as_raw(),
         repository_dir: repository,
-        curl_bin: dir.join("curl"),
+        fetch_socket: dir.join("fetch.sock"),
         trusted_keys_dir: keys,
         cached_channel: cfg.state_dir.join("update/verified-channel.json"),
         cached_signature: cfg.state_dir.join("update/verified-channel.json.sig"),
@@ -2466,6 +2466,23 @@ fn remediation_loop_protection_engages_and_resets() {
     td.mock.set_state(json!("tampered"));
     td.mock.fail_next_applies(true);
 
+    // The last remediation event, and the compliance changes so far.
+    let last_remediation = |audit: &[Value]| {
+        audit
+            .iter()
+            .rev()
+            .find(|e| e["action"] == "reconcile.remediate")
+            .cloned()
+            .unwrap()
+    };
+    let compliance_changes = |audit: &[Value]| -> Vec<String> {
+        audit
+            .iter()
+            .filter(|e| e["action"] == "reconcile.compliance" && e["resource"] == "mock.widget")
+            .map(|e| e["result"].as_str().unwrap().to_string())
+            .collect()
+    };
+
     // Attempts 1 and 2: apply fails, capability is remediating.
     for attempt in 1..=2 {
         let resp = td.call("reconcile", None);
@@ -2474,9 +2491,14 @@ fn remediation_loop_protection_engages_and_resets() {
         assert_eq!(resp["result"]["remediated_count"], 0);
         assert_eq!(resp["result"]["compliance"]["overall"], "remediating");
         let audit = td.audit_lines();
-        let ev = &audit[audit.len() - 2];
-        assert_eq!(ev["action"], "reconcile.remediate");
+        let ev = last_remediation(&audit);
         assert_eq!(ev["result"], "apply_failed", "attempt {attempt}");
+        // Compliant to remediating is news once, not on every attempt.
+        assert_eq!(
+            compliance_changes(&audit),
+            ["remediating"],
+            "attempt {attempt}"
+        );
     }
 
     // Attempt 3: the transition — attempts_exhausted, non_compliant.
@@ -2485,10 +2507,17 @@ fn remediation_loop_protection_engages_and_resets() {
     assert_eq!(entry["remediation"], "apply_failed");
     assert_eq!(resp["result"]["compliance"]["overall"], "non_compliant");
     let audit = td.audit_lines();
-    let ev = &audit[audit.len() - 2];
-    assert_schema_shaped(ev);
-    assert_eq!(ev["action"], "reconcile.remediate");
+    let ev = last_remediation(&audit);
+    assert_schema_shaped(&ev);
     assert_eq!(ev["result"], "attempts_exhausted");
+    let change = audit
+        .iter()
+        .rev()
+        .find(|e| e["action"] == "reconcile.compliance")
+        .unwrap();
+    assert_schema_shaped(change);
+    assert_eq!(change["policy_ids"], json!(["personal-defaults"]));
+    assert_eq!(compliance_changes(&audit), ["remediating", "non_compliant"]);
     let exhausted_events = audit
         .iter()
         .filter(|e| e["result"] == "attempts_exhausted")
@@ -2532,6 +2561,12 @@ fn remediation_loop_protection_engages_and_resets() {
     assert_eq!(resp["result"]["capabilities"][0]["remediation"], "applied");
     assert_eq!(resp["result"]["compliance"]["overall"], "compliant");
     assert_eq!(td.mock.state(), json!("on"));
+    // The manual set settled it: the audit trail records the recovery, and
+    // does not go on saying non_compliant.
+    assert_eq!(
+        compliance_changes(&td.audit_lines()),
+        ["remediating", "non_compliant", "compliant"]
+    );
 }
 
 #[test]

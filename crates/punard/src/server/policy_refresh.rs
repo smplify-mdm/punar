@@ -74,6 +74,26 @@ impl RefreshResult {
     }
 }
 
+/// What one refresh opportunity recorded, and whether the next ones back
+/// off ([`RefreshBackoff`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Refreshed {
+    pub(super) result: RefreshResult,
+    backs_off: bool,
+}
+
+impl Refreshed {
+    /// Only a failure that may clear by itself backs off: an I/O error on
+    /// this device, or a root drop changed while the set was installed.
+    fn of(result: RefreshResult, reason: Option<&str>) -> Refreshed {
+        Refreshed {
+            result,
+            backs_off: result == RefreshResult::Failed
+                && matches!(reason, Some("io" | "local_files_changed")),
+        }
+    }
+}
+
 /// The three results that mean "enforcing what the organization serves".
 fn is_current(result: &str) -> bool {
     matches!(result, "unchanged" | "applied" | "withdrawn")
@@ -118,7 +138,12 @@ const MAX_REFRESH_SKIP: u32 = 15;
 /// `2^(n-1) - 1` opportunities are skipped, at most [`MAX_REFRESH_SKIP`]:
 /// 0, 1, 3, 7, 15, 15, … Any answer resets it, a refused set included —
 /// the control plane is up, and the set is what failed — except one this
-/// device could not install (`failed`), which counts as a failure too.
+/// device could not install for a reason that may clear by itself (`failed`
+/// with `io` or `local_files_changed`), which counts as a failure too. A
+/// refusal remembered with what policy.d holds ([`LocalRefusal`]) is not
+/// staged again until policy.d or the offer changes, so asking again costs
+/// one fetch and nothing else, and must not wait: the organization's
+/// correction, or its withdrawal, is what ends it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RefreshBackoff {
     failures: u32,
@@ -289,12 +314,14 @@ impl Inner {
                     self.policy_refresh_backoff.lock().unwrap().answered();
                     return;
                 };
-                let result = self.refresh_under_guard(actor, epoch, fetched);
-                // A set this device could not install backs off like a
-                // failed fetch: the next pass would only repeat the same
-                // local failure, on a device that may be short of space.
+                let refreshed = self.refresh_under_guard(actor, epoch, fetched);
+                // A set this device could not install for a reason that may
+                // clear by itself backs off like a failed fetch: the next
+                // pass would only repeat the same local failure, on a device
+                // that may be short of space. One remembered with policy.d
+                // is not staged again, and is asked about on every pass.
                 let mut backoff = self.policy_refresh_backoff.lock().unwrap();
-                if result == Some(RefreshResult::Failed) {
+                if refreshed.is_some_and(|refreshed| refreshed.backs_off) {
                     backoff.failed();
                 } else {
                     backoff.answered();
@@ -320,6 +347,15 @@ impl Inner {
                 outcome.detail = Some(why);
                 outcome
             }
+            // The agent itself, which the pass's liveness call found
+            // answering and which failed since: management interrupted, the
+            // enroll.agent episode, and never the network's. The fetch says
+            // nothing about the organization's policy or the link to it, so
+            // nothing is recorded for the policy and nothing backs off.
+            Err(UpstreamError::AgentUnavailable(fault)) => {
+                self.note_agent(actor, epoch, super::Liveness::Unavailable(fault));
+                return;
+            }
             Err(UpstreamError::Refused { code, message }) => {
                 let mut outcome = Outcome::new(RefreshResult::Refused, Some(refused_reason(&code)));
                 outcome.detail = Some(format!("{code}: {message}"));
@@ -334,14 +370,14 @@ impl Inner {
         self.record_refresh(actor, epoch, outcome);
     }
 
-    /// Check and, when it differs, commit a fetched set. The result it
-    /// recorded, or `None` when the enrollment changed first.
+    /// Check and, when it differs, commit a fetched set. What it recorded,
+    /// or `None` when the enrollment changed first.
     fn refresh_under_guard(
         &self,
         actor: &AuditActor,
         epoch: u64,
         fetched: FetchedPolicy,
-    ) -> Option<RefreshResult> {
+    ) -> Option<Refreshed> {
         // The enrollment the fetch was made for, still the one in the slot.
         let owned_files = {
             let slot = self.enrollment.lock().unwrap();
@@ -560,19 +596,14 @@ impl Inner {
                 committed.ids.join(", ")
             }
         );
-        Some(committed.result)
+        Some(Refreshed::of(committed.result, None))
     }
 
     /// [`Inner::record_refresh`], answering what was recorded.
-    fn recorded(
-        &self,
-        actor: &AuditActor,
-        epoch: u64,
-        outcome: Outcome<'_>,
-    ) -> Option<RefreshResult> {
-        let result = outcome.result;
+    fn recorded(&self, actor: &AuditActor, epoch: u64, outcome: Outcome<'_>) -> Option<Refreshed> {
+        let refreshed = Refreshed::of(outcome.result, outcome.reason);
         self.record_refresh(actor, epoch, outcome);
-        Some(result)
+        Some(refreshed)
     }
 
     /// Make a prepared set the enforced one, on disk. In order, each step
@@ -713,7 +744,8 @@ impl Inner {
                     eprintln!(
                         "punard: could not put policy.d back after a failed refresh \
                          ({failure}; {stuck}); both sets stay owned and the previous one \
-                         stays beside it until the change is settled"
+                         stays beside it until the change is settled, which keeps \
+                         anything in it found nowhere else"
                     );
                     Commit::Stuck(failure)
                 }
@@ -1168,6 +1200,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A change that landed before a crash is audited by the next start
+    /// even when the record settled from policy.d cannot be saved then. The
+    /// daemon runs on with the settled record in memory, and the next sync
+    /// pass saves it without the pending change, so an event left for "the
+    /// next start" would never be written once the disk recovers. A later
+    /// start that settles it again finds it written and adds none.
+    #[test]
+    fn a_landed_change_is_audited_at_start_even_when_its_record_cannot_be_saved() {
+        let root = root("landed-unsaved");
+        enrolled_on_disk(&root, &[baseline(true)]);
+        let daemon = start(&root);
+        {
+            let at = root.clone();
+            let _hook = faults::install(move |step| {
+                if step == Step::Render {
+                    crash_copy(&at, &at.join("crashed"));
+                }
+                Ok(())
+            });
+            refresh(&daemon, vec![baseline(false)]);
+        }
+        let crashed = root.join("crashed");
+        assert!(
+            policy_events(&crashed).is_empty(),
+            "crashed before its event"
+        );
+        assert!(saved(&crashed).get("policy_pending").is_some());
+        let applied = |at: &Path| {
+            policy_events(at)
+                .into_iter()
+                .filter(|e| e["result"] == "applied")
+                .count()
+        };
+        {
+            let _hook = faults::install(|step| match step {
+                Step::RecordSettled => Err(io::Error::other("no space left on device")),
+                _ => Ok(()),
+            });
+            let restarted = start(&crashed);
+            assert_eq!(enforced_firewall(&restarted), json!("disabled"));
+        }
+        assert!(
+            saved(&crashed).get("policy_pending").is_some(),
+            "the settled record was not saved"
+        );
+        assert_eq!(applied(&crashed), 1, "audited all the same");
+        let _restarted = start(&crashed);
+        assert!(saved(&crashed).get("policy_pending").is_none());
+        assert_eq!(applied(&crashed), 1, "and only once");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn last_result(daemon: &Daemon) -> (String, Option<String>) {
         let refresh = daemon
             .inner
@@ -1259,6 +1343,112 @@ mod tests {
         refresh(&daemon, vec![baseline(false)]);
         assert_eq!(last_result(&daemon).1.as_deref(), Some("unsupported_entry"));
         assert_eq!(*staged.borrow(), 3, "neither was staged");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A root drop kept outside policy.d behind a symlink is read through
+    /// the link, so editing the file it points at changes what a remembered
+    /// refusal depended on: the set is staged again, as for a drop edited in
+    /// place.
+    #[test]
+    fn a_refusal_is_staged_again_when_a_symlinked_drops_target_changes() {
+        let root = root("symlinked-refusal");
+        enrolled_on_disk(&root, &[baseline(true)]);
+        let daemon = start(&root);
+        let outside = root.join("drops");
+        std::fs::create_dir_all(&outside).unwrap();
+        let clash = |name: &str| {
+            json!({"policy_id": "eng-baseline-v12", "source_kind": "organization_role_policy",
+                   "precedence_rank": 3, "source_name": name})
+            .to_string()
+        };
+        std::fs::write(outside.join("clash.json"), clash("first")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("clash.json"),
+            root.join("state/policy.d/clash.json"),
+        )
+        .unwrap();
+        let staged = Rc::new(RefCell::new(0));
+        let _hook = {
+            let staged = Rc::clone(&staged);
+            faults::install(move |step| {
+                if step == Step::Stage {
+                    *staged.borrow_mut() += 1;
+                }
+                Ok(())
+            })
+        };
+        refresh(&daemon, vec![baseline(false)]);
+        assert_eq!(
+            last_result(&daemon),
+            (
+                "failed".to_string(),
+                Some("conflicts_with_local_policy".to_string())
+            )
+        );
+        refresh(&daemon, vec![baseline(false)]);
+        assert_eq!(*staged.borrow(), 1, "nothing changed: not staged again");
+        std::fs::write(
+            outside.join("clash.json"),
+            clash("second, edited where the link points"),
+        )
+        .unwrap();
+        refresh(&daemon, vec![baseline(false)]);
+        assert_eq!(*staged.borrow(), 2, "the file the loader reads changed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The double fault: a root drop written just before the exchange stops
+    /// the change, and the rollback then fails too. The drop is then only in
+    /// the directory the exchange replaced, at the staging path. Neither the
+    /// next pass, which stages there again, nor the next start, which clears
+    /// what a change left there, deletes it: it is kept beside policy.d.
+    #[test]
+    fn a_root_drop_caught_by_a_rollback_that_fails_is_kept() {
+        let root = root("double-fault");
+        enrolled_on_disk(&root, &[baseline(true)]);
+        let daemon = start(&root);
+        let policy_d = root.join("state/policy.d");
+        {
+            let policy_d = policy_d.clone();
+            let _hook = faults::install(move |step| match step {
+                Step::Swap => {
+                    std::fs::write(policy_d.join("late.note"), b"root's").unwrap();
+                    Ok(())
+                }
+                Step::RollBack => Err(io::Error::other("no space left on device")),
+                _ => Ok(()),
+            });
+            refresh(&daemon, vec![baseline(false)]);
+        }
+        assert_eq!(
+            std::fs::read(staging(&root).join("late.note")).unwrap(),
+            b"root's",
+            "only in the directory the exchange replaced"
+        );
+        let kept = |at: &Path| -> Vec<Vec<u8>> {
+            std::fs::read_dir(at.join("state"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(policy_set::KEPT_PREFIX))
+                })
+                .filter_map(|path| std::fs::read(path.join("late.note")).ok())
+                .collect()
+        };
+
+        // The next start clears the staging path and keeps the drop.
+        crash_copy(&root, &root.join("restarted"));
+        let _restarted = start(&root.join("restarted"));
+        assert!(!staging(&root.join("restarted")).exists());
+        assert_eq!(kept(&root.join("restarted")), [b"root's".to_vec()]);
+
+        // So does the next pass, which stages there again.
+        refresh(&daemon, vec![baseline(false)]);
+        assert_eq!(saved(&root)["policy_refresh"]["result"], "applied");
+        assert_eq!(kept(&root), [b"root's".to_vec()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

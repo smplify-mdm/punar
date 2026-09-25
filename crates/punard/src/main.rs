@@ -187,15 +187,32 @@ fn run(args: RunArgs) -> ExitCode {
     let registry = build_registry(&args);
     // Control-plane endpoint precedence: flag, then environment override,
     // then the compiled default (milestone-5.md section 4.2 — the env
-    // seam is how host tests point punard at a temp socket).
-    let control_plane_socket = args
-        .control_plane_socket
-        .or_else(|| {
-            std::env::var_os(punard::enroll::CONTROL_PLANE_SOCKET_ENV)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| PathBuf::from(punard::enroll::DEFAULT_CONTROL_PLANE_SOCKET));
+    // seam is how host tests point punard at a temp socket). An override is
+    // honoured only on an image that ships the development control plane
+    // (release check A5 keeps it off every release image): elsewhere it is
+    // a way to route punard to a stand-in for the agent, so it is refused,
+    // punard dials the built-in agent, and the attempt is audited.
+    let default_socket = PathBuf::from(punard::enroll::DEFAULT_CONTROL_PLANE_SOCKET);
+    let requested = args.control_plane_socket.or_else(|| {
+        std::env::var_os(punard::enroll::CONTROL_PLANE_SOCKET_ENV)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    });
+    let development = std::path::Path::new(punard::enroll::DEVELOPMENT_CONTROL_PLANE).exists();
+    let (control_plane_socket, control_plane_override_refused) =
+        punard::enroll::resolve_control_plane(requested, development);
+    if control_plane_override_refused {
+        eprintln!(
+            "punard: refusing to dial another control plane instead of the built-in Smplify \
+             agent: this image ships no development control plane ({})",
+            punard::enroll::DEVELOPMENT_CONTROL_PLANE
+        );
+    }
+    // Dialling the built-in agent's own socket: every connection must reach
+    // systemd's listener, and the units management depends on are checked
+    // on every pass while enrolled (punard::agent_units).
+    let agent_integrity =
+        (control_plane_socket == default_socket).then(punard::agent_units::AgentIntegrity::default);
     // Same precedence for the sibling daemon's socket.
     let agentd_socket = args
         .agentd_socket
@@ -223,6 +240,8 @@ fn run(args: RunArgs) -> ExitCode {
     let cfg = DaemonConfig {
         group: args.group,
         control_plane_socket,
+        agent_integrity,
+        control_plane_override_refused,
         agentd_socket,
         status_file: args.status_file,
         approvals_file: args.approvals_file,

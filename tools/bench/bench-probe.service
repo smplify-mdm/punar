@@ -1,0 +1,39 @@
+# Benchmark probe injected by tools/bench (not part of any operating system).
+#
+# The harness writes this unit into a disposable copy of the disk under test
+# (tools/bench/inject-probe.sh) or passes it as a systemd credential
+# (bench_run.py --inject credentials). It runs in its own cgroup, so its cost
+# is measured and subtracted, and it never runs outside a virtual machine.
+[Unit]
+Description=Benchmark probe (tools/bench)
+Documentation=https://github.com/smplify-mdm/punar/tree/main/tools/bench
+ConditionVirtualization=vm
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+# Script and settings as credentials when the harness passed them that way;
+# otherwise the injected copy on disk.
+ImportCredential=bench.*
+ExecStart=/bin/sh -c 'if [ -n "$${CREDENTIALS_DIRECTORY:-}" ] && [ -r "$${CREDENTIALS_DIRECTORY}/bench.probe" ]; then exec /bin/sh "$${CREDENTIALS_DIRECTORY}/bench.probe"; fi; exec /bin/sh /usr/local/lib/bench-probe/bench-probe.sh'
+Nice=10
+IOSchedulingClass=idle
+CPUAccounting=yes
+MemoryAccounting=yes
+IOAccounting=yes
+RuntimeDirectory=bench-probe
+# The probe reads everything as root but needs no network and no write
+# access beyond its runtime directory and the workload's scratch trees.
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/var/tmp -/opt/bench
+ProtectHome=read-only
+# No PrivateTmp: the workload's fixtures in /var/tmp are read by the
+# person's own processes, outside this unit's namespace.
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+RestrictRealtime=yes

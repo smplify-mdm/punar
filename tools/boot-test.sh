@@ -933,7 +933,7 @@ run_desktop() {
     # in the guest but silently absent from the host report, so the host gate
     # always treated a current image as an older, ungated one.
     if [ -f "${PROOF_DIR}/runtime-report.txt" ]; then
-        grep -E '^PUNAR_(IDLE_|ZRAM_|NETWORK_)[A-Z0-9_]*=[^[:space:]]+$' \
+        grep -E '^PUNAR_(IDLE_|ZRAM_|NETWORK_|SMPLIFYD_)[A-Z0-9_]*=[^[:space:]]+$' \
             "${PROOF_DIR}/runtime-report.txt" >> "${PROOF_DIR}/ram-report.txt" || true
     fi
     if [ -f "${PROOF_DIR}/m11-report.txt" ]; then

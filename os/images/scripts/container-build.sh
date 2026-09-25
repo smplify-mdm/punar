@@ -421,6 +421,10 @@ stage_punar_binaries() {
     install -d "${extra}/usr/lib/punar"
     install -m 0750 "${cargo_target}/release/punar-pim-launch" \
         "${extra}/usr/lib/punar/punar-pim-launch"
+    # punard's unprivileged download helper. World-executable because it runs
+    # as punar-fetch@.service's dynamic user, never as root.
+    install -m 0755 "${cargo_target}/release/punar-fetch" \
+        "${extra}/usr/lib/punar/punar-fetch"
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
         "${dev_extra}/usr/bin/"

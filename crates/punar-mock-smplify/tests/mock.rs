@@ -450,6 +450,33 @@ fn reregistration_rotates_the_token() {
     mock.call_ok("policy.fetch", json!({"device_token": second}));
 }
 
+/// punard's liveness call and its unenrollment, answered as the built-in
+/// agent answers them: an identity for a token this control plane issued and
+/// none otherwise, and a wipe confirmed for any token, the device's reports
+/// kept.
+#[test]
+fn identity_status_and_unregister_answer_as_the_agent_does() {
+    let mock = TestMock::start("identity");
+    let token = mock.enroll();
+    assert_eq!(
+        mock.call_ok("identity.status", json!({"device_token": token})),
+        json!({"enrolled": true, "token_matches": true})
+    );
+    assert_eq!(
+        mock.call_ok("identity.status", json!({"device_token": "tok_unknown"})),
+        json!({"enrolled": false})
+    );
+    assert_eq!(
+        mock.call_ok("identity.status", json!({})),
+        json!({"enrolled": false})
+    );
+    assert_eq!(
+        mock.call_ok("enroll.unregister", json!({"device_token": token})),
+        json!({"wiped": true})
+    );
+    mock.call_err("enroll.unregister", json!({}), "invalid_params");
+}
+
 // ---------------------------------------------------------------------------
 // policy.fetch
 // ---------------------------------------------------------------------------

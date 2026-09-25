@@ -20,8 +20,9 @@
 # spec-40 explain → managed-set behaviors (non-root denial citing the org
 # policy; root recorded-but-overridden) → compliance/inventory sync
 # asserted on the mock's RECEIVED side (exact category-only key allowlists
-# — the spec 24/54 privacy assertion) → offline (spec 55: cached policy
-# enforced, transition-audited unreachable) → recovery (latest-wins: one
+# — the spec 24/54 privacy assertion) → control plane gone (spec 55: cached
+# policy enforced; the agent's socket is on this device, so management
+# interrupted, audited once, never a network outage) → recovery (latest-wins: one
 # new line) → live policy refresh (the organization publishes another set,
 # the next pass enforces it; a refused set changes nothing; the default is
 # restored) → offline unenroll → personal restore. Screenshots capture the
@@ -434,7 +435,7 @@ jq_check "punarctl status: mode managed, org acme" \
 # --- 12. screenshot: enrolled bar chrome (org name + dot + state word) -------
 capture_shot punar-m5.png
 
-# --- 13. offline (spec 55): cached policy enforced, transition audited -------
+# --- 13. control plane gone (spec 55): cached policy enforced, the episode audited
 systemctl stop "${MOCK}" >/dev/null 2>&1
 if "${CTL}" --json reconcile > "${RUN_DIR}/m5-reconcile-offline.json" 2>&1; then
     note "ok   reconcile exit 0 with the control plane down"
@@ -451,15 +452,26 @@ else
     FAILED=1
 fi
 # Second offline pass: proves the transition-only audit below (one
-# unreachable event across repeated failing retries, never one per pass).
+# episode event across repeated failing passes, never one per pass).
 "${CTL}" --json reconcile >/dev/null 2>&1
 "${CTL}" --json enroll status > "${RUN_DIR}/m5-enroll-status-offline.json" 2>&1
-jq_check "enroll status offline: last_sync unreachable, pending true" \
+# The control plane is a local socket, and one that is gone is the agent
+# unavailable, not the network: no sync was attempted, so last_sync keeps the
+# last one and the reports wait, and no enroll.sync outage is recorded.
+jq_check "enroll status offline: last_sync kept, pending true" \
     "${RUN_DIR}/m5-enroll-status-offline.json" \
-    '.last_sync.result == "unreachable" and .last_sync.pending == true'
-unreachable_events="$(jq -s '[.[] | select(.action == "enroll.sync" and .result == "unreachable")] | length' "${AUDIT_LOG}" 2>/dev/null)"
-check_eq "enroll.sync unreachable events (transition-only, across 2 failing passes)" 1 \
+    '.last_sync.result == "success" and .last_sync.pending == true'
+unreachable_events="$(jq -s '[.[] | select(.action == "enroll.sync")] | length' "${AUDIT_LOG}" 2>/dev/null)"
+check_eq "enroll.sync events while the agent is gone (its episode is not a network outage)" 0 \
     "${unreachable_events}"
+# Management interrupted, audited once.
+jq_check "enroll status offline: management interrupted, socket_missing" \
+    "${RUN_DIR}/m5-enroll-status-offline.json" \
+    '.management.state == "interrupted" and .management.reason == "socket_missing"'
+jq_check "status.json offline: management interrupted" "${STATUS_JSON}" \
+    '.management == "interrupted"'
+agent_down_events="$(jq -s '[.[] | select(.action == "enroll.agent" and .result == "agent_unavailable" and .resource == "agent.socket_missing")] | length' "${AUDIT_LOG}" 2>/dev/null)"
+check_eq "enroll.agent agent_unavailable events (once per episode)" 1 "${agent_down_events}"
 
 # --- 14. recovery: latest-wins queue = exactly one new line ------------------
 rc_count_c="$(line_count "${RC_FILE}")"
@@ -474,9 +486,13 @@ jq_check "enroll status after recovery: last_sync success, pending false" \
     '.last_sync.result == "success" and .last_sync.pending == false'
 check_eq "received-compliance grew by exactly one line (latest-wins: the queue is a flag, not a spool)" \
     "$((rc_count_c + 1))" "$(line_count "${RC_FILE}")"
-recovery_events="$(jq -s '[.[] | select(.action == "enroll.sync" and .result == "success")] | length' "${AUDIT_LOG}" 2>/dev/null)"
-check_eq "enroll.sync recovery events (one per outage, not per retry)" 1 \
+recovery_events="$(jq -s '[.[] | select(.action == "enroll.sync")] | length' "${AUDIT_LOG}" 2>/dev/null)"
+check_eq "enroll.sync events after the agent came back (there was no network outage to end)" 0 \
     "${recovery_events}"
+jq_check "enroll status after recovery: management active" \
+    "${RUN_DIR}/m5-enroll-status-recovery.json" '.management.state == "active"'
+agent_back_events="$(jq -s '[.[] | select(.action == "enroll.agent" and .result == "success")] | length' "${AUDIT_LOG}" 2>/dev/null)"
+check_eq "enroll.agent recovery events (once per episode)" 1 "${agent_back_events}"
 
 # --- 14b. live policy refresh (milestone-5.md §5.1, docs/api/ipc.md §5.10) --
 # The organization changes what it serves while the device is enrolled; the
@@ -496,9 +512,9 @@ publish() {
 }
 # refresh_pass <label> — one reconcile pass, then enroll status saved as
 # m5-enroll-status-<label>.json. Up to three passes until a refresh newer
-# than the call has been recorded: the two offline passes of step 13 leave
-# the fetch backed off for one pass, and the recovery pass of step 14 may not
-# have spent it. The second's wait keeps an earlier record out of the window.
+# than the call has been recorded: a refresh may still be backed off from an
+# earlier failure, which one more pass spends. The second's wait keeps an
+# earlier record out of the window.
 refresh_pass() {
     sleep 1
     refresh_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -603,22 +619,53 @@ else
     note "FAIL enroll stop exit $?: $(head -c 240 "${RUN_DIR}/m5-enroll-stop.json")"
     FAILED=1
 fi
-jq_check "enroll stop result: unenrolled, removed eng-baseline-v12" \
+jq_check "enroll stop result: unenrolled, removed eng-baseline-v12, identity release pending" \
     "${RUN_DIR}/m5-enroll-stop.json" \
-    '.enrolled == false and .removed_policy_ids == ["eng-baseline-v12"]'
+    '.enrolled == false and .removed_policy_ids == ["eng-baseline-v12"]
+     and .identity_release == "pending"'
 if [ -z "$(ls -A "${POLICY_D}" 2>/dev/null)" ]; then
     note "ok   policy.d empty after unenroll"
 else
     note "FAIL policy.d not empty after unenroll: $(find "${POLICY_D}" -mindepth 1 2>/dev/null | tr '\n' ' ')"
     FAILED=1
 fi
-if [ ! -e "${STATE_DIR}/enrollment.json" ] && [ ! -e "${STATE_DIR}/device-token" ] \
-        && [ ! -e "${STATE_DIR}/organization-view.json" ]; then
-    note "ok   enrollment.json, device-token and organization-view.json removed"
+if [ ! -e "${STATE_DIR}/enrollment.json" ] && [ ! -e "${STATE_DIR}/organization-view.json" ]; then
+    note "ok   enrollment.json and organization-view.json removed"
 else
-    note "FAIL enrollment.json, device-token or organization-view.json survived unenroll"
+    note "FAIL enrollment.json or organization-view.json survived unenroll"
     FAILED=1
 fi
+# The agent could not confirm it wiped the identity, so the device token is
+# kept until it does: an unenrollment never finishes by forgetting a key.
+if [ -e "${STATE_DIR}/device-token" ]; then
+    note "ok   device-token kept while the identity release is pending"
+else
+    note "FAIL device-token removed before the agent confirmed the wipe"
+    FAILED=1
+fi
+"${CTL}" --json enroll status > "${RUN_DIR}/m5-enroll-status-release-pending.json" 2>&1
+jq_check "enroll status: personal, identity release pending" \
+    "${RUN_DIR}/m5-enroll-status-release-pending.json" \
+    '.enrolled == false and .identity_release.state == "pending"'
+# The agent back: the next pass asks again, and the token goes once it
+# confirms. The control plane is stopped again for the rest of the journey.
+systemctl start "${MOCK}" >/dev/null 2>&1
+i=0
+while [ "${i}" -lt 15 ] && [ ! -S "${MOCK_SOCK}" ]; do i=$((i + 1)); sleep 1; done
+"${CTL}" --json reconcile >/dev/null 2>&1
+if [ ! -e "${STATE_DIR}/device-token" ]; then
+    note "ok   device-token removed once the agent confirmed the wipe"
+else
+    note "FAIL device-token still present after the agent came back"
+    FAILED=1
+fi
+"${CTL}" --json enroll status > "${RUN_DIR}/m5-enroll-status-released.json" 2>&1
+jq_check "enroll status: personal, nothing left to release" \
+    "${RUN_DIR}/m5-enroll-status-released.json" \
+    '.enrolled == false and (has("identity_release") | not)'
+releases="$(jq -s -c '[.[] | select(.action == "enroll.release") | .result]' "${AUDIT_LOG}" 2>/dev/null)"
+check_eq "enroll.release audit: pending, then success" '["pending","success"]' "${releases}"
+systemctl stop "${MOCK}" >/dev/null 2>&1
 
 # --- 16. personal state restored (the preference recorded in 8 resurfaces) ---
 "${CTL}" --json policy explain security.firewall \

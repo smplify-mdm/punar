@@ -63,6 +63,11 @@ pub const STAGING_DIR: &str = ".policy.d.next";
 /// The staging directory of builds before the live refresh.
 const LEGACY_STAGING_DIR: &str = ".policy.d.enroll-staging";
 
+/// A leftover staging directory that held something found nowhere else is
+/// renamed to this prefix and a time, beside `policy.d`, where nothing loads
+/// it ([`clear_leftover`]).
+pub const KEPT_PREFIX: &str = "policy.d.kept-";
+
 /// At most this many envelopes in one set.
 pub const MAX_POLICIES: usize = 64;
 
@@ -554,7 +559,7 @@ pub fn prepare(
 
     step(Step::Stage)?;
     let staging = state_dir.join(STAGING_DIR);
-    remove_dir_if_present(&staging)?;
+    clear_leftover(state_dir, &staging, owned_now)?;
     fs::DirBuilder::new().mode(0o700).create(&staging)?;
     fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
     for (name, bytes) in &set.files {
@@ -631,11 +636,13 @@ fn read_entries(dir: &Path) -> io::Result<Vec<(OsString, fs::Metadata)>> {
 
 /// A digest of what `policy.d` holds, as far as a local refusal depends on
 /// it: which files the record owns, and every entry's name, inode, mode,
-/// size and modification time. Any file a root administrator adds, removes,
-/// replaces or edits changes it; a refusal that depends only on these and on
-/// the set offered is not worth staging again until one of them changes.
-/// Not the inode change time: carrying a file into the staged directory is a
-/// new link to it, which moves that time on every attempt.
+/// size and modification time, and for a symlink the same of what it points
+/// at (the loader reads through it). Any file a root administrator adds,
+/// removes, replaces or edits changes it, wherever a symlinked drop keeps
+/// its contents; a refusal that depends only on these and on the set
+/// offered is not worth staging again until one of them changes. Not the
+/// inode change time: carrying a file into the staged directory is a new
+/// link to it, which moves that time on every attempt.
 pub fn local_fingerprint(state_dir: &Path, owned: &[String]) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
@@ -644,9 +651,8 @@ pub fn local_fingerprint(state_dir: &Path, owned: &[String]) -> io::Result<Strin
         digest.update([0]);
     }
     digest.update([1]);
-    for (name, meta) in read_entries(&state_dir.join(POLICY_DIR))? {
-        digest.update(name.as_encoded_bytes());
-        digest.update([0]);
+    let live = state_dir.join(POLICY_DIR);
+    let entry = |digest: &mut Sha256, meta: &fs::Metadata| {
         for number in [
             meta.dev(),
             meta.ino(),
@@ -656,6 +662,19 @@ pub fn local_fingerprint(state_dir: &Path, owned: &[String]) -> io::Result<Strin
             meta.mtime_nsec() as u64,
         ] {
             digest.update(number.to_be_bytes());
+        }
+    };
+    for (name, meta) in read_entries(&live)? {
+        digest.update(name.as_encoded_bytes());
+        digest.update([0]);
+        entry(&mut digest, &meta);
+        if meta.file_type().is_symlink() {
+            match fs::metadata(live.join(&name)) {
+                // Followed: the file the loader reads.
+                Ok(target) => entry(&mut digest, &target),
+                // Dangling, or unreadable: distinct from any target.
+                Err(_) => digest.update([2]),
+            }
         }
     }
     Ok(format!("{:x}", digest.finalize()))
@@ -896,8 +915,12 @@ pub struct Settled {
 /// absent until the first refresh). Running it twice changes nothing the
 /// second time.
 pub fn settle(state_dir: &Path, enrollment: Option<&mut Enrollment>) -> io::Result<Settled> {
+    let owned = enrollment
+        .as_ref()
+        .map(|record| record.policy_files.clone())
+        .unwrap_or_default();
     for leftover in [STAGING_DIR, LEGACY_STAGING_DIR] {
-        remove_dir_if_present(&state_dir.join(leftover))?;
+        clear_leftover(state_dir, &state_dir.join(leftover), &owned)?;
     }
     let Some(enrollment) = enrollment else {
         return Ok(Settled::default());
@@ -950,6 +973,8 @@ pub(crate) enum Step {
     RollBack,
     /// Saving the record that says what is enforced.
     RecordFinal,
+    /// Saving, at startup, the record [`settle`] made agree with `policy.d`.
+    RecordSettled,
     /// Removing the directory the swap replaced.
     Finish,
 }
@@ -1003,6 +1028,54 @@ pub(crate) mod faults {
             None => Ok(()),
         })
     }
+}
+
+/// Clear what a change left at a staging path, before anything is staged
+/// there again. After a swap whose rollback could not be verified, the
+/// staging path holds the previous `policy.d`, and possibly a file a root
+/// administrator wrote into it just before the exchange: the very file that
+/// made the rollback necessary, which is then in no other directory. So the
+/// leftover is removed only when everything in it is held elsewhere or is
+/// the organization's: a file the record owns (`owned`), the entry
+/// `policy.d` holds under the same name (a link carried into the staged
+/// set), an empty directory. Anything else keeps the whole leftover,
+/// renamed beside `policy.d` as [`KEPT_PREFIX`] and a time, where nothing
+/// loads it, and the journal names it for an administrator to restore or
+/// delete. A crash while a refresh was staging keeps the organization's new
+/// files the same way: nothing tells them apart from a root drop, and a
+/// copy kept is the side to err on.
+fn clear_leftover(state_dir: &Path, leftover: &Path, owned: &[String]) -> io::Result<()> {
+    let live = state_dir.join(POLICY_DIR);
+    let unique = read_entries(leftover)?
+        .into_iter()
+        .filter(|(name, meta)| {
+            let owned_file = name
+                .to_str()
+                .is_some_and(|text| owned.iter().any(|owned| owned == text));
+            let carried = fs::symlink_metadata(live.join(name))
+                .is_ok_and(|held| (held.dev(), held.ino()) == (meta.dev(), meta.ino()));
+            let empty_dir = meta.is_dir() && dir_is_empty(&leftover.join(name)).unwrap_or(false);
+            !(owned_file || carried || empty_dir)
+        })
+        .count();
+    if unique == 0 {
+        return remove_dir_if_present(leftover);
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    let kept = state_dir.join(format!("{KEPT_PREFIX}{stamp}"));
+    fs::rename(leftover, &kept)?;
+    sync_parent(&kept);
+    eprintln!(
+        "punard: {} held {unique} entr{} found nowhere else, which may be a root \
+         administrator's; kept as {}, where nothing loads it",
+        leftover.display(),
+        if unique == 1 { "y" } else { "ies" },
+        kept.display()
+    );
+    Ok(())
 }
 
 fn remove_dir_if_present(path: &Path) -> io::Result<()> {
