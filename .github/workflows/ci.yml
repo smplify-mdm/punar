@@ -405,6 +405,7 @@ jobs:
             tests/desktop/terminal-parity-gate-test.sh \
             tests/desktop/mail-identity-contract-test.sh \
             tests/desktop/qml-inline-component-depth-test.sh \
+            tests/desktop/qml-url-surface-import-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
@@ -499,6 +500,13 @@ jobs:
       # that, so it is now caught in seconds by a script.
       - name: Validate inline component placement
         run: ./tests/desktop/qml-inline-component-depth-test.sh
+
+      # The surface-cost probe loads each deferred surface by URL, and such a
+      # file does not see its directory's other files by bare name: the
+      # Overview and the Alt+Tab switcher failed to load there, which only
+      # the desktop gate's VM showed. Caught here in seconds instead.
+      - name: Validate URL-loaded surface imports
+        run: ./tests/desktop/qml-url-surface-import-test.sh
 
       - name: Test governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh

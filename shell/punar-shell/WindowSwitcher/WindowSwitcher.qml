@@ -40,7 +40,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
-import "../Overview"
+import "../Overview" as Wire
 import "../Services"
 import "../Theme"
 
@@ -402,7 +402,7 @@ DeferredSurfaceBase {
                         anchors.leftMargin: 10
                         spacing: 6
 
-                        WorkspaceWireframe {
+                        Wire.WorkspaceWireframe {
                             width: parent.width
                             height: Math.round(width * 10 / 16)
                             workspace: root.workspaceById(card.modelData.workspaceId)

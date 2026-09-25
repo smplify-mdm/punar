@@ -21,6 +21,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Hyprland
+import "." as Local
 import "../Theme"
 import "../Services"
 
@@ -576,8 +577,11 @@ DeferredSurfaceBase {
 
                                 // ---- wireframe mini plate ----
                                 // WorkspaceWireframe.qml, shared with the
-                                // Alt+Tab window switcher.
-                                WorkspaceWireframe {
+                                // Alt+Tab window switcher. Named through
+                                // `import "."`: loaded by URL (the surface
+                                // probe), this file does not see its
+                                // directory's other files unqualified.
+                                Local.WorkspaceWireframe {
                                     width: parent.width
                                     height: Math.round(width * 10 / 16)
                                     workspace: cell.ws
