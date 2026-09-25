@@ -147,9 +147,6 @@ struct Outcome<'a> {
     reason: Option<&'a str>,
     /// For `rejected`: which set.
     offered_hash: Option<String>,
-    /// For `unchanged`: the revision the device enforces, to fill in a record
-    /// written before revisions were.
-    revision: Option<String>,
     /// For the journal: the loader's, the renderer's or the transport's own
     /// words. Never audited.
     detail: Option<String>,
@@ -161,7 +158,6 @@ impl<'a> Outcome<'a> {
             result,
             reason,
             offered_hash: None,
-            revision: None,
             detail: None,
         }
     }
@@ -323,13 +319,12 @@ impl Inner {
                 return;
             }
         };
-        let offered = set.revision();
+        self.backfill_revision(epoch, &owned_now);
         if set == owned_now {
-            let mut outcome = Outcome::new(RefreshResult::Unchanged, None);
-            outcome.revision = Some(offered);
-            self.record_refresh(actor, epoch, outcome);
+            self.record_refresh(actor, epoch, Outcome::new(RefreshResult::Unchanged, None));
             return;
         }
+        let offered = set.revision();
 
         // The very set this daemon already refused, for a reason that cannot
         // have changed since: not checked again.
@@ -552,6 +547,24 @@ impl Inner {
         }))
     }
 
+    /// An enrollment recorded before revisions existed learns the one it
+    /// enforces, derived from its files, whatever this refresh ends in: for
+    /// `enroll.status` only, in memory until the next save.
+    fn backfill_revision(&self, epoch: u64, owned_now: &CanonicalSet) {
+        let mut slot = self.enrollment.lock().unwrap();
+        let Some(current) = slot
+            .as_mut()
+            .filter(|_| self.enrollment_epoch.load(Ordering::SeqCst) == epoch)
+        else {
+            return;
+        };
+        if current.policy_hash.is_none() {
+            let mut fields = current.policy_fields();
+            fields.hash = Some(owned_now.revision());
+            apply_policy_fields(current, fields);
+        }
+    }
+
     /// Record an outcome that left what is enforced alone, for the enrollment
     /// the refresh began with only, and audit it when it is news
     /// ([`is_news`]). The decision is made under the slot lock with the
@@ -575,9 +588,6 @@ impl Inner {
         );
         if outcome.result == RefreshResult::Unchanged {
             fields.fetched_at = Some(now.clone());
-            if fields.hash.is_none() {
-                fields.hash = outcome.revision;
-            }
         }
         fields.refresh = Some(PolicyRefreshRecord {
             at: now,

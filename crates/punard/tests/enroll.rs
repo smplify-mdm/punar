@@ -3486,6 +3486,20 @@ fn enroll_status_says_which_policy_is_enforced_and_since_when() {
     assert_eq!(status["policy"]["revision"], Value::Null, "{status}");
     assert_eq!(status["policy"]["fetched_at"], status["enrolled_at"]);
     assert_eq!(status["policy"]["changed_at"], status["enrolled_at"]);
+
+    // The first refresh derives it from the files, even one that refuses
+    // what it was offered.
+    control_plane
+        .state
+        .serve_bad_policy
+        .store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["policy"]["last_refresh"]["result"], "rejected");
+    assert_eq!(
+        status["policy"]["revision"],
+        revision_on_disk(&daemon, &["eng-baseline-v12.json"])
+    );
 }
 
 // ---------------------------------------------------------------------------
