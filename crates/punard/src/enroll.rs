@@ -21,7 +21,7 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use punar_common::Redacted;
 use punar_common::ipc::{OrganizationView, OrganizationViewCategory};
@@ -571,6 +571,71 @@ pub fn inventory_resend_due(last_sent_at: Option<&str>, now: &str) -> bool {
     match (last, now) {
         (Some(last), Some(now)) => now < last || now - last >= INVENTORY_RESEND_FLOOR_SECONDS,
         _ => true,
+    }
+}
+
+/// How long an inventory that failed to go out waits before it is sent again,
+/// after its first failure; each further failure of the same inventory
+/// doubles it, up to [`INVENTORY_RETRY_CAP`]. One sync pass comes every two
+/// minutes, so the first retry is the next pass's.
+pub const INVENTORY_RETRY_BASE: Duration = Duration::from_secs(60);
+
+/// The longest an inventory that keeps failing waits between sends.
+pub const INVENTORY_RETRY_CAP: Duration = Duration::from_secs(30 * 60);
+
+/// An inventory that did not reach the control plane, and when it may be
+/// sent again. Without it, an inventory too large to upload within the
+/// agent's budget on a slow link, or one the receiver kept although its
+/// answer came late, went up again on every pass, indefinitely. Only the
+/// same inventory, under the same enrollment, waits: one that changed is
+/// news and goes at once. In memory only, like the pending flags it
+/// qualifies: a restart costs one early send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryRetry {
+    /// The enrollment epoch the send was made under.
+    epoch: u64,
+    /// SHA-256 of the body that failed.
+    hash: String,
+    failures: u32,
+    not_before: Instant,
+}
+
+impl InventoryRetry {
+    /// The wait after a send of `hash`, attempted at `at`, failed: the
+    /// previous wait doubled when it was for the same inventory and
+    /// enrollment, else `base`.
+    pub fn after_failure(
+        previous: Option<&InventoryRetry>,
+        epoch: u64,
+        hash: &str,
+        at: Instant,
+        base: Duration,
+    ) -> InventoryRetry {
+        let failures = match previous {
+            Some(previous) if previous.epoch == epoch && previous.hash == hash => {
+                previous.failures.saturating_add(1)
+            }
+            _ => 1,
+        };
+        let doublings = (failures - 1).min(16);
+        let wait = base.saturating_mul(1 << doublings).min(INVENTORY_RETRY_CAP);
+        InventoryRetry {
+            epoch,
+            hash: hash.to_string(),
+            failures,
+            not_before: at + wait,
+        }
+    }
+
+    /// Whether the inventory `hash`, due under enrollment `epoch`, must still
+    /// wait at `now`.
+    pub fn defers(&self, epoch: u64, hash: &str, now: Instant) -> bool {
+        self.epoch == epoch && self.hash == hash && now < self.not_before
+    }
+
+    /// How long from `now` until it may go again.
+    pub fn wait_from(&self, now: Instant) -> Duration {
+        self.not_before.saturating_duration_since(now)
     }
 }
 
@@ -1598,6 +1663,35 @@ mod tests {
 
     /// Both fields default for a file an older build wrote, and the default
     /// tier is the narrow one.
+    /// A failed inventory waits the base, then double for each further
+    /// failure of the same body under the same enrollment, never past the
+    /// cap. A different body, or another enrollment, starts again.
+    #[test]
+    fn a_failed_inventory_waits_longer_each_time_until_it_changes() {
+        let base = INVENTORY_RETRY_BASE;
+        let at = Instant::now();
+        let first = InventoryRetry::after_failure(None, 7, "h", at, base);
+        assert!(first.defers(7, "h", at + base - Duration::from_secs(1)));
+        assert!(!first.defers(7, "h", at + base));
+        assert!(
+            !first.defers(7, "changed", at),
+            "a changed inventory goes at once"
+        );
+        assert!(!first.defers(8, "h", at), "another enrollment's does too");
+
+        let mut retry = first.clone();
+        for failures in 2..=10 {
+            retry = InventoryRetry::after_failure(Some(&retry), 7, "h", at, base);
+            let expected = (base * (1 << (failures - 1))).min(INVENTORY_RETRY_CAP);
+            assert_eq!(retry.wait_from(at), expected, "after {failures} failures");
+        }
+        assert_eq!(retry.wait_from(at), INVENTORY_RETRY_CAP);
+        let changed = InventoryRetry::after_failure(Some(&retry), 7, "changed", at, base);
+        assert_eq!(changed.wait_from(at), base);
+        let reenrolled = InventoryRetry::after_failure(Some(&retry), 8, "h", at, base);
+        assert_eq!(reenrolled.wait_from(at), base);
+    }
+
     #[test]
     fn ownership_and_send_time_round_trip_and_default_narrow() {
         let dir = tmp("owned");

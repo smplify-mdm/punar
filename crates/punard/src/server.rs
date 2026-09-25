@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,11 +72,12 @@ use crate::browser_policy::{persist_rendered_browser_policy, render_effective_br
 use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
-    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources,
-    LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE, OrgRecord, OrganizationViewRecord,
-    StatusSummary, UpstreamError, compliance_report_body, inventory_body, inventory_resend_due,
-    load_device_token, load_enrollment, load_organization_view, organization_view_summary,
-    save_device_token, save_enrollment, save_organization_view, write_status_summary,
+    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, INVENTORY_RETRY_BASE,
+    InventoryRetry, InventorySources, LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE,
+    OrgRecord, OrganizationViewRecord, StatusSummary, UpstreamError, compliance_report_body,
+    inventory_body, inventory_resend_due, load_device_token, load_enrollment,
+    load_organization_view, organization_view_summary, save_device_token, save_enrollment,
+    save_organization_view, write_status_summary,
 };
 use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
@@ -331,6 +332,9 @@ pub struct DaemonConfig {
     pub update_transaction_sources: UpdateTransactionSources,
     /// Fixed Raspberry Pi firmware/slot paths for the same public method.
     pub pi_update_sources: PiUpdateSources,
+    /// How long an inventory that failed to go out first waits before it is
+    /// sent again ([`INVENTORY_RETRY_BASE`]); shorter in tests.
+    pub inventory_retry_base: Duration,
 }
 
 impl DaemonConfig {
@@ -385,6 +389,7 @@ impl DaemonConfig {
             update_check_sources,
             update_transaction_sources,
             pi_update_sources,
+            inventory_retry_base: INVENTORY_RETRY_BASE,
         }
     }
 }
@@ -496,6 +501,8 @@ struct Inner {
     /// not supersede.
     pending_compliance: AtomicBool,
     pending_inventory: AtomicBool,
+    /// When a pending inventory may be sent again ([`InventoryRetry`]).
+    inventory_retry: Mutex<Option<InventoryRetry>>,
     /// The managed inventory's collectors and their per-boot caches.
     inventory: InventoryCollector,
     /// Whether the last inventory went out with its application list
@@ -711,6 +718,7 @@ impl Daemon {
                 device_token: Mutex::new(device_token),
                 pending_compliance: AtomicBool::new(false),
                 pending_inventory: AtomicBool::new(false),
+                inventory_retry: Mutex::new(None),
                 inventory,
                 applications_withheld: AtomicBool::new(false),
                 last_sync_outcome: Mutex::new(None),
@@ -5582,8 +5590,10 @@ impl Inner {
     /// every full reconcile pass **when enrolled** — compliance (category
     /// states only, SPEC sections 24/54), then inventory when its SHA-256
     /// changed, a resend is pending, or a day has passed since the last one
-    /// arrived. Failures queue (bounded latest-wins booleans); `enroll.sync`
-    /// is audited on **transitions only**.
+    /// arrived. Failures queue (bounded latest-wins booleans), and an
+    /// inventory that failed waits before it is sent again unless it changed
+    /// ([`InventoryRetry`]); `enroll.sync` is audited on **transitions
+    /// only**.
     fn sync_if_enrolled(&self, actor: &AuditActor) {
         let (enrollment, epoch) = {
             let slot = self.enrollment.lock().unwrap();
@@ -5656,13 +5666,27 @@ impl Inner {
         // is never sent must never be able to trigger a send.
         let hash = sha256_hex(&serde_json::to_vec(&inventory).expect("inventory serializes"));
         let now = utc_now_rfc3339();
-        let must_send = enrollment.last_inventory_hash.as_deref() != Some(hash.as_str())
+        let due = enrollment.last_inventory_hash.as_deref() != Some(hash.as_str())
             || self.pending_inventory.load(Ordering::SeqCst)
             || inventory_resend_due(enrollment.last_inventory_sent_at.as_deref(), &now);
+        // An inventory that failed to go out waits before the same body goes
+        // again (InventoryRetry), and stays pending while it waits, rather
+        // than going up on every pass.
+        let attempted_at = Instant::now();
+        let deferred = due
+            && self
+                .inventory_retry
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|retry| retry.defers(epoch, &hash, attempted_at));
         let mut new_hash = enrollment.last_inventory_hash.clone();
         let mut sent_at = enrollment.last_inventory_sent_at.clone();
         let mut received = None;
-        let inventory_outcome = if !must_send {
+        let mut failed_hash = None;
+        let inventory_outcome = if deferred {
+            "unreachable"
+        } else if !due {
             "unchanged"
         } else {
             let answer = match &token {
@@ -5681,7 +5705,10 @@ impl Inner {
                     sent_at = Some(now);
                     "success"
                 }
-                None => "unreachable",
+                None => {
+                    failed_hash = Some(hash);
+                    "unreachable"
+                }
             }
         };
 
@@ -5715,6 +5742,26 @@ impl Inner {
             .store(!compliance_ok, Ordering::SeqCst);
         self.pending_inventory
             .store(inventory_outcome == "unreachable", Ordering::SeqCst);
+        {
+            let mut retry = self.inventory_retry.lock().unwrap();
+            if let Some(hash) = failed_hash {
+                let next = InventoryRetry::after_failure(
+                    retry.as_ref(),
+                    epoch,
+                    &hash,
+                    attempted_at,
+                    self.cfg.inventory_retry_base,
+                );
+                eprintln!(
+                    "punard: the inventory did not reach the control plane; it is sent again \
+                     in {} s, or at once if it changes",
+                    next.wait_from(attempted_at).as_secs()
+                );
+                *retry = Some(next);
+            } else if inventory_outcome == "success" {
+                *retry = None;
+            }
+        }
         *self.last_sync_outcome.lock().unwrap() = Some(FirstSync {
             compliance: if compliance_ok {
                 "success".to_string()

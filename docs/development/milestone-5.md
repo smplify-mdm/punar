@@ -484,7 +484,14 @@ RPC with the stored token; per-call failure marks that report pending (§7).
 - **Queue — bounded, latest-wins (decision)**: two in-memory slots,
   `pending_compliance: bool` and `pending_inventory: bool`. A failed
   report sets its flag; every subsequent reconcile pass (≤120 s later via
-  the timer) rebuilds the *current* report and retries. No spool of
+  the timer) rebuilds the *current* report and retries. An inventory that
+  failed waits before the same body goes again: a minute, doubled after each
+  further failure up to 30 minutes, kept in memory with the flags. A body
+  that changed goes at once, and a send that gets through starts the waits
+  afresh. Otherwise an inventory too large to upload within the agent's
+  budget on a slow link, or one the receiver kept although its answer came
+  late, went up on every pass, indefinitely. The compliance report is a few
+  hundred bytes and still retries every pass. No spool of
   historical reports: compliance/inventory are **state snapshots**, so an
   intermediate report that never got through carries no information the
   next snapshot doesn't supersede — latest-wins is the correct semantics,

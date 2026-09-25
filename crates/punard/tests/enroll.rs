@@ -104,6 +104,9 @@ struct ControlPlaneState {
     /// Answer these methods only after the given delay: a control plane
     /// that is slow to reach the organization's server.
     answer_late: Mutex<HashMap<&'static str, Duration>>,
+    /// Refuse every `inventory.report`: an inventory that cannot get
+    /// through.
+    refuse_inventory: AtomicBool,
     /// Hold the next report of this method, once its token is resolved,
     /// until `release_held`: a sync pass caught with its report in flight.
     hold_next: Mutex<Option<&'static str>>,
@@ -197,6 +200,9 @@ impl ControlPlaneState {
             "inventory.report" => {
                 let device_id = self.device_for(params)?;
                 self.hold_if_next(method);
+                if self.refuse_inventory.load(Ordering::SeqCst) {
+                    return Err(("internal", "the upload did not finish in time".into()));
+                }
                 self.inventory.lock().unwrap().push(json!({
                     "device_id": device_id,
                     "received_at": "now",
@@ -2145,6 +2151,96 @@ fn a_pass_that_outlives_its_enrollment_leaves_the_sync_state_alone() {
     daemon.result("reconcile", None);
     assert_eq!(state.inventory.lock().unwrap().len(), sent);
     assert_eq!(events("enroll.inventory", "success"), 0);
+}
+
+/// An inventory that cannot get through — too large to upload within the
+/// agent's budget on a slow link, say — is not sent again on every pass. It
+/// stays pending and waits, twice as long after each failure; it goes at
+/// once when it changes, and a send that gets through starts the waits
+/// afresh.
+#[test]
+fn a_failing_inventory_waits_longer_each_time_unless_it_changes() {
+    const SECURE_BOOT: &str =
+        "machine/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    const RETRY: Duration = Duration::from_millis(1000);
+    let dir = test_dir("inventory-retry");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = TestDaemon::start_with(
+        &dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        Vec::new(),
+        |cfg| cfg.inventory_retry_base = RETRY,
+    );
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    let attempts = || {
+        state
+            .methods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|method| *method == "inventory.report")
+            .count()
+    };
+    let secure_boot = |on: u8| write_file(&dir.join(SECURE_BOOT), [6u8, 0, 0, 0, on]);
+    let pass_at = |at: std::time::Instant| {
+        std::thread::sleep(at.saturating_duration_since(std::time::Instant::now()));
+        daemon.result("reconcile", None);
+    };
+    assert_eq!(attempts(), 1);
+
+    // It changes and cannot get through; the next pass does not send it
+    // again, and the device reads as pending.
+    state.refuse_inventory.store(true, Ordering::SeqCst);
+    secure_boot(1);
+    let failed = std::time::Instant::now();
+    daemon.result("reconcile", None);
+    assert_eq!(attempts(), 2);
+    daemon.result("reconcile", None);
+    assert_eq!(attempts(), 2, "sent again at once");
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["pending"], true, "{status}");
+    assert_eq!(status["last_sync"]["result"], "unreachable", "{status}");
+    assert_eq!(
+        state.compliance.lock().unwrap().len(),
+        3,
+        "compliance still goes every pass"
+    );
+
+    // After its wait it goes once more, and fails; the next wait is longer.
+    let failed_again = std::time::Instant::now().max(failed + RETRY);
+    pass_at(failed_again + Duration::from_millis(50));
+    assert_eq!(attempts(), 3);
+    pass_at(failed_again + RETRY + Duration::from_millis(300));
+    assert_eq!(attempts(), 3, "the second wait is no longer than the first");
+
+    // A changed inventory goes at once.
+    secure_boot(0);
+    daemon.result("reconcile", None);
+    assert_eq!(attempts(), 4);
+
+    // One that gets through starts the waits afresh: the same failed body
+    // fails again, and waits only the first wait.
+    state.refuse_inventory.store(false, Ordering::SeqCst);
+    secure_boot(1);
+    daemon.result("reconcile", None);
+    assert_eq!(attempts(), 5);
+    assert_eq!(state.inventory.lock().unwrap().len(), 2);
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["pending"], false, "{status}");
+    state.refuse_inventory.store(true, Ordering::SeqCst);
+    secure_boot(0);
+    let failed = std::time::Instant::now();
+    daemon.result("reconcile", None);
+    assert_eq!(attempts(), 6);
+    pass_at(failed + RETRY + Duration::from_millis(50));
+    assert_eq!(
+        attempts(),
+        7,
+        "a send that got through did not reset the wait"
+    );
 }
 
 /// The resend gate hashes what can leave the device and nothing else. The
