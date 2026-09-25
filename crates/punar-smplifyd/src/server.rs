@@ -11,6 +11,14 @@
 //! Peer admission is `SO_PEERCRED` uid 0 — the mock deliberately relies on
 //! filesystem admission alone (milestone-5.md section 4.2); the real daemon
 //! does both, because its answers carry the organisation's word.
+//!
+//! The listener is systemd's (`punar-smplifyd.socket`), and the agent's
+//! lifetime follows enrollment ([`punar_smplifyd::activation`]):
+//! [`Daemon::serve_listener`] returns [`Stopped::Dormant`] once nothing of an
+//! identity is left and no call has come for the idle time, or right after
+//! an `enroll.unregister` wiped it. While anything of one is left it waits
+//! for calls with no timeout at all, so an enrolled device's agent has no
+//! wakeup of its own.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -63,9 +71,25 @@ pub struct Daemon {
     /// memory only: a restart costs one early check-in, not a stale schedule
     /// on disk.
     pin_retry: Mutex<Option<PinRetry>>,
-    /// Whether the last status POST failed, so that one getting through
-    /// says the link is back ([`Daemon::after_post`]).
-    post_failed: AtomicBool,
+    /// Whether the last compliance report could not reach Smplify at all,
+    /// so that one getting through says the link is back
+    /// ([`Daemon::after_compliance_post`]).
+    link_down: AtomicBool,
+    /// Set by an `enroll.unregister` that wiped the identity: once its
+    /// answer is written the agent goes dormant ([`Stopped::Dormant`]).
+    released: AtomicBool,
+    /// Answer a peer of any uid, for tests, which do not run as root.
+    #[cfg(test)]
+    admit_any_peer: bool,
+}
+
+/// Why [`Daemon::serve_listener`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// Nothing of an identity is left, and the agent exits with
+    /// [`punar_smplifyd::activation::DORMANT_EXIT_STATUS`] until the socket
+    /// starts it again.
+    Dormant,
 }
 
 /// A tenant-key check-in that failed, for the identity it was made for.
@@ -89,7 +113,10 @@ impl Daemon {
             #[cfg(test)]
             pin_overrun: Duration::ZERO,
             pin_retry: Mutex::new(None),
-            post_failed: AtomicBool::new(false),
+            link_down: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+            #[cfg(test)]
+            admit_any_peer: false,
         }
     }
 
@@ -118,30 +145,62 @@ impl Daemon {
         self
     }
 
-    /// socket → bind → chmod 0600 → listen, then serve forever.
+    /// Without systemd (development, tests): socket → bind → chmod 0600 →
+    /// listen, then serve forever. Nothing would start the agent again, so
+    /// it never goes dormant.
     pub fn serve(&self, socket: &Path) -> std::io::Result<()> {
-        if let Some(parent) = socket.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        match std::fs::remove_file(socket) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        let listener = UnixListener::bind(socket)?;
-        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+        let listener = bind(socket)?;
         eprintln!("punar-smplifyd: serving {}", socket.display());
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => self.handle(stream),
-                Err(e) => eprintln!("punar-smplifyd: accept failed ({})", e.kind()),
+        self.serve_listener(listener, None).map(|_| ())
+    }
+
+    /// Serve calls from `listener`, one at a time, in the order they arrive.
+    /// With `idle`, the agent is dormant once no call has come for that long
+    /// while nothing of an identity is left, and at once after a wipe;
+    /// while anything is left it waits for a call however long that takes.
+    /// Without `idle` it serves until an error.
+    pub fn serve_listener(
+        &self,
+        listener: UnixListener,
+        idle: Option<Duration>,
+    ) -> std::io::Result<Stopped> {
+        listener.set_nonblocking(true)?;
+        loop {
+            let wait = idle.filter(|_| !self.store.holds_anything());
+            if !readable_within(&listener, wait)? {
+                // Waited out the idle time. Only an empty state directory
+                // lets it go: a call cannot have put an identity there
+                // meanwhile, but a check costs one directory read.
+                if !self.store.holds_anything() {
+                    return Ok(Stopped::Dormant);
+                }
+                continue;
+            }
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                // Taken, or given up on, between the poll and here.
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => {
+                    eprintln!("punar-smplifyd: accept failed ({})", e.kind());
+                    continue;
+                }
+            };
+            // Blocking, with the per-line timeouts `handle` sets.
+            if stream.set_nonblocking(false).is_err() {
+                continue;
+            }
+            self.handle(stream);
+            if self.released.swap(false, Ordering::SeqCst)
+                && idle.is_some()
+                && !self.store.holds_anything()
+            {
+                return Ok(Stopped::Dormant);
             }
         }
-        Ok(())
     }
 
     fn handle(&self, mut stream: UnixStream) {
-        if !peer_is_root(&stream) {
+        if !self.admits(&stream) {
             // Silence is the answer: an unprivileged peer learns nothing,
             // not even that a control plane lives here.
             return;
@@ -177,7 +236,7 @@ impl Daemon {
             "org.discover" => self.org_discover(params),
             "enroll.register" => self.enroll_register(params),
             "enroll.unregister" => self.enroll_unregister(params),
-            "identity.status" => self.identity_status(),
+            "identity.status" => self.identity_status(params),
             "policy.fetch" => self.policy_fetch(params),
             "compliance.report" => self.report(
                 params,
@@ -335,25 +394,64 @@ impl Daemon {
         }))
     }
 
+    /// Wipe the identity, locally: it asks Smplify nothing, so unenrolling
+    /// works offline, and the agent goes dormant once the answer is written.
+    /// With no identity at all there is nothing to authorize, and whatever a
+    /// crash or an earlier wipe left (a key, a certificate) goes the same
+    /// way: punard asks again until a wipe is confirmed (docs/api/ipc.md
+    /// section 5.11), so a wipe whose answer was lost must be confirmable.
+    ///
+    /// `any_identity: true` wipes whatever is held, the token or none. punard
+    /// sends it only while it holds no enrollment, under its enrollment
+    /// guard: an identity it never received the token for (a registration
+    /// whose answer was lost) or one its token does not name is then nothing
+    /// punard uses, and must not stay. Only root can ask (`SO_PEERCRED`), and
+    /// root could remove the files itself. Without it, the identity punard's
+    /// token names is wiped and any other is refused and kept.
     fn enroll_unregister(&self, params: Option<&Value>) -> Result<Value, CallError> {
-        self.authorized(params)?;
+        let any_identity = params
+            .and_then(|params| params.get("any_identity"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !any_identity {
+            let presented = param_str(params, "device_token")?;
+            if let Some(record) = self.store.load().map_err(internal)? {
+                if !identity::token_matches(&record, &presented) {
+                    return Err(CallError::new(
+                        ErrorCode::Unauthorized,
+                        "the device token does not match this identity",
+                    ));
+                }
+            }
+        }
         self.store.wipe().map_err(internal)?;
-        Ok(json!({}))
+        *self.pin_retry.lock().unwrap() = None;
+        self.released.store(true, Ordering::SeqCst);
+        Ok(json!({ "wiped": true }))
     }
 
-    fn identity_status(&self) -> Result<Value, CallError> {
+    /// Local only, and punard's liveness call on every pass while enrolled:
+    /// one file read, nothing asked of Smplify. With the `device_token`
+    /// punard holds, it also says whether that token is this identity's.
+    fn identity_status(&self, params: Option<&Value>) -> Result<Value, CallError> {
         match self.store.load().map_err(internal)? {
-            Some(record) => Ok(json!({
-                "enrolled": true,
-                "device_id": record.device_id,
-                "server": record.server,
-                "org_id": record.org_id,
-                "org_name": record.org_name,
-                "os_identifier": record.os_identifier,
-                "not_after": record.not_after,
-                "tenant_key_pinned": record.tenant_public_key.is_some(),
-                "enrolled_at": record.enrolled_at,
-            })),
+            Some(record) => {
+                let mut status = json!({
+                    "enrolled": true,
+                    "device_id": record.device_id,
+                    "server": record.server,
+                    "org_id": record.org_id,
+                    "org_name": record.org_name,
+                    "os_identifier": record.os_identifier,
+                    "not_after": record.not_after,
+                    "tenant_key_pinned": record.tenant_public_key.is_some(),
+                    "enrolled_at": record.enrolled_at,
+                });
+                if let Ok(presented) = param_str(params, "device_token") {
+                    status["token_matches"] = json!(identity::token_matches(&record, &presented));
+                }
+                Ok(status)
+            }
             None => Ok(json!({ "enrolled": false })),
         }
     }
@@ -412,11 +510,18 @@ impl Daemon {
             ));
         }
         let body = compose(&record.device_id, payload);
+        let mut reached = None;
         let posted = self.api(left).and_then(|api| {
-            api.status(&record.device_id, &body)
-                .map_err(upstream_refusal)
+            let posted = api.status(&record.device_id, &body);
+            reached = Some(posted.as_ref().map_or_else(reached_smplify, |_| true));
+            posted.map_err(upstream_refusal)
         });
-        self.after_post(posted.is_ok());
+        // Only the compliance report, which every pass sends first, speaks
+        // for the link: an inventory is larger and may fail where a report
+        // gets through, and a refusal is Smplify answering.
+        if let (PinTenantKey::First, Some(reached)) = (pin, reached) {
+            self.after_compliance_post(reached);
+        }
         posted?;
         // What left, exactly as it left. punard keeps it as the person's
         // record of what their organization received (SPEC section 24.2), so
@@ -483,15 +588,17 @@ impl Daemon {
         });
     }
 
-    /// A status POST that gets through after one that did not means the link
-    /// is back. A check-in the outage backed off (doubling up to half an hour,
-    /// with nothing getting through at all) is then tried again at the next
-    /// compliance report, instead of after the wait the outage built up; the
-    /// backoff still spares a link that carries reports but not the
+    /// A compliance report that reaches Smplify after one that could not
+    /// means the link is back. A check-in the outage backed off (doubling up
+    /// to half an hour, with nothing getting through at all) is then tried
+    /// again at the next compliance report, instead of after the wait the
+    /// outage built up. Nothing else moves this: an inventory that cannot get
+    /// through while reports do, or a report Smplify refuses, is no outage,
+    /// and the backoff still spares a link that carries reports but not the
     /// check-in.
-    fn after_post(&self, posted: bool) {
-        let was_down = self.post_failed.swap(!posted, Ordering::SeqCst);
-        if posted && was_down {
+    fn after_compliance_post(&self, reached: bool) {
+        let was_down = self.link_down.swap(!reached, Ordering::SeqCst);
+        if reached && was_down {
             *self.pin_retry.lock().unwrap() = None;
         }
     }
@@ -606,6 +713,69 @@ fn upstream_refusal(error: UpstreamError) -> CallError {
         Some(401) | Some(403) => CallError::new(ErrorCode::Unauthorized, error.to_string()),
         Some(404) => CallError::new(ErrorCode::NotFound, "Smplify no longer knows this device"),
         _ => CallError::new(ErrorCode::Internal, error.to_string()),
+    }
+}
+
+/// socket → bind → chmod 0600 → listen, replacing a stale socket file.
+fn bind(socket: &Path) -> std::io::Result<UnixListener> {
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::remove_file(socket) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let listener = UnixListener::bind(socket)?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// Wait for a connection, for at most `wait` (forever without one): whether
+/// one is there.
+fn readable_within(listener: &UnixListener, wait: Option<Duration>) -> std::io::Result<bool> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let timeout = wait.map(|wait| Timespec {
+        tv_sec: wait.as_secs().try_into().unwrap_or(i64::MAX),
+        tv_nsec: wait.subsec_nanos().into(),
+    });
+    let mut fds = [PollFd::new(listener, PollFlags::IN)];
+    loop {
+        match poll(&mut fds, timeout.as_ref()) {
+            Ok(_) => break,
+            // A signal the agent does not handle ends it; any other
+            // interruption is waited out again.
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(errno) => return Err(errno.into()),
+        }
+    }
+    let revents = fds[0].revents();
+    if revents.intersects(PollFlags::ERR | PollFlags::NVAL) {
+        return Err(std::io::Error::other("the listening socket failed"));
+    }
+    Ok(revents.contains(PollFlags::IN))
+}
+
+/// Whether a failed request reached Smplify: it answered, if only with a
+/// refusal or something this agent cannot read. A failure to connect,
+/// resolve, finish a handshake or hear back at all did not.
+fn reached_smplify(error: &UpstreamError) -> bool {
+    use crate::http::HttpError;
+    !matches!(
+        error,
+        UpstreamError::Transport(
+            HttpError::Timeout | HttpError::Io(_) | HttpError::Resolve | HttpError::Tls
+        )
+    )
+}
+
+impl Daemon {
+    fn admits(&self, stream: &UnixStream) -> bool {
+        #[cfg(test)]
+        if self.admit_any_peer {
+            return true;
+        }
+        peer_is_root(stream)
     }
 }
 
@@ -791,7 +961,7 @@ mod tests {
             arrivals.lock().unwrap().is_empty(),
             "Smplify was asked again"
         );
-        let status = d.identity_status().unwrap();
+        let status = d.identity_status(None).unwrap();
         assert_eq!(status["device_id"], "dev-1");
         assert_eq!(status["tenant_key_pinned"], false);
         let _ = std::fs::remove_dir_all(root);
@@ -1005,9 +1175,299 @@ mod tests {
         assert_eq!(arrived(), 3, "the check-in waits");
         // A POST gets through: the silent Smplify cannot answer one, so the
         // agent is told as a report that got through would tell it.
-        d.after_post(true);
+        d.after_compliance_post(true);
         report();
         assert_eq!(arrived(), 5, "the check-in is tried again at once");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Only a compliance report speaks for the link, and only one that could
+    /// not reach Smplify at all says it is down. An inventory that cannot get
+    /// through while reports do is no outage, so a compliance report that
+    /// gets through afterwards does not cut short the wait of a check-in that
+    /// keeps failing; and a refusal is Smplify answering.
+    #[test]
+    fn only_a_compliance_report_that_could_not_reach_smplify_says_the_link_is_down() {
+        const BUDGET: Duration = Duration::from_millis(300);
+        let (d, root) = daemon();
+        let d = d
+            .with_call_budget(BUDGET)
+            .with_pin_budget(BUDGET, Duration::from_secs(600));
+        let (port, arrivals) = silent_smplify();
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let (token, token_sha256) = identity::new_device_token().unwrap();
+        d.store
+            .save(
+                &Record {
+                    device_id: "dev-1".into(),
+                    server: format!("https://127.0.0.1:{port}"),
+                    org_id: "acme".into(),
+                    org_name: "Acme".into(),
+                    os_identifier: "punar".into(),
+                    not_after: None,
+                    tenant_public_key: None,
+                    token_sha256,
+                    enrolled_at: "2026-09-24T00:00:00Z".into(),
+                },
+                &Zeroizing::new(key.serialize_pem()),
+                &cert.pem(),
+                &cert.pem(),
+            )
+            .unwrap();
+        let waiting = Instant::now() + Duration::from_secs(600);
+        *d.pin_retry.lock().unwrap() = Some(PinRetry {
+            device_id: "dev-1".into(),
+            failures: 3,
+            not_before: waiting,
+        });
+        let d = Arc::new(d);
+        let (_, line) = answer_apart(
+            &d,
+            json!({"v": 1, "id": "r", "method": "inventory.report",
+                   "params": {"device_token": &*token, "inventory": {}}}),
+            BUDGET * 20,
+        );
+        assert!(line.contains(r#""error""#), "{line}");
+        assert_eq!(arrivals.lock().unwrap().len(), 1);
+        // A compliance report gets through.
+        d.after_compliance_post(true);
+        assert!(
+            d.pin_retry
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|retry| retry.not_before == waiting),
+            "the check-in keeps its wait"
+        );
+
+        assert!(!reached_smplify(&UpstreamError::Transport(
+            crate::http::HttpError::Timeout
+        )));
+        assert!(reached_smplify(&UpstreamError::Status {
+            status: 422,
+            detail: String::new(),
+        }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A listener on a fresh path served on a thread of its own, answering
+    /// any peer (tests are not root): how it stopped arrives on the channel.
+    fn serve_apart(
+        d: &Arc<Daemon>,
+        root: &Path,
+        idle: Duration,
+    ) -> (PathBuf, std::sync::mpsc::Receiver<std::io::Result<Stopped>>) {
+        let socket = root.join("api.sock");
+        let listener = bind(&socket).unwrap();
+        let d = Arc::clone(d);
+        let (sender, stopped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(d.serve_listener(listener, Some(idle)));
+        });
+        (socket, stopped)
+    }
+
+    fn call(socket: &Path, request: Value) -> Value {
+        let mut stream = UnixStream::connect(socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        writeln!(stream, "{request}").unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn admitting(mut d: Daemon) -> Daemon {
+        d.admit_any_peer = true;
+        d
+    }
+
+    /// An identity on disk, and the device token punard would hold for it.
+    fn enrolled_store(d: &Daemon) -> Zeroizing<String> {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let (token, token_sha256) = identity::new_device_token().unwrap();
+        d.store
+            .save(
+                &Record {
+                    device_id: "dev-1".into(),
+                    server: "https://api.acme.example".into(),
+                    org_id: "acme".into(),
+                    org_name: "Acme".into(),
+                    os_identifier: "punar".into(),
+                    not_after: None,
+                    tenant_public_key: None,
+                    token_sha256,
+                    enrolled_at: "2026-09-24T00:00:00Z".into(),
+                },
+                &Zeroizing::new(key.serialize_pem()),
+                &cert.pem(),
+                &cert.pem(),
+            )
+            .unwrap();
+        token
+    }
+
+    /// An agent that holds no identity answers, and goes dormant once no call
+    /// has come for the idle time: a device that never enrolled, or declined
+    /// to, runs no agent.
+    #[test]
+    fn an_agent_with_no_identity_goes_dormant_once_idle() {
+        const IDLE: Duration = Duration::from_millis(300);
+        let (d, root) = daemon();
+        let d = Arc::new(admitting(d));
+        let (socket, stopped) = serve_apart(&d, &root, IDLE);
+        let answer = call(
+            &socket,
+            json!({"v": 1, "id": "a", "method": "identity.status"}),
+        );
+        let asked = Instant::now();
+        assert_eq!(answer["result"], json!({"enrolled": false}));
+        assert_eq!(
+            stopped.recv_timeout(IDLE * 10).expect("dormant").unwrap(),
+            Stopped::Dormant
+        );
+        assert!(asked.elapsed() >= IDLE, "not before the idle time");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Anything left of an identity keeps the agent running, a key whose
+    /// record was deleted included: deleting `device.json` is not a quiet way
+    /// to stop it. It answers that it holds no identity, which punard, being
+    /// enrolled, reports as management interrupted. Once nothing at all is
+    /// left, the next call starts the idle time again.
+    #[test]
+    fn anything_left_of_an_identity_keeps_the_agent_running() {
+        const IDLE: Duration = Duration::from_millis(200);
+        let (d, root) = daemon();
+        let d = Arc::new(admitting(d));
+        enrolled_store(&d);
+        std::fs::remove_file(d.store.path().join("device.json")).unwrap();
+        let (socket, stopped) = serve_apart(&d, &root, IDLE);
+        let answer = call(
+            &socket,
+            json!({"v": 1, "id": "a", "method": "identity.status"}),
+        );
+        assert_eq!(answer["result"], json!({"enrolled": false}));
+        assert!(
+            stopped.recv_timeout(IDLE * 5).is_err(),
+            "the key is still there"
+        );
+        d.store.wipe().unwrap();
+        call(
+            &socket,
+            json!({"v": 1, "id": "b", "method": "identity.status"}),
+        );
+        assert_eq!(
+            stopped.recv_timeout(IDLE * 10).expect("dormant").unwrap(),
+            Stopped::Dormant
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `enroll.unregister` wipes the identity punard's token names without
+    /// asking Smplify anything, answers, and the agent goes dormant at once,
+    /// long before its idle time. Another token is refused and the identity
+    /// kept; `identity.status` says which token is the identity's.
+    #[test]
+    fn an_unregister_wipes_answers_and_goes_dormant_at_once() {
+        let (d, root) = daemon();
+        let d = Arc::new(admitting(d));
+        let token = enrolled_store(&d);
+        let (socket, stopped) = serve_apart(&d, &root, Duration::from_secs(600));
+        let status = |token: &str| {
+            call(
+                &socket,
+                json!({"v": 1, "id": "s", "method": "identity.status",
+                       "params": {"device_token": token}}),
+            )["result"]
+                .clone()
+        };
+        assert_eq!(status(&token)["token_matches"], true);
+        assert_eq!(status("not-the-token")["token_matches"], false);
+        let refused = call(
+            &socket,
+            json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                   "params": {"device_token": "not-the-token"}}),
+        );
+        assert_eq!(refused["error"]["code"], "unauthorized", "{refused}");
+        assert!(d.store.load().unwrap().is_some(), "kept");
+
+        let wiped = call(
+            &socket,
+            json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                   "params": {"device_token": &*token}}),
+        );
+        assert_eq!(wiped["result"], json!({"wiped": true}), "{wiped}");
+        assert_eq!(
+            stopped
+                .recv_timeout(Duration::from_secs(5))
+                .expect("dormant at once")
+                .unwrap(),
+            Stopped::Dormant
+        );
+        assert!(!d.store.holds_anything());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A wipe whose answer never reached punard is asked for again: with no
+    /// identity left there is nothing to authorize, and whatever a crash
+    /// left of one goes too, so punard can confirm it.
+    #[test]
+    fn an_unregister_with_nothing_left_to_authorize_is_confirmed() {
+        let (d, root) = daemon();
+        let token = enrolled_store(&d);
+        std::fs::remove_file(d.store.path().join("device.json")).unwrap();
+        let line = d.answer_line(
+            &json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                    "params": {"device_token": &*token}})
+            .to_string(),
+        );
+        assert!(line.contains(r#""wiped":true"#), "{line}");
+        assert!(!d.store.holds_anything(), "the key went too");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// punard, holding no enrollment, asks for whatever the agent holds to
+    /// go (`any_identity`): an identity its token does not name, and one it
+    /// never received a token for (a registration whose answer was lost),
+    /// are wiped as surely as its own, so no key is left with nothing that
+    /// can remove it. Without the flag the token still has to match.
+    #[test]
+    fn an_unregister_for_any_identity_wipes_one_the_token_does_not_name() {
+        let (d, root) = daemon();
+        enrolled_store(&d);
+        let refused = d.answer_line(
+            &json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                    "params": {"device_token": "not-the-token"}})
+            .to_string(),
+        );
+        assert!(refused.contains("unauthorized"), "{refused}");
+        assert!(d.store.holds_anything());
+        let line = d.answer_line(
+            &json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                    "params": {"device_token": "not-the-token", "any_identity": true}})
+            .to_string(),
+        );
+        assert!(line.contains(r#""wiped":true"#), "{line}");
+        assert!(!d.store.holds_anything());
+
+        enrolled_store(&d);
+        let line = d.answer_line(
+            &json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                    "params": {"any_identity": true}})
+            .to_string(),
+        );
+        assert!(line.contains(r#""wiped":true"#), "{line}");
+        assert!(!d.store.holds_anything(), "no token needed");
         let _ = std::fs::remove_dir_all(root);
     }
 

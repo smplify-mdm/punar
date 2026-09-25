@@ -1,0 +1,77 @@
+Listen=/run/punar-smplifyd/api.sock (Stream)
+Id=punar-smplifyd.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/punar-smplifyd.socket
+DropInPaths=
+
+MainPID=139
+Id=punar-smplifyd.service
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/punar-smplifyd.service
+DropInPaths=/run/systemd/system.control/punar-smplifyd.service.d/50-CPUWeight.conf
+
+MainPID=0
+Id=punard.service
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/punard.service
+DropInPaths=/etc/systemd/system/punard.service.d/route.conf
+
+Id=punard-reconcile.timer
+LoadState=masked
+FragmentPath=/etc/systemd/system/punard-reconcile.timer
+DropInPaths=
+
+MainPID=0
+Id=punard-reconcile.service
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/punard-reconcile.service
+DropInPaths=
+
+Listen=/run/punar-smplifyd/api.sock (Stream)
+Id=punar-smplifyd.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/punar-smplifyd.socket
+DropInPaths=
+
+Listen=/run/systemd/journal/socket (Datagram)
+Listen=/run/systemd/journal/stdout (Stream)
+Id=systemd-journald.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/systemd-journald.socket
+DropInPaths=
+
+Listen=/run/dbus/system_bus_socket (Stream)
+Id=dbus.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/dbus.socket
+DropInPaths=
+
+Listen=/run/systemd/journal/dev-log (Datagram)
+Id=systemd-journald-dev-log.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/systemd-journald-dev-log.socket
+DropInPaths=
+
+Listen=/run/systemd/io.systemd.Credentials (Stream)
+Id=systemd-creds.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/systemd-creds.socket
+DropInPaths=
+
+Listen=/run/systemd/io.systemd.Hostname (Stream)
+Id=systemd-hostnamed.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/systemd-hostnamed.socket
+DropInPaths=
+
+Listen=/run/systemd/io.systemd.sysext (Stream)
+Id=systemd-sysext.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/systemd-sysext.socket
+DropInPaths=
+
+Listen=/run/initctl (FIFO)
+Id=systemd-initctl.socket
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/system/systemd-initctl.socket
+DropInPaths=

@@ -251,7 +251,7 @@ IPC.
     in an ADR.
 - **F0 foundation (2026-09-25; PLAN.md §2.1, docs/api/ipc.md §23).**
   - **Yama `ptrace_scope = 1`** on every lane (`usr/lib/sysctl.d/50-punar-yama.conf`,
-    release gate A16): a same-uid process can no longer attach to, or read the memory of,
+    release gate A22): a same-uid process can no longer attach to, or read the memory of,
     a process it did not start. Debian's kernel shipped it at 0.
   - **Passwords cross terminals and sockets only** (`punar-reauth`): a pipe or file can be
     reopened through `/proc/<pid>/fd` by any same-uid process, a socket cannot; holders are

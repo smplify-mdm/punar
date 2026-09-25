@@ -223,10 +223,12 @@ if [ "${PUNAR_LAB_OVERLAY}" = 1 ]; then
     units=/work/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system
     install -m 0755 "${target}/punard" "${target}/punarctl" "${target}/punar-smplifyd" \
         "${root_mount}/usr/bin/"
-    install -m 0644 "${units}/punar-smplifyd.service" "${units}/punard.service" \
-        "${root_mount}/usr/lib/systemd/system/"
-    ln -sfn ../punar-smplifyd.service \
-        "${root_mount}/usr/lib/systemd/system/multi-user.target.wants/punar-smplifyd.service"
+    install -m 0644 "${units}/punar-smplifyd.socket" "${units}/punar-smplifyd.service" \
+        "${units}/punard.service" "${root_mount}/usr/lib/systemd/system/"
+    # Dormant until enrolled: nothing enables the agent, punard.service
+    # Wants= its socket. An image from before the socket unit ships a wants
+    # link, which would start the agent at every boot.
+    rm -f "${root_mount}/usr/lib/systemd/system/multi-user.target.wants/punar-smplifyd.service"
     install -d -m 0755 "${root_mount}/usr/share/doc/punar"
     install -m 0644 /work/docs/development/smplify-enrollment.md \
         "${root_mount}/usr/share/doc/punar/smplify-enrollment.md"
@@ -260,6 +262,8 @@ say() {
 i=0
 while [ ! -S "${sock}" ] && [ "${i}" -lt 30 ]; do i=$((i + 1)); sleep 1; done
 if [ ! -S "${sock}" ]; then say "FAIL agent socket absent"; exit 0; fi
+# Dormant until enrolled: systemd listens, and no agent runs until a call.
+say "before-first-call socket=$(systemctl is-active punar-smplifyd.socket 2>/dev/null) agent=$(systemctl is-active punar-smplifyd 2>/dev/null) pids=$(cat /sys/fs/cgroup/system.slice/punar-smplifyd.service/cgroup.procs 2>/dev/null | wc -l)"
 say "os-release $(grep -E '^(ID|VERSION_ID|IMAGE_ID)=' /etc/os-release | tr '\n' ' ')"
 say "discover $(punarctl --socket "${sock}" debug rpc org.discover --params '{"domain":"@DOMAIN@"}' 2>&1 | tr '\n' ' ')"
 say "register-invalid-code $(punarctl --socket "${sock}" debug rpc enroll.register --params '{"device_id":"lab-probe","bootstrap":"00000000000000000000000000000000","code":"lex_lab-probe-deliberately-invalid"}' 2>&1 | tr '\n' ' ')"
@@ -269,7 +273,7 @@ say "agent-log $(journalctl -u punar-smplifyd -b --no-pager -o cat 2>&1 | tail -
 journalctl -b --no-pager -o cat 2>/dev/null \
     | grep -E 'ordering cycle|Found dependency on|break cycle|deleted to break' \
     | while IFS= read -r line; do say "cycle ${line}"; done
-say "active $(for u in punard punar-smplifyd punar-identity-materialize systemd-userdbd greetd; do printf '%s=%s ' "${u}" "$(systemctl is-active "${u}" 2>/dev/null)"; done)"
+say "active $(for u in punard punar-smplifyd.socket punar-smplifyd punar-identity-materialize systemd-userdbd greetd; do printf '%s=%s ' "${u}" "$(systemctl is-active "${u}" 2>/dev/null)"; done)"
 # The person's path to enrollment: membership of `punar` reaches punar-authd,
 # whose ticket punard spends. Without a terminal punarctl sends no ticket, so
 # the first administrator is refused before anything leaves the device.
@@ -292,7 +296,7 @@ chmod 0755 "${root_mount}/usr/local/lib/punar-lab/smplify-probe.sh"
 cat > "${root_mount}/etc/systemd/system/punar-smplify-lab-probe.service" <<'UNIT'
 [Unit]
 Description=Punar Smplify lab probe (disposable lab image only)
-After=punar-smplifyd.service network-online.target
+After=punar-smplifyd.socket network-online.target
 Wants=network-online.target
 
 [Service]

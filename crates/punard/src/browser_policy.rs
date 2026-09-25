@@ -520,6 +520,12 @@ pub fn persist_rendered_browser_policy(
     let mut bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     bytes.push(b'\n');
+    // Every start renders the document again. One that already says exactly
+    // this is left as it is: rewriting it needs room for a temporary file,
+    // and a full disk must not fail a write that changes nothing.
+    if fs::read(path).is_ok_and(|held| held == bytes) {
+        return fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
     write_atomic_synced(path, &bytes, 0o600)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
@@ -583,6 +589,36 @@ mod tests {
     #[test]
     fn no_org_browser_opinion_means_no_managed_file() {
         assert_eq!(render_effective_browser_policy(&[], &[]).unwrap(), None);
+    }
+
+    /// Every start renders the document again: one that already says
+    /// exactly this is not rewritten (a rewrite needs room for a temporary
+    /// file, and a full disk would then fail a write that changes nothing),
+    /// and one that differs is replaced.
+    #[test]
+    fn an_unchanged_document_is_not_written_again() {
+        use std::os::unix::fs::MetadataExt;
+        let dir =
+            std::env::temp_dir().join(format!("punard-rendered-unchanged-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("browser-policy/rendered.json");
+        let layer = |allow: bool| ApplicationPolicyLayer {
+            provenance: provenance(2),
+            required: BTreeSet::new(),
+            denied: BTreeSet::new(),
+            required_web_apps: BTreeMap::new(),
+            denied_origins: BTreeSet::new(),
+            allow_user_install: Some(allow),
+        };
+        persist_rendered_browser_policy(&path, &[layer(false)], &[]).unwrap();
+        let first = fs::metadata(&path).unwrap().ino();
+        persist_rendered_browser_policy(&path, &[layer(false)], &[]).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().ino(), first, "not rewritten");
+        persist_rendered_browser_policy(&path, &[layer(true)], &[]).unwrap();
+        assert_ne!(fs::metadata(&path).unwrap().ino(), first, "a change is");
+        let held: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(held["WebAppInstallByUserEnabled"], json!(true));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

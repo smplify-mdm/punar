@@ -51,8 +51,17 @@ qcow2 (mkosi)                │  QEMU: -m 8192 -smp 4 -device virtio-vga,
    prints mean/max to the serial console; `boot-test.sh` records them into
    `ram-report.txt`. No RAM line, no pass.
 3. **Gate 3 — runtime evidence complete.** Every Punar service cgroup must
-   expose CPU and I/O counters; zram facts must reach the host report. Missing
-   evidence is a failure on both native and emulated runs.
+   expose CPU and I/O counters; zram facts must reach the host report. The
+   boot's journal must also show that `punar-release-initramfs.service` freed
+   the unpacked initramfs before switch-root
+   (`PUNAR_IDLE_INITRAMFS_RELEASED=yes`), or said it was not needed on a
+   kernel outside Linux 7.0 to 7.2 (`not-needed`). A release must have freed
+   more than it kept, `Unevictable` + `Shmem` must have fallen by at least
+   half of what it freed (`PUNAR_IDLE_INITRAMFS_DROP_KB`, the kernel's own
+   figures), and no warning-or-worse userspace journal entry may fall between
+   the release and the switch-root (`PUNAR_IDLE_INITRAMFS_LATE_WARNINGS`).
+   The kernel release and window-end `Unevictable` travel with it as context.
+   Missing evidence is a failure on both native and emulated runs.
 4. **Gate 4 — budget verdict.** `check-budgets.sh` reads `ram-report.txt`
    and applies the RAM, service-PSS, per-service CPU and combined first-party
    write ceilings. Whole-guest writes are retained as context and are not
@@ -77,11 +86,24 @@ the canonical window fixed in
   and max;
 - per service: `cpu.stat usage_usec` and `io.stat wbytes` deltas from the
   `punard`, `punar-agentd`, `punar-secrets`, and `punar-netd` systemd cgroups;
+- the built-in Smplify agent, dormant until enrolled:
+  `PUNAR_SMPLIFYD_START_MONOTONIC_US`, when systemd last started its main
+  process this boot (0 for never), `PUNAR_SMPLIFYD_PROCS`, the process count
+  of its `punar-smplifyd.service` cgroup (none when the cgroup does not
+  exist), and `PUNAR_SMPLIFYD_SOCKET`, the state of the socket that would
+  start it. The measured image never enrolls, so the agent is not in the
+  resident services' PSS, and the gate below holds it to never having
+  started; punard's side (it never connects while unenrolled) is its own
+  test's, since on this image punard dials the mock control plane;
 - periodic work: the persistent, low-priority `punar-background.slice`
   accumulates timer-triggered reconcile and agent-discovery work even though
   their individual oneshot cgroups disappear between samples;
 - whole guest, context only: `/proc/stat` busy ratio and physical block-device
-  sectors-written delta;
+  sectors-written delta, and where those writes went, without counting a byte
+  twice: the journal (`systemd-journald.service`), every top-level cgroup
+  summed, and the kernel/filesystem metadata no cgroup was charged for (the
+  device total from the root cgroup's `io.stat`, or diskstats, minus that
+  sum);
 - memory pressure: `/sys/block/zram0` existence, size, active algorithm and
   `/proc/swaps` membership are observed on the live boot, not inferred from
   configuration;
@@ -121,8 +143,10 @@ not drift from it:
 | combined first-party service PSS > target | 100 MB | `::warning::`, job passes |
 | any first-party cgroup idle CPU ≥ ceiling | 0.50% of one CPU | `::error::`, job **fails** |
 | combined first-party writes > ceiling | 98,304 B / 5 min | `::error::`, job **fails** |
+| Smplify agent started this boot or running on the unenrolled image, or its socket not active | never started, 0 processes, socket `active` | `::error::`, job **fails**, including under TCG |
 | any required runtime fact missing | — | `::error::`, job **fails**, including under TCG |
 | whole-guest writes | informational | recorded and uploaded for diagnosis, not attributed to Punar |
+| whole-guest write attribution missing, its remainder not the device total minus the cgroups, its device total further from diskstats than writes in flight explain, or its cgroup sum above the device by more than that | slack 512 KiB + 1/32 of diskstats | `::error::`, job **fails**, including under TCG (root plus children counts every charged byte twice, in the remainder or in the device total) |
 
 **TCG caveat:** when the runner has no usable `/dev/kvm`, boot-test degrades
 to TCG software emulation. Numeric performance results from such runs are labeled
@@ -145,7 +169,7 @@ not the cross-architecture TCG path this caveat describes.
 | `punar-desktop-screenshot.png` | grim capture from inside the session — proof of real (llvmpipe) rendering. Uploaded as the `punar-desktop-screenshot` CI artifact. |
 | `ram-report.txt` | Typed host budget input: RAM, service PSS, idle CPU/write facts, zram facts, environment, image, timestamp and the informational desktop proxy. |
 | `ram-samples.txt` | raw per-sample `epoch used-MB` lines from the guest window. |
-| `runtime-report.txt` | Raw guest-emitted per-service/whole-guest CPU and write counters plus live zram facts. |
+| `runtime-report.txt` | Raw guest-emitted per-service/whole-guest CPU and write counters, live zram facts, and what the initrd's initramfs release freed, kept and was followed by (with the kernel release and window-end `Unevictable`). |
 | `ram-processes.txt` | Per-process PSS ranking at stabilized idle. |
 | `ram-process-memory.txt` | Window-end per-process PSS, locked, anonymous, file and shared-memory attribution plus whole-process totals and the non-process accounting remainder. The remainder is diagnostic, not a budget metric. |
 | `ram-meminfo-start.txt`, `ram-meminfo-end.txt` | Exact `/proc/meminfo` snapshots bracketing the stabilized five-minute window. |

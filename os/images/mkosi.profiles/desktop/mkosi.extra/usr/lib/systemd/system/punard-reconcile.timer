@@ -12,6 +12,16 @@
 
 [Unit]
 Description=Punar scheduled reconcile trigger (drift remediation)
+# Every reconcile pass, the enrolled device's liveness and unit checks
+# included, comes from this timer: an administrator's `systemctl stop` is
+# refused. Stopping it anyway (mask, a drop-in, a target that stops it)
+# leaves a gap in the passes, audited as `enroll.gap` when they resume, and
+# a mask or drop-in is also caught by the unit check
+# (docs/development/smplify-enrollment.md section 3.4). The development
+# image's exercises lift this with a drop-in of their own
+# (punard-reconcile.timer.d/10-dev-stoppable.conf), which release check A5
+# keeps off every release image.
+RefuseManualStop=yes
 
 [Timer]
 OnBootSec=120

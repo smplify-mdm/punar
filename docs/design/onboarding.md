@@ -390,7 +390,7 @@ posture above is unchanged: nobody holds root, `wheel` or a sudoers rule.)*
 
 **Decision: the first account onboarded is the device's administrator.** It is
 created in the system group **`punar-admin`**, which the image ships empty
-(release gate A18). The role is not a privilege level — it grants no shell, no
+(release gate A24). The role is not a privilege level — it grants no shell, no
 ambient authority and no capability. It is the answer punard needs to a
 question a password cannot answer: *may this person act on the other people
 who use this device?*
@@ -588,8 +588,8 @@ The full posture of the first account:
 |---|---|---|
 | `uid` | **allocated once from a persistent on-disk map** (`/var/lib/punar/identity/uid-map.json`), lowest free ≥ 1000; normally 1000, and nothing may assume it | Below 60000 — see §6.3. Allocated-then-permanent, and **never derived** from the username, an email or a directory object id: `platform-sso.md` §6 rules 1 and 2, which this row exists to satisfy. Deriving a uid from a name is the one-way door that makes later directory binding irreversible |
 | primary group | `<username>` (per-user group) | Standard, and it makes `0700` homes and `umask 002` both safe |
-| supplementary groups | `punar`, `video`, `input` | `punar` = may ask (above). `video`/`input` are the direct-DRM safety net the dev image already grants; logind normally supplies them and they are belt-and-braces |
-| **not** in | `wheel`, `uucp`, `docker`, `storage` | `wheel` per §1.6. `uucp` was a dev-image debugging convenience and does not ship. The others are the classic "group that is silently root" set |
+| supplementary groups | `punar`, and `punar-admin` for the first account | `punar` = may ask (above). `punar-admin` = may act on everyone on this device (§1.6.0): a role punard checks, not a privilege — it grants no shell and no capability. Nothing else: see the next row |
+| **not** in | `input`, `video`, `wheel`, `uucp`, `docker`, `storage` | `input` is a keylogger's whole requirement: any process running as the person could open every `/dev/input/event*` node and read every keystroke, the lock screen's passphrase included. `video` is raw DRM and framebuffer access, which reads the screen. The session needs neither: logind hands the compositor its keyboard, pointer and DRM devices through `TakeDevice` on the active seat, and its `uaccess` ACLs follow the seat, so they end when the session does. Earlier images granted both as a "belt-and-braces" safety net; that was a standing weakness for a convenience nobody used, and `punar-identity-materialize` now takes both away from an existing account on its next boot, in the stored record and in `/run/userdb`. The greeter's system account holds neither either. Release gate A16 refuses an image in which the greeter, `_greetd`, the configured greetd user or any account in the human uid range (1000–59999) of `/etc/passwd` is in either group, through `/etc/group`, `/etc/gshadow` or a sysusers.d line, and any userdb membership, user record or group record in the image that puts anyone in either; it also requires the greeter's PAM session to run `pam_systemd`, since without `video` the greeter draws only because logind gives it the seat. Accounts created by onboarding live in `/var` and are not in the image, so the gate cannot see them: for those the guarantee is `materialize` above, which never publishes either group whatever a record says. `wheel` per §1.6. `uucp` was a dev-image debugging convenience and does not ship. `docker` and `storage` are the classic "group that is silently root" set |
 | shell | `/bin/bash` | The substrate's shell; §65 requires that the user *not need* it, not that it be absent |
 | home | `/home/<username>`, `0700` | On `/var` per ADR-003 |
 | `subuid`/`subgid` | `100000:65536` | Rootless podman, as the dev image already does — but for the created user, not for `punar` |
@@ -1350,7 +1350,7 @@ document and it costs sixteen bytes.
 | `identity` | `null` | `{provider, issuer, subject, upn, boundAt, lastVerifiedAt}` — where `subject` is the IdP's immutable subject claim (OIDC `sub`, Entra `oid`), **never the email**, which is a display attribute that changes |
 | `realNameSource` | `"local"` | `"directory"` once bound — so the first directory sync neither silently overwrites what the person typed nor silently refuses to update it. The ambiguity is resolved by a field that exists before the ambiguity does |
 | `auth.kinds` | `["password"]` | `["password", "oidc"]` — the authenticator is a *list*, so binding **adds** a kind rather than replacing the record's notion of how one signs in |
-| `groups.local[]` | `["punar", "video", "input"]` | unchanged |
+| `groups.local[]` | `["punar"]` | unchanged |
 | `groups.fromDirectory[]` | `[]` | populated by sync, and **never merged into `groups.local`** — so unbinding is a truncation, not a diff |
 | `homeDirectory` | `"/home/alice"` | an explicit field from day one, never derived from the username, because `alice.nguyen@acme.com` is not a path |
 | `uidSource` | `"local"` | `"directory"` — see §6.3 |

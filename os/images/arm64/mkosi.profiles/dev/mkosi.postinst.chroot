@@ -8,8 +8,11 @@ groupadd --force punar
 # does, so the in-VM gates exercise the role rather than a bypass.
 groupadd --force --system punar-admin
 
+# Not `input` or `video`: the session takes its devices from logind on the
+# active seat, and this user must hold what a person holds for the desktop
+# gates to prove the product (docs/design/onboarding.md section 1.7).
 supplementary=""
-for group in sudo video input dialout punar-admin; do
+for group in sudo dialout punar-admin; do
     if getent group "${group}" >/dev/null 2>&1; then
         if [ -n "${supplementary}" ]; then
             supplementary="${supplementary},${group}"

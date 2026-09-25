@@ -291,7 +291,13 @@ enum Command {
     },
     /// Re-observe every capability, remediate drift per the effective
     /// policy (SPEC section 42; Milestone 4), and report the outcome.
-    Reconcile,
+    Reconcile {
+        /// Print one line only when the pass remediated something or failed
+        /// to, and nothing otherwise (the timer's form: every pass is
+        /// audited in /var/log/punar/audit.jsonl either way).
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Inspect update orchestration state.
     Update {
         #[command(subcommand)]
@@ -556,6 +562,10 @@ enum AgentsCommand {
         /// Absent means `manual` — never an assumed timer.
         #[arg(long, value_parser = ["manual", "timer", "register", "enroll"])]
         trigger: Option<String>,
+        /// Print one line only when the pass changed the detection set, and
+        /// nothing otherwise (the timer's form: changes are audited).
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -1248,6 +1258,23 @@ fn render_or_json(
 /// Run one IPC call and print either the verbatim JSON result or the
 /// rendered human view. The human table and the JSON are two renderers
 /// over one result — they can never disagree.
+/// A `--quiet` verb's one line of change, if any: nothing on stdout when the
+/// pass changed nothing, and an answer this build cannot read is a failure,
+/// never silence.
+fn print_change_line(line: Result<Option<String>, String>) -> ExitCode {
+    match line {
+        Ok(Some(line)) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => ExitCode::SUCCESS,
+        Err(why) => {
+            eprintln!("punarctl: the daemon's answer could not be read: {why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn rpc(
     client: &Client,
     json: bool,
@@ -4906,7 +4933,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Reconcile => {
+        Command::Reconcile { quiet } => {
             let hostname = local_hostname();
             // An enrolled device's pass also talks to the control plane,
             // within a budget of its own (contract section 2): waiting only
@@ -4916,6 +4943,7 @@ fn main() -> ExitCode {
                 None,
                 punar_common::ipc::RECONCILE_CLIENT_TIMEOUT,
             ) {
+                Ok(result) if quiet => print_change_line(views::reconcile_change_line(&result)),
                 Ok(result) => {
                     render_or_json(json, &result, |v| views::reconcile(&style, v, &hostname))
                 }
@@ -5349,15 +5377,24 @@ fn main() -> ExitCode {
                         Err(error) => fail(&error),
                     }
                 }
-                AgentsCommand::Scan { trigger } => {
+                AgentsCommand::Scan { trigger, quiet } => {
                     let hostname = local_hostname();
                     // Absent means `manual`, and the daemon decides that,
                     // not this process: a CLI that filled in a default
                     // trigger could label a typed command as a timer.
                     let params = trigger.map(|t| json!({ "trigger": t }));
-                    rpc(&agents, json, "agents.scan", params, |v| {
-                        views::agents_list(&style, v, &hostname)
-                    })
+                    if quiet {
+                        match agents.call("agents.scan", params) {
+                            Ok(result) => {
+                                print_change_line(views::agents_scan_change_line(&result))
+                            }
+                            Err(error) => fail(&error),
+                        }
+                    } else {
+                        rpc(&agents, json, "agents.scan", params, |v| {
+                            views::agents_list(&style, v, &hostname)
+                        })
+                    }
                 }
                 AgentsCommand::Alerts { command, all } => match command {
                     Some(AlertsCommand::Dismiss { alert_id }) => rpc(
@@ -6382,6 +6419,17 @@ mod tests {
             &["punarctl", "relay", "status"],
             &["punarctl", "audit", "tail"],
             &["punarctl", "reconcile"],
+            // The timers' argv: punard-reconcile.service and
+            // punar-agentd-scan.service.
+            &["punarctl", "reconcile", "--quiet"],
+            &[
+                "punarctl",
+                "agents",
+                "scan",
+                "--trigger",
+                "timer",
+                "--quiet",
+            ],
             &["punarctl", "update", "status"],
             &["punarctl", "update", "check"],
             &["punarctl", "update", "check", "--force"],

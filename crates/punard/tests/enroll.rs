@@ -27,6 +27,7 @@ use std::time::Duration;
 use ed25519_dalek::{Signer, SigningKey};
 use punar_common::storage::StorageSources;
 use punar_common::update::{Architecture, BootPlatform};
+use punard::agent_units::{AGENT_EXECUTABLE, AgentIntegrity};
 use punard::authz::{Peer, PeerSource};
 use punard::capability::Registry;
 use punard::capability::mock::MockCapability;
@@ -94,9 +95,36 @@ struct ControlPlaneState {
     /// Refuse `org.discover` of an unknown domain with this message: words
     /// the control plane chose.
     not_found_message: Mutex<Option<String>>,
-    /// Take every request and answer none: a link that drops everything past
-    /// the connection.
+    /// Take every request that needs the organization's server and answer
+    /// none: a link that drops everything past the connection. The calls
+    /// the agent answers from the device alone still work.
     black_hole: AtomicBool,
+    /// Take every request and answer none, those included: a frozen agent.
+    frozen: AtomicBool,
+    /// Answer every call that needs the organization's server as the
+    /// built-in agent does while the device is offline: with its own
+    /// `internal` error, promptly. The calls it answers from the device alone
+    /// still work.
+    offline: AtomicBool,
+    /// Read each request and close the connection without answering: an
+    /// agent killed mid-call.
+    hang_up: AtomicBool,
+    /// Close each connection at once, before reading anything: the reset a
+    /// caller sees from an agent that dies as it accepts.
+    reset: AtomicBool,
+    /// Answer `identity.status` as an agent whose identity was deleted.
+    forget_identity: AtomicBool,
+    /// Answer `identity.status` as an agent holding another device's
+    /// identity.
+    other_identity: AtomicBool,
+    /// Refuse `enroll.unregister`: an agent that cannot wipe.
+    refuse_unregister: AtomicBool,
+    /// Every `enroll.unregister`'s params, as they arrived.
+    unregisters: Mutex<Vec<Value>>,
+    /// Whether punard's release record was on disk when `enroll.register`
+    /// arrived, for the `release_record` path set here.
+    release_record: Mutex<Option<PathBuf>>,
+    record_before_register: Mutex<Vec<bool>>,
     /// Serve a desired state that turns local policy editing off
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
@@ -104,6 +132,14 @@ struct ControlPlaneState {
     /// Every method punard called, in order: proves whether anything left
     /// the device on behalf of a caller.
     methods: Mutex<Vec<String>>,
+    /// Every connection accepted, whether or not a call followed: with the
+    /// agent's socket owned by systemd, a bare connect is enough to start
+    /// the agent (`Accept=no` triggers on the connection), so a device that
+    /// must never run it must never connect.
+    connections: AtomicUsize,
+    /// Answer `identity.status` with this line verbatim instead: something
+    /// that is not the agent answering on its socket.
+    raw_identity_status: Mutex<Option<String>>,
     /// Every request line exactly as it arrived, to prove what never did.
     lines: Mutex<Vec<String>>,
     /// Serve this as the organization document's `enrollment.removable`
@@ -144,6 +180,11 @@ impl ControlPlaneState {
         if let Some(delay) = late {
             std::thread::sleep(delay);
         }
+        if self.offline.load(Ordering::SeqCst)
+            && !matches!(method, "identity.status" | "enroll.unregister")
+        {
+            return Err(("internal", "transport failed (connecting timed out)".into()));
+        }
         match method {
             "org.discover" => {
                 let domain = params["domain"].as_str().unwrap_or_default();
@@ -173,6 +214,12 @@ impl ControlPlaneState {
                 Ok(json!({ "organization": org }))
             }
             "enroll.register" => {
+                if let Some(record) = self.release_record.lock().unwrap().as_ref() {
+                    self.record_before_register
+                        .lock()
+                        .unwrap()
+                        .push(record.exists());
+                }
                 let device_id = params["device_id"].as_str().unwrap_or_default();
                 let bootstrap = params["bootstrap"].as_str().unwrap_or_default();
                 // The mock's admission rule: ≥ 32 hex chars.
@@ -273,9 +320,32 @@ impl ControlPlaneState {
             }
             // admin.* stays reserved for M10 — like every unknown name.
             "enroll.unregister" => {
+                if self.refuse_unregister.load(Ordering::SeqCst) {
+                    return Err(("internal", "identity storage failed (StorageFull)".into()));
+                }
+                self.unregisters.lock().unwrap().push(params.clone());
+                // The agent holds one identity at most: `any_identity`
+                // wipes it, whatever token (or none) comes along.
+                if params["any_identity"] == json!(true) {
+                    self.devices.lock().unwrap().clear();
+                } else {
+                    let token = params["device_token"].as_str().unwrap_or_default();
+                    self.devices.lock().unwrap().remove(token);
+                }
+                Ok(json!({"wiped": true}))
+            }
+            // The agent's liveness call: its identity, and whether this
+            // device's token is the one it holds.
+            "identity.status" => {
                 let token = params["device_token"].as_str().unwrap_or_default();
-                self.devices.lock().unwrap().remove(token);
-                Ok(json!({}))
+                let known = self.devices.lock().unwrap().contains_key(token);
+                if self.forget_identity.load(Ordering::SeqCst) || !known {
+                    return Ok(json!({"enrolled": false}));
+                }
+                Ok(json!({
+                    "enrolled": true,
+                    "token_matches": !self.other_identity.load(Ordering::SeqCst),
+                }))
             }
             other => Err(("unknown_method", format!("no method {other:?}"))),
         }
@@ -335,6 +405,7 @@ impl ControlPlane {
                     break;
                 }
                 let Ok(stream) = stream else { break };
+                accept_state.connections.fetch_add(1, Ordering::SeqCst);
                 let state = Arc::clone(&accept_state);
                 std::thread::spawn(move || serve_connection(stream, &state));
             }
@@ -371,6 +442,10 @@ impl Drop for ControlPlane {
 }
 
 fn serve_connection(stream: UnixStream, state: &ControlPlaneState) {
+    if state.reset.load(Ordering::SeqCst) {
+        drop(stream);
+        return;
+    }
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut writer = stream;
     let mut line = String::new();
@@ -388,11 +463,23 @@ fn serve_connection(stream: UnixStream, state: &ControlPlaneState) {
         let params = request.get("params").cloned().unwrap_or(json!({}));
         state.methods.lock().unwrap().push(method.to_string());
         state.lines.lock().unwrap().push(line.clone());
-        if state.black_hole.load(Ordering::SeqCst) {
+        let local = matches!(method, "identity.status" | "enroll.unregister");
+        if state.frozen.load(Ordering::SeqCst)
+            || (state.black_hole.load(Ordering::SeqCst) && !local)
+        {
             // Held until punard stops waiting and hangs up.
             line.clear();
             let _ = reader.read_line(&mut line);
             break;
+        }
+        if state.hang_up.load(Ordering::SeqCst) {
+            break;
+        }
+        if method == "identity.status" {
+            if let Some(raw) = state.raw_identity_status.lock().unwrap().clone() {
+                let _ = writeln!(writer, "{raw}");
+                break;
+            }
         }
         let response = match state.handle(method, &params) {
             Ok(result) => json!({"v": 1, "id": id, "result": result}),
@@ -725,6 +812,21 @@ impl Drop for TestDaemon {
 
 fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// The `enroll.agent` audit events, as (result, resource) in order.
+fn agent_events(daemon: &TestDaemon) -> Vec<(String, String)> {
+    daemon
+        .audit_events()
+        .iter()
+        .filter(|e| e["action"] == "enroll.agent")
+        .map(|e| {
+            (
+                e["result"].as_str().unwrap().to_string(),
+                e["resource"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
 }
 
 /// How many times punard asked for its policy.
@@ -1094,21 +1196,36 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     let report = daemon.result("reconcile", None);
     assert_eq!(report["compliance"]["overall"], "compliant");
     let enroll_status = daemon.result("enroll.status", None);
-    assert_eq!(enroll_status["last_sync"]["result"], "unreachable");
+    // The control plane here is the built-in agent's socket, on this device:
+    // one that is gone is management interrupted, told apart from the
+    // network, and audited once for the episode. The network was never
+    // asked, so no sync was attempted: last_sync keeps the last one, the
+    // reports wait, and no enroll.sync outage is recorded.
+    assert_eq!(enroll_status["last_sync"]["result"], "success");
     assert_eq!(enroll_status["last_sync"]["pending"], true);
     assert_eq!(enroll_status["attestation"], "simulated");
-    let unreachable_events = |daemon: &TestDaemon| {
+    let sync_events = |daemon: &TestDaemon| {
         daemon
             .audit_events()
             .iter()
-            .filter(|e| e["action"] == "enroll.sync" && e["result"] == "unreachable")
+            .filter(|e| e["action"] == "enroll.sync")
             .count()
     };
-    assert_eq!(unreachable_events(&daemon), 1);
-    // A second failing pass adds no second transition event (transitions
+    assert_eq!(sync_events(&daemon), 0);
+    assert_eq!(enroll_status["management"]["state"], "interrupted");
+    assert_eq!(enroll_status["management"]["reason"], "socket_missing");
+    assert_eq!(daemon.status_summary()["management"], "interrupted");
+    // A second failing pass adds no second episode event (transitions
     // only, never per-retry spam).
     daemon.result("reconcile", None);
-    assert_eq!(unreachable_events(&daemon), 1);
+    assert_eq!(sync_events(&daemon), 0);
+    assert_eq!(
+        agent_events(&daemon),
+        [(
+            "agent_unavailable".to_string(),
+            "agent.socket_missing".to_string()
+        )]
+    );
     assert_eq!(
         state.compliance.lock().unwrap().len(),
         2,
@@ -1124,12 +1241,23 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     assert_eq!(enroll_status["last_sync"]["pending"], false);
     assert_eq!(control_plane.state.compliance.lock().unwrap().len(), 3);
     assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 1);
-    let success_transitions = daemon
-        .audit_events()
-        .iter()
-        .filter(|e| e["action"] == "enroll.sync" && e["result"] == "success")
-        .count();
-    assert_eq!(success_transitions, 1);
+    assert_eq!(
+        sync_events(&daemon),
+        0,
+        "the agent's episode is not an outage"
+    );
+    assert_eq!(enroll_status["management"], json!({"state": "active"}));
+    assert_eq!(daemon.status_summary()["management"], "active");
+    assert_eq!(
+        agent_events(&daemon),
+        [
+            (
+                "agent_unavailable".to_string(),
+                "agent.socket_missing".to_string()
+            ),
+            ("success".to_string(), "agent.socket_missing".to_string())
+        ]
+    );
 
     // Unenroll — deliberately with the control plane DOWN: local restore
     // needs no counterparty.
@@ -1139,10 +1267,18 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     assert_eq!(stopped["removed_policy_ids"], json!(["eng-baseline-v12"]));
     assert!(policy_d_files(&daemon).is_empty());
     assert!(!daemon.state_path("enrollment.json").exists());
-    assert!(!daemon.state_path("device-token").exists());
     assert!(
         !view_path.exists(),
         "the view describes an enrollment that has ended"
+    );
+    // The agent never confirmed it wiped the identity, so its token stays
+    // and says so: an unenrollment is never finished by forgetting a key
+    // that is still on disk.
+    assert_eq!(stopped["identity_release"], "pending");
+    assert!(daemon.state_path("device-token").exists());
+    assert_eq!(
+        daemon.result("enroll.status", None)["identity_release"]["state"],
+        "pending"
     );
 
     // Personal state restored — and the preference recorded while
@@ -1166,6 +1302,37 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     assert_eq!(state.compliance.lock().unwrap().len(), 3);
     daemon.result("reconcile", None);
     assert_eq!(state.compliance.lock().unwrap().len(), 3);
+
+    // The agent back: the next pass asks it again to wipe the identity, and
+    // once it confirms, the token goes and the release is audited. Nothing
+    // else is sent: a personal device reports nothing.
+    let control_plane = ControlPlane::start_with(&dir, state);
+    control_plane.state.methods.lock().unwrap().clear();
+    daemon.result("reconcile", None);
+    assert_eq!(
+        *control_plane.state.methods.lock().unwrap(),
+        ["enroll.unregister"]
+    );
+    assert!(!daemon.state_path("device-token").exists());
+    assert!(
+        daemon
+            .result("enroll.status", None)
+            .get("identity_release")
+            .is_none()
+    );
+    let releases: Vec<String> = daemon
+        .audit_events()
+        .iter()
+        .filter(|e| e["action"] == "enroll.release")
+        .map(|e| e["result"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(releases, ["pending", "success"]);
+    daemon.result("reconcile", None);
+    assert_eq!(
+        control_plane.state.methods.lock().unwrap().len(),
+        1,
+        "nothing more"
+    );
 
     // Audit lifecycle: enroll.start success citing the org policy,
     // enroll.stop success, both sync transitions.
@@ -2641,7 +2808,7 @@ fn configure_update_channel(cfg: &mut DaemonConfig, dir: &Path) {
         repository_url_file: dir.join("update-repository.url"),
         repository_url_owner_uid: rustix::process::geteuid().as_raw(),
         repository_dir: repository,
-        curl_bin: dir.join("curl"),
+        fetch_socket: dir.join("fetch.sock"),
         trusted_keys_dir: keys,
         cached_channel: cfg.state_dir.join("update/verified-channel.json"),
         cached_signature: cfg.state_dir.join("update/verified-channel.json.sig"),
@@ -4039,6 +4206,79 @@ fn a_refused_fetch_backs_off_and_keeps_policy() {
     assert_eq!(events[1]["result"], "unchanged");
 }
 
+/// A refusal that depends on this device's own files is remembered with
+/// them and not staged again, so asking again costs one fetch and nothing
+/// else: the fetch is not backed off, and the organization's correction is
+/// enforced on the very next pass rather than up to half an hour later.
+#[test]
+fn a_remembered_local_refusal_is_asked_about_again_on_every_pass() {
+    let dir = test_dir("refresh-remembered");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = &control_plane.state;
+    // Root's drop, and a changed set from the organization that cannot be
+    // loaded beside it.
+    write_file(
+        &daemon.state_path("policy.d/clash.json"),
+        json!({"policy_id": "eng-baseline-v12", "source_kind": "organization_role_policy",
+               "precedence_rank": 3, "source_name": "root's"})
+        .to_string(),
+    );
+    *state.firewall_enabled.lock().unwrap() = Some(false);
+    let fetched_before = fetch_count(state);
+    for _ in 0..6 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(fetch_count(state) - fetched_before, 6, "every pass asked");
+    let refresh = last_refresh(&daemon);
+    assert_eq!(refresh["result"], "failed", "{refresh}");
+    assert_eq!(
+        refresh["reason"], "conflicts_with_local_policy",
+        "{refresh}"
+    );
+    let failed = policy_events(&daemon)
+        .iter()
+        .filter(|e| e["result"] == "failed")
+        .count();
+    assert_eq!(failed, 1, "recorded once");
+
+    // The organization takes its change back: enforced on the next pass.
+    *state.firewall_enabled.lock().unwrap() = None;
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["result"], "unchanged");
+}
+
+/// While the device is offline every fetch fails, and the refresh backs off
+/// as it would from a refusing server. Once a report gets through the link is
+/// back, and what the outage built up says nothing about the organization's
+/// server: a policy it changed meanwhile is fetched on the next pass, not up
+/// to half an hour later.
+#[test]
+fn a_policy_changed_during_an_outage_is_fetched_once_the_link_is_back() {
+    let dir = test_dir("refresh-after-outage");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = &control_plane.state;
+    state.offline.store(true, Ordering::SeqCst);
+    for _ in 0..8 {
+        daemon.result("reconcile", None);
+    }
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["result"], "unreachable", "{status}");
+
+    *state.firewall_enabled.lock().unwrap() = Some(false);
+    state.offline.store(false, Ordering::SeqCst);
+    // The reports get through; the fetch was still backed off.
+    daemon.result("reconcile", None);
+    assert_eq!(
+        daemon.result("enroll.status", None)["last_sync"]["result"],
+        "success"
+    );
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["result"], "applied");
+    assert_eq!(daemon.mock.state(), json!("disabled"));
+}
+
 /// An answer longer than punard reads is the organization's to fix, not a
 /// link to wait out: a refresh records it as refused by that rule, once,
 /// keeps the last good policy and asks again on the very next pass, and
@@ -4105,12 +4345,15 @@ fn a_set_the_device_cannot_install_backs_off_like_a_failed_fetch() {
 /// however the link fails, so punarctl's wait for it (and the timer's unit)
 /// never runs out: on a link that takes every request and answers none, the
 /// policy fetch is waited out, and the reports that no longer fit in what is
-/// left are not sent at all, staying pending for the next pass.
+/// left are not sent at all, staying pending for the next pass. A frozen
+/// agent, which does not answer even the liveness call it answers from the
+/// device alone, is waited out once and asked nothing more: management
+/// interrupted, not the network.
 #[test]
 fn a_pass_on_a_black_holed_link_ends_inside_its_budget() {
     // Room for the fetch and a compliance report on a link that answers
     // (5 + 9 s waited out would not fit, 0 + 9 does); on one that does not,
-    // the fetch alone is waited out.
+    // the fetch alone is waited out. The liveness call's whole wait fits.
     const BUDGET: Duration = Duration::from_secs(10);
     let dir = test_dir("black-hole");
     let control_plane = ControlPlane::start(&dir);
@@ -4131,19 +4374,40 @@ fn a_pass_on_a_black_holed_link_ends_inside_its_budget() {
     daemon.result("reconcile", None);
     let took = started.elapsed();
     assert!(took < BUDGET + Duration::from_secs(1), "{took:?}");
+    // The agent answers the liveness call; the fetch is waited out (it may
+    // wait on the organization's server), and the reports no longer fit.
     assert_eq!(
         *state.methods.lock().unwrap(),
-        ["policy.fetch"],
-        "the reports did not fit, and were not sent"
+        ["identity.status", "policy.fetch"],
+        "the reports were not sent"
     );
     let status = daemon.result("enroll.status", None);
     assert_eq!(status["last_sync"]["pending"], true, "{status}");
+    assert_eq!(status["last_sync"]["result"], "unreachable", "{status}");
+    assert_eq!(status["management"]["state"], "active", "{status}");
+
+    // A frozen agent: the liveness call is waited out, and nothing more is
+    // asked of it.
+    state.frozen.store(true, Ordering::SeqCst);
+    state.methods.lock().unwrap().clear();
+    let started = std::time::Instant::now();
+    daemon.result("reconcile", None);
+    let took = started.elapsed();
+    assert!(took < BUDGET + Duration::from_secs(1), "{took:?}");
+    assert_eq!(*state.methods.lock().unwrap(), ["identity.status"]);
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["management"]["reason"], "not_answering", "{status}");
+    state.frozen.store(false, Ordering::SeqCst);
 
     // The link back: the next pass sends what was pending.
     state.black_hole.store(false, Ordering::SeqCst);
     let reports = state.compliance.lock().unwrap().len();
     daemon.result("reconcile", None);
     assert_eq!(state.compliance.lock().unwrap().len(), reports + 1);
+    assert_eq!(
+        daemon.result("enroll.status", None)["management"]["state"],
+        "active"
+    );
 }
 
 /// The common case costs one request and nothing else: no file in policy.d
@@ -4393,4 +4657,916 @@ fn a_policy_file_edited_or_removed_on_the_device_is_written_again() {
     daemon.result("reconcile", None);
     assert_eq!(policy_d_bytes(&daemon), bytes, "removed: written again");
     assert_eq!(policy_events(&daemon).len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// The built-in agent: dormant until enrolled, and every way it stops
+// answering an enrolled device noticed and audited (docs/development/
+// smplify-enrollment.md section 3.4; docs/api/ipc.md sections 5.10, 5.11, 6)
+// ---------------------------------------------------------------------------
+
+/// A device that never enrolled never calls the agent: not at boot, not on
+/// any pass, not to answer a status read. With the agent's socket owned by
+/// systemd, that is what keeps a personal device free of Smplify code.
+#[test]
+fn a_device_that_never_enrolled_never_calls_the_agent() {
+    let dir = test_dir("personal-no-calls");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    for _ in 0..3 {
+        daemon.result("reconcile", None);
+    }
+    daemon.result("enroll.status", None);
+    daemon.result("status", None);
+    assert!(
+        control_plane.state.methods.lock().unwrap().is_empty(),
+        "{:?}",
+        control_plane.state.methods.lock().unwrap()
+    );
+    // Not even a connection without a call: that alone would start the
+    // agent through its socket.
+    assert_eq!(control_plane.state.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(daemon.status_summary()["management"], Value::Null);
+}
+
+/// Unenrolling asks the agent one thing, to wipe the identity, and once it
+/// has confirmed that nothing is asked again: the agent goes dormant and the
+/// device is personal.
+#[test]
+fn unenrolling_asks_the_agent_to_wipe_and_then_nothing() {
+    let dir = test_dir("unenroll-calls");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = &control_plane.state;
+    state.methods.lock().unwrap().clear();
+    let stopped = daemon.result("enroll.stop", None);
+    assert_eq!(stopped["identity_release"], "released");
+    assert_eq!(*state.methods.lock().unwrap(), ["enroll.unregister"]);
+    assert!(!daemon.state_path("device-token").exists());
+    for _ in 0..2 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(state.methods.lock().unwrap().len(), 1, "nothing more");
+    assert!(
+        daemon
+            .audit_events()
+            .iter()
+            .all(|e| e["action"] != "enroll.release"),
+        "a release confirmed at once is the enroll.stop event's own"
+    );
+}
+
+/// Every way the agent can stop serving an enrolled device is noticed within
+/// one pass, told apart from the network, and audited once for the episode
+/// with its reason, then once when it ends: an identity deleted from under it
+/// (it answers that it holds none), one that is not this device's, an agent
+/// killed mid-call, one that resets the connection, a socket that is gone
+/// (masked and stopped) and one nobody listens on (failed). While it lasts
+/// the reports are held and the status file says management is interrupted.
+#[test]
+fn every_way_the_agent_stops_serving_is_audited_once_per_episode() {
+    let dir = test_dir("agent-faults");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = Arc::clone(&control_plane.state);
+    let broken = |reason: &str| {
+        let reports = state.compliance.lock().unwrap().len();
+        for _ in 0..2 {
+            daemon.result("reconcile", None);
+        }
+        let status = daemon.result("enroll.status", None);
+        assert_eq!(status["management"]["state"], "interrupted", "{reason}");
+        assert_eq!(status["management"]["reason"], reason, "{status}");
+        assert!(status["management"]["since"].is_string(), "{status}");
+        assert_eq!(daemon.status_summary()["management"], "interrupted");
+        assert_eq!(
+            state.compliance.lock().unwrap().len(),
+            reports,
+            "{reason}: reports are held"
+        );
+    };
+    let mended = |reason: &str| {
+        daemon.result("reconcile", None);
+        let status = daemon.result("enroll.status", None);
+        assert_eq!(status["management"], json!({"state": "active"}), "{reason}");
+        assert_eq!(daemon.status_summary()["management"], "active");
+        let events = agent_events(&daemon);
+        assert_eq!(
+            events[events.len() - 2..],
+            [
+                ("agent_unavailable".to_string(), format!("agent.{reason}")),
+                ("success".to_string(), format!("agent.{reason}"))
+            ],
+            "{events:?}"
+        );
+    };
+
+    for (flag, reason) in [
+        (&state.forget_identity, "identity_missing"),
+        (&state.other_identity, "identity_mismatch"),
+        (&state.hang_up, "closed_without_answer"),
+        (&state.reset, "connection_reset"),
+    ] {
+        flag.store(true, Ordering::SeqCst);
+        broken(reason);
+        flag.store(false, Ordering::SeqCst);
+        mended(reason);
+    }
+
+    // Masked and stopped: no socket at all.
+    let saved = control_plane.stop();
+    broken("socket_missing");
+    let control_plane = ControlPlane::start_with(&dir, Arc::clone(&saved));
+    mended("socket_missing");
+
+    // Failed: a socket node nobody listens on.
+    let saved = control_plane.stop();
+    drop(UnixListener::bind(dir.join("control-plane.sock")).unwrap());
+    broken("connection_refused");
+    let _control_plane = ControlPlane::start_with(&dir, saved);
+    mended("connection_refused");
+
+    assert_eq!(agent_events(&daemon).len(), 12, "two per episode, no more");
+    // None of it was the network: no sync outage, no policy fetch recorded
+    // as unreachable, and last_sync still names the last real sync.
+    let events = daemon.audit_events();
+    assert!(
+        events.iter().all(|e| e["action"] != "enroll.sync"
+            && !(e["action"] == "enroll.policy" && e["result"] == "unreachable")),
+        "{events:?}"
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["result"], "success", "{status}");
+}
+
+/// The liveness check fails closed: the one answer that means the agent is
+/// there and is this device's is `enrolled: true` with `token_matches: true`.
+/// Something else answering on the agent's socket, with an answer the agent
+/// never gives, is management interrupted (`unexpected_answer`), not a pass
+/// that learned nothing: a stand-in that claims an identity but not this
+/// device's token, one that refuses with an error the agent never uses, one
+/// that writes a line that is not the protocol, and one that speaks another
+/// version of it.
+#[test]
+fn an_answer_that_is_not_the_agents_is_management_interrupted() {
+    let dir = test_dir("agent-impostor");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = &control_plane.state;
+    for raw in [
+        r#"{"v":1,"id":"x","result":{"enrolled":true}}"#,
+        r#"{"v":1,"id":"x","error":{"code":"x","message":"y"}}"#,
+        r#"{"v":1,"id":"x","result":{}}"#,
+        "not the protocol",
+        r#"{"v":2,"id":"x","result":{"enrolled":true,"token_matches":true}}"#,
+    ] {
+        *state.raw_identity_status.lock().unwrap() = Some(raw.to_string());
+        let reports = state.compliance.lock().unwrap().len();
+        daemon.result("reconcile", None);
+        let status = daemon.result("enroll.status", None);
+        assert_eq!(status["management"]["state"], "interrupted", "{raw}");
+        assert_eq!(
+            status["management"]["reason"], "unexpected_answer",
+            "{raw}: {status}"
+        );
+        assert_eq!(
+            state.compliance.lock().unwrap().len(),
+            reports,
+            "{raw}: nothing more is sent to it"
+        );
+        *state.raw_identity_status.lock().unwrap() = None;
+        daemon.result("reconcile", None);
+        assert_eq!(
+            daemon.result("enroll.status", None)["management"]["state"],
+            "active",
+            "{raw}"
+        );
+    }
+    assert_eq!(
+        agent_events(&daemon),
+        [
+            "agent_unavailable",
+            "success",
+            "agent_unavailable",
+            "success",
+            "agent_unavailable",
+            "success",
+            "agent_unavailable",
+            "success",
+            "agent_unavailable",
+            "success"
+        ]
+        .iter()
+        .map(|result| (result.to_string(), "agent.unexpected_answer".to_string()))
+        .collect::<Vec<_>>()
+    );
+}
+
+/// punard's own device token deleted while the device is enrolled: it can
+/// neither ask the agent about this device's identity nor report on it, and
+/// that is management interrupted (`token_missing`), audited once, never a
+/// network outage. Nothing is sent: not even the liveness call, which would
+/// have no token to present.
+#[test]
+fn a_deleted_device_token_is_management_interrupted() {
+    let dir = test_dir("token-deleted");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    daemon.stop();
+    fs::remove_file(dir.join("state/device-token")).unwrap();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let before = control_plane.state.connections.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        daemon.result("reconcile", None);
+    }
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["management"]["state"], "interrupted", "{status}");
+    assert_eq!(status["management"]["reason"], "token_missing", "{status}");
+    assert_eq!(status["last_sync"]["pending"], true, "{status}");
+    assert_eq!(daemon.status_summary()["management"], "interrupted");
+    assert_eq!(
+        agent_events(&daemon),
+        [(
+            "agent_unavailable".to_string(),
+            "agent.token_missing".to_string()
+        )]
+    );
+    assert!(
+        daemon
+            .audit_events()
+            .iter()
+            .all(|e| e["action"] != "enroll.sync"),
+        "not the network"
+    );
+    assert_eq!(
+        control_plane.state.connections.load(Ordering::SeqCst),
+        before,
+        "nothing asked without the token"
+    );
+}
+
+/// An episode that began before a restart is the same episode after it: no
+/// second `agent_unavailable` event for it, and its recovery is audited when
+/// it ends.
+#[test]
+fn an_agent_episode_survives_a_restart() {
+    let dir = test_dir("agent-restart");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    control_plane
+        .state
+        .forget_identity
+        .store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    daemon.stop();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result("reconcile", None);
+    assert_eq!(
+        agent_events(&daemon),
+        [(
+            "agent_unavailable".to_string(),
+            "agent.identity_missing".to_string()
+        )]
+    );
+    control_plane
+        .state
+        .forget_identity
+        .store(false, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    assert_eq!(agent_events(&daemon).len(), 2);
+    assert_eq!(agent_events(&daemon)[1].0, "success");
+}
+
+/// A registration enroll.start could not commit is released like an
+/// unenrollment: when the agent does not confirm the wipe, the identity's
+/// token is kept and says so, and a later pass finishes it, so the key is
+/// never left on disk with nothing to remove it.
+#[test]
+fn an_uncommitted_registration_the_agent_does_not_release_is_released_later() {
+    let dir = test_dir("uncommitted-release");
+    let control_plane = ControlPlane::start(&dir);
+    let state = &control_plane.state;
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    state.serve_bad_policy.store(true, Ordering::SeqCst);
+    state.refuse_unregister.store(true, Ordering::SeqCst);
+    daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert!(!daemon.state_path("enrollment.json").exists());
+    assert!(
+        daemon.state_path("device-token").exists(),
+        "kept to release"
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["enrolled"], false);
+    assert_eq!(
+        status["identity_release"],
+        json!({"state": "pending", "reason": "refused"})
+    );
+    assert_eq!(state.devices.lock().unwrap().len(), 1, "still held");
+    assert!(
+        daemon.state_path("identity-release.json").exists(),
+        "the release is recorded, not inferred from the token"
+    );
+    // Still refused: asked again, not audited again, and shown in the
+    // status file the shell reads.
+    daemon.result("reconcile", None);
+    assert_eq!(daemon.status_summary()["identity_release"], "pending");
+    let releases = |daemon: &TestDaemon| -> Vec<(String, String)> {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "enroll.release")
+            .map(|e| {
+                (
+                    e["result"].as_str().unwrap().to_string(),
+                    e["resource"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        releases(&daemon),
+        [("pending".to_string(), "agent.refused".to_string())]
+    );
+
+    state.refuse_unregister.store(false, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    assert!(!daemon.state_path("device-token").exists());
+    assert!(!daemon.state_path("identity-release.json").exists());
+    assert!(state.devices.lock().unwrap().is_empty(), "released");
+    assert!(
+        daemon
+            .result("enroll.status", None)
+            .get("identity_release")
+            .is_none()
+    );
+    assert_eq!(daemon.status_summary()["identity_release"], Value::Null);
+    assert_eq!(
+        releases(&daemon),
+        [
+            ("pending".to_string(), "agent.refused".to_string()),
+            ("success".to_string(), "agent".to_string())
+        ]
+    );
+
+    // And the device enrolls as it would have.
+    state.serve_bad_policy.store(false, Ordering::SeqCst);
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+}
+
+/// Deleting `enrollment.json` (and its terms) while the device token stays is
+/// not an unenrollment: nothing ended the enrollment, so punard keeps the
+/// organization's identity rather than wiping it itself, asks the agent
+/// nothing, audits it once as `enroll.release` `kept`, and shows it. A new
+/// enrollment replaces it.
+#[test]
+fn a_deleted_enrollment_record_keeps_the_identity_rather_than_releasing_it() {
+    let dir = test_dir("record-deleted");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    daemon.stop();
+    fs::remove_file(dir.join("state/enrollment.json")).unwrap();
+    fs::remove_file(dir.join("state/enrollment-terms.json")).unwrap();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let before = state.connections.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(
+        state.connections.load(Ordering::SeqCst),
+        before,
+        "the agent is asked nothing"
+    );
+    assert_eq!(state.devices.lock().unwrap().len(), 1, "the identity stays");
+    assert!(daemon.state_path("device-token").exists());
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["enrolled"], false);
+    assert_eq!(
+        status["identity_release"],
+        json!({"state": "kept", "reason": "enrollment_record_missing"})
+    );
+    assert_eq!(daemon.status_summary()["identity_release"], "kept");
+    let releases = |daemon: &TestDaemon| -> Vec<(String, String)> {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "enroll.release")
+            .map(|e| {
+                (
+                    e["result"].as_str().unwrap().to_string(),
+                    e["resource"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let kept = [(
+        "kept".to_string(),
+        "agent.enrollment_record_missing".to_string(),
+    )];
+    assert_eq!(releases(&daemon), kept);
+    // A restart is the same decision, not a second one.
+    daemon.stop();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result("reconcile", None);
+    assert_eq!(releases(&daemon), kept);
+    assert_eq!(state.devices.lock().unwrap().len(), 1);
+
+    // A new enrollment replaces it, and nothing is left to keep (the
+    // organization's file the old record owned is now a foreign one, which
+    // enrollment never overwrites: removed first, as its refusal says).
+    fs::remove_file(dir.join("state/policy.d/eng-baseline-v12.json")).unwrap();
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert!(!daemon.state_path("identity-release.json").exists());
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["enrolled"], true);
+    assert!(status.get("identity_release").is_none(), "{status}");
+}
+
+/// enroll.start records the release before it registers, so a registration
+/// whose answer never reached punard (killed, powered off, a broken
+/// connection) is not left with the agent: punard has no token and no
+/// enrollment, the record says to release, and the next pass asks the agent
+/// to wipe whatever it holds. A registration that commits removes the
+/// record.
+#[test]
+fn a_registration_whose_answer_was_lost_is_released_later() {
+    let dir = test_dir("registration-lost");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    *state.release_record.lock().unwrap() = Some(dir.join("state/identity-release.json"));
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    assert_eq!(*state.record_before_register.lock().unwrap(), [true]);
+    assert!(!daemon.state_path("identity-release.json").exists());
+
+    // punard dies after the agent kept the identity and before punard kept
+    // anything of it: only the record enroll.start wrote before registering.
+    daemon.stop();
+    for file in ["enrollment.json", "enrollment-terms.json", "device-token"] {
+        fs::remove_file(dir.join("state").join(file)).unwrap();
+    }
+    fs::write(
+        dir.join("state/identity-release.json"),
+        r#"{"version":1,"state":"release","cause":"registration","since":"2026-09-25T00:00:00Z"}"#,
+    )
+    .unwrap();
+    assert_eq!(state.devices.lock().unwrap().len(), 1);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result("reconcile", None);
+    assert!(state.devices.lock().unwrap().is_empty(), "released");
+    let asked = state.unregisters.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(asked, json!({"any_identity": true}), "no token to present");
+    assert!(!daemon.state_path("identity-release.json").exists());
+    assert!(
+        daemon
+            .result("enroll.status", None)
+            .get("identity_release")
+            .is_none()
+    );
+    assert!(
+        daemon
+            .audit_events()
+            .iter()
+            .any(|e| e["action"] == "enroll.release" && e["result"] == "success")
+    );
+}
+
+/// An unenrollment whose agent holds an identity the token does not name (one
+/// planted, or left by a registration punard never heard back from) still
+/// finishes: punard, holding no enrollment, asks for whatever the agent holds
+/// to go, and it goes, rather than being refused on every pass forever.
+#[test]
+fn a_release_the_token_does_not_name_is_not_refused_forever() {
+    let dir = test_dir("release-mismatch");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    state.refuse_unregister.store(true, Ordering::SeqCst);
+    let stopped = daemon.result("enroll.stop", None);
+    assert_eq!(stopped["identity_release"], "pending");
+    // The agent now holds an identity the kept token does not name.
+    state.devices.lock().unwrap().clear();
+    state
+        .devices
+        .lock()
+        .unwrap()
+        .insert("tok_planted".to_string(), "dev_planted".to_string());
+    state.refuse_unregister.store(false, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    assert!(state.devices.lock().unwrap().is_empty(), "wiped");
+    let asked = state.unregisters.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(asked["any_identity"], true, "{asked}");
+    assert!(!daemon.state_path("device-token").exists());
+    assert!(!daemon.state_path("identity-release.json").exists());
+}
+
+/// An episode of management interrupted still open when the enrollment ends
+/// is closed by it: one `enroll.agent` `ended` event, so every episode in the
+/// audit has both ends.
+#[test]
+fn an_episode_open_at_unenrollment_is_closed_by_it() {
+    let dir = test_dir("episode-at-stop");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    control_plane
+        .state
+        .forget_identity
+        .store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    daemon.result("enroll.stop", None);
+    assert_eq!(
+        agent_events(&daemon),
+        [
+            (
+                "agent_unavailable".to_string(),
+                "agent.identity_missing".to_string()
+            ),
+            ("ended".to_string(), "agent.identity_missing".to_string())
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The management units, the agent's listener, and the passes themselves
+// ---------------------------------------------------------------------------
+
+/// What systemd shows for the management units as the image ships them,
+/// the agent running as process 4242.
+fn shipped_units() -> String {
+    "Id=punar-smplifyd.socket\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punar-smplifyd.socket\nDropInPaths=\n\
+     Listen=/run/punar-smplifyd/api.sock (Stream)\n\n\
+     MainPID=4242\nId=punar-smplifyd.service\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punar-smplifyd.service\nDropInPaths=\n\n\
+     MainPID=812\nId=punard.service\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punard.service\nDropInPaths=\n\n\
+     Id=punard-reconcile.timer\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punard-reconcile.timer\nDropInPaths=\n\n\
+     MainPID=0\nId=punard-reconcile.service\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punard-reconcile.service\nDropInPaths=\n"
+        .to_string()
+}
+
+/// A stand-in for `systemctl` in `dir/units`: `show` prints `shown.txt`,
+/// `start` appends its arguments to `started.txt`; and a /proc where process
+/// 4242 runs the image's agent.
+fn fake_systemctl(dir: &Path, require_systemd_listener: bool) -> AgentIntegrity {
+    let units = dir.join("units");
+    fs::create_dir_all(units.join("proc/4242")).unwrap();
+    fs::write(units.join("shown.txt"), shipped_units()).unwrap();
+    std::os::unix::fs::symlink(AGENT_EXECUTABLE, units.join("proc/4242/exe")).unwrap();
+    let systemctl = units.join("systemctl");
+    fs::write(
+        &systemctl,
+        "#!/bin/sh\nhere=$(dirname \"$0\")\ncase \"$1\" in\n\
+         show) cat \"${here}/shown.txt\" ;;\n\
+         start) echo \"$*\" >> \"${here}/started.txt\" ;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    AgentIntegrity {
+        systemctl,
+        proc_root: units.join("proc"),
+        require_systemd_listener,
+    }
+}
+
+fn with_integrity(
+    dir: &Path,
+    control_plane: &ControlPlane,
+    integrity: AgentIntegrity,
+) -> TestDaemon {
+    TestDaemon::start_with(
+        dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        Vec::new(),
+        move |cfg| cfg.agent_integrity = Some(integrity),
+    )
+}
+
+/// An agent that answers as this device's, behind units that are not the
+/// image's, is management interrupted (`unit_modified`), once per episode:
+/// a drop-in on punard pointing it elsewhere, a drop-in replacing the
+/// agent's `ExecStart=`, a masked reconcile timer, a socket listening
+/// elsewhere, and an agent process that is not the image's binary.
+#[test]
+fn a_modified_management_unit_is_management_interrupted() {
+    let dir = test_dir("units-modified");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = with_integrity(&dir, &control_plane, fake_systemctl(&dir, false));
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    daemon.result("reconcile", None);
+    assert_eq!(
+        daemon.result("enroll.status", None)["management"]["state"],
+        "active"
+    );
+    let shown = dir.join("units/shown.txt");
+    let exe = dir.join("units/proc/4242/exe");
+    let modifications: [(&str, &dyn Fn()); 5] = [
+        ("punard re-routed", &|| {
+            fs::write(
+                &shown,
+                shipped_units().replace(
+                    "punard.service\nDropInPaths=",
+                    "punard.service\nDropInPaths=/etc/systemd/system/punard.service.d/route.conf",
+                ),
+            )
+            .unwrap()
+        }),
+        ("agent replaced", &|| {
+            fs::write(
+                &shown,
+                shipped_units().replace(
+                    "punar-smplifyd.service\nDropInPaths=",
+                    "punar-smplifyd.service\nDropInPaths=/run/systemd/system/punar-smplifyd.service.d/exec.conf",
+                ),
+            )
+            .unwrap()
+        }),
+        ("timer masked", &|| {
+            fs::write(
+                &shown,
+                shipped_units().replace(
+                    "Id=punard-reconcile.timer\nLoadState=loaded",
+                    "Id=punard-reconcile.timer\nLoadState=masked",
+                ),
+            )
+            .unwrap()
+        }),
+        ("socket moved", &|| {
+            fs::write(
+                &shown,
+                shipped_units().replace("punar-smplifyd/api.sock", "x/api.sock"),
+            )
+            .unwrap()
+        }),
+        ("another binary", &|| {
+            fs::remove_file(&exe).unwrap();
+            std::os::unix::fs::symlink("/tmp/impostor", &exe).unwrap();
+        }),
+    ];
+    for (what, modify) in modifications {
+        modify();
+        daemon.result("reconcile", None);
+        let status = daemon.result("enroll.status", None);
+        assert_eq!(status["management"]["state"], "interrupted", "{what}");
+        assert_eq!(status["management"]["reason"], "unit_modified", "{what}");
+        fs::write(&shown, shipped_units()).unwrap();
+        fs::remove_file(&exe).unwrap();
+        std::os::unix::fs::symlink(AGENT_EXECUTABLE, &exe).unwrap();
+        daemon.result("reconcile", None);
+        assert_eq!(
+            daemon.result("enroll.status", None)["management"]["state"],
+            "active",
+            "{what}"
+        );
+    }
+    assert_eq!(
+        agent_events(&daemon),
+        ["agent_unavailable", "success"]
+            .repeat(5)
+            .iter()
+            .map(|result| (result.to_string(), "agent.unit_modified".to_string()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A second socket unit at the agent's path, which leaves the agent's own
+/// units exactly as shipped and whose listener systemd creates too (PID 1's
+/// credentials, the agent's address), is management interrupted
+/// (`unexpected_listener`); so is a systemd that cannot be asked about the
+/// units (`units_unreadable`): what punard cannot see it does not vouch for.
+/// Each ends when the units are as shipped again.
+#[test]
+fn another_listener_at_the_agents_path_or_units_unseen_is_management_interrupted() {
+    let dir = test_dir("units-foreign-listener");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = with_integrity(&dir, &control_plane, fake_systemctl(&dir, false));
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    daemon.result("reconcile", None);
+    assert_eq!(
+        daemon.result("enroll.status", None)["management"]["state"],
+        "active"
+    );
+    let shown = dir.join("units/shown.txt");
+    let systemctl = dir.join("units/systemctl");
+    let original = fs::read_to_string(&systemctl).unwrap();
+    let cases: [(&str, &dyn Fn()); 2] = [
+        ("unexpected_listener", &|| {
+            fs::write(
+                &shown,
+                format!(
+                    "{}\nListen=/run/punar-smplifyd/api.sock (Stream)\n\
+                     Id=transient-fake.socket\nLoadState=loaded\n\
+                     FragmentPath=/run/systemd/transient/transient-fake.socket\n\
+                     DropInPaths=\n",
+                    shipped_units()
+                ),
+            )
+            .unwrap()
+        }),
+        ("units_unreadable", &|| {
+            fs::write(
+                &systemctl,
+                "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n",
+            )
+            .unwrap()
+        }),
+    ];
+    for (reason, break_it) in cases {
+        break_it();
+        daemon.result("reconcile", None);
+        let status = daemon.result("enroll.status", None);
+        assert_eq!(status["management"]["state"], "interrupted", "{reason}");
+        assert_eq!(status["management"]["reason"], reason);
+        fs::write(&shown, shipped_units()).unwrap();
+        fs::write(&systemctl, &original).unwrap();
+        daemon.result("reconcile", None);
+        assert_eq!(
+            daemon.result("enroll.status", None)["management"]["state"],
+            "active",
+            "{reason}"
+        );
+    }
+    let expected: Vec<(String, String)> = ["unexpected_listener", "units_unreadable"]
+        .iter()
+        .flat_map(|reason| {
+            ["agent_unavailable", "success"]
+                .map(|result| (result.to_string(), format!("agent.{reason}")))
+        })
+        .collect();
+    assert_eq!(agent_events(&daemon), expected);
+}
+
+/// Nothing, the enrollment code least of all, goes to an agent behind
+/// modified units, or over a socket systemd did not create.
+#[test]
+fn enrollment_sends_nothing_to_an_agent_it_cannot_vouch_for() {
+    let dir = test_dir("enroll-modified");
+    let control_plane = ControlPlane::start(&dir);
+    let integrity = fake_systemctl(&dir, false);
+    fs::write(
+        dir.join("units/shown.txt"),
+        shipped_units().replace(
+            "punar-smplifyd.service\nDropInPaths=",
+            "punar-smplifyd.service\nDropInPaths=/etc/systemd/system/punar-smplifyd.service.d/x.conf",
+        ),
+    )
+    .unwrap();
+    let daemon = with_integrity(&dir, &control_plane, integrity);
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "code": "ENROLL-CODE"})),
+    );
+    assert_eq!(error["details"]["agent"], "unit_modified", "{error}");
+    assert_eq!(control_plane.state.connections.load(Ordering::SeqCst), 0);
+    daemon.stop();
+
+    // Units as shipped, and a listener some other program bound (the test's
+    // own): refused on the first connection, with nothing sent over it.
+    fs::write(dir.join("units/shown.txt"), shipped_units()).unwrap();
+    let integrity = AgentIntegrity {
+        require_systemd_listener: true,
+        ..fake_systemctl(&test_dir("enroll-listener"), false)
+    };
+    let daemon = with_integrity(&dir, &control_plane, integrity);
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "code": "ENROLL-CODE"})),
+    );
+    assert_eq!(error["details"]["agent"], "unexpected_listener", "{error}");
+    assert!(control_plane.state.methods.lock().unwrap().is_empty());
+    assert!(!daemon.state_path("enrollment.json").exists());
+}
+
+/// A socket that is gone or no longer listened on is started again: punard's
+/// `Wants=` on it acts only when punard itself starts, so without this a
+/// socket stopped once stayed stopped until a reboot.
+#[test]
+fn a_socket_that_stopped_listening_is_started_again() {
+    let dir = test_dir("socket-restart");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = with_integrity(&dir, &control_plane, fake_systemctl(&dir, false));
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert!(!dir.join("units/started.txt").exists());
+    let _saved = control_plane.stop();
+    daemon.result("reconcile", None);
+    assert_eq!(
+        fs::read_to_string(dir.join("units/started.txt")).unwrap(),
+        "start --no-block punar-smplifyd.socket\n"
+    );
+}
+
+/// Passes further apart than the timer allows, suspend excluded, are audited
+/// once when they resume (`enroll.gap`): on the same boot, and, when the gap
+/// ended in a clean stop, on the next.
+#[test]
+fn a_gap_in_the_reconcile_passes_is_audited_when_they_resume() {
+    const LIMIT: Duration = Duration::from_millis(300);
+    let dir = test_dir("reconcile-gap");
+    let control_plane = ControlPlane::start(&dir);
+    let boot_id = dir.join("boot_id");
+    fs::write(&boot_id, "boot-a\n").unwrap();
+    let start = |boot_id: PathBuf| {
+        TestDaemon::start_with(
+            &dir,
+            Peer::root(),
+            &control_plane.socket,
+            "enabled",
+            Vec::new(),
+            move |cfg| {
+                cfg.boot_id_path = boot_id;
+                cfg.reconcile_gap_limit = LIMIT;
+            },
+        )
+    };
+    let gaps = |daemon: &TestDaemon| {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "enroll.gap")
+            .count()
+    };
+    let daemon = start(boot_id.clone());
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    daemon.result("reconcile", None);
+    assert_eq!(gaps(&daemon), 0);
+    std::thread::sleep(LIMIT * 2);
+    daemon.result("reconcile", None);
+    assert_eq!(gaps(&daemon), 1);
+    daemon.result("reconcile", None);
+    assert_eq!(gaps(&daemon), 1, "once, when passes resume");
+
+    // No pass for a while, then a clean stop, then another boot.
+    std::thread::sleep(LIMIT * 2);
+    daemon.stop();
+    fs::write(&boot_id, "boot-b\n").unwrap();
+    let daemon = start(boot_id.clone());
+    assert_eq!(gaps(&daemon), 2, "measured to the clean stop");
+    daemon.result("reconcile", None);
+    assert_eq!(gaps(&daemon), 2);
+}
+
+/// An override of the control-plane socket refused on an image with no
+/// development control plane is audited once at start.
+#[test]
+fn a_refused_control_plane_override_is_audited() {
+    let dir = test_dir("override-refused");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = TestDaemon::start_with(
+        &dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        Vec::new(),
+        |cfg| cfg.control_plane_override_refused = true,
+    );
+    assert_eq!(
+        agent_events(&daemon),
+        [(
+            "denied".to_string(),
+            "agent.control_plane_override".to_string()
+        )]
+    );
+}
+
+/// The audit trail's view of a capability's compliance survives a restart:
+/// a capability recorded `non_compliant` that a restarted punard finds
+/// healed is recorded `compliant` on its first pass, once.
+#[test]
+fn a_compliance_recovery_across_a_restart_is_audited() {
+    let dir = test_dir("compliance-restart");
+    let control_plane = ControlPlane::start(&dir);
+    let changes = |daemon: &TestDaemon| -> Vec<String> {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "reconcile.compliance")
+            .map(|e| e["result"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result(
+        "capabilities.set",
+        Some(json!({"capability": "security.firewall", "desired_state": "enabled"})),
+    );
+    daemon.mock.set_state(json!("disabled"));
+    daemon.mock.fail_next_applies(true);
+    for _ in 0..3 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(changes(&daemon), ["remediating", "non_compliant"]);
+    daemon.stop();
+
+    // Healed while punard was down: the first pass records the recovery.
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let recorded = changes(&daemon);
+    assert_eq!(
+        recorded.last().map(String::as_str),
+        Some("compliant"),
+        "{recorded:?}"
+    );
+    daemon.result("reconcile", None);
+    assert_eq!(changes(&daemon), recorded, "once");
 }

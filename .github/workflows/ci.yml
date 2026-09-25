@@ -240,11 +240,34 @@ jobs:
       - name: Validate stabilized-window memory attribution wiring
         run: ./tests/performance/memory-attribution-contract-test.sh
 
+      - name: Validate the benchmark probe against its fixtures
+        run: ./tests/performance/bench-probe-test.sh
+
+      - name: Validate the benchmark report's win rule, losses and parsers
+        run: ./tests/performance/bench-summarize-test.sh
+
       - name: Validate release-image policy gate branches
         run: ./tests/images/release-image-policy-test.sh
 
       - name: Validate bounded early-boot module policy
         run: ./tests/images/initrd-module-policy-test.sh
+
+      # The unpacked initramfs stayed resident as Unevictable memory for the
+      # whole boot on the arm64 release image (Linux 7.1; PERFORMANCE_BUDGETS.md
+      # §4.1); every lane frees it before switch-root on Linux 7.0 to 7.2.
+      # Pins the unit's ordering and hardening, the reboot-on-failure drop-ins,
+      # the kernel range, the job wait, the keep set against fake initramfs
+      # trees, and the mount boundaries with real mounts. That last check needs
+      # an unprivileged user and mount namespace, which Ubuntu 24.04 restricts
+      # through AppArmor; under CI the test fails rather than skip it.
+      - name: Allow unprivileged user namespaces for the mount-boundary check
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Validate the initramfs release step and its keep set
+        run: ./tests/images/initramfs-release-contract-test.sh
 
       - name: Validate installer live-root and tree-manifest contracts
         run: |
@@ -342,6 +365,8 @@ jobs:
             tests/images/installer-initrd-test.sh \
             tests/images/installer-iso-contract-test.sh \
             tests/images/initrd-module-policy-test.sh \
+            tests/images/initramfs-release-contract-test.sh \
+            os/images/initrd-common/usr/lib/punar/release-initramfs \
             tests/images/release-image-policy-test.sh \
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
@@ -352,6 +377,7 @@ jobs:
             tests/images/bubblewrap-security-contract-test.sh \
             tests/images/vendor-sandbox-contract-test.sh \
             tests/images/clock-trust-contract-test.sh \
+            tests/images/smplifyd-activation-contract-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
             tests/performance/memory-attribution-contract-test.sh \
@@ -478,6 +504,12 @@ jobs:
       # every Punar service that is not a reviewed exclusion.
       - name: Test that the network and the session cannot set the clock
         run: ./tests/images/clock-trust-contract-test.sh
+
+      # A device that never enrolls runs no Smplify code: the agent is started
+      # by its socket on punard's first call, stays resident only while it
+      # holds an identity, and an administrator's stop is refused.
+      - name: Test that the Smplify agent is dormant until enrolled
+        run: ./tests/images/smplifyd-activation-contract-test.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all

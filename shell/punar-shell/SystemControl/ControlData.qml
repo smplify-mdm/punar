@@ -24,8 +24,14 @@
 //        punarctl privilege status --json the §48 grants held right now
 //        punarctl web-apps list --json    installed web apps, contexts and
 //                                         the effective install policy
+//      and three more, each only while its own view is selected:
+//        punarctl network status --json       Network: netd's enforcement
+//        punarctl privacy connections --json  Connections: the local TCP view
+//        punarctl relay status --json         Relay: the route model
 //      A daemon that is not running answers nothing, and the surface then
-//      says AWAITING PUNARD instead of inventing a value.
+//      says AWAITING PUNARD instead of inventing a value. A view that a verb
+//      answers draws what the verb said, so the panel and the terminal
+//      cannot tell a person two different things.
 //
 //   3. THE KERNEL, for the handful of facts knowable without a network
 //      manager, a power daemon or a Bluetooth stack — fixed paths in
@@ -328,6 +334,17 @@ Scope {
     Probe {
         id: postureProbe
     }
+    // Network, Connections and Relay: punar-netd's own answers, asked only
+    // while the view that shows them is selected.
+    Probe {
+        id: networkProbe
+    }
+    Probe {
+        id: connectionsProbe
+    }
+    Probe {
+        id: relayProbe
+    }
 
     // The mutation channel — separate from the probes so a write never
     // races a read, and so its exit code and stderr can be shown.
@@ -419,6 +436,16 @@ Scope {
 
     function refreshWebApps(): void {
         webAppsProbe.ask(["punarctl", "--json", "web-apps", "list"]);
+    }
+
+    // The verb behind the selected view, when that view has one of its own.
+    function refreshSelectedView(): void {
+        if (data.selectedId === "network")
+            networkProbe.ask(["punarctl", "network", "status", "--json"]);
+        else if (data.selectedId === "connections")
+            connectionsProbe.ask(["punarctl", "privacy", "connections", "--json"]);
+        else if (data.selectedId === "relay")
+            relayProbe.ask(["punarctl", "relay", "status", "--json"]);
     }
 
     // ---------------------------------------------------------------
@@ -702,6 +729,15 @@ Scope {
                     {id: "compliance", name: "Compliance"},
                     {id: "policies", name: "Policies"},
                     {id: "privilege", name: "Privilege"}
+                ]
+            });
+        } else if (Status.identityRelease !== "") {
+            // The one organization fact a personal device can carry: an
+            // unenrollment still finishing, or an identity punard keeps.
+            sections.push({
+                section: "Organization",
+                items: [
+                    {id: "enrollment", name: "Enrollment"}
                 ]
             });
         }
@@ -1033,11 +1069,28 @@ Scope {
         } else {
             data.webAppComposerVisible = false;
         }
+        data.refreshSelectedView();
     }
 
     function refreshAll(): void {
         data.refreshProbes();
         data.refreshKernelFacts();
+        data.refreshSelectedView();
+    }
+
+    // A punar-netd verb that has not answered: its refusal verbatim when one
+    // came back, and the same command for a terminal either way.
+    function netdSilent(probe: var, verb: string): var {
+        var said = probe.errorText;
+        return {
+            what: probe.answered ? verb + " did not answer" : "Asking punar-netd",
+            why: said !== "" ? said : (probe.answered ? "punar-netd returned nothing this surface could read. Nothing is drawn in place of its answer." : "The answer arrives in a moment; nothing is drawn before it does."),
+            when_: "Run `" + verb + "` in a terminal for the same answer"
+        };
+    }
+
+    function plainWord(value: var): string {
+        return typeof value === "string" ? value.replace(/_/g, " ") : "";
     }
 
     // ---------------------------------------------------------------
@@ -1455,20 +1508,48 @@ Scope {
                 v: data.netAddress === "" ? "not reported" : data.netAddress
             });
         }
+        // punar-netd's own answer, the one `punarctl network status` prints.
+        // When it has not answered, the row says so, in netd's words when it
+        // refused: a policy row that simply vanished would read as "fine".
+        var status = data.obj(networkProbe.payload);
+        var enforcement = status === null ? null : data.obj(status.enforcement);
+        if (enforcement !== null) {
+            var state = data.str(enforcement, "state", "not reported");
+            var sessions = typeof enforcement.installed_sessions === "number" ? enforcement.installed_sessions : 0;
+            kv.push({
+                k: "Project network policy",
+                v: state.toUpperCase() + " · " + data.str(enforcement, "reason", sessions + (sessions === 1 ? " managed session" : " managed sessions") + " in the kernel table"),
+                tone: state === "available" ? "ok" : "bad"
+            });
+        } else {
+            var silent = data.netdSilent(networkProbe, "punarctl network status");
+            kv.push({
+                k: "Project network policy",
+                v: networkProbe.answered ? "UNKNOWN · " + silent.what + " · " + silent.why : silent.what,
+                tone: networkProbe.answered ? "bad" : ""
+            });
+        }
         kv.push({
             k: "Source",
-            v: "/proc/net/route · /sys/class/net — read once per open"
+            v: "/proc/net/route · /sys/class/net · punarctl network status — read once per open"
         });
+        // Whether a Wi-Fi capability exists is the registry's answer, not a
+        // sentence here: the row changes the day one is registered.
+        var wifi = data.capabilityIds("wifi");
         return {
             title: "Network",
-            sub: "System · kernel routing table · read-only",
+            sub: "System · kernel routing table and punar-netd · read-only",
             kv: kv,
-            dashed: {
-                what: "Networks, connect and disconnect · Milestone 12",
-                why: "Punar ships no NetworkManager and registers no network capability, so there is no list of networks to show and no ConnectWifi to call. The plate draws that row against punar-netd, which arrives with the network privacy prototype.",
-                when_: "Milestone 12 · punar-netd"
+            dashed: wifi.length > 0 ? {
+                what: "Wi-Fi networks, joining and leaving",
+                why: "punard's registry carries " + wifi.join(", ") + ". This panel does not drive " + (wifi.length === 1 ? "it" : "them") + " yet, so it offers nothing here it could not carry out.",
+                when_: "Run `punarctl capabilities` for the same list"
+            } : {
+                what: "Wi-Fi networks, joining and leaving",
+                why: data.capabilityList.length === 0 ? "iwd associates with Wi-Fi and systemd-networkd addresses every link; both ship and run. punarctl capabilities has not answered, so this row does not say whether Punar can choose a network for you." : "iwd associates with Wi-Fi and systemd-networkd addresses every link; both ship and run. Choosing a network is not something punard offers: its registry carries no Wi-Fi capability, so this row offers nothing it could not carry out.",
+                when_: "Run `punarctl capabilities` for the registry's own list"
             },
-            note: "System Control shows what the kernel already reports. It does not start a network service in order to have something to draw, and it will not render a toggle that no capability backs."
+            note: "System Control shows what the kernel and punar-netd report. It does not start a network service in order to have something to draw, and it will not render a toggle that no capability backs."
         };
     }
 
@@ -1493,8 +1574,41 @@ Scope {
             },
             rows: rows,
             emptyRows: "No monitor is reported by the compositor",
-            note: "Read-only, and here is the reason: display configuration is not a registered capability. punard's registry carries three backends — security.firewall, system.hostname, time.timezone — and this panel does not write a setting the control plane does not own."
+            note: data.displaysNote()
         };
+    }
+
+    // Why Displays is read-only, in the registry's own words: the list is
+    // `punarctl capabilities`, not a sentence that goes stale when a backend
+    // is added, and whether display configuration is one of them is read
+    // from the same list.
+    function displaysNote(): string {
+        var caps = data.capabilityList;
+        if (caps.length === 0)
+            return "Read-only: punarctl capabilities has not answered, so this panel names no backends it did not read and offers no setting.";
+        var ids = [];
+        for (var i = 0; i < caps.length; i++) {
+            var id = data.str(caps[i], "capability", "");
+            if (id !== "")
+                ids.push(id);
+        }
+        var display = data.capabilityIds("display.");
+        if (display.length > 0)
+            return "Read-only here: punard's registry carries " + display.join(", ") + ", and this panel does not drive " + (display.length === 1 ? "it" : "them") + " yet. Run `punarctl capabilities` for the same list.";
+        return "Read-only, and here is the reason: no display capability is registered. punard's registry carries " + ids.length + (ids.length === 1 ? " backend — " : " backends — ") + ids.join(", ") + " — and this panel does not write a setting the control plane does not own.";
+    }
+
+    // The registered capability ids that contain `part`, from
+    // `punarctl capabilities`: empty until it has answered.
+    function capabilityIds(part: string): var {
+        var found = [];
+        var caps = data.capabilityList;
+        for (var i = 0; i < caps.length; i++) {
+            var id = data.str(caps[i], "capability", "");
+            if (id !== "" && id.indexOf(part) !== -1)
+                found.push(id);
+        }
+        return found;
     }
 
     function viewAudio(): var {
@@ -2045,47 +2159,177 @@ Scope {
     // ---- PRIVACY ---------------------------------------------------
 
     function privacyView(id: string): var {
-        if (id === "connections") {
+        if (id === "connections")
+            return data.viewConnections();
+        if (id === "relay")
+            return data.viewRelay();
+        return null;
+    }
+
+    // What `punarctl privacy connections` prints, drawn: the bounded local
+    // TCP view punar-netd builds on demand. Its wire carries no port, local
+    // address, uid, pid or payload, so neither does this view.
+    function viewConnections(): var {
+        var answer = data.obj(connectionsProbe.payload);
+        if (answer === null) {
             return {
                 title: "Connections",
                 sub: "Privacy · who is talking to the network",
-                dashed: {
-                    what: "Local network observability is not available yet",
-                    why: "Nothing on this device observes network destinations — punar-netd arrives in Milestone 12, and Punar does not guess at data it does not mediate. punarctl privacy connections answers with this same sentence, because it is the same answer.",
-                    when_: "Milestone 12 · network privacy prototype"
-                },
-                kv: [
-                    {
-                        k: "What does exist",
-                        v: "punarctl privacy ledger — what AI sessions accessed"
-                    },
-                    {
-                        k: "And",
-                        v: "punarctl privacy queries — every question an admin asked"
-                    }
-                ],
-                note: "Those two commands are the real privacy surfaces on this device today, and they are the user's to read without privilege. This panel links to them rather than reprinting them, so there is one record and not two."
+                dashed: data.netdSilent(connectionsProbe, "punarctl privacy connections")
             };
         }
-        if (id === "relay") {
+        var kv = [];
+        var scanned = data.shortTime(data.str(answer, "scanned_at", ""));
+        kv.push({
+            k: "Scanned",
+            v: scanned === "" ? "not reported" : scanned
+        });
+        var enforcement = data.str(answer, "enforcement", "not reported");
+        kv.push({
+            k: "Enforcement",
+            v: enforcement.toUpperCase() + " · " + data.str(answer, "enforcement_reason", "per managed cgroup"),
+            tone: enforcement === "available" ? "ok" : "bad"
+        });
+        kv.push({
+            k: "Transport",
+            v: data.str(answer, "transport", "not reported") + " · current sockets · on demand"
+        });
+        var relay = data.obj(answer.relay);
+        if (relay !== null) {
+            kv.push({
+                k: "Relay",
+                v: data.plainWord(relay.mode) + (relay.simulated === true ? " · simulated, the packet path is direct" : " · direct"),
+                tone: relay.simulated === true ? "warn" : ""
+            });
+        }
+        var dns = data.obj(answer.dns_protection);
+        if (dns !== null) {
+            kv.push({
+                k: "DNS protection",
+                v: data.plainWord(dns.state) + " · planned for " + data.plainWord(dns.milestone)
+            });
+        }
+        var rows = [];
+        var processes = Array.isArray(answer.processes) ? answer.processes : [];
+        for (var i = 0; i < processes.length; i++) {
+            var proc = data.obj(processes[i]);
+            if (proc === null)
+                continue;
+            var session = data.obj(proc.session);
+            var who = data.str(proc, "name", "unnamed") + " · " + (proc.governed === true ? "governed" : "not governed") + " · " + (session === null ? data.plainWord(proc.pid_class) + " · unmanaged" : data.str(session, "project", "") + " · " + data.str(session, "id", ""));
+            var connections = Array.isArray(proc.connections) ? proc.connections : [];
+            var denied = Array.isArray(proc.denied) ? proc.denied : [];
+            if (connections.length === 0 && denied.length === 0) {
+                rows.push({
+                    name: data.str(proc, "name", "unnamed"),
+                    meta: who + " · " + data.str(proc, "note", "No current TCP connections"),
+                    tone: ""
+                });
+            }
+            for (var c = 0; c < connections.length; c++) {
+                var conn = data.obj(connections[c]);
+                if (conn === null)
+                    continue;
+                var destination = data.str(conn, "destination", "");
+                rows.push({
+                    name: data.str(conn, "name", destination),
+                    meta: who + " · " + destination + " · " + data.plainWord(conn.zone) + " · " + data.plainWord(conn.category) + " · " + data.plainWord(conn.route) + " · " + data.plainWord(conn.state),
+                    tone: ""
+                });
+            }
+            for (var d = 0; d < denied.length; d++) {
+                var denial = data.obj(denied[d]);
+                if (denial === null)
+                    continue;
+                var last = data.str(denial, "last_destination", "");
+                rows.push({
+                    name: data.str(denial, "zone", "zone"),
+                    meta: who + " · DENIED " + (typeof denial.attempts === "number" ? denial.attempts : 0) + " · " + data.plainWord(denial.kind) + (last === "" ? "" : " · last " + last) + " · " + data.str(denial, "explain", ""),
+                    tone: "bad"
+                });
+            }
+        }
+        var notes = [];
+        var limitations = Array.isArray(answer.limitations) ? answer.limitations : [];
+        for (var l = 0; l < limitations.length; l++) {
+            if (typeof limitations[l] === "string" && limitations[l] !== "")
+                notes.push(limitations[l]);
+        }
+        notes.push("No ports · no local addresses · no payloads · no DNS history · no export method. This is punarctl privacy connections, drawn; the terminal prints the same answer.");
+        return {
+            title: "Connections",
+            sub: "Privacy · who is talking to the network · on demand",
+            pill: {
+                label: processes.length + (processes.length === 1 ? " process" : " processes")
+            },
+            kv: kv,
+            rows: rows,
+            emptyRows: "No current TCP connections observed",
+            note: notes.join(" ")
+        };
+    }
+
+    // What `punarctl relay status` prints, drawn. While the relay is a
+    // simulated route model, the view says so in the same words the CLI does.
+    function viewRelay(): var {
+        var relay = data.obj(relayProbe.payload);
+        if (relay === null) {
             return {
                 title: "Relay",
                 sub: "Privacy · private relay",
-                dashed: {
-                    what: "Not implemented until Milestone 12",
-                    why: "punarctl relay status answers with exactly this sentence. The relay is drawn dashed everywhere it appears in the design language because the complete path is not operating — implementation alone does not earn a solid line.",
-                    when_: "Milestone 12 · network privacy prototype"
-                }
+                dashed: data.netdSilent(relayProbe, "punarctl relay status")
             };
         }
-        return null;
+        var simulated = relay.simulated === true;
+        var rows = [];
+        var hops = Array.isArray(relay.hops) ? relay.hops : [];
+        for (var i = 0; i < hops.length; i++) {
+            var hop = data.obj(hops[i]);
+            if (hop === null)
+                continue;
+            var knows = Array.isArray(hop.knows) ? hop.knows : [];
+            var words = [];
+            for (var k = 0; k < knows.length; k++)
+                words.push(data.plainWord(knows[k]));
+            rows.push({
+                name: data.str(hop, "role", "hop"),
+                meta: "knows " + (words.length === 0 ? "nothing it reports" : words.join(" · ")),
+                tone: ""
+            });
+        }
+        var milestone = data.str(relay, "real_relay_milestone", "");
+        var result = {
+            title: "Relay",
+            sub: "Privacy · private relay · " + (simulated ? "simulated route model" : "direct"),
+            pill: {
+                label: simulated ? "SIMULATED" : data.plainWord(relay.mode).toUpperCase()
+            },
+            kv: [
+                {
+                    k: "Mode",
+                    v: data.plainWord(relay.mode) + (simulated ? " · simulated model, the packet path remains direct" : " · direct packet path"),
+                    tone: simulated ? "warn" : ""
+                }
+            ],
+            rows: rows,
+            emptyRows: "No relay hops: traffic takes the direct path",
+            note: data.str(relay, "property_claimed", "") !== "" ? "Claimed by the model: " + data.str(relay, "property_claimed", "") + ". Change it with punarctl relay set." : "Change it with punarctl relay set."
+        };
+        if (simulated || milestone !== "") {
+            result.dashed = {
+                what: "A relay that carries packets",
+                why: data.str(relay, "property_not_held", "The relay is a route model, not a path packets take.") + " The relay is drawn dashed wherever it appears because the complete path is not operating; implementation alone does not earn a solid line.",
+                when_: milestone === "" ? "Not scheduled" : "Independent relay trust boundaries · " + data.plainWord(milestone)
+            };
+        }
+        return result;
     }
 
     // ---- ORGANIZATION ----------------------------------------------
 
     function orgView(id: string): var {
         if (id === "enrollment" && !Status.enrolled)
-            return null;
+            return Status.identityRelease === "" ? null : data.viewIdentityRelease();
         if (id === "enrollment")
             return data.viewEnrollment();
         if (id === "compliance")
@@ -2122,9 +2366,42 @@ Scope {
                     k: "Compliance",
                     v: Status.label.toUpperCase(),
                     tone: Status.state
+                },
+                {
+                    // The words punarctl enroll status prints for the same
+                    // state, which also says why.
+                    k: "Management",
+                    v: Status.managementInterrupted ? "INTERRUPTED" : "ACTIVE",
+                    tone: Status.managementInterrupted ? "bad" : "ok"
                 }
             ],
-            note: "Enrollment adds chrome; it never redraws the machine. Every section of this panel looked the same before it and looks the same after, with the organization's answers annotated on top."
+            note: Status.managementInterrupted
+                ? "Management interrupted: this device cannot reach its organization's agent, so reports wait until it answers. The organization keeps what it already received, and the policy it set is still enforced. punarctl enroll status says why."
+                : "Enrollment adds chrome; it never redraws the machine. Every section of this panel looked the same before it and looks the same after, with the organization's answers annotated on top."
+        };
+    }
+
+    // A personal device whose Smplify identity is not gone yet. The words
+    // punarctl enroll status prints for the same state.
+    function viewIdentityRelease(): var {
+        var kept = Status.identityRelease === "kept";
+        return {
+            title: "Enrollment",
+            sub: "Organization · personal device",
+            kv: [
+                {
+                    k: "Enrollment",
+                    v: "NONE"
+                },
+                {
+                    k: "Smplify identity",
+                    v: kept ? "KEPT" : "RELEASE PENDING",
+                    tone: kept ? "bad" : "warn"
+                }
+            ],
+            note: kept
+                ? "Nothing records the end of the enrollment this device's Smplify identity belongs to, so punard keeps it rather than wiping it, and asks the agent nothing. It is in the audit log as enroll.release, and a new enrollment replaces it. punarctl enroll status says the same."
+                : "This device is personal. Its Smplify agent has not yet confirmed it wiped the device's key, and is asked again on every reconcile pass. punarctl enroll status says why."
         };
     }
 

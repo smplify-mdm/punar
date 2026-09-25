@@ -30,7 +30,7 @@ grep -Fq 'systemctl mask seatd.service' "${ARM_POSTINSTALL}" || {
 # them together for a concrete profile.
 for postinstall in "${ARCH_POSTINSTALL}" "${AMD_POSTINSTALL}" "${ARM_POSTINSTALL}"; do
     # F0-S1/F0-S3: every lane creates the administrator and audit groups
-    # before tmpfiles and onboarding run (release gates A17, A18).
+    # before tmpfiles and onboarding run (release gates A23, A24).
     for product_group in punar-admin punar-audit; do
         grep -Fq "groupadd --system ${product_group}" "${postinstall}" || {
             echo "FAIL groups: ${product_group} is not created by ${postinstall}" >&2
@@ -170,6 +170,66 @@ if grep -Fq "\"\${extra}/usr/share/punar/fixtures/webapps/notes/" \
 fi
 echo 'ok   browser exercise fixtures are confined to the dev overlay'
 
+# WP-01 shipped files. The clean fixture below is built from these exact
+# files, so the clean pass also proves the shipped copies satisfy A16's
+# greeter seat, A17, A19, A20 and A21. The checks here add what a fixture cannot: the lanes that must
+# compose them, and an early warning before security.txt expires.
+DESKTOP_EXTRA="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra"
+SHIPPED_RESOLVED="${DESKTOP_EXTRA}/usr/lib/systemd/resolved.conf.d/50-punar.conf"
+SHIPPED_SECURITY_TXT="${DESKTOP_EXTRA}/usr/share/punar/security.txt"
+SHIPPED_FETCH_UNIT="${DESKTOP_EXTRA}/usr/lib/systemd/system/punar-fetch@.service"
+SHIPPED_FETCH_SOCKET="${DESKTOP_EXTRA}/usr/lib/systemd/system/punar-fetch.socket"
+SHIPPED_PUNARD_UNIT="${DESKTOP_EXTRA}/usr/lib/systemd/system/punard.service"
+SHIPPED_GREETD_PAM="${DESKTOP_EXTRA}/etc/pam.d/greetd"
+for lane_conf in \
+    "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/desktop/mkosi.conf" \
+    "${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.conf"; do
+    grep -Fq 'ExtraTrees=../../../mkosi.profiles/desktop/mkosi.extra' "${lane_conf}" || {
+        echo "FAIL WP-01: ${lane_conf} no longer composes the shared desktop tree" >&2
+        exit 1
+    }
+done
+for postinstall in "${ARCH_POSTINSTALL}" "${AMD_POSTINSTALL}" "${ARM_POSTINSTALL}"; do
+    # The expansions are the literal adapter line being searched for.
+    # shellcheck disable=SC2016
+    grep -Fq 'gpasswd --delete "${member}" "${retired_group}"' "${postinstall}" || {
+        echo "FAIL A16 adapter: ${postinstall} does not take the greeter out of input/video" >&2
+        exit 1
+    }
+done
+grep -qxF 'Wants=punar-fetch.socket' \
+    "${DESKTOP_EXTRA}/usr/lib/systemd/system/punard.service" || {
+    echo 'FAIL A19 adapter: punard.service does not pull in the fetch helper socket' >&2
+    exit 1
+}
+for stager in \
+    "${DESKTOP_STAGER}" \
+    "${REPO_ROOT}/os/images/amd64-debian/container-build.sh" \
+    "${REPO_ROOT}/os/images/arm64/container-build.sh"; do
+    # shellcheck disable=SC2016
+    grep -Fq '"${extra}/usr/lib/punar/punar-fetch"' "${stager}" || {
+        echo "FAIL A19 adapter: the fetch helper is not staged by ${stager}" >&2
+        exit 1
+    }
+done
+security_expires=$(sed -n 's/^Expires: //p' "${SHIPPED_SECURITY_TXT}")
+security_left=$(( ($(date -u -d "${security_expires}" +%s) - $(date -u +%s)) / 86400 ))
+if [ "${security_left}" -lt 30 ]; then
+    echo "FAIL A20: security.txt expires in ${security_left} days; move its Expires a year on" >&2
+    exit 1
+fi
+security_contacts=$(sed -n 's/^Contact: //p' "${SHIPPED_SECURITY_TXT}")
+while IFS= read -r contact; do
+    [ -n "${contact}" ] || continue
+    grep -Fq -- "${contact#mailto:}" "${REPO_ROOT}/SECURITY.md" || {
+        echo "FAIL A20: security.txt names ${contact}, which SECURITY.md does not" >&2
+        exit 1
+    }
+done <<EOF
+${security_contacts}
+EOF
+echo "ok   WP-01 shipped files are composed by every lane; security.txt has ${security_left} days left"
+
 CLEAN="${TEST_ROOT}/clean"
 CASE="${TEST_ROOT}/case"
 EXPECTED="${TEST_ROOT}/expected-enabled-units.txt"
@@ -198,12 +258,6 @@ printf '%s\n' \
     'root:x:0:0:root:/root:/bin/sh' \
     'daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin' \
     > "${CLEAN}/etc/passwd"
-printf '%s\n' \
-    'root:x:0:' \
-    'punar:x:970:' \
-    'punar-admin:x:971:' \
-    'punar-audit:x:972:' \
-    > "${CLEAN}/etc/group"
 mkdir -p "${CLEAN}/usr/lib/sysctl.d" "${CLEAN}/usr/lib/tmpfiles.d"
 cp "${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/sysctl.d/50-punar-yama.conf" \
     "${CLEAN}/usr/lib/sysctl.d/50-punar-yama.conf"
@@ -233,8 +287,58 @@ printf '%s\n' \
 mkdir -p "${CLEAN}/etc/security"
 printf '%s\n' '# stated lockout policy' 'deny = 5' 'unlock_time = 300' \
     'fail_interval = 900' > "${CLEAN}/etc/security/faillock.conf"
-printf '%s\n' '[Unit]' 'Description=Punar product service' \
-    > "${CLEAN}/usr/lib/systemd/system/punard.service"
+# A16: a greeter and the device groups exist, and nobody is in them.
+printf '%s\n' 'greeter:x:960:960::/var/lib/greetd:/usr/sbin/nologin' \
+    >> "${CLEAN}/etc/passwd"
+# A23/A24: the administrator and audit groups exist, empty, beside them.
+printf '%s\n' 'root:x:0:' 'input:x:97:' 'video:x:985:' 'greeter:x:960:' \
+    'punar:x:970:' 'punar-admin:x:971:' 'punar-audit:x:972:' \
+    > "${CLEAN}/etc/group"
+printf '%s\n' 'root:!::' 'input:!::' 'video:!::' 'greeter:!::' \
+    'punar:!::' 'punar-admin:!::' 'punar-audit:!::' \
+    > "${CLEAN}/etc/gshadow"
+mkdir -p "${CLEAN}/usr/lib/sysusers.d"
+printf '%s\n' 'u greeter - "greetd greeter" /var/lib/greetd' 'm colord video' \
+    > "${CLEAN}/usr/lib/sysusers.d/greetd.conf"
+# A17: the shipped resolver drop-in.
+mkdir -p "${CLEAN}/usr/lib/systemd/resolved.conf.d" "${CLEAN}/etc/systemd"
+cp "${SHIPPED_RESOLVED}" "${CLEAN}/usr/lib/systemd/resolved.conf.d/50-punar.conf"
+printf '%s\n' '[Resolve]' '#LLMNR=yes' '#MulticastDNS=yes' \
+    > "${CLEAN}/etc/systemd/resolved.conf"
+# A18: signed sources in each package format the lanes carry.
+mkdir -p "${CLEAN}/etc/apt/sources.list.d" "${CLEAN}/etc/apt/apt.conf.d" \
+    "${CLEAN}/usr/share/punar/catalog/remotes" "${CLEAN}/var/lib/flatpak/repo"
+printf '%s\n' '[options]' 'SigLevel    = Required DatabaseOptional' \
+    'LocalFileSigLevel = Optional' '[core]' 'Include = /etc/pacman.d/mirrorlist' \
+    > "${CLEAN}/etc/pacman.conf"
+printf '%s\n' 'Types: deb' 'URIs: https://deb.debian.org/debian' 'Suites: sid' \
+    'Components: main' 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+    > "${CLEAN}/etc/apt/sources.list.d/debian.sources"
+printf '%s\n' 'APT::Install-Recommends "false";' \
+    > "${CLEAN}/etc/apt/apt.conf.d/00-punar"
+cp "${REPO_ROOT}/catalog/remotes/flathub.flatpakrepo" \
+    "${CLEAN}/usr/share/punar/catalog/remotes/flathub.flatpakrepo"
+printf '%s\n' '[remote "flathub"]' 'url=https://dl.flathub.org/repo/' 'gpg-verify=true' \
+    'gpg-verify-summary=true' > "${CLEAN}/var/lib/flatpak/repo/config"
+# A19: the shipped helper units, a helper that names the downloader, and a
+# punard that does not.
+cp "${SHIPPED_FETCH_UNIT}" "${CLEAN}/usr/lib/systemd/system/punar-fetch@.service"
+cp "${SHIPPED_FETCH_SOCKET}" "${CLEAN}/usr/lib/systemd/system/punar-fetch.socket"
+printf '%s\n' 'helper fixture: exec /usr/bin/curl' > "${CLEAN}/usr/lib/punar/punar-fetch"
+chmod 0755 "${CLEAN}/usr/lib/punar/punar-fetch"
+printf '%s\n' 'punard fixture: no downloader here' > "${CLEAN}/usr/bin/punard"
+chmod 0755 "${CLEAN}/usr/bin/punard"
+printf '%s\n' '#!/bin/sh' '# a comment may mention curl' 'exec /usr/bin/punarctl status' \
+    > "${CLEAN}/usr/lib/punar/session.sh"
+chmod 0755 "${CLEAN}/usr/lib/punar/session.sh"
+# A20: the shipped security.txt.
+cp "${SHIPPED_SECURITY_TXT}" "${CLEAN}/usr/share/punar/security.txt"
+# A19 and A21: the shipped punard unit and sign-in PAM stack, and the keyring
+# module where Arch installs it.
+cp "${SHIPPED_PUNARD_UNIT}" "${CLEAN}/usr/lib/systemd/system/punard.service"
+mkdir -p "${CLEAN}/etc/pam.d" "${CLEAN}/usr/lib/security"
+cp "${SHIPPED_GREETD_PAM}" "${CLEAN}/etc/pam.d/greetd"
+: > "${CLEAN}/usr/lib/security/pam_gnome_keyring.so"
 ln -s ../punard.service \
     "${CLEAN}/usr/lib/systemd/system/multi-user.target.wants/punard.service"
 printf '%s\n' '[Unit]' 'Description=Punar product helper' \
@@ -295,6 +399,15 @@ mutate_a2() { printf '%s\n' 'punar:x:1000:1000::/home/punar:/bin/sh' >> "${CASE}
 mutate_a3() { printf '%s\n' 'punar:100000:65536' > "${CASE}/etc/subuid"; }
 mutate_a4() { printf '%s\n' '[initial_session]' >> "${CASE}/etc/greetd/config.toml"; }
 mutate_a5() { : > "${CASE}/usr/lib/punar/m10-check.sh"; }
+# The development drop-ins live one directory down, in a unit's .d.
+mutate_a5_mock_dropin() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punard.service.d"
+    : > "${CASE}/usr/lib/systemd/system/punard.service.d/10-mock-control-plane.conf"
+}
+mutate_a5_timer_dropin() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punard-reconcile.timer.d"
+    : > "${CASE}/usr/lib/systemd/system/punard-reconcile.timer.d/10-dev-stoppable.conf"
+}
 mutate_a6() {
     ln -s ../punar-idle-ram.service \
         "${CASE}/usr/lib/systemd/system/multi-user.target.wants/innocent.service"
@@ -350,36 +463,229 @@ mutate_a15() {
         > "${CASE}/usr/lib/punar/lock-exercise.allow"
 }
 
-# A16 has three ways to be wrong: no stated value (Debian's kernel then runs
+# A16 has four places a membership can come from and each must bite: the
+# group file, gshadow's member list, a sysusers.d line systemd-sysusers would
+# replay, and userdb records; and a person's account, not only the greeter.
+mutate_a16_greeter() { sed -i 's/^video:x:985:$/video:x:985:greeter/' "${CASE}/etc/group"; }
+mutate_a16_gshadow() { sed -i 's/^input:!::$/input:!::greeter/' "${CASE}/etc/gshadow"; }
+mutate_a16_person() {
+    printf '%s\n' 'alice:x:1000:1000::/home/alice:/bin/bash' >> "${CASE}/etc/passwd"
+    sed -i 's/^input:x:97:$/input:x:97:alice/' "${CASE}/etc/group"
+}
+mutate_a16_sysusers() { printf '%s\n' 'm greeter video' >> "${CASE}/usr/lib/sysusers.d/greetd.conf"; }
+mutate_a16_membership() {
+    mkdir -p "${CASE}/usr/lib/userdb"
+    printf '%s\n' '{}' > "${CASE}/usr/lib/userdb/alice:input.membership"
+}
+mutate_a16_member_of() {
+    mkdir -p "${CASE}/etc/userdb"
+    printf '%s\n' '{"userName":"alice",' '"memberOf":["punar","video"]}' \
+        > "${CASE}/etc/userdb/alice.user"
+}
+mutate_a16_group_members() {
+    mkdir -p "${CASE}/usr/lib/userdb"
+    printf '%s\n' '{"groupName":"video","gid":985,' '"members":["alice"]}' \
+        > "${CASE}/usr/lib/userdb/video.group"
+}
+# The greeter's seat: its PAM session must run pam_systemd, directly (Arch)
+# or through what greetd-greeter includes (Debian).
+mutate_a16_greeter_seat() { sed -i '/pam_systemd\.so/d' "${CASE}/etc/pam.d/greetd"; }
+mutate_a16_greeter_include() {
+    printf '%s\n' '#%PAM-1.0' '@include login' > "${CASE}/etc/pam.d/greetd-greeter"
+    printf '%s\n' 'auth required pam_unix.so' '@include common-session' > "${CASE}/etc/pam.d/login"
+    printf '%s\n' 'session required pam_unix.so' > "${CASE}/etc/pam.d/common-session"
+}
+# A17: the drop-in gone, a protocol left on in it, and a later override.
+mutate_a17() { rm -f "${CASE}/usr/lib/systemd/resolved.conf.d/50-punar.conf"; }
+mutate_a17_value() {
+    sed -i 's/^MulticastDNS=no$/MulticastDNS=resolve/' \
+        "${CASE}/usr/lib/systemd/resolved.conf.d/50-punar.conf"
+}
+mutate_a17_override() {
+    mkdir -p "${CASE}/etc/systemd/resolved.conf.d"
+    printf '%s\n' '[Resolve]' 'LLMNR=yes' > "${CASE}/etc/systemd/resolved.conf.d/90-lan.conf"
+}
+# A same-name file that outranks /usr/lib replaces the drop-in whole.
+mutate_a17_mask_empty() {
+    mkdir -p "${CASE}/etc/systemd/resolved.conf.d"
+    : > "${CASE}/etc/systemd/resolved.conf.d/50-punar.conf"
+}
+mutate_a17_mask_null() {
+    mkdir -p "${CASE}/run/systemd/resolved.conf.d"
+    ln -s /dev/null "${CASE}/run/systemd/resolved.conf.d/50-punar.conf"
+}
+mutate_a17_main_file() {
+    printf '%s\n' '[Resolve]' 'MulticastDNS=yes' > "${CASE}/usr/lib/systemd/resolved.conf"
+}
+# A18: one unsigned path per package system.
+mutate_a18_pacman() {
+    printf '%s\n' '[t2]' 'SigLevel = Never' 'Server = https://example.test/os' \
+        >> "${CASE}/etc/pacman.conf"
+}
+mutate_a18_pacman_optional() {
+    sed -i 's/^SigLevel    = Required DatabaseOptional$/SigLevel = Optional TrustAll/' \
+        "${CASE}/etc/pacman.conf"
+}
+mutate_a18_pacman_remote() {
+    sed -i 's/^LocalFileSigLevel = Optional$/LocalFileSigLevel = Optional\nRemoteFileSigLevel = Optional/' \
+        "${CASE}/etc/pacman.conf"
+}
+mutate_a18_pacman_mirrorlist() {
+    mkdir -p "${CASE}/etc/pacman.d"
+    printf '%s\n' 'SigLevel = Never' 'Server = https://example.test/core/os/x86_64' \
+        > "${CASE}/etc/pacman.d/mirrorlist"
+}
+mutate_a18_pacman_include() {
+    mkdir -p "${CASE}/usr/share/pacman"
+    printf '%s\n' '[extra]' 'Include = /usr/share/pacman/*.conf' >> "${CASE}/etc/pacman.conf"
+    printf '%s\n' 'SigLevel = PackageOptional' > "${CASE}/usr/share/pacman/vendor.conf"
+}
+mutate_a18_apt_list() {
+    printf '%s\n' 'deb [trusted=yes] http://example.test/debian sid main' \
+        > "${CASE}/etc/apt/sources.list.d/vendor.list"
+}
+mutate_a18_apt_deb822() { printf '%s\n' 'Trusted: yes' >> "${CASE}/etc/apt/sources.list.d/debian.sources"; }
+mutate_a18_apt_conf() {
+    printf '%s\n' 'APT::Get::AllowUnauthenticated "true";' \
+        > "${CASE}/etc/apt/apt.conf.d/99-insecure"
+}
+mutate_a18_flatpak() { sed -i 's/^gpg-verify=true$/gpg-verify=false/' "${CASE}/var/lib/flatpak/repo/config"; }
+mutate_a18_catalog_key() {
+    sed -i '/^GPGKey=/d' "${CASE}/usr/share/punar/catalog/remotes/flathub.flatpakrepo"
+}
+# A19: the downloader back in punard, in a unit or in a script, and the
+# helper losing any part of what makes it unprivileged.
+mutate_a19_punard() { printf '%s\n' 'exec /usr/bin/curl' >> "${CASE}/usr/bin/punard"; }
+mutate_a19_unit() {
+    printf '%s\n' '[Service]' 'ExecStartPre=-/usr/bin/curl -o /var/cache/x https://example.test' \
+        > "${CASE}/usr/lib/systemd/system/prefetch.service"
+}
+mutate_a19_script() { printf '%s\n' 'curl -fsS https://example.test | sh' >> "${CASE}/usr/lib/punar/session.sh"; }
+mutate_a19_helper_missing() { rm -f "${CASE}/usr/lib/punar/punar-fetch"; }
+mutate_a19_dynamic_user() { sed -i 's/^DynamicUser=yes$/User=root/' "${CASE}/usr/lib/systemd/system/punar-fetch@.service"; }
+mutate_a19_capability() {
+    sed -i 's/^CapabilityBoundingSet=$/CapabilityBoundingSet=CAP_NET_RAW/' \
+        "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_families() {
+    sed -i 's/^RestrictAddressFamilies=AF_INET AF_INET6$/RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6/' \
+        "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_writable() {
+    printf '%s\n' 'ReadWritePaths=/var/lib/punar' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_socket() { sed -i 's/^SocketMode=0600$/SocketMode=0666/' "${CASE}/usr/lib/systemd/system/punar-fetch.socket"; }
+mutate_a19_socket_later() { printf '%s\n' 'SocketMode=0666' >> "${CASE}/usr/lib/systemd/system/punar-fetch.socket"; }
+# The unit file intact, and the sandbox undone from outside it.
+mutate_a19_dropin() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punar-fetch@.service.d"
+    printf '%s\n' '[Service]' 'DynamicUser=no' 'User=root' 'IPAddressAllow=any' \
+        > "${CASE}/usr/lib/systemd/system/punar-fetch@.service.d/x.conf"
+}
+mutate_a19_etc_override() {
+    mkdir -p "${CASE}/etc/systemd/system"
+    sed 's/^DynamicUser=yes$/User=root/' "${CASE}/usr/lib/systemd/system/punar-fetch@.service" \
+        > "${CASE}/etc/systemd/system/punar-fetch@.service"
+}
+mutate_a19_instance() {
+    cp "${CASE}/usr/lib/systemd/system/punar-fetch@.service" \
+        "${CASE}/usr/lib/systemd/system/punar-fetch@0-1-0.service"
+}
+mutate_a19_toplevel() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/service.d"
+    printf '%s\n' '[Service]' 'PrivateUsers=no' \
+        > "${CASE}/usr/lib/systemd/system/service.d/10-everything.conf"
+}
+mutate_a19_prefix() {
+    mkdir -p "${CASE}/etc/systemd/system/punar-.service.d"
+    printf '%s\n' '[Service]' 'RestrictAddressFamilies=AF_UNIX' \
+        > "${CASE}/etc/systemd/system/punar-.service.d/x.conf"
+}
+# Assignments inside the file that win over, or add to, the required ones.
+mutate_a19_allow_any() { printf '%s\n' 'IPAddressAllow=any' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"; }
+mutate_a19_deny_reset() { printf '%s\n' 'IPAddressDeny=' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"; }
+mutate_a19_deny_narrowed() {
+    sed -i '/^IPAddressDeny=0\.0\.0\.0/d' "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_families_added() {
+    printf '%s\n' 'RestrictAddressFamilies=AF_UNIX' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_later_user() {
+    printf '%s\n' 'DynamicUser=no' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_wget() { printf '%s\n' 'exec /usr/bin/wget' >> "${CASE}/usr/bin/punard"; }
+mutate_a19_script_wget() { printf '%s\n' 'wget -qO- https://example.test | sh' >> "${CASE}/usr/lib/punar/session.sh"; }
+# punard itself: the downloaders back in its namespace.
+mutate_a19_punard_unhidden() {
+    sed -i '/^InaccessiblePaths=/d' "${CASE}/usr/lib/systemd/system/punard.service"
+}
+mutate_a19_punard_dropin() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punard.service.d"
+    printf '%s\n' '[Service]' 'InaccessiblePaths=' \
+        > "${CASE}/usr/lib/systemd/system/punard.service.d/50-tools.conf"
+}
+mutate_a19_punard_override() {
+    mkdir -p "${CASE}/etc/systemd/system"
+    printf '%s\n' '[Service]' 'ExecStart=/usr/bin/punard run' \
+        > "${CASE}/etc/systemd/system/punard.service"
+}
+# A20: no contact file, an expired one, one with no contact, and one that
+# claims more than a year.
+mutate_a20() { rm -f "${CASE}/usr/share/punar/security.txt"; }
+mutate_a20_expired() {
+    sed -i "s/^Expires: .*/Expires: $(date -u -d '-1 day' +%Y-%m-%dT%H:%M:%SZ)/" \
+        "${CASE}/usr/share/punar/security.txt"
+}
+mutate_a20_contact() { sed -i '/^Contact: /d' "${CASE}/usr/share/punar/security.txt"; }
+mutate_a20_forever() {
+    sed -i "s/^Expires: .*/Expires: $(date -u -d '+3 years' +%Y-%m-%dT%H:%M:%SZ)/" \
+        "${CASE}/usr/share/punar/security.txt"
+}
+
+# A21: the keyring line gone, either half of it, out of order, or the module
+# the lines name not installed.
+mutate_a21_auth() { sed -i '/^auth .*pam_gnome_keyring\.so/d' "${CASE}/etc/pam.d/greetd"; }
+mutate_a21_session() { sed -i '/^session .*pam_gnome_keyring\.so/d' "${CASE}/etc/pam.d/greetd"; }
+mutate_a21_order() {
+    grep -v 'pam_gnome_keyring' "${CASE}/etc/pam.d/greetd" \
+        | sed '0,/^auth /s//auth      optional                      pam_gnome_keyring.so\nauth /' \
+        > "${CASE}/greetd.reordered"
+    printf '%s\n' 'session   optional  pam_gnome_keyring.so auto_start' >> "${CASE}/greetd.reordered"
+    mv "${CASE}/greetd.reordered" "${CASE}/etc/pam.d/greetd"
+}
+mutate_a21_module() { rm -f "${CASE}/usr/lib/security/pam_gnome_keyring.so"; }
+mutate_a21_missing() { rm -f "${CASE}/etc/pam.d/greetd"; }
+
+# A22 has three ways to be wrong: no stated value (Debian's kernel then runs
 # at 0), a stated 0, and another file overriding a correct one.
-mutate_a16() { rm -f "${CASE}/usr/lib/sysctl.d/50-punar-yama.conf"; }
-mutate_a16_zero() {
+mutate_a22() { rm -f "${CASE}/usr/lib/sysctl.d/50-punar-yama.conf"; }
+mutate_a22_zero() {
     sed -i 's/^kernel.yama.ptrace_scope = 1$/kernel.yama.ptrace_scope = 0/' \
         "${CASE}/usr/lib/sysctl.d/50-punar-yama.conf"
 }
-mutate_a16_override() {
+mutate_a22_override() {
     mkdir -p "${CASE}/etc/sysctl.d"
     printf '%s\n' 'kernel.yama.ptrace_scope = 0' > "${CASE}/etc/sysctl.d/99-debug.conf"
 }
-# A17: the directory handed back to every account, a file left undeclared,
+# A23: the directory handed back to every account, a file left undeclared,
 # another tmpfiles line granting the trail, and a person in the group.
-mutate_a17() {
+mutate_a23() {
     sed -i 's|^d /var/log/punar 0750 root punar-audit -$|d /var/log/punar 0750 root punar -|' \
         "${CASE}/usr/lib/tmpfiles.d/punard.conf"
 }
-mutate_a17_file() {
+mutate_a23_file() {
     sed -i '\|^z /var/log/punar/audit.jsonl  |d' "${CASE}/usr/lib/tmpfiles.d/punard.conf"
 }
-mutate_a17_grant() {
+mutate_a23_grant() {
     printf '%s\n' 'z /var/log/punar/audit.jsonl 0644 root punar -' \
         > "${CASE}/usr/lib/tmpfiles.d/zz-local.conf"
 }
-mutate_a17_member() {
+mutate_a23_member() {
     sed -i 's/^punar-audit:x:972:$/punar-audit:x:972:alice/' "${CASE}/etc/group"
 }
-# A18: no administrator group at all, and one that ships a member.
-mutate_a18() { sed -i '/^punar-admin:/d' "${CASE}/etc/group"; }
-mutate_a18_member() {
+# A24: no administrator group at all, and one that ships a member.
+mutate_a24() { sed -i '/^punar-admin:/d' "${CASE}/etc/group"; }
+mutate_a24_member() {
     sed -i 's/^punar-admin:x:971:$/punar-admin:x:971:punar/' "${CASE}/etc/group"
 }
 
@@ -387,6 +693,20 @@ reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
     | grep -q PUNAR_RELEASE_IMAGE_POLICY_OK
 echo 'ok   clean release fixture passes'
+
+# The same tree in Debian's shape passes too: greetd-greeter includes login,
+# which reaches pam_systemd through common-session, and the keyring module
+# lives under the multiarch directory.
+reset_case
+printf '%s\n' '#%PAM-1.0' '@include login' > "${CASE}/etc/pam.d/greetd-greeter"
+printf '%s\n' 'auth required pam_unix.so' '@include common-session' > "${CASE}/etc/pam.d/login"
+printf '%s\n' 'session required pam_unix.so' 'session optional pam_systemd.so' \
+    > "${CASE}/etc/pam.d/common-session"
+mkdir -p "${CASE}/usr/lib/aarch64-linux-gnu/security"
+mv "${CASE}/usr/lib/security/pam_gnome_keyring.so" "${CASE}/usr/lib/aarch64-linux-gnu/security/"
+"${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
+    | grep -q PUNAR_RELEASE_IMAGE_POLICY_OK
+echo 'ok   the Debian-shaped greeter and keyring layout passes'
 
 # Dev deliberately bypasses the release-only policy even with an invalid root.
 "${CHECKER}" "${TEST_ROOT}/missing-root" dev 'console=ttyS0 punar.live=1' \
@@ -403,6 +723,7 @@ ln -s /usr/lib/systemd/system/systemd-networkd-wait-online.service \
 BUILDROOT="${CASE}" \
 PROFILES='desktop dev' \
 ARCHITECTURE=x86-64 \
+ARTIFACTDIR="${TEST_ROOT}/artifacts-desktop" \
 SRCDIR="${REPO_ROOT}/os/images" \
 MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
 PUNAR_IMAGE_ID=punar-desktop \
@@ -411,6 +732,17 @@ PUNAR_SNAPSHOT_PIN="${PUNAR_SNAPSHOT_PIN}" \
     "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 [ ! -e "${CASE}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service" ]
 echo 'ok   mkosi finalize resolves image sources, removes wait-online, and preserves the dev bypass'
+# Every profile's default initrd gets the member that frees the unpacked
+# initramfs before switch-root; only the installer adds its live root.
+[ -s "${TEST_ROOT}/artifacts-desktop/io.mkosi.initrd/50-punar-release-initramfs.initrd" ] || {
+    echo 'FAIL mkosi finalize: the desktop build has no initramfs-release member' >&2
+    exit 1
+}
+[ ! -e "${TEST_ROOT}/artifacts-desktop/io.mkosi.initrd/90-punar-live.initrd" ] || {
+    echo 'FAIL mkosi finalize: a desktop build carries the installer live root' >&2
+    exit 1
+}
+echo 'ok   mkosi finalize appends the initramfs-release member to a desktop build'
 
 MINIMAL="${TEST_ROOT}/minimal-dev"
 mkdir -p "${MINIMAL}/usr/lib"
@@ -420,6 +752,7 @@ cp "${MINIMAL}/usr/lib/os-release" "${MINIMAL}/etc/os-release"
 PROFILES='dev' \
 BUILDROOT="${MINIMAL}" \
 ARCHITECTURE=x86-64 \
+ARTIFACTDIR="${TEST_ROOT}/artifacts-minimal" \
 SRCDIR="${REPO_ROOT}/os/images" \
 MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
 PUNAR_IMAGE_ID=punar-desktop \
@@ -428,6 +761,12 @@ PUNAR_SNAPSHOT_PIN="${PUNAR_SNAPSHOT_PIN}" \
     "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 [ ! -e "${MINIMAL}/usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service" ]
 echo 'ok   mkosi finalize leaves the minimal dev profile free of desktop mount policy'
+cmp -s "${TEST_ROOT}/artifacts-desktop/io.mkosi.initrd/50-punar-release-initramfs.initrd" \
+    "${TEST_ROOT}/artifacts-minimal/io.mkosi.initrd/50-punar-release-initramfs.initrd" || {
+    echo 'FAIL mkosi finalize: the minimal build lacks the identical initramfs-release member' >&2
+    exit 1
+}
+echo 'ok   mkosi finalize appends the same initramfs-release member to a minimal build'
 
 expect_fail A0 mutate_a0
 expect_fail A1 mutate_a1
@@ -435,6 +774,8 @@ expect_fail A2 mutate_a2
 expect_fail A3 mutate_a3
 expect_fail A4 mutate_a4
 expect_fail A5 mutate_a5
+expect_fail A5 mutate_a5_mock_dropin
+expect_fail A5 mutate_a5_timer_dropin
 expect_fail A6 mutate_a6
 expect_fail A7 mutate_a7
 expect_fail A13 mutate_a13
@@ -445,15 +786,74 @@ expect_fail A14 mutate_a14_trigger
 expect_fail A14 mutate_a14_forever
 expect_fail A14 mutate_a14_unreadable
 expect_fail A15 mutate_a15
-expect_fail A16 mutate_a16
-expect_fail A16 mutate_a16_zero
-expect_fail A16 mutate_a16_override
+expect_fail A16 mutate_a16_greeter
+expect_fail A16 mutate_a16_gshadow
+expect_fail A16 mutate_a16_person
+expect_fail A16 mutate_a16_sysusers
+expect_fail A16 mutate_a16_membership
+expect_fail A16 mutate_a16_member_of
+expect_fail A16 mutate_a16_group_members
+expect_fail A16 mutate_a16_greeter_seat
+expect_fail A16 mutate_a16_greeter_include
 expect_fail A17 mutate_a17
-expect_fail A17 mutate_a17_file
-expect_fail A17 mutate_a17_grant
-expect_fail A17 mutate_a17_member
-expect_fail A18 mutate_a18
-expect_fail A18 mutate_a18_member
+expect_fail A17 mutate_a17_value
+expect_fail A17 mutate_a17_override
+expect_fail A17 mutate_a17_mask_empty
+expect_fail A17 mutate_a17_mask_null
+expect_fail A17 mutate_a17_main_file
+expect_fail A18 mutate_a18_pacman
+expect_fail A18 mutate_a18_pacman_optional
+expect_fail A18 mutate_a18_pacman_remote
+expect_fail A18 mutate_a18_pacman_mirrorlist
+expect_fail A18 mutate_a18_pacman_include
+expect_fail A18 mutate_a18_apt_list
+expect_fail A18 mutate_a18_apt_deb822
+expect_fail A18 mutate_a18_apt_conf
+expect_fail A18 mutate_a18_flatpak
+expect_fail A18 mutate_a18_catalog_key
+expect_fail A19 mutate_a19_punard
+expect_fail A19 mutate_a19_unit
+expect_fail A19 mutate_a19_script
+expect_fail A19 mutate_a19_helper_missing
+expect_fail A19 mutate_a19_dynamic_user
+expect_fail A19 mutate_a19_capability
+expect_fail A19 mutate_a19_families
+expect_fail A19 mutate_a19_writable
+expect_fail A19 mutate_a19_socket
+expect_fail A19 mutate_a19_socket_later
+expect_fail A19 mutate_a19_dropin
+expect_fail A19 mutate_a19_etc_override
+expect_fail A19 mutate_a19_instance
+expect_fail A19 mutate_a19_toplevel
+expect_fail A19 mutate_a19_prefix
+expect_fail A19 mutate_a19_allow_any
+expect_fail A19 mutate_a19_deny_reset
+expect_fail A19 mutate_a19_deny_narrowed
+expect_fail A19 mutate_a19_families_added
+expect_fail A19 mutate_a19_later_user
+expect_fail A19 mutate_a19_wget
+expect_fail A19 mutate_a19_script_wget
+expect_fail A19 mutate_a19_punard_unhidden
+expect_fail A19 mutate_a19_punard_dropin
+expect_fail A19 mutate_a19_punard_override
+expect_fail A20 mutate_a20
+expect_fail A20 mutate_a20_expired
+expect_fail A20 mutate_a20_contact
+expect_fail A20 mutate_a20_forever
+expect_fail A21 mutate_a21_auth
+expect_fail A21 mutate_a21_session
+expect_fail A21 mutate_a21_order
+expect_fail A21 mutate_a21_module
+expect_fail A21 mutate_a21_missing
+expect_fail A22 mutate_a22
+expect_fail A22 mutate_a22_zero
+expect_fail A22 mutate_a22_override
+expect_fail A23 mutate_a23
+expect_fail A23 mutate_a23_file
+expect_fail A23 mutate_a23_grant
+expect_fail A23 mutate_a23_member
+expect_fail A24 mutate_a24
+expect_fail A24 mutate_a24_member
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \

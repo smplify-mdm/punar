@@ -214,6 +214,6 @@ fn a_person_reads_their_own_events_and_the_devices_and_is_told_what_was_withheld
     assert_eq!(root["result"]["withheld"], 0);
 
     // The file itself is 0640: only its owner and group read it — and the
-    // group, in the image, is punar-audit, which no person is in (gate A17).
+    // group, in the image, is punar-audit, which no person is in (gate A23).
     assert_eq!(mode(&device.dir.join("audit.jsonl")), 0o640);
 }

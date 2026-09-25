@@ -1385,6 +1385,76 @@ pub fn audit(style: &Style, result: &Value, hostname: &str) -> Result<String, St
 /// the marker. An M3-shaped result (report-only daemon) still renders
 /// with the M3 wording — the view never claims a remediation that did
 /// not happen.
+/// `punarctl reconcile --quiet`: one line when the pass changed something
+/// or failed to, nothing when it only confirmed what was already so. The
+/// timer runs this every two minutes, and the journal is durable: the full
+/// report of an unchanged pass there said nothing new, while every pass is
+/// audited in punard's own log (a `reconcile` event, one per remediation
+/// attempt and one per compliance change; docs/api/ipc.md section 6).
+/// Capability ids are the daemon's closed identifiers; no value is printed.
+pub fn reconcile_change_line(result: &Value) -> Result<Option<String>, String> {
+    let report: model::Reconcile = parse(result)?;
+    let named = |outcomes: &[&str]| -> Vec<&str> {
+        report
+            .capabilities
+            .iter()
+            .filter(|entry| {
+                entry
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|remediation| outcomes.contains(&remediation))
+            })
+            .map(|entry| entry.capability.as_str())
+            .collect()
+    };
+    let applied = named(&["applied"]);
+    let failed = named(&["apply_failed", "verify_failed"]);
+    if applied.is_empty() && failed.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = Vec::new();
+    if !applied.is_empty() {
+        parts.push(format!("remediated {}", applied.join(", ")));
+    }
+    if !failed.is_empty() {
+        parts.push(format!("remediation failed for {}", failed.join(", ")));
+    }
+    Ok(Some(format!(
+        "punarctl reconcile: {} (drift in {} of {} capabilities before the pass)",
+        parts.join("; "),
+        report.drift_count,
+        report.capabilities.len()
+    )))
+}
+
+/// `punarctl agents scan --quiet`: one line when the pass changed the
+/// detection set, nothing when it did not. Changes are audited by
+/// punar-agentd itself (`agents.scan` detected/cleared); a pass that changes
+/// nothing writes nothing anywhere. `agents.scan` always says whether it
+/// changed anything, so an answer that does not is one this cannot read: a
+/// failure, never silence.
+pub fn agents_scan_change_line(result: &Value) -> Result<Option<String>, String> {
+    let changed = result
+        .get("changed")
+        .and_then(Value::as_bool)
+        .ok_or("agents.scan did not say whether the detection set changed")?;
+    if !changed {
+        return Ok(None);
+    }
+    let count = |key: &str| {
+        result
+            .get(key)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    Ok(Some(format!(
+        "punarctl agents scan: the detection set changed ({} detections, {} sessions this \
+         boot)",
+        count("detections"),
+        count("sessions")
+    )))
+}
+
 pub fn reconcile(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let report: model::Reconcile = parse(result)?;
     let mut out = fmt::masthead(style, "Reconcile", &personal_context(hostname));
@@ -1955,15 +2025,19 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let status: model::EnrollStatus = parse(result)?;
     let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, status.enrolled));
     if !status.enrolled {
-        out.push_str(&fmt::rows(
-            style,
-            &[Row::new(
-                "Enrollment",
-                "None",
-                Slot::Neutral,
-                "personal device",
-            )],
-        ));
+        let mut rows = vec![Row::new(
+            "Enrollment",
+            "None",
+            Slot::Neutral,
+            "personal device",
+        )];
+        if let Some(release) = &status.identity_release {
+            rows.push(match release.state.as_str() {
+                "kept" => identity_kept_row(release.reason.as_deref()),
+                _ => identity_release_row(release.reason.as_deref()),
+            });
+        }
+        out.push_str(&fmt::rows(style, &rows));
         out.push_str(&fmt::note(
             style,
             "Personal mode is local-only · nothing leaves this machine",
@@ -1992,6 +2066,9 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let policy_ids = status.policy_ids.clone().unwrap_or_default();
     let attestation = status.attestation.as_deref().unwrap_or("unknown");
     let mut rows = enrollment_rows(org, &policy_ids, attestation, status.enrolled_at.as_deref());
+    if let Some(management) = &status.management {
+        rows.push(management_row(management));
+    }
     if let Some(row) = removability_row(status.removable) {
         rows.push(row);
     }
@@ -2120,19 +2197,91 @@ fn printable(text: &str) -> String {
     punar_common::ipc::term_safe_name(text)
 }
 
+/// Whether the organization can manage the device now. The same words the
+/// shell's Enrollment pane draws ("Management interrupted"), so the terminal
+/// and the panel cannot tell two stories. Fixed text around the daemon's
+/// closed reason code.
+fn management_row(management: &model::Management) -> Row {
+    match management.state.as_str() {
+        "interrupted" => {
+            let reason = management
+                .reason
+                .as_deref()
+                .map(|reason| printable(reason).replace('_', " "))
+                .unwrap_or_else(|| "no reason given".to_string());
+            let since = management
+                .since
+                .as_deref()
+                .map(|at| format!(" since {}", fmt::timestamp(&printable(at))))
+                .unwrap_or_default();
+            Row::new(
+                "Management",
+                "Interrupted",
+                Slot::Bad,
+                &format!(
+                    "the Smplify agent cannot be used ({reason}){since} · reports wait until it \
+                     answers · audited as enroll.agent"
+                ),
+            )
+        }
+        _ => Row::new(
+            "Management",
+            "Active",
+            Slot::Ok,
+            "the Smplify agent answers · checked on every sync",
+        ),
+    }
+}
+
+/// An unenrollment the agent has not confirmed: its identity (key and
+/// certificate) is still to be wiped, and punard asks again on every pass.
+fn identity_release_row(reason: Option<&str>) -> Row {
+    let why = reason
+        .map(|reason| format!(" ({})", printable(reason).replace('_', " ")))
+        .unwrap_or_default();
+    Row::new(
+        "Smplify identity",
+        "Release pending",
+        Slot::Warn,
+        &format!(
+            "the agent has not yet confirmed it wiped this device's key{why} · asked again on \
+             every reconcile pass"
+        ),
+    )
+}
+
+/// A Smplify identity punard holds a token for and no record of ending the
+/// enrollment it belonged to (the enrollment record was deleted): kept, never
+/// wiped by punard itself, and audited. The same words the shell draws.
+fn identity_kept_row(reason: Option<&str>) -> Row {
+    let why = reason
+        .map(|reason| format!(" ({})", printable(reason).replace('_', " ")))
+        .unwrap_or_default();
+    Row::new(
+        "Smplify identity",
+        "Kept",
+        Slot::Bad,
+        &format!(
+            "nothing records the end of the enrollment it belongs to{why} · punard keeps it and \
+             asks the agent nothing · audited as enroll.release · a new enrollment replaces it"
+        ),
+    )
+}
+
 /// `punarctl enroll stop`.
 pub fn enroll_stop(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let outcome: model::EnrollStop = parse(result)?;
     let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, false));
-    out.push_str(&fmt::rows(
-        style,
-        &[Row::new(
-            "Removed",
-            "",
-            Slot::Neutral,
-            &outcome.removed_policy_ids.join(" · "),
-        )],
-    ));
+    let mut rows = vec![Row::new(
+        "Removed",
+        "",
+        Slot::Neutral,
+        &outcome.removed_policy_ids.join(" · "),
+    )];
+    if outcome.identity_release.as_deref() == Some("pending") {
+        rows.push(identity_release_row(None));
+    }
+    out.push_str(&fmt::rows(style, &rows));
     out.push_str(&fmt::verdict(
         style,
         Slot::Ok,
@@ -6223,6 +6372,49 @@ mod tests {
         assert!(!text.contains("RECORDED, NOT APPLIED"), "{text}");
     }
 
+    /// The timer's quiet pass prints one line when it changed something or
+    /// failed to, and nothing at all when it only confirmed what was so.
+    #[test]
+    fn a_quiet_reconcile_prints_only_a_change_or_a_failure() {
+        let entry = |capability: &str, drift: bool, remediation: &str| {
+            json!({"capability": capability, "desired_state": "enabled",
+                   "current_state": if drift { "disabled" } else { "enabled" },
+                   "drift": drift, "verified": true, "remediation": remediation})
+        };
+        let quiet = json!({"drift_count": 1, "remediated_count": 0, "capabilities": [
+            entry("security.firewall", false, "none"),
+            entry("system.hostname", true, "alert_only"),
+        ]});
+        assert_eq!(reconcile_change_line(&quiet).unwrap(), None);
+        let changed = json!({"drift_count": 2, "remediated_count": 1, "capabilities": [
+            entry("security.firewall", true, "applied"),
+            entry("time.timezone", true, "apply_failed"),
+        ]});
+        let line = reconcile_change_line(&changed).unwrap().unwrap();
+        assert!(line.contains("remediated security.firewall"), "{line}");
+        assert!(
+            line.contains("remediation failed for time.timezone"),
+            "{line}"
+        );
+        assert!(!line.contains("disabled"), "no value: {line}");
+        assert!(!line.contains('\n'), "one line: {line}");
+
+        assert_eq!(
+            agents_scan_change_line(&json!({"changed": false, "detections": []})).unwrap(),
+            None
+        );
+        assert!(
+            agents_scan_change_line(&json!({"sessions": []})).is_err(),
+            "an answer that does not say is a failure, not silence"
+        );
+        let line = agents_scan_change_line(
+            &json!({"changed": true, "detections": [{}, {}], "sessions": [{}]}),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(line.contains("2 detections, 1 sessions"), "{line}");
+    }
+
     #[test]
     fn enroll_start_renders_the_loud_simulated_label() {
         let style = Style::plain();
@@ -6296,6 +6488,77 @@ mod tests {
         assert!(text.contains("UNREACHABLE"), "{text}");
         assert!(text.contains("report queued"), "{text}");
         assert!(!text.to_lowercase().contains("tok_"), "{text}");
+    }
+
+    /// Management interrupted reads the same words the shell's Enrollment
+    /// pane draws, with the daemon's reason and since when; an active agent
+    /// says so; an unenrollment the agent has not confirmed says the key is
+    /// still to be wiped, on the personal view and in enroll stop's verdict.
+    #[test]
+    fn enroll_views_say_when_management_is_interrupted_or_a_release_pending() {
+        let style = Style::plain();
+        let enrolled = |management: Value| {
+            json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": ["eng-baseline-v12"],
+                "enrolled_at": "2026-08-26T09:00:00Z",
+                "attestation": "none",
+                "management": management,
+            })
+        };
+        let text = enroll_status(
+            &style,
+            &enrolled(json!({"state": "interrupted", "reason": "socket_missing",
+                             "since": "2026-09-24T10:00:00Z"})),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("MANAGEMENT"), "{text}");
+        assert!(text.contains("INTERRUPTED"), "{text}");
+        assert!(text.contains("socket missing"), "{text}");
+        assert!(text.contains("enroll.agent"), "{text}");
+        let text =
+            enroll_status(&style, &enrolled(json!({"state": "active"})), "punar-m5").unwrap();
+        assert!(text.contains("ACTIVE"), "{text}");
+        assert!(!text.contains("INTERRUPTED"), "{text}");
+
+        let text = enroll_status(
+            &style,
+            &json!({"enrolled": false,
+                    "identity_release": {"state": "pending", "reason": "not_answering"}}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("RELEASE PENDING"), "{text}");
+        assert!(text.contains("not answering"), "{text}");
+        let text = enroll_status(
+            &style,
+            &json!({"enrolled": false,
+                    "identity_release": {"state": "kept",
+                                         "reason": "enrollment_record_missing"}}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("KEPT"), "{text}");
+        assert!(text.contains("enrollment record missing"), "{text}");
+        assert!(!text.contains("RELEASE PENDING"), "{text}");
+        let text = enroll_stop(
+            &style,
+            &json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],
+                    "identity_release": "pending"}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("RELEASE PENDING"), "{text}");
+        let text = enroll_stop(
+            &style,
+            &json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],
+                    "identity_release": "released"}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(!text.contains("RELEASE PENDING"), "{text}");
     }
 
     /// The organization chooses its display name, and a terminal obeys what

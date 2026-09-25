@@ -203,6 +203,32 @@ pub struct EnrollStatus {
     /// check for a newer one went. Absent from a daemon that predates it.
     #[serde(default)]
     pub policy: Option<EnrollPolicy>,
+    /// Whether the organization can manage the device right now. Absent from
+    /// a daemon that predates it.
+    #[serde(default)]
+    pub management: Option<Management>,
+    /// A Smplify identity an unenrollment has not finished releasing.
+    #[serde(default)]
+    pub identity_release: Option<IdentityRelease>,
+}
+
+/// The `management` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct Management {
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+/// The `identity_release` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct IdentityRelease {
+    /// `pending` or `kept`.
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// The `policy` object of [`EnrollStatus`].
@@ -265,6 +291,9 @@ pub struct EnrollStop {
     #[allow(dead_code)]
     pub enrolled: bool,
     pub removed_policy_ids: Vec<String>,
+    /// `released` or `pending`; absent from a daemon that predates it.
+    #[serde(default)]
+    pub identity_release: Option<String>,
 }
 
 /// `audit.tail` result (contract section 5.5). Events are
