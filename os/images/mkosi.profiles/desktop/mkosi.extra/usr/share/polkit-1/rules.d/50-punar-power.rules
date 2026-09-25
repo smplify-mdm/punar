@@ -27,6 +27,20 @@
 //     able to say so; overriding that is a different decision from "may this
 //     person reboot", and it is not one this file makes.
 //
+// WITH ANOTHER SESSION OPEN, ONLY A DEVICE ADMINISTRATOR (F0-S1, 2026-09-25;
+// docs/api/ipc.md section 23.2). The `-multiple-sessions` actions are the ones
+// logind asks about when someone else is signed in too, and restarting then
+// ends that person's session and whatever they had not saved — an action that
+// reaches another person. So those two need the `punar-admin` role, which
+// polkit reads the way a login would (getgrouplist through nss-systemd, so a
+// role taken away is gone at the next question). Anyone else is told no
+// outright rather than challenged for a password nobody can type here, and
+// `punarctl session restart` says it was refused. A restart with no other
+// session open reaches nobody and stays open to the person at the seat.
+// Two limits, stated: polkit cannot spend a punar-authd ticket, so the seat's
+// physical presence (local and active) stands in for a fresh password here;
+// and it reads the device's own group, not an organization's pinned list.
+//
 // Everything else falls through to the shipped policy: NOT_HANDLED means "no
 // opinion", not "yes".
 polkit.addRule(function (action, subject) {
@@ -38,10 +52,11 @@ polkit.addRule(function (action, subject) {
     }
     switch (action.id) {
     case "org.freedesktop.login1.reboot":
-    case "org.freedesktop.login1.reboot-multiple-sessions":
     case "org.freedesktop.login1.power-off":
-    case "org.freedesktop.login1.power-off-multiple-sessions":
         return polkit.Result.YES;
+    case "org.freedesktop.login1.reboot-multiple-sessions":
+    case "org.freedesktop.login1.power-off-multiple-sessions":
+        return subject.isInGroup("punar-admin") ? polkit.Result.YES : polkit.Result.NO;
     }
     return polkit.Result.NOT_HANDLED;
 });

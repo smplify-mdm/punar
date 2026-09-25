@@ -249,6 +249,12 @@ jobs:
       - name: Validate release-image policy gate branches
         run: ./tests/images/release-image-policy-test.sh
 
+      # The power rule's own JavaScript, evaluated with node against the
+      # subjects that matter: with another person signed in, only a device
+      # administrator restarts or shuts down (F0-S1).
+      - name: Evaluate the power polkit rule
+        run: ./tests/images/power-polkit-rule-test.sh
+
       - name: Validate bounded early-boot module policy
         run: ./tests/images/initrd-module-policy-test.sh
 
@@ -368,6 +374,7 @@ jobs:
             tests/images/initramfs-release-contract-test.sh \
             os/images/initrd-common/usr/lib/punar/release-initramfs \
             tests/images/release-image-policy-test.sh \
+            tests/images/power-polkit-rule-test.sh \
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
             tests/images/raspberry-pi-bundle-check.sh \
