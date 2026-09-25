@@ -675,6 +675,28 @@ mutate_a22_leds_class() {
     printf '%s\n' 'ACTION=="add", SUBSYSTEM=="leds", RUN+="/bin/chgrp input /sys/class/leds/%k/brightness"' \
         > "${CASE}/usr/lib/udev/rules.d/90-brightnessctl.rules"
 }
+# The two the security review wrote and the first A22 missed: a rule that
+# matches the backlight by KERNEL, and one whose chmod hides in a helper.
+mutate_a22_kernel_match() {
+    printf '%s\n' 'ACTION=="add", KERNEL=="*_backlight", RUN+="/bin/chmod 0666 /sys%p/brightness"' \
+        > "${CASE}/usr/lib/udev/rules.d/90-kernel-match.rules"
+}
+mutate_a22_helper() {
+    printf '%s\n' 'SUBSYSTEM=="backlight", RUN+="/usr/bin/sh -c /usr/lib/x/perm"' \
+        > "${CASE}/usr/lib/udev/rules.d/90-helper.rules"
+}
+# No udev rule at all: tmpfiles.d loosening the panel at every boot.
+mutate_a22_tmpfiles() {
+    mkdir -p "${CASE}/usr/lib/tmpfiles.d"
+    printf '%s\n' '# a comment naming /sys/class/backlight is fine' \
+        'z /sys/class/backlight/*/brightness 0666 - - -' \
+        > "${CASE}/usr/lib/tmpfiles.d/panel.conf"
+}
+mutate_a22_tmpfiles_leds() {
+    mkdir -p "${CASE}/etc/tmpfiles.d"
+    printf '%s\n' 'a+ /sys/devices/platform/x/leds/tpacpi::kbd_backlight/brightness - - - - u:1000:rw' \
+        > "${CASE}/etc/tmpfiles.d/kbd.conf"
+}
 mutate_a22_continued() {
     # shellcheck disable=SC1003 # the backslash is udev's line continuation
     printf '%s\n' 'SUBSYSTEM=="backlight", \' '  GROUP="video"' \
@@ -842,6 +864,10 @@ expect_fail A22 mutate_a22_mode
 expect_fail A22 mutate_a22_uaccess
 expect_fail A22 mutate_a22_continued
 expect_fail A22 mutate_a22_leds_class
+expect_fail A22 mutate_a22_kernel_match
+expect_fail A22 mutate_a22_helper
+expect_fail A22 mutate_a22_tmpfiles
+expect_fail A22 mutate_a22_tmpfiles_leds
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \

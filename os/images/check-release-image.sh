@@ -892,12 +892,20 @@ for udev_dir in usr/lib/udev/rules.d lib/udev/rules.d etc/udev/rules.d run/udev/
                 rule = rule line
                 # Loosening a sysfs file takes a program: chmod and friends
                 # on anything in either class (brightnessctl does the whole
-                # leds class). An ownership, mode or uaccess key does nothing
-                # to a device without a /dev node, but on the backlight it is
-                # the same intent, so it is refused there too; the player LEDs
-                # of a game controller may carry one.
+                # leds class). And ANY program run for a backlight, however
+                # the rule matches it (SUBSYSTEM, KERNEL=="*_backlight", a
+                # DEVPATH, a /sys path) is refused outright: a helper script
+                # hides its chmod from any pattern, and the stock rules run
+                # nothing for a backlight (systemd-backlight is a unit, not a
+                # RUN). An ownership, mode or uaccess key does nothing to a
+                # device without a /dev node, but on the backlight it is the
+                # same intent, so it is refused there too; the player LEDs of
+                # a game controller may carry one.
+                backlight = (rule ~ /(SUBSYSTEM=="backlight"|backlight|\/sys\/class\/backlight\/)/)
+                runs = (rule ~ /RUN(\{[a-z]+\})?\+?=/)
                 if ((rule ~ /(SUBSYSTEM=="(backlight|leds)"|\/sys\/class\/(backlight|leds)\/)/ &&
                      rule ~ /RUN(\{[a-z]+\})?\+?=.*(chmod|chgrp|chown|setfacl)/) ||
+                    (backlight && runs) ||
                     (rule ~ /(SUBSYSTEM=="backlight"|kbd_backlight)/ &&
                      rule ~ /((GROUP|MODE|OWNER)[:+]?=|TAG\+?=+"uaccess")/)) {
                     print FNR
@@ -906,6 +914,22 @@ for udev_dir in usr/lib/udev/rules.d lib/udev/rules.d etc/udev/rules.d run/udev/
             }' "${udev_rules}" | head -n 1)
         if [ -n "${loosened}" ]; then
             fail A22 "${udev_rules#"${ROOT}"/}:${loosened} loosens backlight permissions; brightness goes through logind's SetBrightness"
+        fi
+    done
+done
+# The same loosening needs no udev rule at all: a tmpfiles.d line can chmod,
+# chown or ACL a sysfs file (z, Z, a, a+, m) or write to it (w) at every
+# boot. No line may name a backlight or leds device.
+for tmpfiles_dir in usr/lib/tmpfiles.d lib/tmpfiles.d etc/tmpfiles.d run/tmpfiles.d; do
+    [ -d "${ROOT}/${tmpfiles_dir}" ] || continue
+    for tmpfiles_conf in "${ROOT}/${tmpfiles_dir}"/*.conf; do
+        [ -f "${tmpfiles_conf}" ] || continue
+        loosened=$(awk '
+            /^[[:space:]]*#/ { next }
+            $2 ~ /^\/sys\/(class\/(backlight|leds)|devices\/.*\/(backlight|leds))\// { print FNR; exit }
+        ' "${tmpfiles_conf}")
+        if [ -n "${loosened}" ]; then
+            fail A22 "${tmpfiles_conf#"${ROOT}"/}:${loosened} changes a backlight or LED file through tmpfiles.d; brightness goes through logind's SetBrightness"
         fi
     done
 done
