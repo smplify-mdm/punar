@@ -1886,9 +1886,12 @@ or path other than the confirmed target device. An installed system returns
   `resource: "state_store"`, `source: "service"`, `user_id: "punard"`).
   **Compliance changes:** `reconcile.compliance` (resource = capability id,
   `result` = the new SPEC section 52 state, `policy_ids` = the policy that
-  decided it), when a capability's state differs from the last pass's, and
-  at the first pass after a start for every capability that is not
-  `compliant`. It records the drift nothing remediates (alert-only, awaiting
+  decided it), when a capability's state differs from the one this event
+  last recorded for it (a capability never recorded reads as `compliant`).
+  What was last recorded is kept in `/var/lib/punar/compliance-audited.json`,
+  written only when an event is, so a recovery is recorded however it came
+  (a manual set that settles the capability, a restart that finds it
+  healed), and a restart does not record a state again. It records the drift nothing remediates (alert-only, awaiting
   approval, a value only the image can change), which no remediation event
   names; with the per-pass `reconcile` event and the remediation events it
   is why the reconcile timer's own output can be quiet (`punarctl reconcile

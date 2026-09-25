@@ -5455,3 +5455,43 @@ fn a_refused_control_plane_override_is_audited() {
         )]
     );
 }
+
+/// The audit trail's view of a capability's compliance survives a restart:
+/// a capability recorded `non_compliant` that a restarted punard finds
+/// healed is recorded `compliant` on its first pass, once.
+#[test]
+fn a_compliance_recovery_across_a_restart_is_audited() {
+    let dir = test_dir("compliance-restart");
+    let control_plane = ControlPlane::start(&dir);
+    let changes = |daemon: &TestDaemon| -> Vec<String> {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "reconcile.compliance")
+            .map(|e| e["result"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result(
+        "capabilities.set",
+        Some(json!({"capability": "security.firewall", "desired_state": "enabled"})),
+    );
+    daemon.mock.set_state(json!("disabled"));
+    daemon.mock.fail_next_applies(true);
+    for _ in 0..3 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(changes(&daemon), ["remediating", "non_compliant"]);
+    daemon.stop();
+
+    // Healed while punard was down: the first pass records the recovery.
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let recorded = changes(&daemon);
+    assert_eq!(
+        recorded.last().map(String::as_str),
+        Some("compliant"),
+        "{recorded:?}"
+    );
+    daemon.result("reconcile", None);
+    assert_eq!(changes(&daemon), recorded, "once");
+}

@@ -2463,6 +2463,12 @@ fn remediation_loop_protection_engages_and_resets() {
     assert_eq!(resp["result"]["capabilities"][0]["remediation"], "applied");
     assert_eq!(resp["result"]["compliance"]["overall"], "compliant");
     assert_eq!(td.mock.state(), json!("on"));
+    // The manual set settled it: the audit trail records the recovery, and
+    // does not go on saying non_compliant.
+    assert_eq!(
+        compliance_changes(&td.audit_lines()),
+        ["remediating", "non_compliant", "compliant"]
+    );
 }
 
 #[test]

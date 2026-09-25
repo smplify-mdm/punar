@@ -559,6 +559,12 @@ struct Inner {
     /// startup and on every `capabilities.set`.
     effective: Mutex<EffectiveDocument>,
     tracker: Mutex<ComplianceTracker>,
+    /// The state the audit trail last recorded for each capability it
+    /// recorded as anything but `compliant` ([`COMPLIANCE_AUDITED_FILE`]):
+    /// what `reconcile.compliance` compares against, so a recovery is
+    /// recorded however it came (a manual set, a restart that finds it
+    /// healed), and a restart does not record a state again.
+    compliance_audited: Mutex<BTreeMap<String, ComplianceState>>,
     device_id: String,
     /// Read-only observed fact. Never enters the capability reconcile loop.
     device_profile: punar_common::DeviceProfile,
@@ -986,6 +992,8 @@ impl Daemon {
         let ai =
             crate::aipolicy::load_authority(&cfg.ai_defaults_file, &cfg.state_dir.join("policy.d"));
 
+        let compliance_audited =
+            load_compliance_audited(&cfg.state_dir.join(COMPLIANCE_AUDITED_FILE));
         let daemon = Daemon {
             inner: Arc::new(Inner {
                 cfg,
@@ -1000,6 +1008,7 @@ impl Daemon {
                 application_policy: Mutex::new(loaded.applications),
                 effective: Mutex::new(effective),
                 tracker: Mutex::new(ComplianceTracker::default()),
+                compliance_audited: Mutex::new(compliance_audited),
                 device_id,
                 device_profile,
                 started_at: utc_now_rfc3339(),
@@ -4423,15 +4432,12 @@ impl Inner {
                 actor,
                 &mut remediated_count,
             );
-            let previous = self
-                .tracker
+            self.tracker
                 .lock()
                 .unwrap()
                 .states
                 .insert(id.clone(), state);
-            if compliance_is_news(previous, state) {
-                self.log_audit(self.compliance_event(actor, &id, &policy_id, state));
-            }
+            self.audit_compliance(actor, &id, &policy_id, state);
 
             entries.push(ReconcileEntry {
                 capability: meta.capability,
@@ -4605,6 +4611,36 @@ impl Inner {
                     }
                 }
             }
+        }
+    }
+
+    /// Audit a capability's state when it differs from the one the audit
+    /// trail last recorded for it ([`compliance_is_news`]), and remember what
+    /// was recorded. Compared with the audit trail, not with the last pass:
+    /// a manual set that settles a capability, or a restart after it healed,
+    /// used to leave its last record `non_compliant` for good. Written only
+    /// when a record is made, which is rare.
+    fn audit_compliance(
+        &self,
+        actor: &AuditActor,
+        capability: &str,
+        policy_id: &str,
+        state: ComplianceState,
+    ) {
+        let mut audited = self.compliance_audited.lock().unwrap();
+        if !compliance_is_news(audited.get(capability).copied(), state) {
+            return;
+        }
+        self.log_audit(self.compliance_event(actor, capability, policy_id, state));
+        if state == ComplianceState::Compliant {
+            audited.remove(capability);
+        } else {
+            audited.insert(capability.to_string(), state);
+        }
+        if let Err(e) =
+            save_compliance_audited(&self.cfg.state_dir.join(COMPLIANCE_AUDITED_FILE), &audited)
+        {
+            eprintln!("punard: could not record the audited compliance states: {e}");
         }
     }
 
@@ -7124,14 +7160,45 @@ impl Inner {
     }
 }
 
+/// Beside the layer stores: the state `reconcile.compliance` last recorded
+/// for each capability it recorded as anything but `compliant`, so the audit
+/// trail's view of compliance survives a restart and is corrected however a
+/// capability recovers. Small, and written only when an event is.
+pub const COMPLIANCE_AUDITED_FILE: &str = "compliance-audited.json";
+
+/// Load [`COMPLIANCE_AUDITED_FILE`]; empty when absent or unreadable (then
+/// every capability not `compliant` is recorded once more, which is the
+/// behaviour before the file existed).
+fn load_compliance_audited(path: &Path) -> BTreeMap<String, ComplianceState> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            eprintln!(
+                "punard: {} is unreadable ({e}); starting afresh",
+                path.display()
+            );
+            BTreeMap::new()
+        }),
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+fn save_compliance_audited(
+    path: &Path,
+    audited: &BTreeMap<String, ComplianceState>,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(audited).expect("compliance states serialize");
+    write_atomic_synced(path, &bytes, 0o600)
+}
+
 /// Whether a capability's compliance state is news for the audit trail
-/// (docs/api/ipc.md section 6, `reconcile.compliance`): a change from the
-/// last pass's state, and, on the first pass after a start, any state but
-/// `compliant`. The reconcile summary event says every pass whether drift
-/// was found; this says which capability left or returned to compliance,
-/// including drift nothing remediates (alert-only, awaiting approval, a
-/// value only the image can change), which no remediation event records.
-/// Never one per pass: a steady state encodes nothing new.
+/// (docs/api/ipc.md section 6, `reconcile.compliance`): a state other than
+/// the one the trail last recorded for it, where a capability it never
+/// recorded, or last recorded as recovered, reads as `compliant`
+/// (`previous: None`). The reconcile summary event says every pass whether
+/// drift was found; this says which capability left or returned to
+/// compliance, including drift nothing remediates (alert-only, awaiting
+/// approval, a value only the image can change), which no remediation event
+/// records. Never one per pass: a steady state encodes nothing new.
 fn compliance_is_news(previous: Option<ComplianceState>, state: ComplianceState) -> bool {
     match previous {
         Some(previous) => previous != state,
@@ -7614,11 +7681,11 @@ mod tests {
         use ComplianceState::*;
         assert!(
             !compliance_is_news(None, Compliant),
-            "a start that finds it fine"
+            "never recorded, and fine"
         );
         assert!(
             compliance_is_news(None, NonCompliant),
-            "a start that finds it not"
+            "never recorded, and not"
         );
         assert!(compliance_is_news(Some(Compliant), NonCompliant));
         assert!(

@@ -1420,10 +1420,15 @@ pub fn reconcile_change_line(result: &Value) -> Result<Option<String>, String> {
 /// `punarctl agents scan --quiet`: one line when the pass changed the
 /// detection set, nothing when it did not. Changes are audited by
 /// punar-agentd itself (`agents.scan` detected/cleared); a pass that changes
-/// nothing writes nothing anywhere.
+/// nothing writes nothing anywhere. `agents.scan` always says whether it
+/// changed anything, so an answer that does not is one this cannot read: a
+/// failure, never silence.
 pub fn agents_scan_change_line(result: &Value) -> Result<Option<String>, String> {
-    let changed = result.get("changed").and_then(Value::as_bool);
-    if changed != Some(true) {
+    let changed = result
+        .get("changed")
+        .and_then(Value::as_bool)
+        .ok_or("agents.scan did not say whether the detection set changed")?;
+    if !changed {
         return Ok(None);
     }
     let count = |key: &str| {
@@ -6259,9 +6264,9 @@ mod tests {
             agents_scan_change_line(&json!({"changed": false, "detections": []})).unwrap(),
             None
         );
-        assert_eq!(
-            agents_scan_change_line(&json!({"sessions": []})).unwrap(),
-            None
+        assert!(
+            agents_scan_change_line(&json!({"sessions": []})).is_err(),
+            "an answer that does not say is a failure, not silence"
         );
         let line = agents_scan_change_line(
             &json!({"changed": true, "detections": [{}, {}], "sessions": [{}]}),
