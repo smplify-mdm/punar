@@ -54,7 +54,15 @@ assert_line "${UNIT}" 'Before=initrd-switch-root.service'
 assert_line "${UNIT}" 'Type=oneshot'
 assert_line "${UNIT}" 'ExecStart=-/usr/lib/punar/release-initramfs'
 assert_line "${UNIT}" 'PrivateMounts=yes'
-assert_line "${UNIT}" 'StandardOutput=journal+kmsg'
+assert_line "${UNIT}" 'StandardOutput=kmsg'
+# systemd ignores an output setting it cannot parse (journal+kmsg once slipped
+# through this way), so pin each one to a value systemd.exec(5) documents.
+while IFS= read -r setting; do
+    case "${setting#*=}" in
+        inherit|null|tty|journal|kmsg|journal+console|kmsg+console|socket|file:/*|append:/*|truncate:/*|fd:*) ;;
+        *) fail "the unit has an output setting systemd does not accept: ${setting}" ;;
+    esac
+done < <(grep -E '^Standard(Output|Error)=' "${UNIT}")
 after_line="$(grep -E '^After=' "${UNIT}")" || fail 'the unit has no After= line'
 for unit in initrd-cleanup.service initrd-switch-root.target initrd-udevadm-cleanup-db.service; do
     case " ${after_line#After=} " in
@@ -150,9 +158,22 @@ mklink() {
     ln -s "$1" "$2"
 }
 
+# As systemd 261 reports upstream initrd-switch-root.service: the unit says
+# "systemctl", and systemd looks it up on its search path when it runs it.
 SHOW_SWITCH_ROOT='
-{ path=/usr/bin/systemctl ; argv[]=/usr/bin/systemctl --no-block switch-root ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+{ path=systemctl ; argv[]=systemctl --no-block switch-root ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
 '
+
+# A fake systemctl whose "show" prints $1. Like the real one, it answers
+# nothing when it believes it runs in a chroot, which from a unit with its own
+# mount namespace it does unless SYSTEMD_IGNORE_CHROOT is set.
+fake_systemctl() {
+    # shellcheck disable=SC2016 # the lines of the fake script, verbatim
+    printf '%s\n' '#!/bin/sh' \
+        '[ "$1" = show ] || exit 1' \
+        '[ "${SYSTEMD_IGNORE_CHROOT:-}" = 1 ] || { echo "Running in chroot, ignoring command '"'"'show'"'"'" >&2; exit 0; }' \
+        "printf '%s' '$1'"
+}
 
 # A Debian arm64 initrd, laid out as measured on the release image.
 make_debian_tree() {
@@ -199,9 +220,7 @@ case \$2 in
         printf '%s\n' '${vdso}' '${systemctl_libs}' ;;
     *) echo \"\$2: not a dynamic executable\" >&2; exit 1 ;;
 esac"
-    mkexe "${t}/usr/bin/systemctl" "#!/bin/sh
-[ \"\$1\" = show ] || exit 1
-printf '%s' '${SHOW_SWITCH_ROOT}'"
+    mkexe "${t}/usr/bin/systemctl" "$(fake_systemctl "${SHOW_SWITCH_ROOT}")"
 }
 
 DEBIAN_SYSTEMCTL_LIBS=$'\tlibm.so.6 => /usr/lib/aarch64-linux-gnu/libm.so.6 (0x0000ffffb4610000)\n\tlibsystemd-shared-261.so => /usr/lib/aarch64-linux-gnu/systemd/libsystemd-shared-261.so (0x0000ffffb4070000)\n\tlibc.so.6 => /usr/lib/aarch64-linux-gnu/libc.so.6 (0x0000ffffb3eb0000)\n\tlib[x].so => /usr/lib/aarch64-linux-gnu/lib[x].so (0x0000ffffb3e00000)\n\t/lib/ld-linux-aarch64.so.1 (0x0000ffffb4750000)'
@@ -252,11 +271,9 @@ case \$2 in
 esac"
     local show='
 { path=/usr/bin/plymouth ; argv[]=/usr/bin/plymouth update-root-fs --new-root-dir=/sysroot ; ignore_errors=yes ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
-{ path=/usr/bin/systemctl ; argv[]=/usr/bin/systemctl --no-block switch-root ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+{ path=systemctl ; argv[]=systemctl --no-block switch-root ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
 '
-    mkexe "${t}/usr/bin/systemctl" "#!/bin/sh
-[ \"\$1\" = show ] || exit 1
-printf '%s' '${show}'"
+    mkexe "${t}/usr/bin/systemctl" "$(fake_systemctl "${show}")"
 }
 
 # Every regular file and symlink of a tree outside the mount points, as
@@ -365,6 +382,7 @@ ARCH_KEEP=(
     /usr/lib/systemd/systemd
     /usr/lib/systemd/systemd-executor
     /usr/lib64
+    /usr/sbin
 )
 make_arch_tree "${WORK}/arch"
 check_tree 'Arch x86_64 with an ExecStartPre= drop-in' "${WORK}/arch" "${ARCH_KEEP[@]}"
@@ -391,6 +409,13 @@ mklink systemctl.loop "${WORK}/link-loop/usr/bin/systemctl"
 mklink systemctl "${WORK}/link-loop/usr/bin/systemctl.loop"
 check_refusal 'a symlink loop' "${WORK}/link-loop" 'cannot resolve /usr/bin/systemctl'
 
+make_debian_tree "${WORK}/unknown-command" "${DEBIAN_SYSTEMCTL_LIBS}"
+mkexe "${WORK}/unknown-command/usr/bin/systemctl" "$(fake_systemctl '
+{ path=frobnicate ; argv[]=frobnicate --now ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+')"
+check_refusal 'a switch-root command on no search path directory' "${WORK}/unknown-command" \
+    'cannot find frobnicate on the service search path'
+
 make_debian_tree "${WORK}/no-loader" "${DEBIAN_SYSTEMCTL_LIBS}"
 rm "${WORK}/no-loader/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
 check_refusal 'no dynamic loader' "${WORK}/no-loader" 'no dynamic loader'
@@ -408,7 +433,7 @@ ${variant}"
         || fail "a dry run without PID 1 (${variant}) did not say it used the fixed set"
     check_tree "the fixed set alone (${variant})" "${WORK}/no-pid1" "${DEBIAN_KEEP[@]}"
 done
-grep -Fq '|| keep_nothing "PID 1 reported no command for initrd-switch-root.service"' "${HELPER}" \
+grep -Fq '|| keep_nothing "PID 1 reported no command for initrd-switch-root.service' "${HELPER}" \
     || fail 'the boot step does not refuse when PID 1 reports no switch-root command'
 
 # --- Never through a mount boundary -----------------------------------------
