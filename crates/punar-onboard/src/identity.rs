@@ -1877,12 +1877,14 @@ mod tests {
     /// The machine has `input` and `video` groups (the fake platform answers
     /// for both, as every substrate does), and a new account is still put in
     /// neither: membership is the account's grant, not the group's existence.
+    /// The one other group is the administrator role, which the first account
+    /// holds (F0-S1).
     #[test]
     fn a_new_account_is_in_the_admission_group_and_nothing_else() {
         let temp = TempDir::new().unwrap();
         let (_store, paths, _code) = recovery_store(&temp);
         let account: AccountRecord = read_json(&account_json(&paths)).unwrap();
-        assert_eq!(account.groups, ["punar"]);
+        assert_eq!(account.groups, ["punar", ADMIN_GROUP]);
         assert!(
             paths
                 .runtime_userdb
@@ -1925,8 +1927,10 @@ mod tests {
 
         store.materialize().unwrap();
 
+        // The record predates the administrator role too, and nobody holds
+        // it, so the owner gains it in the same pass (F0-S1).
         let account: AccountRecord = read_json(&record_path).unwrap();
-        assert_eq!(account.groups, ["punar"]);
+        assert_eq!(account.groups, ["punar", ADMIN_GROUP]);
         assert_eq!(account.username, "alice");
         assert_eq!(account.auth.kinds, ["password"]);
         assert_eq!(
@@ -1972,7 +1976,7 @@ mod tests {
         store.materialize().unwrap();
 
         let mut corrected: serde_json::Value = read_json(&record_path).unwrap();
-        assert_eq!(corrected["groups"], json!(["punar"]));
+        assert_eq!(corrected["groups"], json!(["punar", ADMIN_GROUP]));
         assert_eq!(corrected["futureField"], json!({"kept": true}));
         corrected["groups"] = legacy["groups"].clone();
         assert_eq!(corrected, legacy, "only the group list changed");
@@ -2028,11 +2032,23 @@ mod tests {
                 "an unwritable record left alice in {group}"
             );
         }
+        // The owner administers the device for this boot even though the
+        // grant could not be recorded yet.
+        assert!(
+            paths
+                .runtime_userdb
+                .join(format!("alice:{ADMIN_GROUP}.membership"))
+                .is_file()
+        );
         let still: AccountRecord = read_json(&record_path).unwrap();
         assert_eq!(still.groups, ["punar", "video", "input"]);
         store.materialize().unwrap();
         let corrected: AccountRecord = read_json(&record_path).unwrap();
-        assert_eq!(corrected.groups, ["punar"], "corrected once it can be");
+        assert_eq!(
+            corrected.groups,
+            ["punar", ADMIN_GROUP],
+            "corrected once it can be, and the owner's role recorded with it"
+        );
     }
 
     /// Even a record that still names a retired group is never published
