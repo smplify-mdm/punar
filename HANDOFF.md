@@ -242,9 +242,9 @@ polling loops.
 qs -p /usr/share/punar/shell ipc show
 qs -p /usr/share/punar/shell ipc call <target> <verb>
 ```
-Nineteen targets: `aipanel alerts approval bar commandcenter lock mail
+Twenty targets: `aipanel alerts approval bar commandcenter lock mail
 notifications osd overview policies privacypanel session shortcuts systemcontrol
-theme toasts wallpaper windowactions`. `mail` is the first that is NOT a shell
+theme toasts wallpaper windowactions windowswitcher`. `mail` is the first that is NOT a shell
 surface — it belongs to the Punar Mail application, a separate Quickshell
 configuration at `shell/punar-shell/Mail/` with its own `qs -p` process, so it
 answers on its own socket:

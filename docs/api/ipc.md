@@ -2034,8 +2034,16 @@ or path other than the confirmed target device. An installed system returns
   - `punarctl session lock|end|restart|shutdown`: these run `loginctl
     lock-session`, the compositor's `exit`, and `systemctl reboot|poweroff`,
     so polkit still decides.
-  - `punarctl audio status|volume ±N%|N%|mute [on|off|toggle]`: this runs
-    `wpctl`, capped at 100% like the volume keys.
+  - `punarctl audio status|volume ±N%|N%|mute [on|off|toggle] [--input]`:
+    this runs `wpctl`, capped at 100% like the volume keys; `--input` mutes
+    the microphone.
+  - SMP-1405 WP-02: `punarctl media play-pause|next|previous|status` (MPRIS
+    over `busctl --user`); `punarctl display brightness [get|set N%|N%|±N%]
+    [--keyboard]` (logind `Session.SetBrightness` on `session/auto`, exit 6
+    with no backlight); `punarctl keyboard layout [status|list|set]` and
+    `punarctl keyboard clipboard-keys on|off|status`; `punarctl keys list
+    [--filter] [--untried]` (the compositor's `j/binds`); `punarctl window
+    pop`; `punarctl layout <preset>|default --workspace <n|active>`.
   - Exit codes: 5 with no compositor or PipeWire, 3 when polkit refuses, 2
     for a bad name, address or volume.
   - The GUI runs these same verbs: the overview, the command center, the

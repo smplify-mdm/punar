@@ -796,7 +796,7 @@ rather than per-stage:
 | Field | Writes | Through | If skipped |
 |---|---|---|---|
 | Language | *nothing in v1* | — | `English (US)`, the only entry, with M13 §5.2's dashed `OTHER LOCALES · NOT IN THIS BUILD` row and its reason |
-| Keyboard | keymap desired state on `/var`, materialised to Hyprland drop-in + `/etc/vconsole.conf` | `punarctl capabilities set system.keymap <layout>` *(dashed — M13 §5.3)* | `us` |
+| Keyboard | keymap desired state on `/var`, materialised to `/etc/vconsole.conf`; each session renders it as data for the compositor | `punarctl keyboard layout set <layout>` over `system.keymap` **(shipped, SMP-1405 WP-02; the person at the machine may set it, audited)**; the login screen's choice is adopted on a successful sign-in | `us`, or the installer's choice from the install seed |
 | Timezone | timezone desired state on `/var`, materialised to `/etc/localtime` | `punarctl capabilities set time.timezone <tz>` **(shipped)** | `UTC`, and the clock says `UTC` rather than pretending |
 | **Higher contrast** | `~/.config/punar/theme.json` | `punarctl theme set contrast` | off — the `paper` default |
 

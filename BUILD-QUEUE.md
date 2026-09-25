@@ -1292,6 +1292,12 @@ semantics, and there is no raw-dispatcher escape hatch. This needs a live
 compositor to iterate against. NOTE: it was also misdiagnosed as the cause of an
 M2 failure that turned out to be auto-lock; the failures were identical without
 it. Reproduce without the suspect change before backing anything out.
+**Re-landed (SMP-1405 WP-02):** the missing argument semantics is the bind
+option `{ mouse = true }` (Omarchy 4.0.4 tiling.lua K50/K51). The binds now sit
+last in punar-binds.lua inside `pcall`, so no error can take earlier binds with
+it; `tools/hyprland-verify.sh` runs the whole config through the pinned
+Hyprland's `--verify-config` in CI, and keys-check.sh drags a real window with
+PUNAR held through QMP.
 
 **Still open.** A desktop right-click context menu — genuinely not built, not
 stubbed, and not something Thunar can provide, because no file manager owns the

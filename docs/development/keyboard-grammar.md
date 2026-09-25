@@ -10,12 +10,16 @@ float), §13.3 (window grammar), §13.5 (layout presets), §13.6
 (scratchpads), §14 (project workspaces, overview), §15 (multi-monitor).
 M2 chord assignments and the `PUNAR+L` collision resolution follow
 [milestone-2.md](milestone-2.md) §3 verbatim.
-Source of truth: `os/modules/desktop/hypr/punar-binds.conf` (sourced by
-`hyprland.conf`; layout presets additionally
+Source of truth: `os/modules/desktop/hypr/punar-binds.lua` (required by
+`hyprland.lua`; input by `punar-input.lua`; layout presets additionally
 `os/modules/desktop/hypr/punar-layout.sh`), shipped system-wide at
 `/etc/xdg/hypr/` (script at `/usr/lib/punar/punar-layout.sh`) in the
-punar-desktop image. This document is the human-readable mirror; if they
-disagree, the config is wrong or this page is stale — fix whichever lies.
+punar-desktop image. The `.conf` files beside them are the superseded
+legacy provider and are not staged. This document is the human-readable
+mirror; if they disagree, the config is wrong or this page is stale — fix
+whichever lies. `tests/desktop/keybind-contract-test.sh` holds the config to
+three rules (every bind described, no chord twice, every Omarchy key family
+answered), and `punarctl keys list` prints the live table.
 
 The grammar principle (§13.1): the keyboard states intent, the desktop
 obeys, motion explains what changed. The **Punar key**, written `PUNAR` in a
@@ -229,16 +233,71 @@ highest-frequency verb and HJKL is its complete vocabulary. The layout
 chooser is a command-center action (type "layout"), and
 `PUNAR+comma/period` are the direct cycle pair.
 
+## SMP-1405 WP-02 — keys, input and window grammar at Omarchy's level
+
+Implemented in config and in `punarctl`; proven in CI by
+`os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh`,
+which presses these as real keys through QMP (`tools/qmp-keys.py`).
+
+### Window grammar
+
+```text
+PUNAR + ALT + H/J/K/L        Swap window left/down/up/right
+PUNAR + M                    Toggle maximize (keeps the bar and gaps)
+PUNAR + O                    Pop window out (float, 60% of the display, centre, pin) / put it back
+PUNAR + D                    Toggle split direction (dwindle)
+PUNAR + 0                    Workspace 10 (1..9, 0 on the number row)
+PUNAR + SHIFT + 0            Move window to workspace 10
+PUNAR + ALT + 1..0           Move window quietly (you stay where you are)
+PUNAR + CTRL + TAB           Next workspace
+PUNAR + wheel                Scroll workspaces
+PUNAR + ALT + arrows         Move the workspace to another monitor
+PUNAR + drag / right-drag    Move / resize a window with the pointer
+PUNAR + comma / period       Previous / next layout preset FOR THIS WORKSPACE (kept across sessions)
+PUNAR + E                    Open files (punarctl app open thunar)
+ALT + TAB / SHIFT + ALT + TAB  Window switcher (most recent first; release Alt to choose)
+CTRL + ALT + TAB             Focus next monitor (SHIFT: previous)
+PUNAR + CTRL + T / G / A     This session's look: transparency / gaps / square lone window
+```
+
+### Media, microphone and brightness (also on the lock screen)
+
+```text
+Play/Pause, Next, Previous   punarctl media play-pause|next|previous (MPRIS)
+Mic mute                     punarctl audio mute --input
+Brightness up/down           punarctl display brightness +5% / -5% (ALT: 1%)
+Keyboard light up/down       punarctl display brightness --keyboard ±34%
+```
+
+Brightness writes only through logind's `SetBrightness` on the session's own
+object: no root, no polkit prompt, no video group, no udev rule. A machine
+with no backlight (every VM) exits 6 and draws nothing.
+
+### Keyboard layout
+
+The device's layout is punard's `system.keymap` (`/etc/vconsole.conf`), set by
+the person at the machine with `punarctl keyboard layout set <layouts>`,
+System Control's Keyboard view, or a successful sign-in from the login
+screen's picker. Both compositors read it as data from
+`$XDG_RUNTIME_DIR/punar/session/input.lua`. A first layout that cannot type
+Latin letters is led by US English, and **both Alt keys together** switch
+layouts (an XKB option, so it works on the login and lock screens too).
+
+### Clipboard keys (optional)
+
+`punarctl keyboard clipboard-keys on`: PUNAR + C / V / X copy, paste and cut
+(Ctrl+Insert / Shift+Insert in a terminal), and floating and centring move to
+PUNAR + ALT + V and C. In foot, Ctrl+Insert and Shift+Insert copy and paste,
+and Ctrl+Shift+A copies the whole scrollback.
+
 ## Future — reserved / not in M2
 
 | Binding | Target | Milestone |
 | --- | --- | --- |
-| Per-workspace layout presets | Needs a workspace-rule reset mechanism (rules accumulate in 0.56.2) | stretch |
 | `grid` preset | `lua:<name>` custom layout at a future compositor rebase | later |
 | Clipboard history (§12.1) | Needs a clipboard manager not in the package set | M2+ |
 | `PUNAR` held → shortcut overlay; `?` → help (§12.3) | Shell overlay consuming `hyprctl binds -j` — every bind (M1 and M2) carries a `bindd` description precisely so this needs no second registry | M2+ |
 | Wi-Fi/BT/audio/power etc. keyboard flows (§12.1) | Command center capabilities, not compositor binds | M2/M3 |
-| Media/brightness keys | Real-hardware image (VM dev image has no such keys) | later |
 | Lock / DPMS | With session/idle management work | later |
 
 ## Verification status (spec 1.22)
