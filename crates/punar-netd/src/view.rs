@@ -48,10 +48,12 @@ pub struct ManagedSession {
     pub process_id: u32,
     pub cgroup_path: String,
     pub cgroup_id: Option<u64>,
-    /// The real uid of the session's root process, read from the kernel
-    /// (`/proc/<pid>/status`) when the session was listed. `None` when it
-    /// could not be read, and then the session's rows are shown to root
-    /// only: whose data it is must be known before a person is shown it.
+    /// Whose session this is: the uid of the `user-<uid>.slice` the scope
+    /// sits in (the kernel's cgroup path, read when the session was listed),
+    /// or failing that the real uid of its root process (`/proc/<pid>/status`).
+    /// `None` when neither could be read, and then the session's rows are
+    /// shown to root only: whose data it is must be known before a person is
+    /// shown it.
     pub uid: Option<u32>,
 }
 
