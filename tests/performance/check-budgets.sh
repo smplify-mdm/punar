@@ -42,6 +42,15 @@
 #   combined Punar service writes > 98,304 bytes  ::error:: -> exit 1
 #   short/missing runtime, network or zram facts  ::error:: -> exit 1
 #
+# The initrd must also have freed the unpacked initramfs before switch-root
+# (punar-release-initramfs.service; PERFORMANCE_BUDGETS.md "Unpacked
+# initramfs"). On Linux 7.0-7.2 it otherwise stays resident as Unevictable
+# memory for the whole boot. This is a behavior, not a measurement, so it
+# fails on every accelerator:
+#
+#   PUNAR_IDLE_INITRAMFS_RELEASED != yes          ::error:: -> exit 1
+#   PUNAR_IDLE_UNEVICTABLE_KB                     context only
+#
 # CPU is stored in hundredths of a percentage point (`bps`): 50 is 0.50%.
 # The write ceiling is the engineering interpretation recorded after two
 # native Apple-HVF windows each wrote exactly 8,192 first-party bytes and a
@@ -138,6 +147,8 @@ IDLE_CPU_MAX_BPS="$(get_field PUNAR_IDLE_CPU_MAX_BPS)"
 IDLE_SERVICE_WRITE_BYTES="$(get_field PUNAR_IDLE_SERVICE_WRITE_BYTES)"
 IDLE_SYSTEM_CPU_BPS="$(get_field PUNAR_IDLE_SYSTEM_CPU_BPS)"
 IDLE_BLOCK_WRITE_BYTES="$(get_field PUNAR_IDLE_BLOCK_WRITE_BYTES)"
+INITRAMFS_RELEASED="$(get_field PUNAR_IDLE_INITRAMFS_RELEASED)"
+UNEVICTABLE_KB="$(get_field PUNAR_IDLE_UNEVICTABLE_KB)"
 NETWORK_ONLINE="$(get_field PUNAR_NETWORK_ONLINE)"
 ZRAM_PRESENT="$(get_field PUNAR_ZRAM_PRESENT)"
 ZRAM_DISKSIZE_MB="$(get_field PUNAR_ZRAM_DISKSIZE_MB)"
@@ -219,6 +230,12 @@ esac
 if [ "${RUNTIME_PRESENT}" != "yes" ]; then
     annotate error "idle runtime facts are incomplete or missing (PUNAR_IDLE_RUNTIME_PRESENT='${RUNTIME_PRESENT:-missing}') — every Punar service cgroup must expose CPU and I/O counters"
     fail=1
+fi
+if [ "${INITRAMFS_RELEASED}" != "yes" ]; then
+    annotate error "the unpacked initramfs was not freed before switch-root (PUNAR_IDLE_INITRAMFS_RELEASED='${INITRAMFS_RELEASED:-missing}') — punar-release-initramfs.service logged no clean release, so on Linux 7.0-7.2 it stays resident as Unevictable memory for the whole boot (PERFORMANCE_BUDGETS.md, Unpacked initramfs)"
+    fail=1
+else
+    echo "==> OK: the initrd freed the unpacked initramfs before switch-root; Unevictable ${UNEVICTABLE_KB:-missing} kB at the end of the window (context only)"
 fi
 if [ "${NETWORK_ONLINE}" != "yes" ]; then
     annotate error "stabilized idle was not DHCP-connected (PUNAR_NETWORK_ONLINE='${NETWORK_ONLINE:-missing}') — the canonical method requires a live non-loopback link and default route"

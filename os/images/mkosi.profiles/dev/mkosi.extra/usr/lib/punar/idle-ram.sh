@@ -238,6 +238,20 @@ emit_fact "PUNAR_IDLE_SERVICE_WRITE_BYTES=${service_write_bytes}"
 emit_fact "PUNAR_IDLE_SYSTEM_CPU_BPS=${system_cpu_bps}"
 emit_fact "PUNAR_IDLE_BLOCK_WRITE_BYTES=${block_write_bytes}"
 
+# The initrd must have freed the unpacked initramfs before switch-root
+# (punar-release-initramfs.service, PERFORMANCE_BUDGETS.md "Unpacked
+# initramfs"): on Linux 7.0-7.2 it otherwise stays resident as Unevictable
+# memory for the whole boot. Its single journal line is the evidence; the
+# window-end Unevictable figure is context for the attribution.
+initramfs_released=no
+if journalctl -b -u punar-release-initramfs.service -o cat --no-pager 2>/dev/null \
+        | grep -Eq '^released the initramfs: .*; find status 0, 0 errors$'; then
+    initramfs_released=yes
+fi
+emit_fact "PUNAR_IDLE_INITRAMFS_RELEASED=${initramfs_released}"
+unevictable_kb="$(awk '/^Unevictable:/ {print $2}' "${RUN_DIR}/ram-meminfo-end.txt")"
+emit_fact "PUNAR_IDLE_UNEVICTABLE_KB=${unevictable_kb:-absent}"
+
 # The line the CI desktop test greps for (gates: fail mean > 1536 MB hard
 # ceiling, warn > 1024 MB target; TCG runs are warn-only, labeled emulated).
 emit_fact "PUNAR_RAM_MEAN_MB=${mean}"

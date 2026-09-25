@@ -51,8 +51,12 @@ qcow2 (mkosi)                │  QEMU: -m 8192 -smp 4 -device virtio-vga,
    prints mean/max to the serial console; `boot-test.sh` records them into
    `ram-report.txt`. No RAM line, no pass.
 3. **Gate 3 — runtime evidence complete.** Every Punar service cgroup must
-   expose CPU and I/O counters; zram facts must reach the host report. Missing
-   evidence is a failure on both native and emulated runs.
+   expose CPU and I/O counters; zram facts must reach the host report. The
+   boot's journal must also show that `punar-release-initramfs.service` freed
+   the unpacked initramfs before switch-root
+   (`PUNAR_IDLE_INITRAMFS_RELEASED=yes`; the window-end `Unevictable` figure
+   travels with it as context). Missing evidence is a failure on both native
+   and emulated runs.
 4. **Gate 4 — budget verdict.** `check-budgets.sh` reads `ram-report.txt`
    and applies the RAM, service-PSS, per-service CPU and combined first-party
    write ceilings. Whole-guest writes are retained as context and are not
@@ -145,7 +149,7 @@ not the cross-architecture TCG path this caveat describes.
 | `punar-desktop-screenshot.png` | grim capture from inside the session — proof of real (llvmpipe) rendering. Uploaded as the `punar-desktop-screenshot` CI artifact. |
 | `ram-report.txt` | Typed host budget input: RAM, service PSS, idle CPU/write facts, zram facts, environment, image, timestamp and the informational desktop proxy. |
 | `ram-samples.txt` | raw per-sample `epoch used-MB` lines from the guest window. |
-| `runtime-report.txt` | Raw guest-emitted per-service/whole-guest CPU and write counters plus live zram facts. |
+| `runtime-report.txt` | Raw guest-emitted per-service/whole-guest CPU and write counters, live zram facts, and whether the initrd freed the unpacked initramfs (with window-end `Unevictable`). |
 | `ram-processes.txt` | Per-process PSS ranking at stabilized idle. |
 | `ram-process-memory.txt` | Window-end per-process PSS, locked, anonymous, file and shared-memory attribution plus whole-process totals and the non-process accounting remainder. The remainder is diagnostic, not a budget metric. |
 | `ram-meminfo-start.txt`, `ram-meminfo-end.txt` | Exact `/proc/meminfo` snapshots bracketing the stabilized five-minute window. |

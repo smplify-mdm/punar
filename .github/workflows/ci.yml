@@ -246,6 +246,13 @@ jobs:
       - name: Validate bounded early-boot module policy
         run: ./tests/images/initrd-module-policy-test.sh
 
+      # On Linux 7.0-7.2 the unpacked initramfs stays resident as
+      # Unevictable memory for the whole boot; every lane frees it before
+      # switch-root. Pins the unit's ordering, that it cannot run outside the
+      # initrd, and the keep set against fake initramfs trees.
+      - name: Validate the initramfs release step and its keep set
+        run: ./tests/images/initramfs-release-contract-test.sh
+
       - name: Validate installer live-root and tree-manifest contracts
         run: |
           ./tests/images/installer-initrd-test.sh
@@ -342,6 +349,8 @@ jobs:
             tests/images/installer-initrd-test.sh \
             tests/images/installer-iso-contract-test.sh \
             tests/images/initrd-module-policy-test.sh \
+            tests/images/initramfs-release-contract-test.sh \
+            os/images/initrd-common/usr/lib/punar/release-initramfs \
             tests/images/release-image-policy-test.sh \
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \

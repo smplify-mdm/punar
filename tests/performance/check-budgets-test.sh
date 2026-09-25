@@ -10,6 +10,7 @@ MISSING_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-missing.
 OFFLINE_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-offline.txt"
 NO_ZRAM_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-no-zram.txt"
 SHORT_WINDOW_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-short-window.txt"
+INITRAMFS_KEPT_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-initramfs-kept.txt"
 UNIT_DIR="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system"
 
 # cpu.stat/io.stat are not portable assumptions unless accounting is explicit
@@ -78,4 +79,9 @@ if "${CHECKER}" "${SHORT_WINDOW_REPORT}" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "PASS: stabilized-idle checker gates KVM/HVF CPU+writes + connected five-minute idle + zram, rejects missing facts, and TCG-downgrades numeric evidence"
+if "${CHECKER}" "${INITRAMFS_KEPT_REPORT}" >/dev/null 2>&1; then
+    echo "FAIL: a report whose initrd never freed the unpacked initramfs passed" >&2
+    exit 1
+fi
+
+echo "PASS: stabilized-idle checker gates KVM/HVF CPU+writes + connected five-minute idle + zram + a freed initramfs, rejects missing facts, and TCG-downgrades numeric evidence"

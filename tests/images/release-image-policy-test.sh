@@ -351,6 +351,7 @@ ln -s /usr/lib/systemd/system/systemd-networkd-wait-online.service \
 BUILDROOT="${CASE}" \
 PROFILES='desktop dev' \
 ARCHITECTURE=x86-64 \
+ARTIFACTDIR="${TEST_ROOT}/artifacts-desktop" \
 SRCDIR="${REPO_ROOT}/os/images" \
 MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
 PUNAR_IMAGE_ID=punar-desktop \
@@ -359,6 +360,17 @@ PUNAR_SNAPSHOT_PIN="${PUNAR_SNAPSHOT_PIN}" \
     "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 [ ! -e "${CASE}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service" ]
 echo 'ok   mkosi finalize resolves image sources, removes wait-online, and preserves the dev bypass'
+# Every profile's default initrd gets the member that frees the unpacked
+# initramfs before switch-root; only the installer adds its live root.
+[ -s "${TEST_ROOT}/artifacts-desktop/io.mkosi.initrd/50-punar-release-initramfs.initrd" ] || {
+    echo 'FAIL mkosi finalize: the desktop build has no initramfs-release member' >&2
+    exit 1
+}
+[ ! -e "${TEST_ROOT}/artifacts-desktop/io.mkosi.initrd/90-punar-live.initrd" ] || {
+    echo 'FAIL mkosi finalize: a desktop build carries the installer live root' >&2
+    exit 1
+}
+echo 'ok   mkosi finalize appends the initramfs-release member to a desktop build'
 
 MINIMAL="${TEST_ROOT}/minimal-dev"
 mkdir -p "${MINIMAL}/usr/lib"
@@ -368,6 +380,7 @@ cp "${MINIMAL}/usr/lib/os-release" "${MINIMAL}/etc/os-release"
 PROFILES='dev' \
 BUILDROOT="${MINIMAL}" \
 ARCHITECTURE=x86-64 \
+ARTIFACTDIR="${TEST_ROOT}/artifacts-minimal" \
 SRCDIR="${REPO_ROOT}/os/images" \
 MKOSI_CONFIG="${TEST_ROOT}/mkosi-config.json" \
 PUNAR_IMAGE_ID=punar-desktop \
@@ -376,6 +389,12 @@ PUNAR_SNAPSHOT_PIN="${PUNAR_SNAPSHOT_PIN}" \
     "${FINALIZE}" | grep -q PUNAR_RELEASE_IMAGE_POLICY_SKIPPED
 [ ! -e "${MINIMAL}/usr/lib/systemd/system/sysinit.target.wants/punar-shm-hardening.service" ]
 echo 'ok   mkosi finalize leaves the minimal dev profile free of desktop mount policy'
+cmp -s "${TEST_ROOT}/artifacts-desktop/io.mkosi.initrd/50-punar-release-initramfs.initrd" \
+    "${TEST_ROOT}/artifacts-minimal/io.mkosi.initrd/50-punar-release-initramfs.initrd" || {
+    echo 'FAIL mkosi finalize: the minimal build lacks the identical initramfs-release member' >&2
+    exit 1
+}
+echo 'ok   mkosi finalize appends the same initramfs-release member to a minimal build'
 
 expect_fail A0 mutate_a0
 expect_fail A1 mutate_a1
