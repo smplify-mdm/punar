@@ -123,6 +123,108 @@ pub fn write_atomic_synced(path: &Path, bytes: &[u8], mode: u32) -> io::Result<(
     }
 }
 
+/// [`write_atomic_synced`] for a file root owns and exactly one other uid,
+/// `reader`, may read: created `0600`, given the POSIX access ACL
+/// `user::rw-, user:<reader>:r--, group::---, mask::r--, other::---` before it
+/// is renamed into place, so there is no moment at which the name points at
+/// a file anyone else can read (F0 review: the per-person approval views).
+///
+/// Not a group: a person's primary group is not guaranteed to be theirs
+/// alone. Not the person as owner: an owner can chmod and rewrite a file, and
+/// the files this writes are what a person reads before they consent. A
+/// filesystem without POSIX ACLs refuses, and the error is returned with
+/// nothing renamed into place: the reader then sees no view — closed, not
+/// open.
+pub fn write_atomic_synced_for_reader(path: &Path, bytes: &[u8], reader: u32) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let tmp = parent.join(format!(".{file_name}.punard-tmp.{}", std::process::id()));
+    let open_excl = || {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+    };
+    let written = (|| {
+        let mut f = match open_excl() {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&tmp)?;
+                open_excl()?
+            }
+            Err(e) => return Err(e),
+        };
+        f.write_all(bytes)?;
+        grant_read_to_one_uid(&f, reader)?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    match written {
+        Ok(()) => {
+            if let Ok(dir) = File::open(&parent) {
+                let _ = dir.sync_all();
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// The name of the POSIX access ACL extended attribute.
+const POSIX_ACL_ACCESS: &str = "system.posix_acl_access";
+
+/// The access ACL that lets root read and write `file` and exactly one other
+/// uid, `reader`, read it — nobody else (see
+/// [`write_atomic_synced_for_reader`]). The kernel's xattr form
+/// (`linux/posix_acl_xattr.h`): a little-endian version 2 header, then
+/// `(tag: u16, perm: u16, id: u32)` entries in tag order.
+pub fn one_reader_acl(reader: u32) -> Vec<u8> {
+    const VERSION: u32 = 2;
+    const UNDEFINED_ID: u32 = u32::MAX;
+    const USER_OBJ: u16 = 0x01;
+    const USER: u16 = 0x02;
+    const GROUP_OBJ: u16 = 0x04;
+    const MASK: u16 = 0x10;
+    const OTHER: u16 = 0x20;
+    const READ: u16 = 4;
+    const WRITE: u16 = 2;
+    let mut blob = VERSION.to_le_bytes().to_vec();
+    for (tag, perm, id) in [
+        (USER_OBJ, READ | WRITE, UNDEFINED_ID),
+        (USER, READ, reader),
+        (GROUP_OBJ, 0, UNDEFINED_ID),
+        (MASK, READ, UNDEFINED_ID),
+        (OTHER, 0, UNDEFINED_ID),
+    ] {
+        blob.extend_from_slice(&tag.to_le_bytes());
+        blob.extend_from_slice(&perm.to_le_bytes());
+        blob.extend_from_slice(&id.to_le_bytes());
+    }
+    blob
+}
+
+/// Set [`one_reader_acl`] on `file`.
+pub fn grant_read_to_one_uid(file: &File, reader: u32) -> io::Result<()> {
+    rustix::fs::fsetxattr(
+        file,
+        POSIX_ACL_ACCESS,
+        &one_reader_acl(reader),
+        rustix::fs::XattrFlags::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
 /// Remove `path` and `fsync` the parent directory, so an unlink that means
 /// "this authorization is over" survives a crash (see
 /// [`write_atomic_synced`]). A missing file is success.
@@ -612,5 +714,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(res.stdout.len(), 65_536);
+    }
+
+    /// F0 review: a per-person view is readable by root and by the one uid it
+    /// is for, through an ACL set before the name exists — never by a group,
+    /// never by the person as owner. The kernel is the judge: it refuses a
+    /// malformed ACL, and it reports back exactly the entries set.
+    #[test]
+    fn a_view_is_written_readable_by_one_uid_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("punard-acl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("1234.json");
+        match write_atomic_synced_for_reader(&path, b"{}", 1234) {
+            Ok(()) => {}
+            // A filesystem without POSIX ACLs refuses, and nothing is left
+            // behind to read.
+            Err(e) if e.raw_os_error() == Some(95) => {
+                eprintln!("note: this filesystem has no POSIX ACLs; the ACL leg is skipped");
+                assert!(!path.exists());
+                assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no temp file left");
+                let _ = fs::remove_dir_all(&dir);
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        }
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        let file = File::open(&path).unwrap();
+        let mut buf = [0u8; 256];
+        let len = rustix::fs::fgetxattr(&file, POSIX_ACL_ACCESS, &mut buf).unwrap();
+        let acl = &buf[..len];
+        assert_eq!(
+            acl,
+            one_reader_acl(1234),
+            "the kernel kept exactly this ACL"
+        );
+        // With an ACL the group bits show the mask: r for the named reader,
+        // and nothing for the owning group or anyone else.
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "{mode:o}");
+        // The blob names exactly one other uid.
+        let named: Vec<u32> = acl[4..]
+            .chunks(8)
+            .filter(|entry| u16::from_le_bytes([entry[0], entry[1]]) == 0x02)
+            .map(|entry| u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]))
+            .collect();
+        assert_eq!(named, [1234]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

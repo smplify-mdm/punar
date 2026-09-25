@@ -887,6 +887,14 @@ pub struct AppsInstallParams {
     /// permissions were shown and cannot be replayed against a later version.
     #[serde(default)]
     pub acknowledge_host_access: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Remove the native package associated with one catalog id.
@@ -894,6 +902,14 @@ pub struct AppsInstallParams {
 #[serde(deny_unknown_fields)]
 pub struct AppsRemoveParams {
     pub id: String,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Update one installed catalog application, or every installed catalog
@@ -906,6 +922,14 @@ pub struct AppsUpdateParams {
     pub id: Option<String>,
     #[serde(default)]
     pub all: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 // -- M11 user-created web apps and browser contexts ------------------------
@@ -1054,6 +1078,35 @@ impl ResolveDecision {
 pub struct ApprovalsResolveParams {
     pub approval_id: String,
     pub decision: ResolveDecision,
+    /// A single-use `punar-authd` ticket for the resolving person (F0-S1,
+    /// contract section 23.2). Approving a `capability_set` or
+    /// `privilege_request` approval changes device-wide state, so a person
+    /// other than root must be a device administrator and present one;
+    /// denying, and approving a `credential_request`, take none. Additive:
+    /// absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
+/// Params for `admins.set` (contract section 23.3): give or take away one
+/// account's device-administrator role.
+///
+/// The account is named, never a uid: a role belongs to a person's account,
+/// and the daemon resolves the name against the accounts this device has.
+/// Exactly one account per call, so every change is one audited decision
+/// with one author.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminsSetParams {
+    /// The account whose role changes.
+    pub user: String,
+    /// `true` makes the account a device administrator; `false` takes the
+    /// role away. The last administrator can never be removed.
+    pub administrator: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for the
+    /// caller. Absent is legitimate only for uid 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Params for `privilege.request` (contract section 14.8).
@@ -1268,11 +1321,20 @@ pub enum Method {
     /// `install.status` — live-environment read side of the atomic installer
     /// progress document. Never carries passphrases or recovery material.
     InstallStatus,
+    /// `admins.list` (F0-S1, contract section 23.3) — who administers this
+    /// device, who decides that, and whether the caller is one. Read; any
+    /// admitted peer.
+    AdminsList,
+    /// `admins.set` (F0-S1, contract section 23.3) — give or take away one
+    /// account's device-administrator role. Root, or an administrator with a
+    /// fresh ticket; agents never; the last administrator is never removed;
+    /// always audited.
+    AdminsSet(AdminsSetParams),
 }
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 45] = [
+    pub const NAMES: [&'static str; 47] = [
         "status",
         "device.posture",
         "capabilities.list",
@@ -1318,6 +1380,32 @@ impl Method {
         "install.apply",
         "install.recovery_ack",
         "install.status",
+        "admins.list",
+        "admins.set",
+    ];
+
+    /// Names the first-party apps amendment reserves on this socket
+    /// (docs/api/ipc.md section 24), in the order their milestones add them.
+    ///
+    /// A reserved name is **not** in [`Method::NAMES`] and has no variant: it
+    /// parses to `unknown_method` exactly like a name nobody ever proposed,
+    /// until the milestone that brings its handler moves it into the table.
+    /// Listing it here is how the amendment holds the name — a later change
+    /// cannot take one of these for a different meaning without editing this
+    /// list, and the test beside it says so.
+    pub const RESERVED: [&'static str; 9] = [
+        // M2 Activity Monitor.
+        "resources.sample",
+        "process.signal",
+        // M5 Text Editor.
+        "sysfiles.list",
+        "sysfiles.apply",
+        "sysfiles.revert",
+        // Files P2 network shares.
+        "storage.share_mount",
+        "storage.share_unmount",
+        "storage.share_list",
+        "storage.share_forget",
     ];
 
     /// The wire method name. Exhaustive match, no wildcard — this is the
@@ -1369,6 +1457,8 @@ impl Method {
             Method::InstallApply(_) => "install.apply",
             Method::InstallRecoveryAck(_) => "install.recovery_ack",
             Method::InstallStatus => "install.status",
+            Method::AdminsList => "admins.list",
+            Method::AdminsSet(_) => "admins.set",
         }
     }
 
@@ -1453,6 +1543,11 @@ impl Method {
                 true
             }
             Method::InstallStatus => false,
+            // The role is read by anyone admitted; changing it is decided in
+            // the daemon (root, or an administrator with a fresh ticket), for
+            // the reason `policy.set` is not root-only: nobody at a Punar
+            // keyboard is root.
+            Method::AdminsList | Method::AdminsSet(_) => false,
         }
     }
 
@@ -1474,7 +1569,8 @@ impl Method {
             | Method::UpdateStatus
             | Method::UpdateReconcileCandidate
             | Method::InstallTargets
-            | Method::InstallStatus => return None,
+            | Method::InstallStatus
+            | Method::AdminsList => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
@@ -1503,6 +1599,7 @@ impl Method {
             Method::InstallPlan(p) => serde_json::to_value(p),
             Method::InstallApply(p) => serde_json::to_value(p),
             Method::InstallRecoveryAck(p) => serde_json::to_value(p),
+            Method::AdminsSet(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -1624,6 +1721,8 @@ impl Method {
             "install.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::InstallStatus)
             }
+            "admins.list" => Self::expect_no_params(method, params).map(|()| Method::AdminsList),
+            "admins.set" => Self::parse_required_params(method, params).map(Method::AdminsSet),
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
@@ -2599,6 +2698,12 @@ pub struct CapabilitiesSetResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditTailResult {
     pub events: Vec<AuditEvent>,
+    /// How many events inside the window belonged to other people and were
+    /// left out (F0-S3). A non-root caller reads its own events and the
+    /// device's; everyone else's are counted here and never shown. Always
+    /// `0` for root. Additive (`v: 1`): absent from an older daemon's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<u64>,
 }
 
 /// `reconcile` result (contract section 5.6). Every M3 field keeps its M3
@@ -2848,6 +2953,7 @@ mod tests {
             Method::ApprovalsResolve(ApprovalsResolveParams {
                 approval_id: "apr_7c1d9a4e".to_string(),
                 decision: ResolveDecision::Approved,
+                ticket: None,
             }),
             Method::ApprovalsConsume(ApprovalIdParams {
                 approval_id: "apr_7c1d9a4e".to_string(),
@@ -2872,13 +2978,18 @@ mod tests {
                 confirm_metadata_sha256:
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
                 acknowledge_host_access: false,
+                ticket: Some(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                ),
             }),
             Method::AppsRemove(AppsRemoveParams {
                 id: "spotify".to_string(),
+                ticket: None,
             }),
             Method::AppsUpdate(AppsUpdateParams {
                 id: None,
                 all: true,
+                ticket: None,
             }),
             Method::WebAppsList(WebAppsListParams::default()),
             Method::WebAppsGet(WebAppsGetParams {
@@ -2955,6 +3066,12 @@ mod tests {
                 groups_fd: 5,
             }),
             Method::InstallStatus,
+            Method::AdminsList,
+            Method::AdminsSet(AdminsSetParams {
+                user: "alice".to_string(),
+                administrator: true,
+                ticket: None,
+            }),
         ];
         assert_eq!(
             methods.len(),
@@ -3020,6 +3137,73 @@ mod tests {
                     "method {name:?} looks like generic execution"
                 );
             }
+        }
+    }
+
+    /// The IPC amendment for the first-party apps (docs/api/ipc.md section
+    /// 24) holds these names before their handlers exist. Pinned here, so a
+    /// change that adds, drops or reorders a reserved name has to say so in
+    /// this test, next to the contract text it must also change.
+    #[test]
+    fn the_reserved_names_are_exactly_the_amendments_list() {
+        assert_eq!(
+            Method::RESERVED,
+            [
+                "resources.sample",
+                "process.signal",
+                "sysfiles.list",
+                "sysfiles.apply",
+                "sysfiles.revert",
+                "storage.share_mount",
+                "storage.share_unmount",
+                "storage.share_list",
+                "storage.share_forget",
+            ]
+        );
+        // F0 adds exactly the two role methods; every app method is still
+        // only a reservation.
+        assert_eq!(Method::NAMES.len(), 47);
+        assert_eq!(&Method::NAMES[45..], ["admins.list", "admins.set"]);
+    }
+
+    /// A reserved name has no handler yet, so it must answer exactly what an
+    /// unknown name answers — not `invalid_params`, and never a dispatch.
+    #[test]
+    fn a_reserved_name_answers_unknown_method_until_its_handler_lands() {
+        for name in Method::RESERVED {
+            assert!(
+                !Method::NAMES.contains(&name),
+                "{name} is reserved and live at once"
+            );
+            let line = format!(r#"{{"v":1,"id":"r","method":"{name}","params":{{}}}}"#);
+            let reject = Request::parse_json_line(&line).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::UnknownMethod, "{name}");
+            for forbidden in ["exec", "shell", "script", "eval", "spawn", "command"] {
+                assert!(!name.contains(forbidden), "{name} looks like execution");
+            }
+        }
+    }
+
+    #[test]
+    fn admins_set_names_one_account_and_nothing_else() {
+        let line = r#"{"v":1,"id":"a","method":"admins.set","params":{"user":"bob","administrator":false}}"#;
+        let request = Request::parse_json_line(line).unwrap();
+        assert_eq!(
+            request.method,
+            Method::AdminsSet(AdminsSetParams {
+                user: "bob".into(),
+                administrator: false,
+                ticket: None
+            })
+        );
+        for smuggled in [
+            r#"{"v":1,"id":"a","method":"admins.set","params":{"user":"bob","administrator":true,"uid":0}}"#,
+            r#"{"v":1,"id":"a","method":"admins.set","params":{"user":"bob"}}"#,
+            r#"{"v":1,"id":"a","method":"admins.set"}"#,
+            r#"{"v":1,"id":"a","method":"admins.list","params":{"user":"bob"}}"#,
+        ] {
+            let reject = Request::parse_json_line(smuggled).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{smuggled}");
         }
     }
 
@@ -3180,7 +3364,8 @@ mod tests {
             request.method,
             Method::AppsUpdate(AppsUpdateParams {
                 id: None,
-                all: true
+                all: true,
+                ticket: None,
             })
         ));
         let reject = Request::parse_json_line(

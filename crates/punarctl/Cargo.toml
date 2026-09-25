@@ -10,6 +10,7 @@ publish.workspace = true
 base64 = { workspace = true }
 clap = { workspace = true }
 punar-common = { workspace = true }
+punar-reauth = { workspace = true }
 # The workspace-name rule and the shell's workspace store, shared with the
 # shell's own writer so `punarctl workspace` cannot drift from it.
 punar-workspace = { workspace = true }

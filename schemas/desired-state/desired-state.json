@@ -120,6 +120,33 @@
                   "title": "Local policy editing",
                   "description": "'allowed' lets a re-authenticated administrator record device_specific_override entries through policy.set (docs/api/ipc.md section 5.8a); 'denied' turns that route off, and the refusal names this policy. Neither value affects what the organization's own layers pin: those outrank the local administrator either way.",
                   "enum": ["allowed", "denied"]
+                },
+                "administrators": {
+                  "title": "Device administrators",
+                  "description": "Who may take actions that reach other people on this device while it is enrolled (docs/api/ipc.md section 23.4): device policy, updates, enrollment, other people's processes and sessions. Absent means the organization has no opinion and the device's own administrators (group punar-admin; the first onboarded account holds it) decide. 'local' states that explicitly; 'pinned' names exactly the accounts that administer the device, and the device's own list is kept but has no effect; 'none' turns local administration off, so only root and the organization act. Leaving an enrollment the organization made removable always follows the device's own list, whatever this says. A present-but-unreadable value refuses daemon start rather than falling back to the device's own list.",
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "title": "Mode",
+                      "enum": ["local", "pinned", "none"]
+                    },
+                    "accounts": {
+                      "title": "Pinned administrators",
+                      "description": "Account names on the device, required with mode 'pinned' and refused with any other mode.",
+                      "type": "array",
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-z_][a-z0-9_-]{0,31}$"
+                      }
+                    }
+                  },
+                  "required": ["mode"],
+                  "additionalProperties": false,
+                  "if": {"properties": {"mode": {"const": "pinned"}}},
+                  "then": {"required": ["accounts"]},
+                  "else": {"not": {"required": ["accounts"]}}
                 }
               },
               "required": ["policyEditing"],

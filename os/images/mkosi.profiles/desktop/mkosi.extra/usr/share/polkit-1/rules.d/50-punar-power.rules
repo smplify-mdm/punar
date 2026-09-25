@@ -27,6 +27,28 @@
 //     able to say so; overriding that is a different decision from "may this
 //     person reboot", and it is not one this file makes.
 //
+// WITH ANOTHER PERSON SIGNED IN, NOBODY FROM THE DESKTOP (F0-S1, F0 review;
+// docs/api/ipc.md section 23.2). The `-multiple-sessions` actions are the
+// ones logind asks about when another user holds a session too (greeter
+// sessions and a person's own second session do not count), and restarting
+// then ends that person's session and whatever they had not saved — an
+// action that reaches another person. The rule for such an action is uid 0
+// or a device administrator's FRESH password, with an organization's
+// administrator list deciding while it has one. polkit can do neither here:
+// it cannot spend a punar-authd ticket, and it cannot read the list punard
+// resolves from the organization's policy. Granting it to group punar-admin
+// (as this file briefly did) therefore let an administrator the organization
+// had removed, or anyone at an administrator's unlocked session, end another
+// person's session with no password at all. So this file answers NO to
+// every subject, outright rather than with a password challenge nobody at
+// this seat can answer, and `punarctl session restart` says it was refused.
+// Root is not a subject here (logind does not ask polkit about uid 0), and
+// the power button on the case, which logind handles itself, still works:
+// physical access was never something this file could withhold. Until a
+// person can hold a second account on a device this refuses nothing in
+// practice; the path that lets an administrator do it with a fresh password
+// belongs with the other actions that end another uid's session.
+//
 // Everything else falls through to the shipped policy: NOT_HANDLED means "no
 // opinion", not "yes".
 polkit.addRule(function (action, subject) {
@@ -38,10 +60,11 @@ polkit.addRule(function (action, subject) {
     }
     switch (action.id) {
     case "org.freedesktop.login1.reboot":
-    case "org.freedesktop.login1.reboot-multiple-sessions":
     case "org.freedesktop.login1.power-off":
-    case "org.freedesktop.login1.power-off-multiple-sessions":
         return polkit.Result.YES;
+    case "org.freedesktop.login1.reboot-multiple-sessions":
+    case "org.freedesktop.login1.power-off-multiple-sessions":
+        return polkit.Result.NO;
     }
     return polkit.Result.NOT_HANDLED;
 });

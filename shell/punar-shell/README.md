@@ -49,8 +49,10 @@ the machine.
 | `Services/WorkspaceState.qml` | Singleton: workspace-name persistence + restore (M2, milestone-2.md §6) |
 | `Services/WallpaperState.qml` | Singleton: four-entry wallpaper catalog + atomic user preference + `wallpaper` IPC handler |
 | `Services/Agents.qml` | Singleton: AI-panel display state — watches `/run/punar/agents.json` (M7, ipc.md §11) |
-| `Services/Ledger.qml` | Singleton: AI access-ledger display state — watches `/run/punar-agentd/ledger.json` (M8, ipc.md §13.2) |
-| `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals.json` (M9, ipc.md §15) |
+| `Services/Ledger.qml` | Singleton: AI access-ledger display state for this person — asks `punarctl agents access <id> --json` (owner-or-root `agents.access`, M8, ipc.md §12.2); the device-wide side file is `root:punar-audit` and not read by the shell |
+| `Services/PasswordRun.qml` | Component: runs one `/usr/bin/punarctl` verb that needs the person's password with `--ticket-from-parent`: the password goes to punar-authd over its socket, and punarctl gets only a ticket bound to it and to the one method — never a pipe, never the password (F0-S4, ipc.md §23.5) |
+| `Services/DeviceAdmin.qml` | Singleton: whether this person administers the device (`punarctl --json admins list`), so a surface offers a password field to an administrator and names who can act to anyone else (F0-S1, ipc.md §23.3) |
+| `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals/<uid>.json` (M9, ipc.md §15) |
 | `Services/Alerts.qml` | Singleton: shadow-AI alert display state — watches `/run/punar-agentd/alerts.json` (M10, ipc.md §20) |
 | `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |
 | `WindowActions/WindowActions.qml` | Lazy focused-app menu: graceful close plus two-step, exact-window force quit |
@@ -432,7 +434,7 @@ so an unelevated device pays nothing for it and an unelevated bar is
 byte-identical to the pre-M9 bar. Privilege is never invisible on this
 device, and there is no generic unrestricted root-shell API behind it.
 
-### Data — `/run/punard/approvals.json` (M9, ipc.md §15)
+### Data — `/run/punard/approvals/<uid>.json` (M9, ipc.md §15)
 
 Deliberately **not** in `/run/punar` alongside `status.json` and
 `agents.json`. That directory is `0755 punar:punar`, so a local process

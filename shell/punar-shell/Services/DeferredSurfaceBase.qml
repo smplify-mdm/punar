@@ -96,4 +96,8 @@ Scope {
     function ipcSelected(): string {
         return "";
     }
+
+    // The session menu's PUNAR+SHIFT+E confirmation (SessionMenu.qml).
+    function requestSessionEnd(): void {
+    }
 }

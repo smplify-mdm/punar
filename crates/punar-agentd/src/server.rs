@@ -358,12 +358,13 @@ impl Daemon {
         if let Some(parent) = cfg.audit_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let audit = AuditWriter::open(&cfg.audit_path)?;
-        if let Some(gid) = lookup_gid(&cfg.group_file, &cfg.group) {
-            // Group ownership of the shared trail (root:punar) is the
-            // daemons' job; meaningful only as root, harmless otherwise.
-            let _ = std::os::unix::fs::chown(&cfg.audit_path, Some(0), Some(gid));
-        }
+        // The shared trail is root:punar-audit (F0-S3), a group no person is
+        // in; the four writers give every file they create that group, and
+        // with no such group the file stays root-only.
+        let audit = AuditWriter::open_in_group(
+            &cfg.audit_path,
+            lookup_gid(&cfg.group_file, punar_common::audit::AUDIT_GROUP),
+        )?;
 
         let signatures = SignatureSet::load(&cfg.adapters_dir, &cfg.suspected_path);
         for warning in &signatures.warnings {
@@ -390,10 +391,15 @@ impl Daemon {
             retention_days: punar_common::ledger::LEDGER_RETENTION_DAYS,
             detection_retention_days: punar_common::ledger::DETECTION_RETENTION_DAYS,
         };
+        // The side file holds every session's ledger rows, and a ledger is
+        // personal data. It is root:punar-audit — a group no person is in —
+        // so no person reads another person's ledger; a person reads their
+        // own through `agents.access` (owner or root), which is what the AI
+        // panel now asks. It used to be root:punar: every account.
         let ledger = LedgerEngine::open(
             ledger_cfg,
             ProcRoot::new(&cfg.proc_root),
-            lookup_gid(&cfg.group_file, &cfg.group),
+            lookup_gid(&cfg.group_file, punar_common::audit::AUDIT_GROUP),
         );
         for warning in &ledger.warnings {
             eprintln!("punar-agentd: ledger: {warning}");
@@ -480,10 +486,15 @@ impl Daemon {
             move || stop_inner.shutdown.load(Ordering::SeqCst),
             move || {
                 // The audit trail moved: ingest the Level-4 references it
-                // named, and republish the panel's view only if anything
-                // was actually ingested.
+                // named, and republish only if anything was actually
+                // ingested. Both side files, as at every other point: the
+                // AI panel reads a person's ledger through agents.access
+                // (the ledger side file is root:punar-audit), and it learns
+                // that a ledger grew from agents.json being rewritten — so a
+                // drain that rewrote only the ledger file left an open panel
+                // showing the rows it had first read (F0 review).
                 if drain_inner.ledger.drain_audit(&utc_now_rfc3339()) {
-                    drain_inner.publish_ledger_view();
+                    drain_inner.publish_summary();
                 }
             },
         );

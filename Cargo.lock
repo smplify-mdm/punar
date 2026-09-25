@@ -1127,6 +1127,7 @@ version = "0.1.0"
 dependencies = [
  "pam-client2",
  "punar-common",
+ "punar-reauth",
  "rustix",
  "serde",
  "serde_json",
@@ -1240,6 +1241,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "punar-reauth"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "punar-recovery"
 version = "0.1.0"
 dependencies = [
@@ -1304,6 +1315,7 @@ dependencies = [
  "base64",
  "clap",
  "punar-common",
+ "punar-reauth",
  "punar-workspace",
  "rustix",
  "serde",

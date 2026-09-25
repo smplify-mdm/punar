@@ -65,8 +65,13 @@ contains "${BROWSER}" 'signal updateAllRequested()'
 contains "${BROWSER}" ': "Update all · " + root.updatesAvailable;'
 contains "${BROWSER}" 'visible: root.updateBusy'
 contains "${COMMAND}" '["punarctl", "--json", "app", "list"]'
-contains "${COMMAND}" '["punarctl", "--json", "app", "update", "--all", "--yes"]'
+# It changes what everyone runs, so a device administrator confirms it with
+# their password (F0 review): the verb runs by its absolute path with the
+# ticket relay, and waits for the password row before it starts.
+contains "${COMMAND}" '["/usr/bin/punarctl", "--json", "app", "update", "--all", "--yes",'
+contains "${COMMAND}" 'password, "apps.update");'
 contains "${COMMAND}" 'root.appUpdateMessage = "Updating " + root.appUpdatesAvailable'
+contains "${COMMAND}" 'echoMode: TextInput.Password'
 
 # Package helper launchers are not separate products. Keep the filter exact so
 # ordinary third-party applications remain discoverable, and give the useful

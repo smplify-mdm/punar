@@ -16,7 +16,20 @@
 //! /var/lib/punar/approvals/index.json  0600 root:root
 //! /var/lib/punar/grants/               0700 root:root
 //! /var/lib/punar/grants/<gnt>.json     0600 root:root
+//! /run/punard/approvals/               0755 root:root   (the shell's views)
+//! /run/punard/approvals/<uid>.json     0640 root:root + ACL user:<uid>:r
 //! ```
+//!
+//! The shell's view is ONE FILE PER PERSON (F0 review). It used to be one
+//! `/run/punard/approvals.json`, `0640 root:punar`, and every account on the
+//! device is in `punar`, so on a shared device each person could read every
+//! person's agent requests, the justifications written for them and the
+//! device's live grants. Now each person's file holds only the approvals
+//! routed to them and their own grants, and a POSIX ACL lets that one uid
+//! read it: not a group (a person's primary group is not guaranteed to be
+//! theirs alone — the development image's account's is `punar`), and not the
+//! person as owner (an owner can chmod and rewrite a file, and this one is
+//! the card a person reads before they consent).
 //!
 //! An approval a peer can rewrite is an authorization forgery, and a grant a
 //! peer can write is a root shell with extra steps. Every write is atomic
@@ -53,7 +66,7 @@ use std::path::{Path, PathBuf};
 use punar_common::approval::{
     APPROVAL_RECORD_MAX_BYTES, APPROVALS_DIR_NAME, ApprovalEnvelope, ApprovalStatus,
     ApprovalsSummary, GRANTS_DIR_NAME, Grant, MAX_APPROVAL_RECORDS, SummaryApproval, SummaryGrant,
-    SummaryRequester, validate_approval_schema,
+    SummaryRequester, approvals_summary_path, validate_approval_schema,
 };
 use punar_common::time::utc_now_rfc3339;
 use punar_common::trusted_time::BootStamp;
@@ -61,15 +74,23 @@ use punar_common::trusted_time::BootStamp;
 use punar_common::trusted_time::BootWindow;
 use serde::{Deserialize, Serialize};
 
-use crate::util::{remove_synced, write_atomic_synced};
+use crate::util::{remove_synced, write_atomic_synced, write_atomic_synced_for_reader};
 
 /// Mode for every record and for the two directories.
 const RECORD_MODE: u32 = 0o600;
 const DIR_MODE: u32 = 0o700;
-/// The summary file is group-readable so the shell (user `punar`) can watch
-/// it; the *directory* above it is root-owned, which is the part that makes
-/// it unspoofable (docs/api/ipc.md section 15).
-const SUMMARY_MODE: u32 = 0o640;
+/// The per-person summary directory: root-owned, so nobody can replace a
+/// file in it, and traversable so each person can reach their own file (the
+/// runtime directory above it is `0750 root:punar`).
+const SUMMARY_DIR_MODE: u32 = 0o755;
+
+/// One person the shell's view is published for: their uid, and every name
+/// an approval may be routed to them by (`alice`, `uid:1000`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryReader {
+    pub uid: u32,
+    pub names: Vec<String>,
+}
 
 /// The crash-recovery / quick-read index (design plan section 4.1). The
 /// per-record files stay authoritative: this is a derived view, rebuilt from
@@ -101,8 +122,7 @@ struct IndexEntry {
 pub struct ApprovalStore {
     dir: PathBuf,
     grants_dir: PathBuf,
-    summary_path: PathBuf,
-    summary_gid: Option<u32>,
+    summary_dir: PathBuf,
     records: BTreeMap<String, ApprovalEnvelope>,
     grants: BTreeMap<String, Grant>,
 }
@@ -115,11 +135,7 @@ impl ApprovalStore {
     /// to boot over one damaged approval would take the whole device's
     /// policy engine down; forgetting a pending approval is fail-closed
     /// (nothing executes without a fresh, well-formed record).
-    pub fn load(
-        state_dir: &Path,
-        summary_path: PathBuf,
-        summary_gid: Option<u32>,
-    ) -> io::Result<Self> {
+    pub fn load(state_dir: &Path, summary_dir: PathBuf) -> io::Result<Self> {
         let dir = state_dir.join(APPROVALS_DIR_NAME);
         let grants_dir = state_dir.join(GRANTS_DIR_NAME);
         create_private_dir(&dir)?;
@@ -128,8 +144,7 @@ impl ApprovalStore {
         let mut store = ApprovalStore {
             dir,
             grants_dir,
-            summary_path,
-            summary_gid,
+            summary_dir,
             records: BTreeMap::new(),
             grants: BTreeMap::new(),
         };
@@ -418,44 +433,74 @@ impl ApprovalStore {
         write_atomic_synced(&self.dir.join("index.json"), &bytes, RECORD_MODE)
     }
 
-    /// The shell's view (docs/api/ipc.md section 15): every pending approval
-    /// plus recently resolved ones, and every live grant.
+    /// The shell's views (docs/api/ipc.md section 15): for each person in
+    /// `readers`, the approvals routed to them — pending first, then recent
+    /// verdicts — and their own live grants, in `<uid>.json`, readable by
+    /// root and by that uid alone. A file for anyone no longer in `readers`
+    /// is removed.
     ///
     /// Non-authoritative by contract. The overlay's Approve sends only an
     /// `approval_id` and punard re-derives everything from its own record —
     /// so the worst a stale summary can do is show a card that is already
     /// answered, which the daemon then refuses with `conflict`.
-    pub fn publish_summary(&self, now: Option<&BootStamp>) -> io::Result<()> {
-        if let Some(parent) = self.summary_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    pub fn publish_summary(
+        &self,
+        now: Option<&BootStamp>,
+        readers: &[SummaryReader],
+    ) -> io::Result<()> {
+        std::fs::create_dir_all(&self.summary_dir)?;
+        std::fs::set_permissions(
+            &self.summary_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(SUMMARY_DIR_MODE),
+        )?;
+        let everything = self.list();
+        let live = self.live_grants(None, now);
+        let mut first_error = None;
+        for reader in readers.iter().filter(|reader| reader.uid != 0) {
+            let summary = ApprovalsSummary {
+                v: 1,
+                updated_at: utc_now_rfc3339(),
+                approvals: everything
+                    .iter()
+                    .filter(|env| reader.names.contains(&env.approval.user))
+                    .take(MAX_SUMMARY_APPROVALS)
+                    .cloned()
+                    .map(summary_row)
+                    .collect(),
+                grants: live
+                    .iter()
+                    .filter(|g| g.uid == reader.uid)
+                    .map(|g| SummaryGrant {
+                        grant_id: g.grant_id.clone(),
+                        capability: g.capability.clone(),
+                        expires_at: g.expires_at.clone(),
+                    })
+                    .collect(),
+            };
+            let bytes = serde_json::to_vec(&summary)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let path = approvals_summary_path(&self.summary_dir, reader.uid);
+            if let Err(e) = write_atomic_synced_for_reader(&path, &bytes, reader.uid) {
+                first_error.get_or_insert(e);
+            }
         }
-        let summary = ApprovalsSummary {
-            v: 1,
-            updated_at: utc_now_rfc3339(),
-            approvals: self
-                .list()
-                .into_iter()
-                .take(MAX_SUMMARY_APPROVALS)
-                .map(summary_row)
-                .collect(),
-            grants: self
-                .live_grants(None, now)
-                .into_iter()
-                .map(|g| SummaryGrant {
-                    grant_id: g.grant_id,
-                    capability: g.capability,
-                    expires_at: g.expires_at,
-                })
-                .collect(),
-        };
-        let bytes = serde_json::to_vec(&summary)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        write_atomic_synced(&self.summary_path, &bytes, SUMMARY_MODE)?;
-        if let Some(gid) = self.summary_gid {
-            // Meaningful only as root; harmless EPERM otherwise (tests).
-            let _ = std::os::unix::fs::chown(&self.summary_path, Some(0), Some(gid));
+        // Anyone no longer a reader keeps no view.
+        if let Ok(entries) = std::fs::read_dir(&self.summary_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(uid) = name
+                    .to_str()
+                    .and_then(|n| n.strip_suffix(".json"))
+                    .and_then(|n| n.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if !readers.iter().any(|reader| reader.uid == uid && uid != 0) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -573,8 +618,16 @@ mod tests {
 
     fn store(tag: &str) -> (PathBuf, ApprovalStore) {
         let dir = dir(tag);
-        let store = ApprovalStore::load(&dir, dir.join("approvals.json"), None).unwrap();
+        let store = ApprovalStore::load(&dir, dir.join("summaries")).unwrap();
         (dir, store)
+    }
+
+    /// The one person these tests route approvals to: `punar`, uid 1000.
+    fn punar() -> Vec<SummaryReader> {
+        vec![SummaryReader {
+            uid: 1000,
+            names: vec!["punar".to_string(), "uid:1000".to_string()],
+        }]
     }
 
     /// A pending approval with a `ttl_secs` window opened at raw `opened`.
@@ -638,7 +691,7 @@ mod tests {
         store
             .put(envelope("apr_0000aa01", "agt_one", 300, T0))
             .unwrap();
-        store.publish_summary(Some(&at(T0))).unwrap();
+        store.publish_summary(Some(&at(T0)), &punar()).unwrap();
 
         let mode = |p: &Path| {
             use std::os::unix::fs::PermissionsExt;
@@ -646,10 +699,10 @@ mod tests {
         };
         assert_eq!(mode(&dir.join("approvals")), 0o700);
         assert_eq!(mode(&dir.join("approvals/apr_0000aa01.json")), 0o600);
-        assert_eq!(mode(&dir.join("approvals.json")), 0o640);
+        assert_eq!(mode(&dir.join("summaries")), 0o755);
 
         // A fresh store sees exactly what the old one wrote, window included.
-        let reopened = ApprovalStore::load(&dir, dir.join("approvals.json"), None).unwrap();
+        let reopened = ApprovalStore::load(&dir, dir.join("summaries")).unwrap();
         let env = reopened.get("apr_0000aa01").unwrap();
         assert_eq!(env.approval.status, ApprovalStatus::Pending);
         assert_eq!(env.contract, "SetFirewall(disabled)");
@@ -841,9 +894,9 @@ mod tests {
         store
             .put_grant(grant("gnt_0000cc01", 1000, "time.timezone", 600, T0))
             .unwrap();
-        store.publish_summary(Some(&at(T0))).unwrap();
+        store.publish_summary(Some(&at(T0)), &punar()).unwrap();
 
-        let text = std::fs::read_to_string(dir.join("approvals.json")).unwrap();
+        let text = std::fs::read_to_string(dir.join("summaries/1000.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["v"], 1);
         let row = &value["approvals"][0];
@@ -859,8 +912,8 @@ mod tests {
         assert!(value["grants"][0].get("lifetime").is_none());
 
         // A clock that cannot be read publishes no live grant.
-        store.publish_summary(None).unwrap();
-        let text = std::fs::read_to_string(dir.join("approvals.json")).unwrap();
+        store.publish_summary(None, &punar()).unwrap();
+        let text = std::fs::read_to_string(dir.join("summaries/1000.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value["grants"].as_array().unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
@@ -934,7 +987,7 @@ mod tests {
         store.put_grant(old_grant).unwrap();
         store.put(old_pending).unwrap();
         // Reload from disk, exactly as the upgraded punard would.
-        let mut store = ApprovalStore::load(&dir, dir.join("approvals.json"), None).unwrap();
+        let mut store = ApprovalStore::load(&dir, dir.join("summaries")).unwrap();
         let now = at(T0);
         assert!(
             store
@@ -972,9 +1025,70 @@ mod tests {
             .unwrap();
         std::fs::write(dir.join("approvals/apr_0000ff02.json"), "{not json").unwrap();
 
-        let reopened = ApprovalStore::load(&dir, dir.join("approvals.json"), None).unwrap();
+        let reopened = ApprovalStore::load(&dir, dir.join("summaries")).unwrap();
         assert!(reopened.get("apr_0000ff01").is_some());
         assert!(reopened.get("apr_0000ff02").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// F0 review: each person's view holds the approvals routed to them and
+    /// their own grants, and nothing of anyone else's; a person who is no
+    /// longer a reader keeps no file; root gets none (root reads the socket).
+    #[test]
+    fn each_person_sees_only_their_own_approvals_and_grants() {
+        let (dir, mut store) = store("per-person");
+        let mut alices = envelope("apr_0000a101", "agt_alice", 300, T0);
+        alices.approval.user = "alice".to_string();
+        let mut bobs = envelope("apr_0000b101", "agt_bob", 300, T0);
+        bobs.approval.user = "uid:1001".to_string();
+        store.put(alices).unwrap();
+        store.put(bobs).unwrap();
+        store
+            .put_grant(grant("gnt_0000a101", 1000, "time.timezone", 600, T0))
+            .unwrap();
+        store
+            .put_grant(grant("gnt_0000b101", 1001, "security.firewall", 600, T0))
+            .unwrap();
+        let readers = vec![
+            SummaryReader {
+                uid: 1000,
+                names: vec!["alice".into(), "uid:1000".into()],
+            },
+            SummaryReader {
+                uid: 1001,
+                names: vec!["bob".into(), "uid:1001".into()],
+            },
+            SummaryReader {
+                uid: 0,
+                names: vec!["root".into()],
+            },
+        ];
+        store.publish_summary(Some(&at(T0)), &readers).unwrap();
+        let view = |uid: u32| -> serde_json::Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(dir.join(format!("summaries/{uid}.json"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let alice = view(1000);
+        assert_eq!(alice["approvals"].as_array().unwrap().len(), 1);
+        assert_eq!(alice["approvals"][0]["approval_id"], "apr_0000a101");
+        assert_eq!(alice["grants"].as_array().unwrap().len(), 1);
+        assert_eq!(alice["grants"][0]["grant_id"], "gnt_0000a101");
+        let bob = view(1001);
+        assert_eq!(bob["approvals"][0]["approval_id"], "apr_0000b101");
+        assert_eq!(bob["grants"][0]["grant_id"], "gnt_0000b101");
+        assert!(!alice.to_string().contains("agt_bob"));
+        assert!(!bob.to_string().contains("agt_alice"));
+        assert!(
+            !dir.join("summaries/0.json").exists(),
+            "root reads the socket"
+        );
+
+        // Bob leaves the device: his view goes with him.
+        store.publish_summary(Some(&at(T0)), &readers[..1]).unwrap();
+        assert!(!dir.join("summaries/1001.json").exists());
+        assert!(dir.join("summaries/1000.json").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

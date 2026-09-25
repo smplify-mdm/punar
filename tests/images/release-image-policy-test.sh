@@ -29,6 +29,14 @@ grep -Fq 'systemctl mask seatd.service' "${ARM_POSTINSTALL}" || {
 # control planes remain dormant and root-only until the fixed broker starts
 # them together for a concrete profile.
 for postinstall in "${ARCH_POSTINSTALL}" "${AMD_POSTINSTALL}" "${ARM_POSTINSTALL}"; do
+    # F0-S1/F0-S3: every lane creates the administrator and audit groups
+    # before tmpfiles and onboarding run (release gates A24, A25).
+    for product_group in punar-admin punar-audit; do
+        grep -Fq "groupadd --system ${product_group}" "${postinstall}" || {
+            echo "FAIL groups: ${product_group} is not created by ${postinstall}" >&2
+            exit 1
+        }
+    done
     grep -Fq 'useradd --system --gid punar-pim' "${postinstall}" || {
         echo "FAIL PIM service: locked account missing from ${postinstall}" >&2
         exit 1
@@ -250,6 +258,11 @@ printf '%s\n' \
     'root:x:0:0:root:/root:/bin/sh' \
     'daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin' \
     > "${CLEAN}/etc/passwd"
+mkdir -p "${CLEAN}/usr/lib/sysctl.d" "${CLEAN}/usr/lib/tmpfiles.d"
+cp "${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/sysctl.d/50-punar-yama.conf" \
+    "${CLEAN}/usr/lib/sysctl.d/50-punar-yama.conf"
+cp "${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/tmpfiles.d/punard.conf" \
+    "${CLEAN}/usr/lib/tmpfiles.d/punard.conf"
 printf '%s\n' \
     'ID=punar-test-substrate' \
     'VERSION_ID=1' \
@@ -277,9 +290,12 @@ printf '%s\n' '# stated lockout policy' 'deny = 5' 'unlock_time = 300' \
 # A16: a greeter and the device groups exist, and nobody is in them.
 printf '%s\n' 'greeter:x:960:960::/var/lib/greetd:/usr/sbin/nologin' \
     >> "${CLEAN}/etc/passwd"
+# A24/A25: the administrator and audit groups exist, empty, beside them.
 printf '%s\n' 'root:x:0:' 'input:x:97:' 'video:x:985:' 'greeter:x:960:' \
+    'punar:x:970:' 'punar-admin:x:971:' 'punar-audit:x:972:' \
     > "${CLEAN}/etc/group"
 printf '%s\n' 'root:!::' 'input:!::' 'video:!::' 'greeter:!::' \
+    'punar:!::' 'punar-admin:!::' 'punar-audit:!::' \
     > "${CLEAN}/etc/gshadow"
 mkdir -p "${CLEAN}/usr/lib/sysusers.d"
 printf '%s\n' 'u greeter - "greetd greeter" /var/lib/greetd' 'm colord video' \
@@ -702,6 +718,65 @@ mutate_a22_continued() {
     printf '%s\n' 'SUBSYSTEM=="backlight", \' '  GROUP="video"' \
         > "${CASE}/usr/lib/udev/rules.d/61-split.rules"
 }
+# A23 has three ways to be wrong: no stated value (Debian's kernel then runs
+# at 0), a stated 0, and another file overriding a correct one.
+mutate_a23() { rm -f "${CASE}/usr/lib/sysctl.d/50-punar-yama.conf"; }
+mutate_a23_zero() {
+    sed -i 's/^kernel.yama.ptrace_scope = 1$/kernel.yama.ptrace_scope = 0/' \
+        "${CASE}/usr/lib/sysctl.d/50-punar-yama.conf"
+}
+mutate_a23_override() {
+    mkdir -p "${CASE}/etc/sysctl.d"
+    printf '%s\n' 'kernel.yama.ptrace_scope = 0' > "${CASE}/etc/sysctl.d/99-debug.conf"
+}
+# A same-named file that outranks /usr/lib masks the policy without setting
+# anything, and a link is read where it points.
+mutate_a23_mask() {
+    mkdir -p "${CASE}/etc/sysctl.d"
+    ln -s /dev/null "${CASE}/etc/sysctl.d/50-punar-yama.conf"
+}
+mutate_a23_link() {
+    mkdir -p "${CASE}/etc/sysctl.d" "${CASE}/usr/share/punar-debug"
+    printf '%s\n' 'kernel.yama.ptrace_scope = 0' > "${CASE}/usr/share/punar-debug/yama.conf"
+    ln -s /usr/share/punar-debug/yama.conf "${CASE}/etc/sysctl.d/99-debug.conf"
+}
+# punard's by-pid descriptor fetch needs CAP_SYS_PTRACE under Yama 1.
+mutate_a23_capability() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punard.service.d"
+    printf '%s\n' '[Service]' 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE' \
+        > "${CASE}/usr/lib/systemd/system/punard.service.d/50-trim.conf"
+}
+mutate_a23_capability_drop() {
+    printf '%s\n' 'CapabilityBoundingSet=~CAP_SYS_PTRACE' \
+        >> "${CASE}/usr/lib/systemd/system/punard.service"
+}
+# A24: the directory handed back to every account, a file left undeclared,
+# another tmpfiles line granting the trail, and a person in the group.
+mutate_a24() {
+    sed -i 's|^d /var/log/punar 2750 root punar-audit -$|d /var/log/punar 2750 root punar -|' \
+        "${CASE}/usr/lib/tmpfiles.d/punard.conf"
+}
+# The directory without its setgid bit: a writer without CAP_CHOWN creates
+# files in its own group again.
+mutate_a24_setgid() {
+    sed -i 's|^d /var/log/punar 2750 root punar-audit -$|d /var/log/punar 0750 root punar-audit -|' \
+        "${CASE}/usr/lib/tmpfiles.d/punard.conf"
+}
+mutate_a24_file() {
+    sed -i '\|^z /var/log/punar/audit.jsonl  |d' "${CASE}/usr/lib/tmpfiles.d/punard.conf"
+}
+mutate_a24_grant() {
+    printf '%s\n' 'z /var/log/punar/audit.jsonl 0644 root punar -' \
+        > "${CASE}/usr/lib/tmpfiles.d/zz-local.conf"
+}
+mutate_a24_member() {
+    sed -i 's/^punar-audit:x:972:$/punar-audit:x:972:alice/' "${CASE}/etc/group"
+}
+# A25: no administrator group at all, and one that ships a member.
+mutate_a25() { sed -i '/^punar-admin:/d' "${CASE}/etc/group"; }
+mutate_a25_member() {
+    sed -i 's/^punar-admin:x:971:$/punar-admin:x:971:punar/' "${CASE}/etc/group"
+}
 
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
@@ -868,6 +943,20 @@ expect_fail A22 mutate_a22_kernel_match
 expect_fail A22 mutate_a22_helper
 expect_fail A22 mutate_a22_tmpfiles
 expect_fail A22 mutate_a22_tmpfiles_leds
+expect_fail A23 mutate_a23
+expect_fail A23 mutate_a23_zero
+expect_fail A23 mutate_a23_override
+expect_fail A23 mutate_a23_mask
+expect_fail A23 mutate_a23_link
+expect_fail A23 mutate_a23_capability
+expect_fail A23 mutate_a23_capability_drop
+expect_fail A24 mutate_a24
+expect_fail A24 mutate_a24_setgid
+expect_fail A24 mutate_a24_file
+expect_fail A24 mutate_a24_grant
+expect_fail A24 mutate_a24_member
+expect_fail A25 mutate_a25
+expect_fail A25 mutate_a25_member
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \

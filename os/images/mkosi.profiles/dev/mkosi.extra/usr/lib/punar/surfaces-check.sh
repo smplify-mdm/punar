@@ -2456,8 +2456,9 @@ done
 # all. Whether the stronger `-multiple-sessions` action is reached depends on
 # another user happening to hold a session — machine state, not a property of
 # the fix. Asking polkit about that action by name removes the dependence: it is
-# auth_admin_keep in the shipped policy and YES only because
-# 50-punar-power.rules says so.
+# auth_admin_keep in the shipped policy (a challenge, pkcheck exit 2) and an
+# explicit NO (exit 1) only because 50-punar-power.rules says so: ending
+# another person's session from the desktop is refused to everyone (F0 review).
 if command -v pkcheck >/dev/null 2>&1; then
     pkcheck --action-id org.freedesktop.login1.reboot-multiple-sessions \
         --process "$$" >/dev/null 2>&1
@@ -2504,13 +2505,18 @@ else
         esac
     done
 
-    # The action that is authorized ONLY because of the Punar rule. Exit 0 is
-    # "authorized"; anything else is polkit declining to say yes without a
-    # password, which is the state the session menu cannot recover from.
+    # The action the Punar rule REFUSES by name. Exit 1 is "not authorized",
+    # the rule's NO; exit 2 is the shipped challenge (the rule is not in
+    # force); exit 0 would mean something granted ending another person's
+    # session from the desktop.
     pkcheck_result="$(sed -n 's/^pkcheck_multiple_sessions=//p' /run/punar/canpower.txt)"
     case "${pkcheck_result}" in
+        1)
+            note "ok   polkit refuses reboot-multiple-sessions outright (50-punar-power.rules is in force: nobody ends another person's session from the desktop)"
+            ;;
         0)
-            note "ok   polkit authorizes reboot-multiple-sessions for the session (50-punar-power.rules is in force)"
+            note "FAIL polkit authorizes reboot-multiple-sessions for the session: something grants ending another person's session with no fresh password"
+            FAILED=1
             ;;
         absent)
             note "info pkcheck is not installed, so the -multiple-sessions action could not be asked by name; the CanReboot legs above are then only as strong as this machine's session count"
@@ -2520,7 +2526,7 @@ else
             FAILED=1
             ;;
         *)
-            note "FAIL polkit does not authorize reboot-multiple-sessions (pkcheck exit ${pkcheck_result}); the shipped auth_admin_keep default is still in force, so 50-punar-power.rules is absent or is not being applied"
+            note "FAIL polkit challenges reboot-multiple-sessions (pkcheck exit ${pkcheck_result}) instead of refusing it; the shipped auth_admin_keep default is still in force, so 50-punar-power.rules is absent or is not being applied"
             FAILED=1
             ;;
     esac
@@ -2608,12 +2614,23 @@ fi
 
 # --- group 9c: a device policy change needs a password, and then works ------
 #
-# THE PATH THIS COVERS, end to end and as the session user: System Control's
-# Policy view offers an administrator a pin, asks for a reason and a password,
-# and runs /usr/lib/punar/punar-policy-set.sh, which re-authenticates through
-# punar-authd and spends the ticket on `punarctl policy set`. Every piece of
-# that has unit tests; none of them proves the CHAIN, and the chain is where a
-# missing binary, a socket group, a PAM stack or a ticket directory mode fails.
+# THE PATH THIS COVERS, end to end and as the session user: `punarctl policy
+# set` asks for the password on its controlling terminal with echo off, sends
+# it straight to punar-authd's socket (punar-reauth, F0-S4), and spends the
+# ticket on policy.set — which also needs the caller to be a device
+# administrator (F0-S1; the dev user is one, as a product's first account is).
+# System Control runs the same command with --ticket-from-parent: the shell
+# sends the password to punar-authd itself and hands punarctl only a ticket
+# bound to that punarctl and to policy.set; that relay is proven by
+# punar-reauth's, punar-auth's and punarctl's own tests. Every piece has unit
+# tests; none of them proves the CHAIN, and the chain is where a missing
+# binary, a socket group, a PAM stack or a ticket directory mode fails.
+#
+# The terminal is a pseudo-terminal from script(1) (util-linux, or bsdutils on
+# Debian), and the answer arrives two seconds after the command starts:
+# punarctl flushes pending input when it turns echo off, so a line typed
+# before the prompt would be discarded, exactly as at a keyboard. Nothing here
+# is a pipe into punarctl — a pipe is what F0-S4 took away.
 #
 # NEGATIVE LEGS FIRST. If a change went through without a password, the positive
 # leg below would pass on a machine with no authentication at all.
@@ -2631,6 +2648,12 @@ policy_source_kind() {
 policy_effective_value() {
     punarctl policy explain "$1" --json 2>/dev/null \
         | sed -n 's/.*"effective_value":"\([a-z]*\)".*/\1/p'
+}
+# Answer punarctl's password prompt ($1) for a fixed command ($2) on a
+# pseudo-terminal; the command's exit status is the function's.
+policy_by_terminal() {
+    { sleep 2; printf '%s\n' "$1"; sleep 12; } \
+        | script -qec "$2" /dev/null >/dev/null 2>&1
 }
 
 policy_before_kind="$(policy_source_kind "${policy_path}")"
@@ -2654,12 +2677,11 @@ else
             ;;
     esac
 
-    # 2. A wrong password. The helper must stop before punarctl is reached.
-    printf '%s\n' "${policy_wrong}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" "${policy_value}" "gate: wrong password" \
-          >/dev/null 2>&1
+    # 2. A wrong password. punar-authd refuses it before punard is reached.
+    policy_by_terminal "${policy_wrong}" \
+        "punarctl policy set ${policy_path} ${policy_value} --reason 'gate: wrong password'"
     policy_wrong_rc="$?"
-    check_eq "the helper's exit status for a wrong password" "3" "${policy_wrong_rc}"
+    check_eq "punarctl's exit status for a wrong password" "3" "${policy_wrong_rc}"
     check_eq "the winning source after a wrong password" \
         "${policy_before_kind}" "$(policy_source_kind "${policy_path}")"
 
@@ -2667,22 +2689,20 @@ else
     #    nothing about the machine and everything about the provenance, which
     #    is what is being asserted — a gate must not leave a CI VM with its
     #    firewall in a different state than it found it.
-    printf '%s\n' "${policy_password}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" "${policy_value}" "gate: administrator pin" \
-          >/dev/null 2>&1
+    policy_by_terminal "${policy_password}" \
+        "punarctl policy set ${policy_path} ${policy_value} --reason 'gate: administrator pin'"
     policy_set_rc="$?"
-    check_eq "the helper's exit status for a correct password" "0" "${policy_set_rc}"
+    check_eq "punarctl's exit status for a correct password" "0" "${policy_set_rc}"
     check_eq "the winning source after an administrator pin" \
         "device_specific_override" "$(policy_source_kind "${policy_path}")"
     check_eq "the effective value is unchanged by a same-value pin" \
         "${policy_value}" "$(policy_effective_value "${policy_path}")"
 
     # 4. And withdrawing it hands the path back to the layer underneath.
-    printf '%s\n' "${policy_password}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" --clear "gate: withdraw" \
-          >/dev/null 2>&1
+    policy_by_terminal "${policy_password}" \
+        "punarctl policy clear ${policy_path} --reason 'gate: withdraw'"
     policy_clear_rc="$?"
-    check_eq "the helper's exit status for a withdrawal" "0" "${policy_clear_rc}"
+    check_eq "punarctl's exit status for a withdrawal" "0" "${policy_clear_rc}"
     check_eq "the winning source after withdrawing the pin" \
         "${policy_before_kind}" "$(policy_source_kind "${policy_path}")"
 
@@ -2713,9 +2733,8 @@ else
     # nothing to do with what it is testing. One unconditional attempt, and a
     # loud line if even that does not take.
     if [ "$(policy_source_kind "${policy_path}")" = "device_specific_override" ]; then
-        printf '%s\n' "${policy_password}" \
-            | /usr/lib/punar/punar-policy-set.sh "${policy_path}" --clear "gate: cleanup" \
-              >/dev/null 2>&1
+        policy_by_terminal "${policy_password}" \
+            "punarctl policy clear ${policy_path} --reason 'gate: cleanup'"
         if [ "$(policy_source_kind "${policy_path}")" = "device_specific_override" ]; then
             note "FAIL ${policy_path} is still pinned by this gate; later policy groups will fail for the wrong reason"
             FAILED=1

@@ -190,12 +190,12 @@ impl Daemon {
         if let Some(parent) = cfg.audit_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let audit = AuditWriter::open(&cfg.audit_path)?;
-        if let Some(gid) = lookup_gid(&cfg.group_file, &cfg.group) {
-            // Group ownership of the shared trail (root:punar), the same
-            // best-effort chown both other daemons do.
-            let _ = std::os::unix::fs::chown(&cfg.audit_path, Some(0), Some(gid));
-        }
+        // The shared trail is root:punar-audit (F0-S3), a group no person is
+        // in — the same group the other three writers give it.
+        let audit = AuditWriter::open_in_group(
+            &cfg.audit_path,
+            lookup_gid(&cfg.group_file, punar_common::audit::AUDIT_GROUP),
+        )?;
         let approvals = ApprovalClient::new(cfg.punard_socket.clone());
         let store = TokenStore::new(cfg.entropy);
 

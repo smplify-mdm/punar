@@ -546,6 +546,7 @@ impl Inner {
                 let loaded = prepared.loaded;
                 *self.org_layers.lock().unwrap() = loaded.layers;
                 *self.local_admin.lock().unwrap() = loaded.local_admin;
+                *self.admin_roster.lock().unwrap() = loaded.admin_roster;
                 *self.application_policy.lock().unwrap() = loaded.applications;
                 *self.org_policy_loaded.lock().unwrap() = None;
                 self.reload_ai_authority();
@@ -573,6 +574,7 @@ impl Inner {
         }
         *self.org_layers.lock().unwrap() = loaded.layers;
         *self.local_admin.lock().unwrap() = loaded.local_admin;
+        *self.admin_roster.lock().unwrap() = loaded.admin_roster;
         *self.application_policy.lock().unwrap() = loaded.applications;
         *self.org_policy_loaded.lock().unwrap() = Some(offered.clone());
         self.reload_ai_authority();

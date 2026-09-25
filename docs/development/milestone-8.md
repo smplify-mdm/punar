@@ -562,7 +562,11 @@ forgeable.** Decision:
 - `agents.json` (0644, `/run/punar`, user-writable dir) gains **only the
   counts fingerprint** (§7) — no identifiers. Any world-readable
   consumer sees "1 security event", never which.
-- The panel reads full ledger rows from a **new side file**
+- *(Superseded 2026-09-25 by the F0 foundation: the side file holds every
+  person's rows, so it is now `0640 root:punar-audit`, a group no person is
+  in, and the panel reads the person's own ledger through `agents.access`,
+  owner-or-root — docs/api/ipc.md §13.2.)* The panel reads full ledger rows
+  from a **new side file**
   `/run/punar-agentd/ledger.json`, `0640 root:punar`, written atomically
   by agentd at the same points it rewrites `agents.json`. It lives in
   the **root-owned** agentd runtime directory (already `0750 root

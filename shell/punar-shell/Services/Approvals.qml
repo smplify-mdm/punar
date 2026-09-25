@@ -1,12 +1,21 @@
 pragma Singleton
 // Approvals — approval-gate and privilege-grant display state (Milestone 9).
 //
-// Follows `/run/punard/approvals.json`, the side file punard rewrites
-// atomically (tmp + fsync + rename) at EVERY approval state transition and
-// every grant change (side contract: docs/api/ipc.md §15; design:
-// milestone-9.md §8.1). Watched with a FileView change watch (inotify —
-// the Services/Status.qml and Services/Ledger.qml pattern): event-driven,
-// ZERO polling, no socket client in the shell.
+// Follows `/run/punard/approvals/<uid>.json`, THIS PERSON's view, which
+// punard rewrites atomically (tmp + fsync + rename) at EVERY approval state
+// transition and every grant change (side contract: docs/api/ipc.md §15;
+// design: milestone-9.md §8.1). Watched with a FileView change watch
+// (inotify — the Services/Status.qml pattern): event-driven, ZERO polling,
+// no socket client in the shell.
+//
+// ONE FILE PER PERSON (F0 review). There used to be one
+// `/run/punard/approvals.json`, `0640 root:punar`, and every account is in
+// `punar`: each person could read every person's agent requests and grants.
+// Each file now holds only the approvals routed to its person and their own
+// grants, and is readable by root and by that one uid (a POSIX ACL entry).
+// The uid comes from this session's runtime directory (`/run/user/<uid>`,
+// which pam_systemd sets); a wrong one would only name a file this session
+// cannot read, which reads as "nothing pending".
 //
 // WHY /run/punard AND NOT /run/punar (milestone-9.md §8.1): `/run/punar` is
 // `0755 punar:punar` — user-writable. A local process could unlink a file
@@ -14,8 +23,9 @@ pragma Singleton
 // nuisance; for THE FILE THAT TELLS A HUMAN WHAT THEY ARE ABOUT TO
 // AUTHORIZE it is a spoofing primitive: show a benign contract block over a
 // dangerous `apr_` id and the human presses A. So it lives inside the
-// already-root-owned `/run/punard` (`0750 root:punar`) at `0640 root:punar`
-// — the same argument that put `ledger.json` in `/run/punar-agentd`.
+// already-root-owned `/run/punard` (`0750 root:punar`), in a root-owned
+// directory no person can write — the same argument that put the ledger in
+// `/run/punar-agentd`.
 //
 // NON-AUTHORITATIVE, exactly as §9/§11/§13.2/§15 state: the socket is the
 // authority. The overlay's Approve action sends ONLY the `approval_id`, and
@@ -32,7 +42,16 @@ import Quickshell.Io
 Singleton {
     id: root
 
-    readonly property string approvalsPath: "/run/punard/approvals.json"
+    // This session's uid, from `/run/user/<uid>`; "" when that cannot be
+    // read, which leaves the path unreadable and the gate calm.
+    readonly property string uid: {
+        var runtime = String(Quickshell.env("XDG_RUNTIME_DIR") || "");
+        var match = /^\/run\/user\/([0-9]+)\/?$/.exec(runtime);
+        return match ? match[1] : "";
+    }
+
+    readonly property string approvalsPath: root.uid === ""
+        ? "" : "/run/punard/approvals/" + root.uid + ".json"
 
     // Every approval punard is holding: pending first, plus recently
     // resolved ones so a verdict can be drawn after the decision.
@@ -196,8 +215,9 @@ Singleton {
         watchChanges: true
         onLoaded: root.loadApprovals()
         onFileChanged: approvalsFile.reload()
-        // Absent or unreadable: punard not running, or this user is not in
-        // group punar. Either way: nothing is pending, calmly.
+        // Absent or unreadable: punard not running, this user not in group
+        // punar, or no view published for them yet. Either way: nothing is
+        // pending, calmly.
         onLoadFailed: root.resetEmpty()
     }
 }

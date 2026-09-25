@@ -928,7 +928,9 @@ Watched ≠ policed: only sessions Punar launched are governed (milestone-12 §5
 ```
 
 - Data path: a **root-owned side file** `/run/punar-netd/connections.json`,
-  `0640 root:punar`, written atomically on change only. Same reasoning as
+  `0640 root:punar`, written atomically on change only. *(F0, 2026-09-25: now
+  root-only; the panel shows the caller's scoped `network.connections` answer
+  instead — §11.1's note.)* Same reasoning as
   M8 §8.2 and M10 decision 7: a connection list is personal data, and a
   forgeable privacy panel is a phishing primitive. `/run/punar` is
   user-writable and therefore disqualified. The shell reads it with an
@@ -1031,6 +1033,11 @@ adds, as new sections, additively.
 /run/punar-netd/connections.json  0640 root:punar
 /var/lib/punar/network/     0700 root:root
 ```
+
+*(Superseded 2026-09-25 by the F0 foundation: `connections.json` is `0600`,
+root only, because it holds every person's rows, and `network.connections`
+answers each non-root caller with their own rows and the device's plus a
+`withheld` count — docs/api/ipc.md §21.3.)*
 
 Same framing, envelope and error codes as `punar-common::ipc`
 (ipc.md §2–§4). Admission by group `punar`; mutations by `SO_PEERCRED`.

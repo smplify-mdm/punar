@@ -27,7 +27,9 @@ use crate::observe::{ObserveError, observe};
 use crate::policy::{PolicyError, index_zones, parse_zone_memberships};
 use crate::project::{ProjectLocator, deny_all};
 use crate::relay::{RelayError, RelayStatus, RelayStore};
-use crate::view::{DeniedView, ProcessClass, ProcessView, SessionView, ViewError, build_report};
+use crate::view::{
+    DeniedView, ProcessClass, ProcessView, RowOwner, SessionView, ViewError, build_report,
+};
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -104,6 +106,9 @@ struct InstalledSession {
     project: String,
     cgroup_path: String,
     counters: Vec<CounterBinding>,
+    /// Whose session this is ([`crate::view::ManagedSession::uid`]); a row
+    /// the view adds for it carries this owner.
+    uid: Option<u32>,
 }
 
 struct AppliedState {
@@ -153,6 +158,30 @@ pub struct ConnectionsResult {
     pub transport: &'static str,
     pub limitations: Vec<&'static str>,
     pub processes: Vec<ProcessView>,
+    /// Rows left out because they are another person's (docs/api/ipc.md
+    /// section 21.3): counted, never shown. Always 0 for root and in the
+    /// root-only side file. Additive on `v: 1`.
+    pub withheld: u64,
+}
+
+impl ConnectionsResult {
+    /// What a caller running as `uid` may see (F0; docs/api/ipc.md sections
+    /// 21.3 and 23.1). Root sees every row. Anyone else sees their own
+    /// processes and managed sessions, and the device's — daemons, system
+    /// services, the rows netd adds about itself — while another person's
+    /// rows, and a managed session whose owner could not be read, are
+    /// withheld and counted. Which destinations another person's programs
+    /// reach is that person's data.
+    pub fn scoped_to(mut self, uid: u32) -> ConnectionsResult {
+        if uid == 0 {
+            return self;
+        }
+        let before = self.processes.len();
+        self.processes
+            .retain(|process| process.owner.visible_to(uid));
+        self.withheld = (before - self.processes.len()) as u64;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,6 +478,11 @@ impl Runtime {
             .collect();
         let (bindings, warnings) = compile_bindings(&snapshot, zones, memberships, &self.projects);
         let ruleset = render_table(true, zones, memberships, &bindings)?;
+        let owners: BTreeMap<&str, Option<u32>> = snapshot
+            .sessions
+            .iter()
+            .map(|session| (session.session_id.as_str(), session.uid))
+            .collect();
         let next: BTreeMap<_, _> = bindings
             .iter()
             .map(|binding| {
@@ -458,6 +492,7 @@ impl Runtime {
                         project: binding.project_id.clone(),
                         cgroup_path: binding.cgroup_path.clone(),
                         counters: counter_bindings(zones, binding)?,
+                        uid: owners.get(binding.session_id.as_str()).copied().flatten(),
                     },
                 ))
             })
@@ -584,6 +619,7 @@ impl Runtime {
             transport: report.transport,
             limitations: report.limitations,
             processes: report.processes,
+            withheld: 0,
         };
         write_report_if_changed(&self.connections_file, &result).map_err(RuntimeError::SideFile)?;
         Ok(ConnectionPass {
@@ -761,6 +797,7 @@ fn gate_scope_path(
 #[derive(Debug)]
 struct DeniedSessionView {
     project: String,
+    owner: RowOwner,
     rows: Vec<DeniedView>,
 }
 
@@ -814,6 +851,7 @@ fn collect_denials(
                 session_id.clone(),
                 DeniedSessionView {
                     project: session.project.clone(),
+                    owner: session.uid.map_or(RowOwner::Unknown, RowOwner::Uid),
                     rows,
                 },
             );
@@ -836,6 +874,7 @@ fn attach_denials(
     }
     for (session_id, view) in denials {
         processes.push(ProcessView {
+            owner: view.owner,
             name: "managed-agent".to_string(),
             pid_class: ProcessClass::Agent,
             session: Some(SessionView {
@@ -865,6 +904,7 @@ fn attach_denials(
 fn ensure_system_rows(processes: &mut Vec<ProcessView>, enrolled: bool) {
     if !processes.iter().any(|process| process.name == "punard") {
         processes.push(ProcessView {
+            owner: RowOwner::Device,
             name: "punard".to_string(),
             pid_class: ProcessClass::Application,
             session: None,
@@ -880,6 +920,7 @@ fn ensure_system_rows(processes: &mut Vec<ProcessView>, enrolled: bool) {
     }
     if !processes.iter().any(|process| process.name == "punar-netd") {
         processes.push(ProcessView {
+            owner: RowOwner::Device,
             name: "punar-netd".to_string(),
             pid_class: ProcessClass::Application,
             session: None,
@@ -1073,6 +1114,11 @@ fn compile_bindings(
 /// Persist only when the semantic connection set changes. `scanned_at` is
 /// intentionally excluded from the comparison: an unchanged refresh is not
 /// a disk-write event.
+///
+/// `0600`, root only. The file holds every person's rows, and netd runs in
+/// group `punar` — every account — so the `0640` it used to be written with
+/// let any person read which destinations another person's programs reach.
+/// A person reads their own through `network.connections` instead.
 pub fn write_report_if_changed<T: Serialize>(path: &Path, report: &T) -> io::Result<bool> {
     let next = serde_json::to_value(report).expect("connection report serializes infallibly");
     let next_semantic = semantic_report(next.clone());
@@ -1083,7 +1129,7 @@ pub fn write_report_if_changed<T: Serialize>(path: &Path, report: &T) -> io::Res
         return Ok(false);
     }
     let bytes = serde_json::to_vec(&next).expect("connection report serializes infallibly");
-    write_atomic(path, &bytes, 0o640)?;
+    write_atomic(path, &bytes, 0o600)?;
     Ok(true)
 }
 
@@ -1182,6 +1228,7 @@ mod tests {
                 project: "atlas".to_string(),
                 cgroup_path: "/user.slice/punar-agent-agt_old.scope".to_string(),
                 counters: Vec::new(),
+                uid: Some(1000),
             },
         )]);
         let next = BTreeMap::from([(
@@ -1190,6 +1237,7 @@ mod tests {
                 project: "forge".to_string(),
                 cgroup_path: "/user.slice/punar-agent-agt_new.scope".to_string(),
                 counters: Vec::new(),
+                uid: Some(1000),
             },
         )]);
         let skipped = BTreeMap::from([(
@@ -1215,6 +1263,7 @@ mod tests {
                 project: "atlas".to_string(),
                 cgroup_path: "/user.slice/punar-agent-agt_same.scope".to_string(),
                 counters: Vec::new(),
+                uid: Some(1000),
             },
         )]);
         assert!(session_transitions(&installed, &installed, &BTreeMap::new()).is_empty());
@@ -1265,6 +1314,7 @@ mod tests {
                 process_id: 42,
                 cgroup_path: "/user.slice/punar-agent-agt_1.scope".into(),
                 cgroup_id: None,
+                uid: Some(1000),
             },
             ProjectLocator::new(passwd),
         )
@@ -1360,9 +1410,89 @@ mod tests {
         )
         .unwrap();
         assert!(write_report_if_changed(&path, &first).unwrap());
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "the side file holds every person's rows, so only root reads it"
+            );
+        }
         let before = fs::read(&path).unwrap();
         assert!(!write_report_if_changed(&path, &second).unwrap());
         assert_eq!(fs::read(&path).unwrap(), before);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A person sees their own rows and the device's; another person's, and
+    /// a managed session nobody could attribute, are withheld and counted
+    /// (docs/api/ipc.md section 21.3). Root sees everything. The owner is
+    /// never serialized.
+    #[test]
+    fn a_person_sees_their_own_connections_and_the_devices_and_is_told_what_was_withheld() {
+        let row = |name: &str, owner: RowOwner| ProcessView {
+            owner,
+            name: name.to_string(),
+            pid_class: ProcessClass::Application,
+            session: None,
+            governed: false,
+            connections: Vec::new(),
+            denied: Vec::new(),
+            note: None,
+        };
+        let result = ConnectionsResult {
+            scanned_at: "2026-09-25T00:00:00Z".into(),
+            enforcement: "available",
+            enforcement_reason: None,
+            relay: RelayStatus::for_mode(punar_common::network::RelayPreference::Direct),
+            dns_protection: DnsProtectionStatus {
+                state: "not_configured",
+                milestone: "phase_2",
+            },
+            transport: "tcp",
+            limitations: Vec::new(),
+            processes: vec![
+                row("punard", RowOwner::Device),
+                row("alice-browser", RowOwner::Uid(1000)),
+                row("bob-browser", RowOwner::Uid(1001)),
+                row("systemd-resolved", RowOwner::Uid(991)),
+                row("dynamic-helper", RowOwner::Uid(61_234)),
+                row("managed-agent", RowOwner::Unknown),
+            ],
+            withheld: 0,
+        };
+        let names = |result: &ConnectionsResult| -> Vec<String> {
+            result.processes.iter().map(|p| p.name.clone()).collect()
+        };
+
+        let alice = result.clone().scoped_to(1000);
+        assert_eq!(
+            names(&alice),
+            [
+                "punard",
+                "alice-browser",
+                "systemd-resolved",
+                "dynamic-helper"
+            ]
+        );
+        assert_eq!(alice.withheld, 2);
+        let wire = serde_json::to_value(&alice).unwrap();
+        assert_eq!(wire["withheld"], 2);
+        assert!(
+            wire["processes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p.get("owner").is_none()),
+            "{wire}"
+        );
+
+        let bob = result.clone().scoped_to(1001);
+        assert!(names(&bob).contains(&"bob-browser".to_string()));
+        assert!(!names(&bob).contains(&"alice-browser".to_string()));
+
+        let root = result.clone().scoped_to(0);
+        assert_eq!(root.processes.len(), 6);
+        assert_eq!(root.withheld, 0);
     }
 }

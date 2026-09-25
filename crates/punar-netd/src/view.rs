@@ -48,6 +48,44 @@ pub struct ManagedSession {
     pub process_id: u32,
     pub cgroup_path: String,
     pub cgroup_id: Option<u64>,
+    /// Whose session this is: the uid of the `user-<uid>.slice` the scope
+    /// sits in (the kernel's cgroup path, read when the session was listed),
+    /// or failing that the real uid of its root process (`/proc/<pid>/status`).
+    /// `None` when neither could be read, and then the session's rows are
+    /// shown to root only: whose data it is must be known before a person is
+    /// shown it.
+    pub uid: Option<u32>,
+}
+
+/// Whose data one row of the connection view is (F0; docs/api/ipc.md
+/// sections 21.3 and 23.1). Never serialized: it decides who may see the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowOwner {
+    /// A row the daemon adds about the device itself.
+    Device,
+    /// A process or managed session running as this uid.
+    Uid(u32),
+    /// A managed session whose owner could not be read.
+    Unknown,
+}
+
+/// The uid range accounts for people are created in (onboarding's
+/// `UID_MIN..UID_MAX_EXCLUSIVE`, systemd's regular-user range). Anything
+/// outside it — root, system daemons, systemd's dynamic users, nobody — is
+/// the device's, not a person's.
+pub const PERSON_UIDS: std::ops::Range<u32> = 1000..60_000;
+
+impl RowOwner {
+    /// Whether a non-root caller running as `uid` may see this row: their
+    /// own, and the device's. Another person's, and one whose owner is not
+    /// known, are withheld.
+    pub fn visible_to(self, uid: u32) -> bool {
+        match self {
+            RowOwner::Device => true,
+            RowOwner::Uid(owner) => owner == uid || !PERSON_UIDS.contains(&owner),
+            RowOwner::Unknown => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -86,6 +124,9 @@ pub struct DeniedView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProcessView {
+    /// Whose row this is; decides who is shown it and is never serialized.
+    #[serde(skip)]
+    pub owner: RowOwner,
     pub name: String,
     pub pid_class: ProcessClass,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,6 +193,7 @@ pub fn build_report(
         });
         connections.dedup();
         processes.push(ProcessView {
+            owner: RowOwner::Uid(process.uid),
             name: process.name,
             pid_class: if session.is_some() {
                 ProcessClass::Agent
@@ -335,6 +377,7 @@ mod tests {
             process_id: 42,
             cgroup_path: "/user.slice/punar-agent-4f21.scope".into(),
             cgroup_id: Some(31337),
+            uid: Some(1000),
         }];
         (zones, memberships, sessions)
     }

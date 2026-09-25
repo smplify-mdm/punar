@@ -934,6 +934,143 @@ for tmpfiles_dir in usr/lib/tmpfiles.d lib/tmpfiles.d etc/tmpfiles.d run/tmpfile
     done
 done
 
+# A23 (F0-S2): Yama lets a process ptrace-attach only to its own descendants.
+# Without it every program a person runs can read the memory of every other —
+# the shell while a password is typed, punarctl while it holds a ticket. Arch
+# starts Yama at 1 and Debian patches it to 0, so the value must be STATED by
+# this image, and nothing else in the tree may state a different one: exactly
+# 1, because 3 would also forbid punard's by-pid descriptor fetch.
+YAMA_CONF="${ROOT}/usr/lib/sysctl.d/50-punar-yama.conf"
+if [ ! -f "${YAMA_CONF}" ]; then
+    fail A23 'the Yama policy is missing: usr/lib/sysctl.d/50-punar-yama.conf'
+else
+    yama_value=$(sed -n \
+        's/^[[:space:]]*kernel[./]yama[./]ptrace_scope[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' \
+        "${YAMA_CONF}" | tail -n 1)
+    if [ "${yama_value}" != 1 ]; then
+        fail A23 "the Yama policy sets kernel.yama.ptrace_scope to '${yama_value}', not 1"
+    fi
+fi
+for sysctl_dir in usr/lib/sysctl.d usr/local/lib/sysctl.d etc/sysctl.d run/sysctl.d; do
+    [ -d "${ROOT}/${sysctl_dir}" ] || continue
+    # A file of the same name in a directory that outranks /usr/lib replaces
+    # the shipped one whatever it says — a symlink to /dev/null included.
+    if [ "${sysctl_dir}" != usr/lib/sysctl.d ] \
+        && { [ -e "${ROOT}/${sysctl_dir}/50-punar-yama.conf" ] \
+            || [ -L "${ROOT}/${sysctl_dir}/50-punar-yama.conf" ]; }; then
+        fail A23 "${sysctl_dir}/50-punar-yama.conf replaces the shipped Yama policy"
+    fi
+    for sysctl_conf in "${ROOT}/${sysctl_dir}"/*.conf; do
+        [ "${sysctl_conf}" = "${YAMA_CONF}" ] && continue
+        # A link is read where it points, inside this tree.
+        sysctl_read="${sysctl_conf}"
+        if [ -L "${sysctl_conf}" ]; then
+            sysctl_target=$(readlink "${sysctl_conf}")
+            case "${sysctl_target}" in
+                /*) sysctl_read="${ROOT}${sysctl_target}" ;;
+                *) sysctl_read="$(dirname "${sysctl_conf}")/${sysctl_target}" ;;
+            esac
+        fi
+        [ -f "${sysctl_read}" ] || continue
+        if grep -Eq '^[[:space:]]*-?kernel[./]yama[./]ptrace_scope[[:space:]]*=' \
+                "${sysctl_read}"; then
+            fail A23 "${sysctl_conf#"${ROOT}"/} also sets kernel.yama.ptrace_scope"
+        fi
+    done
+done
+if [ -f "${ROOT}/etc/sysctl.conf" ] \
+    && grep -Eq '^[[:space:]]*-?kernel[./]yama[./]ptrace_scope[[:space:]]*=' \
+        "${ROOT}/etc/sysctl.conf"; then
+    fail A23 'etc/sysctl.conf also sets kernel.yama.ptrace_scope'
+fi
+# What the value of 1 rests on: punard fetches a caller's descriptor by pid
+# (pidfd_getfd, the install.apply path), an ATTACH-mode access Yama now
+# restricts, and it keeps working only because punard holds CAP_SYS_PTRACE
+# (yama_ptrace_access_check lets that capability through). punard.service
+# names no bounding set today; one that left CAP_SYS_PTRACE out would break
+# that fetch on every lane, so none may.
+for unit_root in usr/lib/systemd/system etc/systemd/system run/systemd/system; do
+    for punard_unit in "${ROOT}/${unit_root}/punard.service" \
+        "${ROOT}/${unit_root}"/punard.service.d/*.conf; do
+        [ -f "${punard_unit}" ] || continue
+        if awk '
+            /^[[:space:]]*CapabilityBoundingSet[[:space:]]*=/ {
+                value = $0
+                sub(/^[^=]*=[[:space:]]*/, "", value)
+                if (value ~ /^~/) { if (value ~ /CAP_SYS_PTRACE/) bad = 1 }
+                else if (value !~ /CAP_SYS_PTRACE/) bad = 1
+            }
+            END { exit bad ? 0 : 1 }
+        ' "${punard_unit}"; then
+            fail A23 "${punard_unit#"${ROOT}"/} takes CAP_SYS_PTRACE from punard, which its by-pid descriptor fetch needs under Yama 1"
+        fi
+    done
+done
+
+# A24 (F0-S3): the audit trail belongs to root and group punar-audit, which no
+# person is in. It used to be group punar — every account — so every person
+# could read every person's events. A person reads their own through
+# audit.tail. The directory, the live file, its rotation and its lock are all
+# declared here, where an auditor reads them; no tmpfiles line anywhere may
+# hand /var/log/punar to another group.
+PUNARD_TMPFILES="${ROOT}/usr/lib/tmpfiles.d/punard.conf"
+if [ ! -f "${PUNARD_TMPFILES}" ]; then
+    fail A24 'the audit trail modes are undeclared: usr/lib/tmpfiles.d/punard.conf is missing'
+else
+    # Setgid (2750): every file created in it is born group punar-audit,
+    # whichever writer creates it and whatever capabilities it kept.
+    if ! grep -Eq '^d[[:space:]]+/var/log/punar[[:space:]]+2750[[:space:]]+root[[:space:]]+punar-audit([[:space:]]|$)' \
+            "${PUNARD_TMPFILES}"; then
+        fail A24 '/var/log/punar is not declared 2750 root:punar-audit (setgid)'
+    fi
+    for audit_file in audit.jsonl audit.jsonl.1 audit.jsonl.lock; do
+        if ! grep -Eq "^z[[:space:]]+/var/log/punar/${audit_file}[[:space:]]+0640[[:space:]]+root[[:space:]]+punar-audit([[:space:]]|\$)" \
+                "${PUNARD_TMPFILES}"; then
+            fail A24 "/var/log/punar/${audit_file} is not declared 0640 root:punar-audit"
+        fi
+    done
+fi
+for tmpfiles_dir in usr/lib/tmpfiles.d etc/tmpfiles.d; do
+    [ -d "${ROOT}/${tmpfiles_dir}" ] || continue
+    AUDIT_GRANTS=$(awk '
+        $1 !~ /^#/ && $2 ~ /^\/var\/log\/punar(\/|$)/ \
+            && $5 != "punar-audit" && $5 != "root" && $5 != "-" { print FILENAME ": " $0 }
+    ' "${ROOT}/${tmpfiles_dir}"/*.conf 2>/dev/null || true)
+    if [ -n "${AUDIT_GRANTS}" ]; then
+        fail A24 "a tmpfiles line gives the audit trail to another group: $(printf '%s' "${AUDIT_GRANTS}" | sed "s#${ROOT}/##g" | tr '\n' ' ')"
+    fi
+done
+group_members() {
+    awk -F: -v name="$1" '$1 == name { found = 1; print "members=" $4 } END { if (!found) print "missing" }' \
+        "${ROOT}/etc/group"
+}
+if [ ! -f "${ROOT}/etc/group" ]; then
+    fail A24 '/etc/group is missing; the audit and administrator groups cannot be proven'
+else
+    case "$(group_members punar-audit)" in
+        missing) fail A24 'the punar-audit group does not exist' ;;
+        'members=') ;;
+        *) fail A24 "the punar-audit group names members: $(group_members punar-audit)" ;;
+    esac
+fi
+
+# A25 (F0-S1): the device-administrator group exists, so onboarding can put
+# the first account in it, and it is EMPTY in the image: an administrator is a
+# person on the device, never a property of the release. A member here would
+# be an account every installed device trusts to act on everyone on it.
+if [ -f "${ROOT}/etc/group" ]; then
+    case "$(group_members punar-admin)" in
+        missing) fail A25 'the punar-admin group does not exist; onboarding could not make the first account an administrator' ;;
+        'members=') ;;
+        *) fail A25 "the punar-admin group names members in the image: $(group_members punar-admin)" ;;
+    esac
+fi
+if [ -f "${ROOT}/etc/gshadow" ] \
+    && awk -F: '($1 == "punar-admin" || $1 == "punar-audit") && $4 != "" { bad = 1 } END { exit bad ? 0 : 1 }' \
+        "${ROOT}/etc/gshadow"; then
+    fail A25 '/etc/gshadow names members of punar-admin or punar-audit'
+fi
+
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \
         "${FAILURES}" >&2

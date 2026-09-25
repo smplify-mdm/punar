@@ -284,7 +284,13 @@ return function(ctx)
     bind("XF86KbdBrightnessUp", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness --keyboard +34%"), "Keyboard light up", { locked = true })
     bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness --keyboard -34%"), "Keyboard light down", { locked = true })
 
-    bind(mod .. " + SHIFT + E", hl.dsp.exit(), "End session")
+    -- End session asks first. SHIFT+E sits beside SHIFT+W, SHIFT+Q and
+    -- SHIFT+F, and ending a session closes every window in it with no undo,
+    -- so the chord opens the session menu with "End session" armed: pressing
+    -- the chord again, or E, or clicking the row, signs out; Esc or any
+    -- other row keeps the session. The menu's own row runs `punarctl session
+    -- end`, the same verb a terminal uses.
+    bind(mod .. " + SHIFT + E", hl.dsp.exec_cmd(ctx.session_end), "End session")
     bind(mod .. " + slash", hl.dsp.exec_cmd(ctx.shell .. " ipc call shortcuts toggle"), "Shortcut help")
     -- / is Shift+7 on German, Spanish and Italian keyboards and Shift+: on
     -- French ones, where PUNAR+/ cannot be pressed at all; F1 is F1 on every

@@ -32,7 +32,7 @@ pragma ComponentBehavior: Bound
 //     "never written to disk" promise), so no file carries a live
 //     credential lease and there is nothing to observe without polling.
 //     The one live TTL the shell CAN observe — a just-in-time privilege
-//     grant from `grants[]` in /run/punard/approvals.json — is already
+//     grant from `grants[]` in /run/punard/approvals/<uid>.json — is already
 //     drawn by Plate D-012's ELEVATED chip in Bar.qml, and one fact is
 //     not announced twice in the same bar.
 //   · BATTERY · NET · AUDIO — Quickshell services exist, nothing is
@@ -74,7 +74,7 @@ FocusScope {
     // absence of what was not (spec §23, §1.22).
     readonly property int unknownCount: Math.max(Agents.unknownCount, Alerts.activeCount)
 
-    // ---- Approvals · /run/punard/approvals.json (M9, shipped) --------
+    // ---- Approvals · /run/punard/approvals/<uid>.json (M9, shipped) --------
     //
     // NOTE ON THE PATH: D-016 Sect IV·04 writes `/run/punar/approvals.json`.
     // The shipped side contract (docs/api/ipc.md §15) puts the file in the
@@ -282,7 +282,7 @@ FocusScope {
             "flagValue": "",
             "title": "Approvals · " + Approvals.pendingCount + " pending",
             "rows": cluster.approvalRows(),
-            "source": "/run/punard/approvals.json"
+            "source": Approvals.approvalsPath
                 + (Approvals.updatedAt === "" ? "" : " · updated " + cluster.stamp(Approvals.updatedAt))
                 + "\ncountdown computed locally from expires_at",
             "action": "↵ Open approval overlay",

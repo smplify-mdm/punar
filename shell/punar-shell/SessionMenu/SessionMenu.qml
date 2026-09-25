@@ -195,6 +195,19 @@ DeferredSurfaceBase {
             root.show();
     }
 
+    /// PUNAR+SHIFT+E. The chord that used to end the session outright now
+    /// goes through the same arm-then-act as the row: the first press opens
+    /// the menu with "End session" armed ("Press again to end session"), and
+    /// only a second press — of the chord, of E, or a click — runs
+    /// `punarctl session end`. Esc disarms, and any other row replaces the
+    /// armed action, so a stray chord between SHIFT+W and SHIFT+R costs one
+    /// keystroke, never an unsaved document.
+    function requestSessionEnd(): void {
+        if (!root.open)
+            root.show();
+        root.activate("sessionEnd");
+    }
+
     /// Lock is immediate: it destroys nothing and the session is exactly where
     /// it was left. Everything else arms first.
     function lockNow(): void {

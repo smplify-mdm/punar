@@ -977,8 +977,8 @@ real and named.
 |---|---|---|---|
 | `update.status` | any connected peer | no | no |
 | `update.check` | **root, or a person with a fresh `punar-authd` ticket**; agents denied at any uid (§7.3) | yes (writes cached metadata) | always |
-| `update.apply` | **root, or a person with a fresh `punar-authd` ticket**; agent-attributed peers take the M9 AI path first | yes | always |
-| `update.rollback` | **root, or a person with a fresh `punar-authd` ticket**, same M9 rule | yes | always |
+| `update.apply` | **root, or a device administrator with a fresh `punar-authd` ticket** (F0-S1, ipc.md §23: what the operating system runs reaches everyone; the role is checked before the ticket is spent); agent-attributed peers take the M9 AI path first | yes | always |
+| `update.rollback` | **root, or a device administrator with a fresh `punar-authd` ticket**, same M9 rule | yes | always |
 | `update.reconcile_candidate` | **root only**, same M9 rule; Raspberry Pi boot service in normal operation, no params | Pi selector finalization only | always, and the outcome audit is durable before pending state is removed |
 
 **There is no `update.reboot`, and that is deliberate.** `punarctl update
@@ -986,7 +986,9 @@ apply --reboot` runs a plain `systemctl reboot` *as the caller*, after punard
 returns `requires_reboot: true`. polkit lets the active local person do that
 (`50-punar-power.rules`). punard does not need a verb whose entire effect is
 a side effect it cannot audit the completion of, and spec 60's posture is
-that the method table stays as small as the job allows.
+that the method table stays as small as the job allows. With another person
+signed in, that reboot is a device administrator's to make (the rule's
+`-multiple-sessions` branch, F0-S1).
 
 **On Raspberry Pi, punard arms the one-shot tryboot itself (2026-09-24).**
 Booting a Pi candidate needs the firmware's one-shot `tryboot`, requested by

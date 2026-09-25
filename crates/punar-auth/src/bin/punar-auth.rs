@@ -12,10 +12,14 @@
 //! socket, a refused connection, a truncated reply — because a device that could
 //! not ask must never tell someone their correct password is wrong.
 //!
-//! With `--admin` it asks for a re-authentication ticket as well, and a success
-//! prints `ok <ticket>`. The two modes share every other line: the unlock path's
-//! output is unchanged to the byte, which is the property that let this grow a
-//! second caller without touching the lock screen.
+//! It verifies an UNLOCK only. It used to mint an administrator ticket too
+//! (`--admin`, printing `ok <ticket>`), and that is gone: its answer travels on
+//! a stdout pipe, and any program running as the same person can reopen a pipe
+//! through /proc/<pid>/fd and read it (F0-S4). A ticket is now asked for by
+//! the process that will spend it, over punar-authd's socket, and is bound to
+//! that process (docs/api/ipc.md section 23.5). The lock screen itself no
+//! longer uses this relay either — it talks to the socket directly — so what
+//! is left is the probe the recovery check runs.
 
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -29,10 +33,22 @@ use zeroize::{Zeroize, Zeroizing};
 const SOCKET: &str = "/run/punar-authd/auth.sock";
 
 fn main() -> ExitCode {
-    // A closed argv: one optional flag, compared literally. Nothing here is a
-    // path, a name, or anything else a caller could aim somewhere.
-    let admin = std::env::args().skip(1).any(|arg| arg == "--admin");
-    let verdict = run(admin).unwrap_or_else(|| "unavailable".to_string());
+    // Not dumpable, no core file, before the password is read (F0-S4): no
+    // other program of this person can open this process's /proc/<pid>/fd or
+    // memory while it holds the secret. A failure here answers `unavailable`
+    // rather than reading a secret into an unprotected process.
+    if punar_reauth::harden().is_err() {
+        let _ = writeln!(io::stdout(), "unavailable");
+        return ExitCode::SUCCESS;
+    }
+    // A closed argv: no arguments at all. `--admin` is refused rather than
+    // ignored, so a caller that still asks for a ticket learns it will not get
+    // one here instead of reading an unlock verdict as a confirmation.
+    if std::env::args().nth(1).is_some() {
+        let _ = writeln!(io::stdout(), "unavailable");
+        return ExitCode::from(2);
+    }
+    let verdict = run().unwrap_or_else(|| "unavailable".to_string());
     let _ = writeln!(io::stdout(), "{verdict}");
     // The exit status deliberately does NOT encode the verdict: a caller reads
     // the word. Exiting non-zero on a denial would make an ordinary wrong
@@ -40,8 +56,10 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run(admin: bool) -> Option<String> {
-    let mut input = Zeroizing::new(Vec::with_capacity(256));
+fn run() -> Option<String> {
+    // Sized for the longest line accepted, so reading never reallocates and
+    // leaves an unwiped copy of the secret behind in freed memory.
+    let mut input = Zeroizing::new(Vec::with_capacity(MAX_REQUEST_BYTES + 1));
     io::stdin()
         .lock()
         .take((MAX_REQUEST_BYTES + 1) as u64)
@@ -55,14 +73,26 @@ fn run(admin: bool) -> Option<String> {
         return None;
     }
 
-    let body = Zeroizing::new(
-        serde_json::to_vec(&serde_json::json!({
-            "v": PROTOCOL_VERSION,
-            "password": String::from_utf8_lossy(&input).into_owned(),
-            "purpose": if admin { "admin" } else { "unlock" },
-        }))
-        .ok()?,
-    );
+    #[derive(serde::Serialize)]
+    struct Request<'a> {
+        v: u32,
+        password: &'a str,
+        purpose: &'static str,
+    }
+    // The password is borrowed, never copied into a JSON value, and the body
+    // is serialized into a wiped buffer sized so it never reallocates (JSON
+    // escaping at most sextuples a byte).
+    let password = std::str::from_utf8(&input).ok()?;
+    let mut body = Zeroizing::new(Vec::with_capacity(input.len() * 6 + 64));
+    serde_json::to_writer(
+        &mut *body,
+        &Request {
+            v: PROTOCOL_VERSION,
+            password,
+            purpose: "unlock",
+        },
+    )
+    .ok()?;
     input.zeroize();
 
     let mut stream = UnixStream::connect(PathBuf::from(SOCKET)).ok()?;
@@ -86,36 +116,14 @@ fn run(admin: bool) -> Option<String> {
     if len == 0 || len > MAX_RESPONSE_BYTES {
         return None;
     }
-    let mut response = vec![0_u8; len];
+    let mut response = Zeroizing::new(vec![0_u8; len]);
     stream.read_exact(&mut response).ok()?;
     let parsed: serde_json::Value = serde_json::from_slice(&response).ok()?;
 
     // Mapped through a closed set rather than echoed: whatever the far side
     // says, this process prints one of three known words or nothing at all.
     match parsed.get("verdict").and_then(serde_json::Value::as_str) {
-        Some("ok") => {
-            if !admin {
-                return Some("ok".to_string());
-            }
-            // A ticket is echoed only after passing the same shape test punard
-            // will apply, so a far side that answered strangely cannot put an
-            // arbitrary string on this process's stdout.
-            let ticket = parsed.get("ticket").and_then(serde_json::Value::as_str)?;
-            // LOWERCASE hex only, matching punard's `reauth::consume` exactly.
-            // `is_ascii_hexdigit` also accepts A-F, which punard refuses as
-            // malformed — so a relay that passed uppercase through would print
-            // a ticket that could only ever be rejected, and the person would
-            // be told their password confirmation was not in a form the device
-            // could check.
-            if ticket.len() != 64
-                || !ticket
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
-                return None;
-            }
-            Some(format!("ok {ticket}"))
-        }
+        Some("ok") => Some("ok".to_string()),
         Some("denied") => Some("denied".to_string()),
         _ => None,
     }

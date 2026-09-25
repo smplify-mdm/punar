@@ -203,6 +203,13 @@ ShellRoot {
         function open(): void {
             sessionMenuSurface.openSurface();
         }
+        // PUNAR+SHIFT+E: open the menu with "End session" armed, or — when it
+        // is already armed — confirm it. Never ends a session on one press.
+        function endSession(): void {
+            var menu = sessionMenuSurface.ensureLoaded(false);
+            if (menu !== null)
+                menu.requestSessionEnd();
+        }
         function close(): void {
             sessionMenuSurface.closeSurface();
         }
@@ -559,7 +566,7 @@ ShellRoot {
     // The M9 approval gate (Plate D-003). It has no keybinding by
     // design: it opens ITSELF whenever punard records something pending,
     // because a gate the human has to go looking for is not a gate. Fed
-    // by the Approvals singleton's FileView on /run/punard/approvals.json;
+    // by the Approvals singleton's FileView on /run/punard/approvals/<uid>.json;
     // on a machine where punard never wrote that file it never appears.
     // Driven in CI with: qs -p /usr/share/punar/shell ipc call approval open
     ApprovalOverlay {

@@ -507,7 +507,11 @@ struct TestDaemon {
 
 fn write_nss_files(dir: &Path) -> (PathBuf, PathBuf) {
     let group_file = dir.join("group");
-    fs::write(&group_file, "root:x:0:\npunar:x:970:\n").unwrap();
+    fs::write(
+        &group_file,
+        "root:x:0:\npunar:x:970:\npunar-admin:x:971:punar\n",
+    )
+    .unwrap();
     let passwd_file = dir.join("passwd");
     fs::write(
         &passwd_file,
@@ -1363,9 +1367,24 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
 /// 0700 directory named by the uid that proved its password, holding the boot
 /// clock's reading at mint time (SMP-1405) — the daemon under test reads the
 /// same system clock and judges the ticket's age against it.
-fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
+///
+/// Bound, as punar-authd binds every ticket, to the call it was typed for
+/// (`action`) and to the process that may present it: the person's peer
+/// process, [`PERSON_PID`], whose fake `/proc/<pid>/stat` this writes too.
+fn mint_ticket(dir: &Path, uid: u32, token: &str, action: &str) -> PathBuf {
+    use punar_common::reauth_ticket::{Spender, TicketBody};
     use punar_common::trusted_time::{SystemClock, TrustedClock};
     use std::os::unix::fs::DirBuilderExt;
+    let process = dir.join("proc").join(PERSON_PID.to_string());
+    fs::create_dir_all(&process).unwrap();
+    fs::write(
+        process.join("stat"),
+        format!(
+            "{PERSON_PID} (punarctl) S 1 {PERSON_PID} {PERSON_PID} 0 -1 4194560 0 0 0 0 0 0 0 0 \
+             20 0 1 0 {PERSON_START} 0 0\n"
+        ),
+    )
+    .unwrap();
     let per_uid = dir.join("tickets").join(uid.to_string());
     fs::DirBuilder::new()
         .recursive(true)
@@ -1373,10 +1392,22 @@ fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
         .create(&per_uid)
         .unwrap();
     let path = per_uid.join(token);
-    let stamp = SystemClock::new().now().expect("this machine's boot clock");
-    fs::write(&path, serde_json::to_vec(&stamp).unwrap()).unwrap();
+    let body = TicketBody {
+        minted: SystemClock::new().now().expect("this machine's boot clock"),
+        action: action.to_string(),
+        spender: Spender {
+            pid: PERSON_PID as u32,
+            start: PERSON_START,
+        },
+    };
+    fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
     path
 }
+
+/// The person's process: the peer [`person`] calls from, and the one process
+/// every ticket here is minted for.
+const PERSON_PID: i32 = 4300;
+const PERSON_START: u64 = 430_000;
 
 const TICKET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -1384,7 +1415,7 @@ fn person() -> Peer {
     Peer {
         uid: 1000,
         gid: 1000,
-        pid: None,
+        pid: Some(PERSON_PID),
     }
 }
 
@@ -1746,7 +1777,7 @@ fn a_person_enrolls_and_unenrolls_by_confirming_their_password() {
     let state = Arc::new(ControlPlaneState::default());
     let control_plane = ControlPlane::start_with(&dir, state.clone());
     let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "disabled");
-    let ticket = mint_ticket(&dir, 1000, TICKET);
+    let ticket = mint_ticket(&dir, 1000, TICKET, "enroll.start");
 
     let result = daemon.result(
         "enroll.start",
@@ -1793,7 +1824,7 @@ fn a_person_enrolls_and_unenrolls_by_confirming_their_password() {
     let error = daemon.error("enroll.stop", None);
     assert_eq!(error["details"]["reason"], "reauthentication_required");
     const SECOND: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-    let second = mint_ticket(&dir, 1000, SECOND);
+    let second = mint_ticket(&dir, 1000, SECOND, "enroll.stop");
     let stopped = daemon.result("enroll.stop", Some(json!({"ticket": SECOND})));
     assert_eq!(stopped["enrolled"], false);
     assert!(!second.exists());
@@ -1855,7 +1886,7 @@ fn a_non_removable_enrollment_needs_the_persons_yes_and_then_binds_everyone() {
 
     // Not accepted: refused after discovery and before register, so the
     // organization never learns of a device that did not enroll.
-    let ticket = mint_ticket(&dir, 1000, TICKET);
+    let ticket = mint_ticket(&dir, 1000, TICKET, "enroll.start");
     let error = daemon.error(
         "enroll.start",
         Some(json!({"org_domain": "acme.com", "code": "lex_terms", "ticket": TICKET})),
@@ -1881,7 +1912,7 @@ fn a_non_removable_enrollment_needs_the_persons_yes_and_then_binds_everyone() {
     assert!(!daemon.state_path("enrollment.json").exists());
 
     // Accepted.
-    mint_ticket(&dir, 1000, TICKET);
+    mint_ticket(&dir, 1000, TICKET, "enroll.start");
     let enrolled = daemon.result(
         "enroll.start",
         Some(json!({
@@ -1897,7 +1928,7 @@ fn a_non_removable_enrollment_needs_the_persons_yes_and_then_binds_everyone() {
     // before a password could matter: with or without one, their ticket
     // stays unspent.
     const SECOND: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-    let second = mint_ticket(&dir, 1000, SECOND);
+    let second = mint_ticket(&dir, 1000, SECOND, "enroll.stop");
     for params in [None, Some(json!({"ticket": SECOND}))] {
         let error = daemon.error("enroll.stop", params);
         assert_eq!(error["code"], "denied");
@@ -1911,10 +1942,15 @@ fn a_non_removable_enrollment_needs_the_persons_yes_and_then_binds_everyone() {
         second.exists(),
         "a refused unenroll must not cost the password"
     );
-    // Asking to enroll again says who can end this one.
+    // Asking to enroll again says who can end this one. (A confirmation is
+    // spent only on the call it was typed for, so this is a fresh one for
+    // enroll.start: the unenroll one above would be refused as given for a
+    // different change.)
+    const THIRD: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    mint_ticket(&dir, 1000, THIRD, "enroll.start");
     let error = daemon.error(
         "enroll.start",
-        Some(json!({"org_domain": "acme.com", "ticket": SECOND})),
+        Some(json!({"org_domain": "acme.com", "ticket": THIRD})),
     );
     assert_eq!(error["code"], "conflict");
     let message = error["message"].as_str().unwrap();
@@ -2098,7 +2134,7 @@ fn a_confirmation_is_good_once_and_only_for_the_account_that_made_it() {
     let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "disabled");
 
     // Someone else's confirmation is not yours.
-    let foreign = mint_ticket(&dir, 1001, TICKET);
+    let foreign = mint_ticket(&dir, 1001, TICKET, "enroll.start");
     let error = daemon.error(
         "enroll.start",
         Some(json!({"org_domain": "acme.com", "ticket": TICKET})),
@@ -2119,7 +2155,7 @@ fn a_confirmation_is_good_once_and_only_for_the_account_that_made_it() {
     );
 
     // A typo in the domain is refused before the ticket is spent.
-    let mine = mint_ticket(&dir, 1000, TICKET);
+    let mine = mint_ticket(&dir, 1000, TICKET, "enroll.start");
     let error = daemon.error(
         "enroll.start",
         Some(json!({"org_domain": "not a domain", "ticket": TICKET})),
@@ -2176,7 +2212,7 @@ punar-agent-agt_4f21c09ab3e1.scope\n",
             &control_plane.socket,
             "disabled",
         );
-        let ticket = mint_ticket(&dir, uid, TICKET);
+        let ticket = mint_ticket(&dir, uid, TICKET, "enroll.start");
         for (method, params) in [
             (
                 "enroll.start",
@@ -2949,7 +2985,7 @@ fn an_organization_owned_enrollment_needs_the_persons_yes_before_register() {
     let control_plane = ControlPlane::start_with(&dir, state.clone());
     let daemon = TestDaemon::start(&dir, person(), &control_plane.socket, "disabled");
 
-    let ticket = mint_ticket(&dir, 1000, TICKET);
+    let ticket = mint_ticket(&dir, 1000, TICKET, "enroll.start");
     let error = daemon.error(
         "enroll.start",
         Some(json!({
@@ -3004,7 +3040,7 @@ fn an_organization_owned_enrollment_needs_the_persons_yes_before_register() {
         "the refusal is audited"
     );
 
-    mint_ticket(&dir, 1000, TICKET);
+    mint_ticket(&dir, 1000, TICKET, "enroll.start");
     let enrolled = daemon.result(
         "enroll.start",
         Some(json!({

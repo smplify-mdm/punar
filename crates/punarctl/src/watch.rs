@@ -11,9 +11,9 @@
 //!
 //! **Watch for the wake, socket for the truth.** An inotify watch says
 //! *something changed*; the answer always comes from one authoritative
-//! `approvals.get` on the socket. `/run/punard/approvals.json` is
-//! display data (contract section 15) and is never the basis of a
-//! verdict here.
+//! `approvals.get` on the socket. A person's view in
+//! `/run/punard/approvals/` is display data (contract section 15) and is
+//! never the basis of a verdict here.
 //!
 //! **No polling loop** (SPEC section 6.3). The watch is on the
 //! **directory**, not the file, because punard rewrites the summary

@@ -18,7 +18,7 @@ pragma ComponentBehavior: Bound
 // daemon authorizes independently.
 //
 // DATA (ipc.md §15, milestone-9.md §8.1): the Approvals singleton follows
-// `/run/punard/approvals.json` with an inotify FileView — no socket client
+// this person's `/run/punard/approvals/<uid>.json` with an inotify FileView — no socket client
 // in the shell, no polling, no timers except the countdown below. The file
 // is NON-AUTHORITATIVE: `A` sends only the `approval_id`, and punard
 // re-derives the contract from its own record before executing anything.
@@ -386,6 +386,20 @@ Scope {
 
     readonly property bool actionable: root.shownStatus === "pending" && !root.lapsed
 
+    // Approving a change to a device setting — a `capability_set` runs on
+    // the answer, a `privilege_request` mints the grant for one — reaches
+    // everyone who uses this device, so it needs a device administrator's
+    // password at the moment of the yes (F0-S1; ipc.md §23.2). Denying never
+    // does, and neither does a credential for the person's own session.
+    readonly property bool needsPassword: root.field("kind") === "capability_set"
+        || root.field("kind") === "privilege_request"
+                                          || root.field("kind") === "privilege_request"
+
+    // True while the card asks for that password instead of showing the
+    // buttons. Reset whenever the card changes, so a password typed for one
+    // request can never answer another.
+    property bool askingPassword: false
+
     // Position of the shown approval within the pending queue, for the
     // ↑/↓ affordance and the count badge.
     readonly property int pendingIndex: {
@@ -470,7 +484,10 @@ Scope {
     // sent; punard re-derives the contract from its own record.
     property string resolveError: ""
 
-    onSelectedIdChanged: root.resolveError = ""
+    onSelectedIdChanged: {
+        root.resolveError = "";
+        root.askingPassword = false;
+    }
 
     Process {
         id: resolveProc
@@ -491,16 +508,56 @@ Scope {
         if (!root.actionable)
             return;
         var id = root.selectedId;
-        if (id === "" || resolveProc.running)
+        if (id === "" || resolveProc.running || resolveRun.running)
             return;
         root.resolveError = "";
-        resolveProc.command = ["punarctl", "approvals", "resolve", id, "--decision", decision];
+        // A yes that reaches everyone asks for the password first — of a
+        // device administrator. A person without the role is told who can
+        // answer instead of being asked for a password that could not be
+        // used (F0-S1: punard checks the role before any password).
+        if (decision === "approved" && root.needsPassword) {
+            if (!DeviceAdmin.mayAdminister) {
+                root.resolveError = DeviceAdmin.refusal("Approving a change to a device setting");
+                return;
+            }
+            root.askingPassword = true;
+            return;
+        }
+        resolveProc.command = ["/usr/bin/punarctl", "approvals", "resolve", id, "--decision", decision];
         try {
             resolveProc.running = true;
         } catch (e) {
             // No punarctl on this machine: the request stays pending in the
             // daemon, and the card says the decision was not sent.
             root.resolveError = "punarctl could not be started, so the decision was not sent.";
+        }
+    }
+
+    // The password step's own answer: `punarctl approvals resolve` — the
+    // command a terminal runs. The password goes to punar-authd directly,
+    // and punarctl gets only a ticket bound to it and to this approval's
+    // method (PasswordRun, F0-S4). A refusal is shown like any other.
+    function submitApproval(password: string): void {
+        var id = root.selectedId;
+        root.askingPassword = false;
+        if (id === "" || !root.actionable || resolveRun.running)
+            return;
+        if (password === "") {
+            root.resolveError = "Enter your password to approve this change.";
+            return;
+        }
+        root.resolveError = "";
+        if (!resolveRun.start(["/usr/bin/punarctl", "approvals", "resolve", id,
+                               "--decision", "approved", "--ticket-from-parent"],
+                              password, "approvals.resolve"))
+            root.resolveError = "punarctl could not be started, so the decision was not sent.";
+    }
+
+    PasswordRun {
+        id: resolveRun
+
+        onFinished: function (exitCode, said) {
+            root.resolveError = exitCode === 0 ? "" : (said !== "" ? said : "punarctl exited with " + exitCode);
         }
     }
 
@@ -520,6 +577,9 @@ Scope {
 
     function show(): void {
         hideTimer.stop();
+        // Whether this person may approve a change that reaches everyone,
+        // read on open so the card can say who can if they cannot.
+        DeviceAdmin.refresh();
         root.nowMs = Date.now();
         root.windowVisible = true;
         root.open = true;
@@ -987,11 +1047,78 @@ Scope {
                     height: 14
                 }
 
+                // ---- the administrator's password, when a yes needs one ----
+                Item {
+                    id: passwordRow
+
+                    width: parent.width
+                    visible: root.askingPassword && !root.decided
+                    height: visible ? 52 : 0
+
+                    onVisibleChanged: {
+                        if (passwordRow.visible) {
+                            approvalPassword.forceActiveFocus();
+                        } else {
+                            approvalPassword.text = "";
+                            keys.forceActiveFocus();
+                        }
+                    }
+
+                    Meta {
+                        id: passwordLabel
+
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        font.pixelSize: 9
+                        font.letterSpacing: Theme.tracking(9, 0.12)
+                        color: Theme.shellStatusWarn
+                        text: "Your password · this changes a setting everyone on this device shares · ↵ approves · Esc goes back"
+                    }
+                    TextInput {
+                        id: approvalPassword
+
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: passwordLabel.bottom
+                        anchors.topMargin: 10
+                        echoMode: TextInput.Password
+                        font.family: Theme.fontSans
+                        font.pixelSize: 15
+                        color: Theme.shellFg
+                        clip: true
+
+                        Keys.onPressed: function (event) {
+                            switch (event.key) {
+                            case Qt.Key_Escape:
+                                approvalPassword.text = "";
+                                root.askingPassword = false;
+                                event.accepted = true;
+                                break;
+                            case Qt.Key_Return:
+                            case Qt.Key_Enter:
+                                var typed = approvalPassword.text;
+                                approvalPassword.text = "";
+                                root.submitApproval(typed);
+                                event.accepted = true;
+                                break;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: approvalPassword.bottom
+                        anchors.topMargin: 6
+                        height: 2
+                        color: Theme.shellFg
+                    }
+                }
+
                 // ---- actions, or the verdict once decided ----
                 Item {
                     width: parent.width
                     height: 34
-                    visible: !root.decided
+                    visible: !root.decided && !root.askingPassword
 
                     Row {
                         anchors.right: parent.right

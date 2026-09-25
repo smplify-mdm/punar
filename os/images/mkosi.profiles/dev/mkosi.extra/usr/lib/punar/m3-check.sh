@@ -42,6 +42,11 @@
 #      root-only, its unit's exposure is at most 2.0, punard's own binary
 #      names no downloader, and in punard's mount namespace the downloaders
 #      cannot be executed at all
+#   13 the F0 security floor (PLAN.md §2.8): Yama is 1 and a same-uid,
+#      non-descendant ATTACH-mode open fails while a READ-mode one works
+#      (F-YAMA); the audit trail is root:punar-audit, a person cannot read
+#      it and audit.tail says what it withheld (F-AUD); the dev user holds
+#      the administrator role through admins.list (F-ADM)
 set -u
 
 RUN_DIR=/run/punar
@@ -321,6 +326,56 @@ done
 if [ "${downloaders_seen}" -eq 0 ]; then
     note "ok   no downloader is installed for punard to reach"
 fi
+# --- 13. the F0 security floor ---------------------------------------------------
+# F-YAMA. The value first, then the property it buys: two separate process
+# trees of the same uid. The second may still READ the first's /proc status
+# (PTRACE_MODE_READ, which Yama never touches), and may NOT open its memory
+# (PTRACE_MODE_ATTACH) — the access a password thief needs.
+check_eq "kernel.yama.ptrace_scope" "1" "$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)"
+runuser -u punar -- sleep 30 &
+yama_pid=$!
+sleep 1
+yama_target="$(pgrep -u punar -P "${yama_pid}" -x sleep 2>/dev/null | head -n 1)"
+[ -n "${yama_target}" ] || yama_target="${yama_pid}"
+if runuser -u punar -- sh -c "grep -q '^Name:' /proc/${yama_target}/status" 2>/dev/null; then
+    note "ok   a same-uid process still reads another's /proc status (READ mode)"
+else
+    note "FAIL a same-uid process could not read /proc/${yama_target}/status; the control leg is broken"
+    FAILED=1
+fi
+if runuser -u punar -- sh -c "exec 3</proc/${yama_target}/mem" 2>/dev/null; then
+    note "FAIL a same-uid, non-descendant process opened /proc/${yama_target}/mem (Yama is not restricting ATTACH)"
+    FAILED=1
+else
+    note "ok   a same-uid, non-descendant process cannot open another's memory (ATTACH mode)"
+fi
+kill "${yama_pid}" 2>/dev/null
+wait "${yama_pid}" 2>/dev/null
+
+# F-AUD. The modes, then a person's view of them.
+check_eq "/var/log/punar mode (setgid: files are born punar-audit)" "2750 root punar-audit" \
+    "$(stat -c '%a %U %G' /var/log/punar 2>/dev/null)"
+check_eq "audit.jsonl mode" "640 root punar-audit" \
+    "$(stat -c '%a %U %G' /var/log/punar/audit.jsonl 2>/dev/null)"
+if runuser -u punar -- cat /var/log/punar/audit.jsonl >/dev/null 2>&1; then
+    note "FAIL the session user can read the whole audit trail"
+    FAILED=1
+else
+    note "ok   the session user cannot read the whole audit trail"
+fi
+runuser -u punar -- "${CTL}" --json audit tail -n 1000 > "${RUN_DIR}/m3-audit-scoped.json" 2>/dev/null
+jq_check "a person's audit.tail carries a withheld count and only their own or the device's events" \
+    "${RUN_DIR}/m3-audit-scoped.json" \
+    '(.withheld | type) == "number"
+     and all(.events[]; .user_id == "punar" or .user_id == "uid:1000" or .user_id == "root"
+             or (.source | IN("service", "device", "organization")))'
+
+# F-ADM. The dev user is the image's stand-in for a first account.
+runuser -u punar -- "${CTL}" --json admins list > "${RUN_DIR}/m3-admins.json" 2>/dev/null
+jq_check "the dev user administers the device, and admins.list says who does" \
+    "${RUN_DIR}/m3-admins.json" \
+    '.caller.administrator == true and (.administrators | index("punar")) != null
+     and .mode == "local" and .group == "punar-admin"'
 
 # --- verdict -----------------------------------------------------------------
 if [ "${FAILED}" -eq 0 ]; then

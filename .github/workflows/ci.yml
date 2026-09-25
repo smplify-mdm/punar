@@ -249,6 +249,12 @@ jobs:
       - name: Validate release-image policy gate branches
         run: ./tests/images/release-image-policy-test.sh
 
+      # The power rule's own JavaScript, evaluated with node against the
+      # subjects that matter: with another person signed in, only a device
+      # administrator restarts or shuts down (F0-S1).
+      - name: Evaluate the power polkit rule
+        run: ./tests/images/power-polkit-rule-test.sh
+
       - name: Validate bounded early-boot module policy
         run: ./tests/images/initrd-module-policy-test.sh
 
@@ -381,6 +387,7 @@ jobs:
             tests/images/initramfs-release-contract-test.sh \
             os/images/initrd-common/usr/lib/punar/release-initramfs \
             tests/images/release-image-policy-test.sh \
+            tests/images/power-polkit-rule-test.sh \
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
             tests/images/raspberry-pi-bundle-check.sh \
@@ -398,9 +405,12 @@ jobs:
             os/modules/desktop/hypr/punar-scratchpad.sh \
             os/modules/desktop/hypr/punar-graphics-env.sh \
             os/modules/desktop/hypr/punar-terminal-app.sh \
+            os/modules/desktop/hypr/punar-shell-run.sh \
+            os/modules/desktop/hypr/punar-end-session.sh \
             tests/desktop/app-launcher-contract-test.sh \
             tests/desktop/evolution-defaults-contract-test.sh \
             tests/desktop/bar-affordance-contract-test.sh \
+            tests/desktop/session-end-confirm-contract-test.sh \
             tests/desktop/system-control-parity-contract-test.sh \
             tests/desktop/terminal-parity-gate-test.sh \
             tests/desktop/mail-identity-contract-test.sh \
@@ -410,13 +420,13 @@ jobs:
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
+            tests/desktop/shell-run-test.sh \
             tests/desktop/terminal-app-test.sh \
             tests/desktop/keybind-contract-test.sh \
             tools/hyprland-verify.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/greeter-session.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/vendor-sandbox-bin/xdg-open \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-policy-set.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/recovery-check.sh \
@@ -448,6 +458,9 @@ jobs:
       - name: Test native Lua layout switching
         run: ./tests/desktop/layout-script-test.sh
 
+      - name: Test the shell supervisor and the end-session fallback
+        run: ./tests/desktop/shell-run-test.sh
+
       - name: Test terminal application launching
         run: ./tests/desktop/terminal-app-test.sh
 
@@ -470,6 +483,13 @@ jobs:
       # MouseArea had no id for anything to bind to.
       - name: Validate that bar controls show a hover state
         run: ./tests/desktop/bar-affordance-contract-test.sh
+
+      # PUNAR+SHIFT+E sits beside SHIFT+W, +Q and +F, and ending a session
+      # closes every window in it with no undo. It used to call the exit
+      # dispatcher directly; it now opens the session menu with End session
+      # armed, and a second press signs out. Every link of that chain is pinned.
+      - name: Validate that ending the session from the keyboard asks first
+        run: ./tests/desktop/session-end-confirm-contract-test.sh
 
       # System Control must not claim, offer or hide more than the device
       # does: [S] only for two-valued capabilities (it once offered to rename

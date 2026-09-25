@@ -360,8 +360,21 @@ SIDE_AFTER="$(sha256sum /run/punar-netd/connections.json 2>/dev/null | awk '{pri
 SIDE_MTIME_AFTER="$(stat -c '%y' /run/punar-netd/connections.json 2>/dev/null || echo missing)"
 check_eq "unchanged observation does not rewrite the side file" "${SIDE_BEFORE}" "${SIDE_AFTER}"
 check_eq "unchanged observation preserves the side-file mtime" "${SIDE_MTIME_BEFORE}" "${SIDE_MTIME_AFTER}"
-check_eq "connections side file mode/owner" "640 root punar" \
+# Root only: the side file holds every person's rows (docs/api/ipc.md
+# section 21.3). A person reads their own through network.connections, which
+# says how many of other people's it withheld.
+check_eq "connections side file mode/owner" "600 root punar" \
     "$(stat -c '%a %U %G' /run/punar-netd/connections.json 2>/dev/null || echo absent)"
+if as_punar cat /run/punar-netd/connections.json >/dev/null 2>&1; then
+    note "FAIL the session user can read the device-wide connection side file"
+    FAILED=1
+else
+    note "ok   the session user cannot read the device-wide connection side file"
+fi
+as_punar "${CTL}" privacy connections --json > "${RUN_DIR}/m12-connections-person.json" 2>&1
+jq_check "the session user sees their own managed session and a withheld count" \
+    "${RUN_DIR}/m12-connections-person.json" \
+    "(.withheld | type) == \"number\" and ([.processes[] | select(.session.id == \"${SID}\")] | length >= 1)"
 if systemctl list-timers --all --no-legend 2>/dev/null | grep -q 'punar-netd'; then
     note "FAIL punar-netd installed a polling timer"
     FAILED=1
