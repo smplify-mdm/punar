@@ -491,6 +491,21 @@ enum ApprovalsCommand {
         #[arg(long, default_value_t = 300, value_name = "SECONDS")]
         timeout: u64,
     },
+    /// Follow every approval: each one prints when it arrives and again
+    /// when it is answered or expires. With --json, one `approvals.get`
+    /// result per line. Runs until interrupted.
+    ///
+    /// The wake is the one `wait` uses (a watch on punard's summary
+    /// directory, plus each pending approval's own expiry); the truth is
+    /// always the socket.
+    Watch {
+        /// Ask on this terminal for a decision on each new approval routed
+        /// to you: approve, deny or skip. Needs a terminal. Standard input
+        /// is never read as an answer, and punard accepts a decision only
+        /// from a person.
+        #[arg(long)]
+        answer: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2387,6 +2402,201 @@ fn approvals_wait(
             wait_exit(&status)
         }
         Err(error) => fail(&error),
+    }
+}
+
+/// How long `approvals watch` sleeps when nothing is pending and nothing
+/// wakes it. Not a poll: a change to the summary file or a pending
+/// approval's expiry always comes first. It only bounds how stale a
+/// missed wake can leave the stream.
+const WATCH_IDLE: Duration = Duration::from_secs(300);
+
+/// `punarctl approvals watch [--answer]`: every approval as it arrives and
+/// as it settles. The wake is an inotify watch on punard's summary
+/// directory, or the earliest pending expiry, since punard settles a lapsed
+/// approval lazily on the next read. The truth is `approvals.list` and one
+/// `approvals.get` per change. Nothing here decides anything: `--answer`
+/// relays a person's typed decision to `approvals.resolve`, which refuses
+/// anyone who is not one.
+fn approvals_watch(
+    client: &Client,
+    style: &Style,
+    json: bool,
+    hostname: &str,
+    answer: bool,
+) -> ExitCode {
+    // A decision is typed by a person at this device. Standard input is
+    // never an answer channel, so a piped "a" approves nothing.
+    let mut tty = if answer {
+        if peer::in_agent_scope() {
+            eprintln!(
+                "punarctl approvals watch --answer does not run inside an AI agent's session.\n\
+                 Why: an agent may resolve no approval, including its own; punard refuses it \
+                 either way.\n\
+                 Next step: answer from your own terminal or the approval overlay."
+            );
+            return ExitCode::from(ipc::EXIT_DENIED);
+        }
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+        {
+            Ok(tty) => Some(tty),
+            Err(_) => {
+                eprintln!(
+                    "punarctl approvals watch --answer needs a terminal.\n\
+                     Why: a decision is typed by a person at this device, and standard input \
+                     is never read as one.\n\
+                     Next step: run it in a terminal, or watch without --answer and use \
+                     `punarctl approvals resolve <id> --decision approved|denied`."
+                );
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+
+    if !json {
+        let mut out = fmt::masthead(
+            style,
+            "Approvals · watch",
+            &format!("{hostname} · Personal"),
+        );
+        out.push_str(&fmt::note(
+            style,
+            "Each approval prints when it arrives and when it settles · Ctrl-C stops",
+        ));
+        print!("{out}");
+    }
+
+    let watch = watch::DirWatch::on(Path::new(APPROVALS_SUMMARY)).ok();
+    // The last status printed for each approval id still listed.
+    let mut printed: std::collections::BTreeMap<String, String> = Default::default();
+    let mut first = true;
+    loop {
+        let list = match client.call("approvals.list", None) {
+            Ok(list) => list,
+            Err(error) => return fail(&error),
+        };
+        let listed: Vec<(String, String)> = list
+            .get("approvals")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        Some((
+                            row.pointer("/approval/approval_id")?.as_str()?.to_string(),
+                            approval_status(row),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        printed.retain(|id, _| listed.iter().any(|(listed_id, _)| listed_id == id));
+        // The earliest pending approval still ahead of its expiry. punard
+        // settles a lapsed one on the next read (approvals.list sweeps), so
+        // that read is due then even if no file changed. A deadline already
+        // behind us is left out, so a daemon that did not sweep cannot turn
+        // this into a spin.
+        let now = (punar_common::time::unix_now_millis() / 1000) as u64;
+        let next_expiry = list
+            .get("approvals")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|row| approval_status(row) == "pending")
+            .filter_map(approval_deadline)
+            .filter(|deadline| *deadline + 1 >= now)
+            .min();
+
+        for (id, status) in &listed {
+            if printed.get(id) == Some(status) {
+                continue;
+            }
+            // History is not news: at start, only what is pending prints.
+            if first && status != "pending" {
+                printed.insert(id.clone(), status.clone());
+                continue;
+            }
+            let current = match client.call("approvals.get", Some(json!({ "approval_id": id }))) {
+                Ok(current) => current,
+                Err(error) => {
+                    eprintln!("{}", error.message());
+                    printed.insert(id.clone(), status.clone());
+                    continue;
+                }
+            };
+            let status = approval_status(&current);
+            printed.insert(id.clone(), status.clone());
+            if let Err(code) = emit(json, &current, |v| views::approval_event(style, v)) {
+                return code;
+            }
+            if status != "pending" {
+                continue;
+            }
+            let Some(tty) = tty.as_mut() else { continue };
+            if !peer::may_resolve(&routed_user(&current)) {
+                continue;
+            }
+            let Some(decision) = ask_decision(tty, style, &current, hostname) else {
+                continue;
+            };
+            match client.call(
+                "approvals.resolve",
+                Some(json!({ "approval_id": id, "decision": decision })),
+            ) {
+                Ok(resolved) => {
+                    printed.insert(id.clone(), approval_status(&resolved));
+                    if let Err(code) = emit(json, &resolved, |v| views::approval_event(style, v)) {
+                        return code;
+                    }
+                }
+                // Refused (expired while you read it, or not yours): the
+                // daemon's reason prints and the watch goes on.
+                Err(error) => eprintln!("{}", error.message()),
+            }
+        }
+        first = false;
+        let _ = std::io::stdout().flush();
+
+        // Sleep until something changes or the earliest pending approval
+        // lapses.
+        let now = (punar_common::time::unix_now_millis() / 1000) as u64;
+        let until_expiry =
+            next_expiry.map(|deadline| Duration::from_secs(deadline.saturating_sub(now) + 1));
+        let budget = until_expiry.map_or(WATCH_IDLE, |d| d.min(WATCH_IDLE));
+        match &watch {
+            Some(w) => {
+                let _ = w.wait(budget);
+            }
+            None => std::thread::sleep(budget.min(watch::FALLBACK_RECHECK)),
+        }
+    }
+}
+
+/// Show one approval routed to this person on their terminal and read a
+/// decision: `approved`, `denied`, or `None` to leave it. Anything but an
+/// explicit a/approve or d/deny leaves it, including a read failure.
+fn ask_decision(
+    tty: &mut std::fs::File,
+    style: &Style,
+    approval: &Value,
+    hostname: &str,
+) -> Option<&'static str> {
+    let card = views::approval_get(style, approval, hostname, true).ok()?;
+    let _ = write!(tty, "{card}Approve [a] · Deny [d] · Leave it [Enter] › ");
+    let _ = tty.flush();
+    let mut line = String::new();
+    BufReader::new(tty.try_clone().ok()?)
+        .take(64)
+        .read_line(&mut line)
+        .ok()?;
+    match line.trim().to_ascii_lowercase().as_str() {
+        "a" | "approve" => Some("approved"),
+        "d" | "deny" => Some("denied"),
+        _ => None,
     }
 }
 
@@ -4540,6 +4750,9 @@ fn main() -> ExitCode {
                     approval_id,
                     timeout,
                 } => approvals_wait(&client, &style, json, &hostname, &approval_id, timeout),
+                ApprovalsCommand::Watch { answer } => {
+                    approvals_watch(&client, &style, json, &hostname, answer)
+                }
             }
         }
         // M9 (contract section 14.8, Plate D-012): privilege you ask for,

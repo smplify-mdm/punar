@@ -1715,6 +1715,19 @@ or path other than the confirmed target device. An installed system returns
   null with `{code, message}` under `errors` (`code` is the daemon's error
   code, or `unreachable` / `protocol` for a failure on this side). Plain
   `status --json` is still the `status` result alone.
+- **`punarctl approvals watch [--answer]`:** follows every approval. Each one
+  prints when it arrives and again when it settles; with `--json`, that is
+  one `approvals.get` result per line. Approvals already settled when the
+  watch starts are history and do not print. It wakes the way `approvals
+  wait` does (an inotify watch on `/run/punard/`, section 15) and also at
+  the earliest pending `expires_at`, because `approvals.list` settles a
+  lapsed approval when it is read. The truth is always `approvals.list`
+  plus one `approvals.get` per change. `--answer` shows each new approval
+  routed to the invoking person on `/dev/tty` and reads approve / deny /
+  leave it from there. Standard input is never read as an answer. Without
+  a terminal it refuses with exit 2, and inside an agent scope with exit 3.
+  A decision goes to `approvals.resolve`, which stays human-only
+  (section 14.5); its refusal prints and the watch continues.
 - `punarctl debug rpc <method>` (hidden) sends an empty-params request with an
   arbitrary method name — exists solely so the 74.4 "unauthorized IPC" /
   section 60 negative tests can probe the server from inside the image. The

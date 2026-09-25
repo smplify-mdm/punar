@@ -4232,6 +4232,28 @@ pub fn approvals_list(style: &Style, result: &Value, hostname: &str) -> Result<S
     Ok(out)
 }
 
+/// One `approvals watch` line: the approval, its status, what it asks for
+/// and who asked. The row `approvals list` prints, one at a time.
+pub fn approval_event(style: &Style, result: &Value) -> Result<String, String> {
+    let env: model::ApprovalEnvelope = parse(result)?;
+    let doc = &env.approval;
+    let tail = match seconds_until(&doc.expires_at) {
+        Some(s) if doc.status == "pending" => {
+            format!("{} · {} left", contract_line(&env), remaining_words(s))
+        }
+        _ => contract_line(&env),
+    };
+    Ok(fmt::rows(
+        style,
+        &[Row::new(
+            &doc.approval_id,
+            &doc.status,
+            approval_slot(&doc.status),
+            &format!("{tail} · {}", identity_chain(doc)),
+        )],
+    ))
+}
+
 /// `punarctl approvals get <apr_id>` — the full contract card.
 pub fn approval_get(
     style: &Style,

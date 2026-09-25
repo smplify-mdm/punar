@@ -3884,3 +3884,160 @@ fn status_all_json_keys_every_answer_and_names_what_failed() {
     assert_eq!(document["alerts"], fixture_alerts_list(false));
     assert_eq!(document["errors"], json!({}));
 }
+
+// ---------------------------------------------------------------------------
+// `approvals watch` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+/// How many times the watch mock has answered `approvals.list`: the first
+/// read sees the approval pending, every later read sees it answered.
+static WATCH_LISTS: AtomicUsize = AtomicUsize::new(0);
+/// `approvals.resolve` must never be reached from a watch without a person.
+static WATCH_RESOLVES: AtomicUsize = AtomicUsize::new(0);
+
+fn approved_approval() -> Value {
+    let mut approval = pending_approval();
+    approval["approval"]["status"] = json!("approved");
+    approval["resolved_at"] = json!("2126-08-25T10:01:00Z");
+    approval["resolved_by"] = json!({"uid": 1000, "user": "punar", "pid": 812});
+    approval
+}
+
+/// History the watch must not reprint: answered before it started.
+fn old_approval() -> Value {
+    let mut approval = approved_approval();
+    approval["approval"]["approval_id"] = json!("apr_00000001");
+    approval
+}
+
+fn watch_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "approvals.list" => {
+            let calls = WATCH_LISTS.fetch_add(1, Ordering::SeqCst);
+            let current = if calls == 0 {
+                pending_approval()
+            } else {
+                approved_approval()
+            };
+            Ok(json!({"approvals": [current, old_approval()],
+                      "checked_at": "2126-08-25T10:00:30Z"}))
+        }
+        "approvals.get" => {
+            assert_eq!(request["params"]["approval_id"], json!("apr_7c1d9a4e"));
+            if WATCH_LISTS.load(Ordering::SeqCst) <= 1 {
+                Ok(pending_approval())
+            } else {
+                Ok(approved_approval())
+            }
+        }
+        "approvals.resolve" => {
+            WATCH_RESOLVES.fetch_add(1, Ordering::SeqCst);
+            Ok(approved_approval())
+        }
+        _ => respond(request),
+    }
+}
+
+/// Read stdout lines from a running child until `want` lines arrived or
+/// `limit` passed, then kill it.
+fn read_lines_then_kill(
+    mut child: std::process::Child,
+    want: usize,
+    limit: std::time::Duration,
+) -> Vec<String> {
+    let stdout = child.stdout.take().expect("stdout");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let mut lines = Vec::new();
+    while lines.len() < want {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match receiver.recv_timeout(left) {
+            Ok(line) => lines.push(line),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    lines
+}
+
+/// Each approval prints when it arrives and again when it settles, as the
+/// `approvals.get` result verbatim, one per line. What was answered before
+/// the watch started is history and does not print.
+#[test]
+fn approvals_watch_streams_each_approval_as_it_arrives_and_settles() {
+    let socket = start_mock_with(watch_respond);
+    let child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["--json", "approvals", "watch"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn punarctl");
+    // No summary directory to watch here, so the second read comes from
+    // the five-second fallback. Reprinted history would be one of the first
+    // two lines, so two are enough.
+    let lines = read_lines_then_kill(child, 2, std::time::Duration::from_secs(12));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let first: Value = serde_json::from_str(&lines[0]).expect("NDJSON");
+    let second: Value = serde_json::from_str(&lines[1]).expect("NDJSON");
+    assert_eq!(first, pending_approval());
+    assert_eq!(second, approved_approval());
+    assert!(
+        !lines.iter().any(|line| line.contains("apr_00000001")),
+        "{lines:?}"
+    );
+    assert_eq!(WATCH_RESOLVES.load(Ordering::SeqCst), 0);
+}
+
+/// `--answer` asks a person at a terminal and nobody else: without one it
+/// refuses before reading anything, and a piped "a" approves nothing.
+#[test]
+fn approvals_watch_answer_needs_a_terminal_and_ignores_stdin() {
+    if fs::File::open("/dev/tty").is_ok() {
+        eprintln!("skipped: this test process has a terminal the child would prompt on");
+        return;
+    }
+    let socket = start_mock_with(watch_respond);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["approvals", "watch", "--answer"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn punarctl");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"a\n")
+        .expect("write stdin");
+    // A watch that did not refuse would run until killed: bound it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().expect("poll child").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("collect punarctl");
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("--answer needs a terminal"), "{text}");
+    assert!(text.contains("Next step:"), "{text}");
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+    assert_eq!(WATCH_RESOLVES.load(Ordering::SeqCst), 0);
+}
