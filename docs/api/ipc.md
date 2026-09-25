@@ -1957,6 +1957,17 @@ or path other than the confirmed target device. An installed system returns
     binding.
   - Exit codes: 5 when the shell is not running, 2 for an id that is not
     the daemon's number.
+- **`punarctl theme list|show|validate|set|reset|status|render` and
+  `punarctl wallpaper list|set|reset|status`** (client-side,
+  theme-system.md §4.5).
+  - The theme gate is a port of the shell's ThemeContrast.qml (R1-R9, the
+    24 pairs, the §7.1 terminal derivation), held to every figure
+    theme-system.md publishes.
+  - `theme set` writes the §3.3 pointer (0600, with the complete receipt),
+    then calls `ipc call theme reload`.
+  - A refusal exits 6, deliberately not 3.
+  - Wallpapers are the shell's compiled catalog, asked over `ipc call
+    wallpaper`. Exit 5 when the shell is not running.
 - **App parity (client-side, no new method):** `punarctl app list` joins
   `apps.catalog {}` for category, trust tier and catalog version, and its
   `--json` is still `apps.list` verbatim. `app list --all` adds every

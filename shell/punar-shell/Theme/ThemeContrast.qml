@@ -97,10 +97,13 @@ QtObject {
         return Math.round(ratio * 100) / 100;
     }
 
-    // The ONLY comparison. A pair passes when its ROUNDED value still clears
-    // the floor, so 4.497 fails 4.5 and prints as 4.50 (§4.1).
+    // The ONLY comparison, at full precision (§4.1): 4.497 fails a 4.5 floor
+    // and prints as 4.50. It compared the ROUNDED value, which let exactly
+    // that pair pass — the rounding the spec says may never pass a pair.
+    // punarctl's validator (crates/punarctl/src/theme.rs) compares the same
+    // way, so the two gates agree.
     function meetsFloor(ratio: real, floor: real): bool {
-        return ratio >= 0 && root.roundedRatio(ratio) >= floor;
+        return ratio >= 0 && ratio >= floor;
     }
 
     // ---- HSL over sRGB (R4) ----

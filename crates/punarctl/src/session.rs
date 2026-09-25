@@ -138,7 +138,7 @@ fn print_json(value: &Value) -> ExitCode {
 
 /// Window titles, classes and names come from applications: print them
 /// through the terminal-safe filter.
-fn safe(value: &str) -> String {
+pub fn safe(value: &str) -> String {
     punar_common::ipc::term_safe_name(value)
 }
 

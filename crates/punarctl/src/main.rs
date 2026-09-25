@@ -68,6 +68,7 @@ mod ipc;
 mod model;
 mod peer;
 mod session;
+mod theme;
 mod views;
 mod watch;
 mod webapps;
@@ -171,6 +172,17 @@ enum Command {
     Notifications {
         #[command(subcommand)]
         command: session::NotificationsCommand,
+    },
+    /// Themes: list, inspect, validate, select, reset, and render the
+    /// derived terminal, compositor and wallpaper values.
+    Theme {
+        #[command(subcommand)]
+        command: theme::ThemeCommand,
+    },
+    /// The desktop wallpaper: list, select, reset or show the active one.
+    Wallpaper {
+        #[command(subcommand)]
+        command: theme::WallpaperCommand,
     },
     /// Connected displays.
     Display {
@@ -4509,6 +4521,8 @@ fn main() -> ExitCode {
         Command::Session { command } => session::session(command, &style, json),
         Command::Display { command } => session::display(command, &style, json),
         Command::Notifications { command } => session::notifications(command, &style, json),
+        Command::Theme { command } => theme::theme(command, &style, json),
+        Command::Wallpaper { command } => theme::wallpaper(command, &style, json),
         Command::Audio { command } => session::audio(command, &style, json),
         Command::Device { command } => match client.call("device.posture", None) {
             // `--json` is the device.posture result verbatim for both verbs.
