@@ -13,7 +13,8 @@
 # WHAT IT RUNS, as an unprivileged user (Hyprland refuses root):
 #   1. hyprland.lua with no keyboard file (first boot, a failed render);
 #   2. with a rendered two-layout file (the `us,ru` acceptance case);
-#   3. with the Mac-style clipboard keys on (the other bind set);
+#   3. with the Mac-style clipboard keys on (the other bind set), and with
+#      a kept window look (the hl.config the binds file applies at load);
 #   4. punar-greeter.lua;
 #   5. punar-input.lua's DATA-ONLY reader, through assertion configs that
 #      `error()` on a wrong answer: a valid file is read, a hostile file and a
@@ -97,6 +98,10 @@ printf "%s\n" "{\"version\": 1, \"clipboardKeys\": \"mac\"}" > /home/person/.con
 chown person /home/person/.config/punar/keyboard.json
 verify "desktop config, Mac-style clipboard keys" /etc/xdg/hypr/hyprland.lua
 rm -f /home/person/.config/punar/keyboard.json
+printf "%s\n" "{\"version\": 1, \"transparency\": true, \"gaps\": false, \"square\": true}" > /home/person/.config/punar/look.json
+chown person /home/person/.config/punar/look.json
+verify "desktop config, a kept look (all three toggles)" /etc/xdg/hypr/hyprland.lua
+rm -f /home/person/.config/punar/look.json
 verify "greeter config" /etc/xdg/hypr/punar-greeter.lua
 
 # The reader, held to its contract by configs that fail on a wrong answer.

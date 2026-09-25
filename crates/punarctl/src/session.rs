@@ -76,6 +76,15 @@ pub enum WindowCommand {
         #[arg(long)]
         address: Option<String>,
     },
+    /// This person's window look: transparency, the gaps between windows,
+    /// and a square shape for a window alone on its workspace. Kept across
+    /// sessions. Without arguments, the current look; with one, `toggle`.
+    Look {
+        #[arg(value_parser = ["transparency", "gaps", "square"])]
+        which: Option<String>,
+        #[arg(value_parser = ["on", "off", "toggle"], requires = "which")]
+        state: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -772,6 +781,7 @@ pub fn window(command: WindowCommand, style: &Style, json_output: bool) -> ExitC
             window_result(hypr::dispatch(&expression), style, json_output, "killed")
         }
         WindowCommand::Pop { address } => pop_window(address, style, json_output),
+        WindowCommand::Look { which, state } => crate::look::look(which, state, style, json_output),
     }
 }
 

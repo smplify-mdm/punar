@@ -289,35 +289,30 @@ return function(ctx)
     -- menu has on other Linux desktops; every letter key is already taken.
     bind(mod .. " + backspace", hl.dsp.exec_cmd(ctx.session), "Session menu")
 
-    -- THE LOOK, FOR THIS SESSION. Omarchy persists its toggles by copying Lua
-    -- files into ~/.local/state that its configuration then runs, the
-    -- code-as-state pattern it had to patch in 4.0.1. These live in the
-    -- compositor, write nothing, and end with the session or a reload.
-    local translucent = false
-    bind(mod .. " + CTRL + T", function()
-        translucent = not translucent
+    -- THE LOOK, KEPT AS DATA. `punarctl window look` writes three booleans
+    -- to ~/.config/punar/look.json and applies them live with one
+    -- `hyprctl eval`; hyprland.lua reads the same file with patterns at
+    -- every configuration load (ctx.look), so a toggle survives a reload and
+    -- the next session. Omarchy keeps its toggles by copying Lua files into
+    -- ~/.local/state that its configuration then RUNS, the code-as-state
+    -- pattern it had to patch in 4.0.1; nothing here is run.
+    local look = ctx.look or {}
+    if look.transparency or look.gaps == false or look.square then
         hl.config({
             decoration = {
-                active_opacity = translucent and 0.96 or 1.0,
-                inactive_opacity = translucent and 0.88 or 1.0,
+                active_opacity = look.transparency and 0.96 or 1.0,
+                inactive_opacity = look.transparency and 0.88 or 1.0,
             },
-        })
-    end, "Toggle window transparency")
-    local gapless = false
-    bind(mod .. " + CTRL + G", function()
-        gapless = not gapless
-        hl.config({
             general = {
-                gaps_in = gapless and 0 or 4,
-                gaps_out = gapless and 0 or 8,
+                gaps_in = look.gaps == false and 0 or 4,
+                gaps_out = look.gaps == false and 0 or 8,
             },
+            layout = { single_window_aspect_ratio = look.square and { 1, 1 } or { 0, 0 } },
         })
-    end, "Toggle window gaps")
-    local square = false
-    bind(mod .. " + CTRL + A", function()
-        square = not square
-        hl.config({ layout = { single_window_aspect_ratio = square and { 1, 1 } or { 0, 0 } } })
-    end, "Toggle square shape for a lone window")
+    end
+    bind(mod .. " + CTRL + T", hl.dsp.exec_cmd(ctx.punarctl .. " window look transparency toggle"), "Toggle window transparency")
+    bind(mod .. " + CTRL + G", hl.dsp.exec_cmd(ctx.punarctl .. " window look gaps toggle"), "Toggle window gaps")
+    bind(mod .. " + CTRL + A", hl.dsp.exec_cmd(ctx.punarctl .. " window look square toggle"), "Toggle square shape for a lone window")
 
     -- MAC-STYLE CLIPBOARD KEYS, when the person turned them on
     -- (`punarctl keyboard clipboard-keys on`). The chord is sent to the

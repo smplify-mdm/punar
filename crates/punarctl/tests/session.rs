@@ -1202,6 +1202,74 @@ fn clipboard_keys_write_the_preference_and_reload_the_binds() {
     assert_eq!(saved["clipboardKeys"], "standard");
 }
 
+/// PUNAR+CTRL+T/G/A: `window look` keeps the three toggles as data, so they
+/// survive a reload and the next session, and applies them live with one
+/// `hyprctl eval` built only from the booleans (SMP-1405 WP-02 review: the
+/// toggles used to live only in the compositor and reset on every reload).
+#[test]
+fn window_look_keeps_the_toggles_as_data_and_applies_them_live() {
+    let session = Session::start(desktop);
+    let hypr = fake_hyprctl(&session.root);
+    let run = |args: &[&str]| {
+        session
+            .command(args)
+            .env("PATH", with_path(&[&hypr]))
+            .env_remove("XDG_CONFIG_HOME")
+            .output()
+            .unwrap()
+    };
+    let output = run(&["--json", "window", "look"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&output)).unwrap(),
+        json!({"version": 1, "transparency": false, "gaps": true, "square": false, "applied": null})
+    );
+    assert!(
+        !session.root.join("home/.config/punar/look.json").exists(),
+        "reading writes nothing"
+    );
+
+    let output = run(&["--json", "window", "look", "transparency", "toggle"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(result["transparency"], true);
+    assert_eq!(result["applied"], true);
+    let saved: Value = serde_json::from_str(
+        &fs::read_to_string(session.root.join("home/.config/punar/look.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        saved,
+        json!({"version": 1, "transparency": true, "gaps": true, "square": false})
+    );
+    let log = fs::read_to_string(session.root.join("hyprctl.log")).unwrap();
+    assert_eq!(
+        log.trim(),
+        "eval hl.config({ decoration = { active_opacity = 0.96, inactive_opacity = 0.88 }, \
+         general = { gaps_in = 4, gaps_out = 8 }, \
+         layout = { single_window_aspect_ratio = { 0, 0 } } })"
+    );
+
+    // on/off are explicit; a second toggle goes back.
+    run(&["window", "look", "gaps", "off"]);
+    run(&["window", "look", "gaps", "off"]);
+    run(&["window", "look", "transparency"]);
+    let saved: Value = serde_json::from_str(
+        &fs::read_to_string(session.root.join("home/.config/punar/look.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        saved,
+        json!({"version": 1, "transparency": false, "gaps": false, "square": false})
+    );
+    // Only the three names and the three states exist.
+    assert_eq!(run(&["window", "look", "blur"]).status.code(), Some(2));
+    assert_eq!(
+        run(&["window", "look", "gaps", "maybe"]).status.code(),
+        Some(2)
+    );
+}
+
 /// PUNAR+O: `window pop` reads the focused window and pops it out at 60% of
 /// the focused display, in the order Hyprland needs.
 #[test]

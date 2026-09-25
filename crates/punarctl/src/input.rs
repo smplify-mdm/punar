@@ -162,7 +162,7 @@ fn session_input_path() -> Option<PathBuf> {
     runtime_dir().map(|dir| dir.join(SESSION_INPUT))
 }
 
-fn config_home() -> Option<PathBuf> {
+pub(crate) fn config_home() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -175,7 +175,7 @@ fn config_home() -> Option<PathBuf> {
 }
 
 /// Write a file the person owns, atomically, private to them.
-fn write_private(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let parent = path
@@ -215,7 +215,7 @@ pub fn input_expression(input: &keymap::SessionInput) -> String {
 }
 
 /// `hyprctl eval <expr>`, the path punar-layout.sh proves in every gate.
-fn hyprctl(args: &[&str]) -> Result<(), String> {
+pub(crate) fn hyprctl(args: &[&str]) -> Result<(), String> {
     let output = Command::new("hyprctl")
         .args(args)
         .stdin(Stdio::null())
@@ -232,7 +232,7 @@ fn hyprctl(args: &[&str]) -> Result<(), String> {
     }
 }
 
-fn in_hyprland() -> bool {
+pub(crate) fn in_hyprland() -> bool {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|s| !s.is_empty())
 }
 

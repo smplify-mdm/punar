@@ -59,24 +59,61 @@ end)
 -- punar-input.lua), key repeat, touchpad and pointer. SMP-1405 WP-02.
 local input = require("/etc/xdg/hypr/punar-input.lua")
 
--- The person's optional Mac-style clipboard grammar, as data: one word from
--- ~/.config/punar/keyboard.json, written by `punarctl keyboard clipboard-keys`.
--- Anything but "mac" is the standard grammar.
-local function clipboard_keys()
+local function config_home()
     local home = os.getenv("XDG_CONFIG_HOME")
     if not home or home:sub(1, 1) ~= "/" then
         home = (os.getenv("HOME") or "") .. "/.config"
     end
-    local file = io.open(home .. "/punar/keyboard.json", "r")
+    return home
+end
+
+-- The first 4 KiB of one of the person's small preference files, or "".
+local function preference_text(name)
+    local file = io.open(config_home() .. "/punar/" .. name, "r")
     if not file then
-        return "standard"
+        return ""
     end
     local text = file:read(4096) or ""
     file:close()
-    if text:match('"clipboardKeys"%s*:%s*"mac"') then
+    return text
+end
+
+-- The person's optional Mac-style clipboard grammar, as data: one word from
+-- ~/.config/punar/keyboard.json, written by `punarctl keyboard clipboard-keys`.
+-- Anything but "mac" is the standard grammar.
+local function clipboard_keys()
+    if preference_text("keyboard.json"):match('"clipboardKeys"%s*:%s*"mac"') then
         return "mac"
     end
     return "standard"
+end
+
+-- The person's window look (transparency, gaps, a square lone window), as
+-- data: three booleans from ~/.config/punar/look.json, written by `punarctl
+-- window look`, which PUNAR+CTRL+T/G/A run. Matched with patterns, never
+-- run, so the toggles survive a reload and the next session without the
+-- code-as-state files Omarchy keeps (SMP-1405 WP-02). Missing or malformed
+-- is the default look.
+local function look()
+    local text = preference_text("look.json")
+    local versioned = text:match('"version"%s*:%s*1[^%d]') ~= nil
+    local function flag(key, default)
+        if not versioned then
+            return default
+        end
+        local value = text:match('"' .. key .. '"%s*:%s*(%a+)')
+        if value == "true" then
+            return true
+        elseif value == "false" then
+            return false
+        end
+        return default
+    end
+    return {
+        transparency = flag("transparency", false),
+        gaps = flag("gaps", true),
+        square = flag("square", false),
+    }
 end
 
 hl.config({
@@ -127,6 +164,7 @@ require("/etc/xdg/hypr/punar-binds.lua")({
     -- click on its row in the command center do the same thing one way.
     files = "punarctl app open thunar",
     clipboard_keys = clipboard_keys(),
+    look = look(),
 })
 
 -- User-created web-app rules are derived from punard's root-owned inventory.

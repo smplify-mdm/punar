@@ -67,6 +67,7 @@ mod fmt;
 mod hypr;
 mod input;
 mod ipc;
+mod look;
 mod media;
 mod model;
 mod peer;
