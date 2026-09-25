@@ -14,8 +14,8 @@
 //! suspend or a reboot simply fetches again.
 
 use std::fs;
-use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,13 +29,12 @@ use punar_common::update::{
 };
 use thiserror::Error;
 
-use crate::fetch::{DEFAULT_FETCH_SOCKET, FetchClient, FetchRequest, validate_https_url};
+use crate::fetch::{DEFAULT_FETCH_SOCKET, FetchClient, FetchRequest, read_update_base};
 use crate::update_status::{read_bounded, read_os_release};
 use crate::util::write_atomic_synced;
 
 const CHANNEL_DOCUMENT_MAX: u64 = 64 * 1024;
 const SIGNATURE_MAX: u64 = 64;
-const REPOSITORY_URL_MAX: u64 = 2048;
 const DEFAULT_CACHE_MAX_AGE: u64 = 15 * 60;
 /// A channel document or signature: the whole transfer, connection included.
 const HTTPS_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -55,8 +54,9 @@ pub struct UpdateCheckSources {
     /// Fixed local transport root used only when `repository_url_file` is absent.
     pub repository_dir: PathBuf,
     /// The unprivileged download helper's socket (`punar-fetch.socket`).
-    /// punard never runs a downloader itself: it hands the helper a private
-    /// staging descriptor and verifies what arrives in it (crate::fetch).
+    /// punard never runs a downloader itself: the helper sends the bytes
+    /// over a pipe, punard copies them into a private staging file the
+    /// helper never holds, and verifies that file (crate::fetch).
     pub fetch_socket: PathBuf,
     pub trusted_keys_dir: PathBuf,
     pub cached_channel: PathBuf,
@@ -662,10 +662,10 @@ impl UpdateCheckEngine {
         size: u64,
         description: &str,
     ) -> Result<(), UpdateCheckError> {
-        // The helper must never choose the permissions of a cached release
-        // artifact, and it cannot: it receives only this descriptor, opened
-        // here with the same private mode as the surrounding cache, on a
-        // path that must not already exist.
+        // The helper never chooses the permissions of a cached release
+        // artifact, or touches it at all: punard opens it here, with the same
+        // private mode as the surrounding cache, on a path that must not
+        // already exist, and copies the helper's pipe into it.
         let staged = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -802,38 +802,11 @@ fn read_source(path: &Path, max_bytes: u64) -> Result<Vec<u8>, UpdateCheckError>
     read_bounded(path, max_bytes).map_err(UpdateCheckError::SourceUnavailable)
 }
 
+/// The channel's base URL. punard and the download helper read it through
+/// the same function (crate::fetch), so the helper refuses exactly the
+/// update URLs that are not beneath what punard reads here.
 fn read_repository_base_url(path: &Path, expected_uid: u32) -> Result<String, UpdateCheckError> {
-    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(i32::try_from(flags.bits()).expect("open flags fit libc::c_int"))
-        .open(path)
-        .map_err(|error| source_configuration(path, error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| source_configuration(path, error.to_string()))?;
-    if !metadata.file_type().is_file() {
-        return Err(source_configuration(path, "it is not a regular file"));
-    }
-    if metadata.uid() != expected_uid || metadata.mode() & 0o022 != 0 {
-        return Err(source_configuration(
-            path,
-            format!("it must be owned by uid {expected_uid} and not be group/other writable"),
-        ));
-    }
-    let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut file)
-        .take(REPOSITORY_URL_MAX + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| source_configuration(path, error.to_string()))?;
-    if bytes.len() as u64 > REPOSITORY_URL_MAX {
-        return Err(source_configuration(path, "it exceeds 2048 bytes"));
-    }
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| source_configuration(path, "it is not UTF-8"))?;
-    let line = text.strip_suffix('\n').unwrap_or(text);
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    validate_repository_base_url(line).map_err(|reason| source_configuration(path, reason))
+    read_update_base(path, expected_uid).map_err(|reason| source_configuration(path, reason))
 }
 
 fn source_configuration(path: &Path, reason: impl Into<String>) -> UpdateCheckError {
@@ -842,13 +815,6 @@ fn source_configuration(path: &Path, reason: impl Into<String>) -> UpdateCheckEr
         path.display(),
         reason.into()
     ))
-}
-
-/// The base URL is held to the same rule the download helper applies to
-/// every update URL beneath it (crate::fetch), so a base punard accepts can
-/// never produce a URL the helper refuses.
-fn validate_repository_base_url(value: &str) -> Result<String, &'static str> {
-    validate_https_url(value)
 }
 
 fn read_cache(path: &Path, max_bytes: u64) -> Result<Vec<u8>, UpdateTrustError> {
@@ -904,6 +870,7 @@ fn ensure_private_parent(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fetch::validate_https_url;
     use ed25519_dalek::{Signer, SigningKey};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -925,7 +892,10 @@ mod tests {
     /// that fixture downloader; it prints the body on standard output.
     fn sources(root: &Path) -> UpdateCheckSources {
         let fetch_socket = root.join("fetch.sock");
-        crate::fetch::testing::spawn_helper(&fetch_socket, &root.join("curl"));
+        crate::fetch::testing::spawn_helper(
+            &fetch_socket,
+            crate::fetch::testing::config(&root.join("curl"), &root.join("update-repository.url")),
+        );
         UpdateCheckSources {
             repository_url_file: root.join("update-repository.url"),
             repository_url_owner_uid: rustix::process::geteuid().as_raw(),
@@ -1022,7 +992,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(
             &engine.sources.repository_url_file,
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o644),
         )
         .unwrap();
         // The document download takes 20 s on the boot clock.
@@ -1146,6 +1116,17 @@ mod tests {
         let curl = root.join("curl");
         fs::write(&curl, "#!/bin/sh\nprintf data\n").unwrap();
         fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        // The helper serves only URLs beneath the root-owned channel base.
+        fs::write(
+            &paths.repository_url_file,
+            "https://updates.example.test/\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            &paths.repository_url_file,
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         let engine = UpdateCheckEngine::new(paths);
         let destination = root.join("artifact.new");
         engine
@@ -1204,7 +1185,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(
             &engine.sources.repository_url_file,
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o644),
         )
         .unwrap();
         let log = root.join("curl-argv");
@@ -1238,7 +1219,7 @@ mod tests {
         let argv = fs::read_to_string(log).unwrap();
         assert!(argv.contains("--disable"));
         assert!(argv.contains("--proto\n=https"));
-        assert!(argv.contains("--max-redirs\n0"));
+        assert!(argv.contains("--location\n--max-redirs\n0"));
         assert!(argv.contains("--tlsv1.2"));
         assert!(
             argv.contains("https://updates.example.test/punar/stable/aarch64/uefi/channel.json\n")
@@ -1264,7 +1245,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(
             &engine.sources.repository_url_file,
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o644),
         )
         .unwrap();
 
@@ -1275,6 +1256,41 @@ mod tests {
         assert!(error.to_string().contains("only an https:// URL"));
         assert!(!engine.sources.cached_channel.exists());
         assert!(!engine.sources.cached_signature.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_base_the_download_helper_cannot_read_is_refused_before_any_download() {
+        // The helper runs as a dynamic user and re-reads the base itself, so
+        // a root-only file would fail every download on a permission error.
+        // punard refuses it up front and says why.
+        let root = root("https-unreadable-base");
+        let (engine, _) = fixture(&root);
+        fs::write(
+            &engine.sources.repository_url_file,
+            "https://updates.example.test/punar\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            &engine.sources.repository_url_file,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let ran = root.join("curl-ran");
+        let curl = root.join("curl");
+        fs::write(&curl, format!("#!/bin/sh\n: > '{}'\n", ran.display())).unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = engine
+            .check(UpdateChannel::Stable, "dev_00123", true)
+            .unwrap_err();
+        assert!(error.is_unreachable());
+        assert!(
+            error.to_string().contains("readable by others (mode 0644)"),
+            "{error}"
+        );
+        assert!(!ran.exists(), "no download was attempted");
+        assert!(!engine.sources.cached_channel.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1309,7 +1325,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(
             &engine.sources.repository_url_file,
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o644),
         )
         .unwrap();
         let oversized = root.join("oversized");
@@ -1344,10 +1360,10 @@ mod tests {
     #[test]
     fn repository_url_validation_rejects_ambiguous_and_unsafe_forms() {
         assert_eq!(
-            validate_repository_base_url("https://updates.example.test/releases-v1/").unwrap(),
+            validate_https_url("https://updates.example.test/releases-v1/").unwrap(),
             "https://updates.example.test/releases-v1"
         );
-        assert!(validate_repository_base_url("https://updates.example.test:8443").is_ok());
+        assert!(validate_https_url("https://updates.example.test:8443").is_ok());
         for invalid in [
             "http://updates.example.test",
             "https://user@updates.example.test",
@@ -1362,7 +1378,7 @@ mod tests {
             "https://updates.example.test\nhttps://other.example.test",
         ] {
             assert!(
-                validate_repository_base_url(invalid).is_err(),
+                validate_https_url(invalid).is_err(),
                 "unsafe URL was accepted: {invalid:?}"
             );
         }

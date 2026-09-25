@@ -889,9 +889,9 @@ impl AppManager {
         fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).map_err(backend_io)?;
         let outcome = (|| {
             let package = staging.join("package.deb");
-            // The helper writes into this one private descriptor and
-            // nothing else; the size and digest checks below decide whether
-            // what it wrote is the package the signed catalog pinned.
+            // punard copies what the helper sends into this private file,
+            // which the helper never holds; the size and digest checks below
+            // decide whether it is the package the signed catalog pinned.
             let staged = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -2925,7 +2925,10 @@ mod tests {
         .unwrap();
         fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
         let fetcher = dir.join("fetch.sock");
-        crate::fetch::testing::spawn_helper(&fetcher, &curl);
+        crate::fetch::testing::spawn_helper(
+            &fetcher,
+            crate::fetch::testing::config(&curl, &dir.join("no-update-channel")),
+        );
 
         let bsdtar = dir.join("bsdtar");
         fs::write(

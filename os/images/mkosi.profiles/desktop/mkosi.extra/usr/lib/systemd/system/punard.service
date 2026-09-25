@@ -37,6 +37,13 @@ IOAccounting=yes
 # /etc/localtime (the full sandbox profile is later-milestone work).
 # NoNewPrivileges is compatible with nft (root's own privileges, no setuid).
 NoNewPrivileges=yes
+# punard never runs a downloader: every download goes through the unprivileged
+# helper behind punar-fetch.socket. Making the downloaders inaccessible in
+# punard's mount namespace turns that from a code convention into a property
+# of the running daemon: an exec of either, by path or through PATH, from
+# punard or anything it starts, fails. check-release-image.sh A19 keeps this
+# line.
+InaccessiblePaths=-/usr/bin/curl -/usr/bin/wget
 PrivateTmp=yes
 ProtectHome=yes
 StandardOutput=journal

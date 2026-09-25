@@ -39,8 +39,9 @@
 #   11 device class is observed from Linux facts; the typed force seam
 #      exercises workstation/laptop/appliance and mutates no safety state
 #   12 downloads run in the unprivileged fetch helper: its socket listens
-#      root-only, its unit's exposure is at most 2.0, and punard's own binary
-#      does not name the downloader
+#      root-only, its unit's exposure is at most 2.0, punard's own binary
+#      names no downloader, and in punard's mount namespace the downloaders
+#      cannot be executed at all
 set -u
 
 RUN_DIR=/run/punar
@@ -279,8 +280,10 @@ done
 # a dynamic user with no capabilities, a read-only file system and no local
 # network. Asserted on the running machine, not the unit file: the socket
 # listens and only root can reach it, systemd's own exposure score for the
-# helper stays at or under 2.0, and the running punard's binary does not name
-# the downloader at all.
+# helper stays at or under 2.0, the running punard's binary names no
+# downloader, and punard could not run one if it tried, by path or through
+# PATH: in its mount namespace (/proc/PID/root) each downloader is systemd's
+# mode-0000 inaccessible node, which nothing can execute.
 check_eq "punar-fetch.socket listens" "active" \
     "$(systemctl is-active punar-fetch.socket 2>/dev/null)"
 check_eq "the fetch socket is root-only" "600 root:root" \
@@ -300,11 +303,23 @@ punard_pid="$(systemctl show -p MainPID --value punard.service 2>/dev/null)"
 if [ -z "${punard_pid}" ] || [ "${punard_pid}" = 0 ]; then
     note "FAIL punard has no main process to inspect"
     FAILED=1
-elif grep -a -q -F /usr/bin/curl "/proc/${punard_pid}/exe" 2>/dev/null; then
-    note "FAIL the running punard names the downloader; it must hand downloads to punar-fetch"
+elif grep -a -q -e /usr/bin/curl -e /usr/bin/wget "/proc/${punard_pid}/exe" 2>/dev/null; then
+    note "FAIL the running punard names a downloader; it must hand downloads to punar-fetch"
     FAILED=1
 else
-    note "ok   the running punard does not name the downloader"
+    note "ok   the running punard does not name a downloader"
+fi
+downloaders_seen=0
+for downloader in /usr/bin/curl /usr/bin/wget; do
+    [ -e "${downloader}" ] || continue
+    downloaders_seen=$((downloaders_seen + 1))
+    if [ -n "${punard_pid}" ] && [ "${punard_pid}" != 0 ]; then
+        check_eq "punard's namespace makes ${downloader} inaccessible (mode as punard sees it)" "0" \
+            "$(stat -L -c '%a' "/proc/${punard_pid}/root${downloader}" 2>/dev/null)"
+    fi
+done
+if [ "${downloaders_seen}" -eq 0 ]; then
+    note "ok   no downloader is installed for punard to reach"
 fi
 
 # --- verdict -----------------------------------------------------------------

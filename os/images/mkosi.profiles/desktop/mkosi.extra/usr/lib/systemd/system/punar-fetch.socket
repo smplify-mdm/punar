@@ -2,10 +2,11 @@
 #
 # punard is root and used to run the downloader itself for update-channel
 # metadata, release artifacts and catalog-pinned vendor packages. It no longer
-# runs one at all: it opens the file the bytes belong in, privately, and hands
-# that one descriptor over this socket to punar-fetch@.service, which runs with
-# no privilege and no writable file system. punard then verifies the signature
-# or digest of what arrived and alone moves it into place.
+# runs one at all: for each transfer it hands punar-fetch@.service, which runs
+# with no privilege and no writable file system, one end of a pipe over this
+# socket, and copies what arrives into a private file the helper never holds.
+# punard then verifies the signature or digest of that file and alone moves it
+# into place.
 #
 # Accept=yes: every download is its own short-lived instance that serves one
 # request and exits, so no process that parses network data outlives the
