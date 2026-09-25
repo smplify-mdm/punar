@@ -260,6 +260,13 @@ CTRL + ALT + TAB             Focus next monitor (SHIFT: previous)
 PUNAR + CTRL + T / G / A     This session's look: transparency / gaps / square lone window
 ```
 
+Not bound, on purpose: Omarchy's "file manager in the focused terminal's
+folder" (K125). Every foot window belongs to one server process, so the
+process tree cannot say which shell a window holds; Omarchy's helper takes
+the newest shell and opens the wrong folder from any other window. The
+precise answer is the shell reporting its folder (OSC 7), which arrives with
+WP-15's shell integration; the chord comes with it.
+
 ### Media, microphone and brightness (also on the lock screen)
 
 ```text

@@ -220,7 +220,11 @@ FAMILIES = [
     ("K121", ["Lock session"], ""),
     ("K122-K149", ["Open terminal", "Open browser", "Open files"],
      "third-party app and web-app chords: apps are opened from the command center, "
-     "and a person binds their own with WP-11's override format"),
+     "and a person binds their own with WP-11's override format. The file manager "
+     "in the focused terminal's folder (K125) waits for WP-15's shell integration: "
+     "every foot window belongs to one server process, so only the shell reporting "
+     "its folder (OSC 7) can say which folder a window is in, and guessing from the "
+     "process tree, as Omarchy's helper does, opens the newest shell's folder"),
     ("K150-K153", ["mac:Copy", "mac:Paste", "mac:Cut"],
      "off by default (punarctl keyboard clipboard-keys on); the clipboard manager is WP-04"),
     ("K154-K156", ["Volume up", "Volume down", "Toggle mute"], ""),
