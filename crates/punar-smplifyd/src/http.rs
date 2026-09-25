@@ -7,7 +7,7 @@
 //! there is no cookie jar, redirect follower, proxy discovery or connection
 //! pool to reason about.
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -168,9 +168,10 @@ impl Client {
 
     pub fn send(&self, request: &Request<'_>) -> Result<Response, HttpError> {
         let started = Instant::now();
-        let addrs = (request.url.host.as_str(), request.url.port)
-            .to_socket_addrs()
-            .map_err(|_| HttpError::Resolve)?;
+        let target = (request.url.host.clone(), request.url.port);
+        let addrs = resolve_within(self.remaining(started)?, move || {
+            target.to_socket_addrs().map(Iterator::collect)
+        })?;
         let mut tcp = None;
         for addr in addrs {
             let remaining = self.remaining(started)?;
@@ -227,6 +228,30 @@ impl Client {
             return Err(HttpError::Timeout);
         }
         Ok(self.budget - elapsed)
+    }
+}
+
+/// Resolve a name, waiting at most `within` for the answer. The system
+/// resolver has no deadline of its own (a cold lookup can take seconds, a
+/// broken one half a minute), and the agent serves one call at a time, so a
+/// lookup that outlives the request's budget would hold every call queued
+/// behind it past punard's wait. It runs on a thread of its own, which is
+/// left to finish when the request gives up on it.
+fn resolve_within(
+    within: Duration,
+    resolve: impl FnOnce() -> io::Result<Vec<SocketAddr>> + Send + 'static,
+) -> Result<Vec<SocketAddr>, HttpError> {
+    let (answer, answered) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("punar-smplifyd-resolve".to_string())
+        .spawn(move || {
+            let _ = answer.send(resolve());
+        })
+        .map_err(|_| HttpError::Resolve)?;
+    match answered.recv_timeout(within) {
+        Ok(Ok(addrs)) => Ok(addrs),
+        Ok(Err(_)) => Err(HttpError::Resolve),
+        Err(_) => Err(HttpError::Timeout),
     }
 }
 
@@ -428,6 +453,25 @@ mod tests {
             .expect("the request outlived ten budgets");
         assert!(matches!(result, Err(HttpError::Timeout)), "{result:?}");
         assert!(took < budget * 2, "{took:?}");
+    }
+
+    /// A name lookup is held to the request's budget like everything after
+    /// it: one the system resolver takes far longer to answer is given up on
+    /// when the budget ends, and one that answers in time is used.
+    #[test]
+    fn a_slow_name_lookup_is_given_up_on_at_the_budget() {
+        let budget = Duration::from_millis(300);
+        let started = Instant::now();
+        let slow = resolve_within(budget, || {
+            std::thread::sleep(Duration::from_secs(5));
+            Ok(vec!["127.0.0.1:443".parse().unwrap()])
+        });
+        assert!(matches!(slow, Err(HttpError::Timeout)), "{slow:?}");
+        assert!(started.elapsed() < budget * 2, "{:?}", started.elapsed());
+        let quick = resolve_within(budget, || Ok(vec!["127.0.0.1:443".parse().unwrap()]));
+        assert_eq!(quick.unwrap(), vec!["127.0.0.1:443".parse().unwrap()]);
+        let failed = resolve_within(budget, || Err(io::Error::other("no such name")));
+        assert!(matches!(failed, Err(HttpError::Resolve)), "{failed:?}");
     }
 
     #[test]

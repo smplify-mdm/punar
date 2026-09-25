@@ -1,6 +1,12 @@
 //! The root-only socket and the method table. One request per connection,
-//! sequentially: punard is the only client, it makes one call at a time, and
-//! nothing here long-polls inside a call.
+//! one connection at a time, in the order they arrive, and nothing here
+//! long-polls inside a call. punard is the only client, but it may have
+//! several calls in flight (a timer pass, a root administrator's reconcile
+//! and an enrollment overlap): those wait in the listen queue, and punard
+//! waits for each answer from the end of the calls ahead of it
+//! (`punard::enroll::AgentQueue`), so every call here must end within its
+//! own budget (`punar_smplifyd::budget`) for the ones behind it to be
+//! answered in time.
 //!
 //! Peer admission is `SO_PEERCRED` uid 0 — the mock deliberately relies on
 //! filesystem admission alone (milestone-5.md section 4.2); the real daemon
@@ -47,6 +53,11 @@ pub struct Daemon {
     pin_budget: Duration,
     /// [`PIN_RETRY_BASE`]; shorter in tests.
     pin_retry_base: Duration,
+    /// Time the tenant-key check-in takes past its own budget, as a slow
+    /// name lookup or a slow disk could make it: for the test that holds a
+    /// report to its whole budget even then.
+    #[cfg(test)]
+    pin_overrun: Duration,
     /// When the tenant-key check-in may next be tried after failing. Kept in
     /// memory only: a restart costs one early check-in, not a stale schedule
     /// on disk.
@@ -71,6 +82,8 @@ impl Daemon {
             register_budget: REGISTER_BUDGET,
             pin_budget: PIN_BUDGET,
             pin_retry_base: PIN_RETRY_BASE,
+            #[cfg(test)]
+            pin_overrun: Duration::ZERO,
             pin_retry: Mutex::new(None),
         }
     }
@@ -351,12 +364,14 @@ impl Daemon {
     /// method, and a report that Smplify kept but whose answer came later
     /// reads there as "unreachable": the inventory's hash and send time are
     /// not saved, the person's record of what left is not written, and the
-    /// whole inventory goes up again on every pass. So the status POST has
-    /// [`Daemon::call_budget`], and the tenant-key check-in rides only the
-    /// compliance report, which every sync pass sends first, with
-    /// [`Daemon::pin_budget`] of its own: `compliance.report` answers within
-    /// their sum (`punar_smplifyd::budget::call_budget`), which punard waits
-    /// out.
+    /// whole inventory goes up again on every pass. So the tenant-key
+    /// check-in rides only the compliance report, which every sync pass
+    /// sends first, with [`Daemon::pin_budget`] of its own, and the status
+    /// POST has [`Daemon::call_budget`], or less when that is all that is
+    /// left of the call's whole budget, measured from its start:
+    /// `compliance.report` answers within their sum, and `inventory.report`
+    /// within [`Daemon::call_budget`] (`punar_smplifyd::budget::call_budget`),
+    /// which punard waits out.
     fn report(
         &self,
         params: Option<&Value>,
@@ -364,6 +379,16 @@ impl Daemon {
         compose: fn(&str, &Value) -> Value,
         pin: PinTenantKey,
     ) -> Result<Value, CallError> {
+        // The whole call is held to its budget from here, whatever the
+        // check-in before the status POST took: a POST given a fresh budget
+        // after a check-in that overran its own could answer after punard
+        // stopped waiting, and a report Smplify stored would read as
+        // unreachable.
+        let started = Instant::now();
+        let whole = match pin {
+            PinTenantKey::First => self.pin_budget + self.call_budget,
+            PinTenantKey::Never => self.call_budget,
+        };
         let record = self.authorized(params)?;
         let payload = params.and_then(|p| p.get(key)).ok_or_else(|| {
             CallError::new(ErrorCode::InvalidParams, format!("{key} is required"))
@@ -371,8 +396,18 @@ impl Daemon {
         if pin == PinTenantKey::First {
             self.pin_tenant_key_if_missing(&record);
         }
+        let left = whole
+            .saturating_sub(started.elapsed())
+            .min(self.call_budget);
+        if left.is_zero() {
+            return Err(CallError::new(
+                ErrorCode::Internal,
+                "no time was left in this call to send the report; it is sent again on the \
+                 next pass",
+            ));
+        }
         let body = compose(&record.device_id, payload);
-        self.api(self.call_budget)?
+        self.api(left)?
             .status(&record.device_id, &body)
             .map_err(upstream_refusal)?;
         // What left, exactly as it left. punard keeps it as the person's
@@ -410,6 +445,8 @@ impl Daemon {
             api.checkin(&record.device_id, &record.os_identifier, &os_release)
                 .map_err(internal)
         });
+        #[cfg(test)]
+        std::thread::sleep(self.pin_overrun);
         let why = match answer {
             Ok(Some(key)) => {
                 let mut pinned = record.clone();
@@ -836,6 +873,62 @@ mod tests {
         assert_eq!(arrived().len(), 6, "the check-in is retried after its wait");
         report("compliance.report", "report");
         assert_eq!(arrived().len(), 7, "and waits longer after failing again");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A compliance report is held to its whole budget from the moment the
+    /// call begins, however long the tenant-key check-in before it took: a
+    /// check-in that overran its own budget (a slow name lookup, a slow
+    /// disk) leaves the status POST only what is left, and none at all once
+    /// the budget is spent, so the answer still reaches punard inside its
+    /// wait and a report Smplify stored is never read as unreachable.
+    #[test]
+    fn a_report_after_a_slow_check_in_keeps_to_its_whole_budget() {
+        const BUDGET: Duration = Duration::from_millis(600);
+        const PIN: Duration = Duration::from_millis(300);
+        const OVERRUN: Duration = Duration::from_millis(900);
+        let (d, root) = daemon();
+        let mut d = d
+            .with_call_budget(BUDGET)
+            .with_pin_budget(PIN, BUDGET * 100);
+        d.pin_overrun = OVERRUN;
+        let (port, arrivals) = silent_smplify();
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let (token, token_sha256) = identity::new_device_token().unwrap();
+        d.store
+            .save(
+                &Record {
+                    device_id: "dev-1".into(),
+                    server: format!("https://127.0.0.1:{port}"),
+                    org_id: "acme".into(),
+                    org_name: "Acme".into(),
+                    os_identifier: "punar".into(),
+                    not_after: None,
+                    tenant_public_key: None,
+                    token_sha256,
+                    enrolled_at: "2026-09-24T00:00:00Z".into(),
+                },
+                &Zeroizing::new(key.serialize_pem()),
+                &cert.pem(),
+                &cert.pem(),
+            )
+            .unwrap();
+        let d = Arc::new(d);
+        let (took, line) = answer_apart(
+            &d,
+            json!({"v": 1, "id": "r", "method": "compliance.report",
+                   "params": {"device_token": &*token, "report": {}}}),
+            (PIN + BUDGET + OVERRUN) * 10,
+        );
+        assert!(line.contains(r#""error""#), "{line}");
+        // The check-in and its overrun spent the whole budget: nothing is
+        // left for the POST, which is not sent.
+        assert!(took < PIN + OVERRUN + BUDGET / 2, "{took:?}");
+        assert_eq!(arrivals.lock().unwrap().len(), 1, "only the check-in");
         let _ = std::fs::remove_dir_all(root);
     }
 
