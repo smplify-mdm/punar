@@ -1968,6 +1968,16 @@ or path other than the confirmed target device. An installed system returns
   - A refusal exits 6, deliberately not 3.
   - Wallpapers are the shell's compiled catalog, asked over `ipc call
     wallpaper`. Exit 5 when the shell is not running.
+- **The parity gate:** `tests/desktop/terminal-parity-gate-test.sh` runs in
+  CI and reads the shell's source.
+  - Every process the shell starts must be `punarctl`, a fixed helper
+    scoped to the files that may run it and given its reason, or a
+    documented funnel whose callers pass literal punarctl argv.
+  - Every System Control view must name its verb in
+    `tests/desktop/system-control-verbs.json`, and punarctl's unit tests
+    prove each verb parses.
+  - A new direct tool call fails the gate until it is routed through
+    punarctl or earns an entry with a reason.
 - **App parity (client-side, no new method):** `punarctl app list` joins
   `apps.catalog {}` for category, trust tier and catalog version, and its
   `--json` is still `apps.list` verbatim. `app list --all` adds every

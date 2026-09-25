@@ -6592,6 +6592,32 @@ mod tests {
         assert_eq!(document["launcher_hidden_error"], "it could not be read");
     }
 
+    /// Terminal parity, rule 2: every System Control view's verb in
+    /// tests/desktop/system-control-verbs.json is a command this punarctl
+    /// accepts. The desktop gate checks the table covers every view; this
+    /// checks the table names real verbs.
+    #[test]
+    fn every_system_control_view_verb_parses() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/desktop/system-control-verbs.json"
+        ))
+        .unwrap();
+        let views = table["views"].as_object().unwrap();
+        assert!(views.len() >= 20, "the table lost its views");
+        for (view, entry) in views {
+            let Some(verb) = entry.get("verb").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let mut argv = vec!["punarctl".to_string()];
+            argv.extend(verb.iter().map(|word| word.as_str().unwrap().to_string()));
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "System Control's {view} view names `{}`, which punarctl does not accept",
+                argv.join(" ")
+            );
+        }
+    }
+
     /// `audit tail` defaults to 20 events (docs/api/ipc.md section 5.5).
     #[test]
     fn audit_tail_defaults_to_twenty() {
