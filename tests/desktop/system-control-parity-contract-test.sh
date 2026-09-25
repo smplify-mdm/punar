@@ -29,6 +29,10 @@
 #     punar-netd "arrives in Milestone 12" after it had, Network promised Wi-Fi
 #     from the same milestone, and Displays listed three registry backends
 #     when there were six.
+#   * The first fix still hard-coded "display configuration is not a
+#     registered capability" and "no punarctl verb exists" for Wi-Fi, and the
+#     Network view dropped its policy row, silently, when punar-netd did not
+#     answer.
 #
 # Each rule below is mechanical: it reads the source, not a screenshot.
 set -euo pipefail
@@ -156,16 +160,31 @@ for needle, what in [
     if needle in control:
         fail("posture", f"ControlData.qml reads {what} itself instead of device.posture")
 
-# 10. A view that has a verb draws what the verb said. The sentences that
-#     went stale are named so they cannot return, and each view must ask its
-#     own verb with the exact argv a terminal types.
-for stale, why in [
-    ("Milestone 12", "punar-netd shipped in Milestone 12; nothing may still say it is coming"),
-    ("three backends", "the registry's size is read from punarctl capabilities, not written down"),
-    ("arrives in Milestone", "a view says what exists now, from the verb that knows"),
+# 10. A view that has a verb draws what the verb said. Copy a person reads
+#     may not promise a milestone, count the registry, or say a capability
+#     does not exist: those are the sentences that went stale. Checked in
+#     every string literal outside comments, so a new "Milestone 13" or
+#     "seven backends" fails as the old ones did. Each view must ask its own
+#     verb with the exact argv a terminal types, and say so when it did not
+#     answer.
+code_lines = [
+    line for line in control.splitlines()
+    if not line.lstrip().startswith(("//", "/*", "*"))
+]
+literals = re.findall(r'"(?:[^"\\\n]|\\.)*"', "\n".join(code_lines))
+number_words = (r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+                r"twelve|dozen)")
+for pattern, why in [
+    (r"\bMilestone\s+\d+", "a view says what exists now, not which milestone it arrives in"),
+    (r"\barrives in (?:Milestone|M\d+)\b", "a view says what exists now, from the verb that knows"),
+    (number_words + r"\s+(?:registered\s+)?(?:backends?|capabilities)\b",
+     "the registry's size is read from punarctl capabilities, not written down"),
+    (r"\bis not a registered capability\b|\bno punarctl verb exists\b",
+     "whether a capability exists is the registry's answer, not a sentence"),
 ]:
-    if stale in control:
-        fail("stale copy", f"ControlData.qml still says {stale!r}: {why}")
+    for literal in literals:
+        if re.search(pattern, literal, re.I):
+            fail("stale copy", f"ControlData.qml says {literal[:90]!r}: {why}")
 for view, argv in [
     ("network", '["punarctl", "network", "status", "--json"]'),
     ("connections", '["punarctl", "privacy", "connections", "--json"]'),
@@ -178,6 +197,11 @@ for function, probe in [
     ("viewRelay", "relayProbe.payload"),
     ("viewNetwork", "networkProbe.payload"),
     ("displaysNote", "data.capabilityList"),
+    ("displaysNote", 'data.capabilityIds("display.")'),
+    ("viewNetwork", 'data.capabilityIds("wifi")'),
+    ("viewNetwork", "data.netdSilent(networkProbe"),
+    ("viewConnections", "data.netdSilent(connectionsProbe"),
+    ("viewRelay", "data.netdSilent(relayProbe"),
 ]:
     body = re.search(r"function " + function + r"\(.*?\n    }\n", control, re.S)
     if body is None:

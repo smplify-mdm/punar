@@ -1522,6 +1522,8 @@ Scope {
             });
         }
         // punar-netd's own answer, the one `punarctl network status` prints.
+        // When it has not answered, the row says so, in netd's words when it
+        // refused: a policy row that simply vanished would read as "fine".
         var status = data.obj(networkProbe.payload);
         var enforcement = status === null ? null : data.obj(status.enforcement);
         if (enforcement !== null) {
@@ -1532,19 +1534,33 @@ Scope {
                 v: state.toUpperCase() + " · " + data.str(enforcement, "reason", sessions + (sessions === 1 ? " managed session" : " managed sessions") + " in the kernel table"),
                 tone: state === "available" ? "ok" : "bad"
             });
+        } else {
+            var silent = data.netdSilent(networkProbe, "punarctl network status");
+            kv.push({
+                k: "Project network policy",
+                v: networkProbe.answered ? "UNKNOWN · " + silent.what + " · " + silent.why : silent.what,
+                tone: networkProbe.answered ? "bad" : ""
+            });
         }
         kv.push({
             k: "Source",
             v: "/proc/net/route · /sys/class/net · punarctl network status — read once per open"
         });
+        // Whether a Wi-Fi capability exists is the registry's answer, not a
+        // sentence here: the row changes the day one is registered.
+        var wifi = data.capabilityIds("wifi");
         return {
             title: "Network",
             sub: "System · kernel routing table and punar-netd · read-only",
             kv: kv,
-            dashed: {
+            dashed: wifi.length > 0 ? {
                 what: "Wi-Fi networks, joining and leaving",
-                why: "iwd associates with Wi-Fi and systemd-networkd addresses every link; both ship and run. Choosing a network is not yet something Punar does on a person's behalf: only root may drive iwd, and no punarctl verb exists to list or join a network, so this row offers nothing it could not carry out.",
-                when_: "Planned · a Wi-Fi verb, and this row with it"
+                why: "punard's registry carries " + wifi.join(", ") + ". This panel does not drive " + (wifi.length === 1 ? "it" : "them") + " yet, so it offers nothing here it could not carry out.",
+                when_: "Run `punarctl capabilities` for the same list"
+            } : {
+                what: "Wi-Fi networks, joining and leaving",
+                why: data.capabilityList.length === 0 ? "iwd associates with Wi-Fi and systemd-networkd addresses every link; both ship and run. punarctl capabilities has not answered, so this row does not say whether Punar can choose a network for you." : "iwd associates with Wi-Fi and systemd-networkd addresses every link; both ship and run. Choosing a network is not something punard offers: its registry carries no Wi-Fi capability, so this row offers nothing it could not carry out.",
+                when_: "Run `punarctl capabilities` for the registry's own list"
             },
             note: "System Control shows what the kernel and punar-netd report. It does not start a network service in order to have something to draw, and it will not render a toggle that no capability backs."
         };
@@ -1577,18 +1593,35 @@ Scope {
 
     // Why Displays is read-only, in the registry's own words: the list is
     // `punarctl capabilities`, not a sentence that goes stale when a backend
-    // is added.
+    // is added, and whether display configuration is one of them is read
+    // from the same list.
     function displaysNote(): string {
         var caps = data.capabilityList;
         if (caps.length === 0)
-            return "Read-only: display configuration is not a registered capability, and punarctl capabilities has not answered, so this panel names no backends it did not read.";
+            return "Read-only: punarctl capabilities has not answered, so this panel names no backends it did not read and offers no setting.";
         var ids = [];
         for (var i = 0; i < caps.length; i++) {
             var id = data.str(caps[i], "capability", "");
             if (id !== "")
                 ids.push(id);
         }
-        return "Read-only, and here is the reason: display configuration is not a registered capability. punard's registry carries " + ids.length + (ids.length === 1 ? " backend — " : " backends — ") + ids.join(", ") + " — and this panel does not write a setting the control plane does not own.";
+        var display = data.capabilityIds("display.");
+        if (display.length > 0)
+            return "Read-only here: punard's registry carries " + display.join(", ") + ", and this panel does not drive " + (display.length === 1 ? "it" : "them") + " yet. Run `punarctl capabilities` for the same list.";
+        return "Read-only, and here is the reason: no display capability is registered. punard's registry carries " + ids.length + (ids.length === 1 ? " backend — " : " backends — ") + ids.join(", ") + " — and this panel does not write a setting the control plane does not own.";
+    }
+
+    // The registered capability ids that contain `part`, from
+    // `punarctl capabilities`: empty until it has answered.
+    function capabilityIds(part: string): var {
+        var found = [];
+        var caps = data.capabilityList;
+        for (var i = 0; i < caps.length; i++) {
+            var id = data.str(caps[i], "capability", "");
+            if (id !== "" && id.indexOf(part) !== -1)
+                found.push(id);
+        }
+        return found;
     }
 
     function viewAudio(): var {
