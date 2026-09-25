@@ -2,7 +2,22 @@
 # token created by the completed onboarding transaction; after it is consumed,
 # every login takes the ordinary password path. There is no null-password mode.
 auth      [success=done default=ignore]  pam_exec.so quiet seteuid /usr/bin/punar-onboardd first-login
-auth      required                      pam_unix.so
+# REQUISITE, NOT REQUIRED: a wrong password ends the stack here. `required`
+# records the failure and runs the remaining auth lines anyway, which hands a
+# MISTYPED password to pam_gnome_keyring below. Where that line can reach the
+# person's keyring daemon at auth time, it then creates a login keyring that
+# does not exist yet under the typo. Measured in a container: run as the
+# person, from inside their session, a failed sign-in left an encrypted
+# login.keyring behind. Run as root without a runtime directory, as greetd's
+# worker authenticates before any session exists, the typo reached no daemon
+# (pam_gnome_keyring only keeps the password until session open, and a failed
+# auth never gets there), so no greeter sign-in has been shown to do this.
+# Whether the typo is harmless then rests on where the stack runs, and
+# `requisite` takes that out of it: no line after a refused password ever
+# sees it. Release-image policy A21 holds this line to `requisite`, and the
+# desktop gate proves a wrong password leaves no keyring (surfaces-check.sh
+# group 8k).
+auth      requisite                     pam_unix.so
 # UNLOCK THE LOGIN KEYRING WITH THE PASSWORD THAT JUST UNLOCKED THE MACHINE.
 # Without this line gnome-keyring asks for a SECOND password moments after the
 # first, which is both worse than the problem it solves and the thing every

@@ -18,6 +18,7 @@ members = [
     "crates/punar-reauth",
     "crates/punar-recovery",
     "crates/punar-secrets",
+    "crates/punar-signin-probe",
     "crates/punar-smplifyd",
     "crates/punar-workspace",
     "crates/punarctl",

@@ -2037,69 +2037,173 @@ check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state 
 # pam_gnome_keyring, which unlocks the login keyring with it or creates it
 # encrypted under it.
 #
-# WHAT RUNS. This image's session autologins, so no sign-in ever ran a
-# password through PAM. Where pamtester is installed (the Debian lanes' dev
-# profile) the gate drives the sign-in stack itself: `pamtester greetd`
-# authenticates and opens a session as this user with the password, through
-# every line of etc/pam.d/greetd that does not need root, with the session's
-# keyring daemon already running, as it is at a real sign-in. Remove the
-# pam_gnome_keyring auth line and no keyring appears, which fails below.
-# pamtester is not packaged for Arch, so that lane falls back to the one step
-# the module performs, the daemon's unlock-or-create with the password
-# (`gnome-keyring-daemon --unlock`), and says so; release gate A21 checks the
-# PAM lines themselves on every lane. The classifier is proven on both formats
-# first, so a check that could not tell them apart fails instead of passing,
-# and every keyring on disk is classified, not only the login one: a second
-# collection created with an empty password is the same leak.
+# WHAT RUNS. This image's session autologins, and greetd's initial_session
+# skips the whole auth stack, so no sign-in ever ran a password through PAM.
+# The gate signs this account in itself with punar-signin-probe, a harness the
+# development image carries and release-image policy A5 refuses anywhere else:
+# the whole of etc/pam.d/greetd, authenticate through session close, with the
+# password on stdin and the session's keyring daemon already running. Every
+# lane runs that same stack. None stands in for it with the daemon's own
+# `--unlock` any more, which proved the daemon rather than the sign-in, and a
+# lane without the probe fails instead of falling back. Remove the
+# pam_gnome_keyring auth line and no keyring appears, which fails below;
+# release gate A21 checks the PAM lines as well. A mistyped password goes
+# through the stack first and must create no keyring.
+#
+# WHAT IT DOES NOT PROVE. The probe runs the stack as this user, from inside
+# the session; greetd runs it as root, before the session exists. So here
+# pam_unix checks the password through the setuid helper unix_chkpwd, which
+# works only because this account's hash is in /etc/shadow (a userdb account
+# would fail, as the lock screen once did), and pam_gnome_keyring finds the
+# session's daemon at auth, through XDG_RUNTIME_DIR, and unlocks there. Under
+# greetd its auth line finds no daemon and only keeps the password, and its
+# session line hands it over once pam_systemd has named the runtime
+# directory. Both end in the daemon's one login unlock, which is what decides
+# the keyring's format and mode, and that is what this group proves. What it
+# cannot see is greetd's own hand-over at session open: a sign-in whose
+# password never reached the daemon would leave no login keyring, and this
+# probe would still make one. Proving that needs a root sign-in with logind,
+# which this user-session check cannot start. Measured in a container: run as
+# root without a runtime directory, as greetd's worker is, a mistyped
+# password reaches no daemon even under `auth required pam_unix.so`; run as
+# the user, it did, and created a login keyring under the typo, which is
+# what the negative leg below catches.
+#
+# AN ACCOUNT WITH NO LOGIN KEYRING YET, OR A FAIL. The negative leg proves
+# something only where no login keyring exists: a wrong password cannot
+# unlock one that does, so it changes nothing whether or not it reached the
+# daemon, and the leg would pass under the old `required` stack. So a login
+# keyring already here fails the group rather than letting it pass without
+# proving anything: a second run of this check in one boot does (the first
+# run's sign-in made it), and so would anything that made one before the
+# sign-in. Setting the file aside does not help: the daemon keeps the
+# collection it loaded, so, measured in a container, neither the typo nor the
+# correct password then wrote anything. With none before, and none after the
+# typo, the encrypted login keyring checked below is the one this run's
+# correct password created.
+#
+# WAITING FOR THE WRITE, NOT FOR THE NAME. gnome-keyring reserves a new
+# keyring's name by creating the file EMPTY (O_CREAT|O_EXCL, mode 600), then
+# writes the keyring to a temporary file and renames it over the name. A file
+# that merely exists may still be that reservation: the Arch lane read one,
+# found no format in it, and failed a login keyring that was encrypted a
+# moment later. So the wait is for every keyring in the directory to be
+# non-empty, which after the rename means written, and the classifier names an
+# empty file `empty`, which fails like every answer but `encrypted`.
+#
+# The classifier is proven on both formats first, so a check that could not
+# tell them apart fails instead of passing, and every keyring on disk is
+# classified, not only the login one: a second collection created with an
+# empty password is the same leak. tests/desktop/keyring-format-test.sh holds
+# both functions to real gnome-keyring files.
 keyring_format() {
-    if [ ! -f "$1" ]; then
+    if [ ! -e "$1" ]; then
         echo absent
-        return
+    elif [ ! -f "$1" ]; then
+        echo unknown
+    elif [ ! -s "$1" ]; then
+        echo empty
+    else
+        # The binary format's 16-byte magic, then version 0.0 with AES and
+        # MD5, the only one gnome-keyring writes or reads; or the textual
+        # format's first group.
+        case "$(od -An -tx1 -N20 "$1" 2>/dev/null | tr -d ' \n')" in
+            476e6f6d654b657972696e670a0d000a00000000) echo encrypted ;;
+            5b6b657972696e675d*) echo plaintext ;;
+            *) echo unknown ;;
+        esac
     fi
-    case "$(head -c 12 "$1" 2>/dev/null)" in
-        GnomeKeyring) echo encrypted ;;
-        "[keyring]"*) echo plaintext ;;
-        *) echo unknown ;;
-    esac
 }
+
+# Whether every keyring in directory $1 has been written: none is still the
+# empty reservation gnome-keyring makes before it writes a keyring.
+keyrings_written() {
+    for kw_file in "$1"/*.keyring; do
+        [ -f "${kw_file}" ] || continue
+        [ -s "${kw_file}" ] || return 1
+    done
+    return 0
+}
+
+# What a keyring that is not encrypted holds, for a FAIL line: its size and
+# first twenty bytes, which are format markers, never a secret.
+keyring_evidence() {
+    printf 'size %s bytes, begins %s' \
+        "$(stat -c '%s' "$1" 2>/dev/null || echo -)" \
+        "$(od -An -tx1 -N20 "$1" 2>/dev/null | tr -d ' \n')"
+}
+
 keyring_fixtures="$(mktemp -d)"
 printf '[keyring]\ndisplay-name=login\nctime=0\n' > "${keyring_fixtures}/plain.keyring"
-printf 'GnomeKeyring\n\r\000\n\000\001\000\000' > "${keyring_fixtures}/sealed.keyring"
+printf 'GnomeKeyring\n\r\000\n\000\000\000\000\000\000\000\005login' \
+    > "${keyring_fixtures}/sealed.keyring"
+: > "${keyring_fixtures}/reserved.keyring"
 check_eq "the keyring check reads a plaintext keyring as plaintext" "plaintext" \
     "$(keyring_format "${keyring_fixtures}/plain.keyring")"
 check_eq "the keyring check reads an encrypted keyring as encrypted" "encrypted" \
     "$(keyring_format "${keyring_fixtures}/sealed.keyring")"
+check_eq "the keyring check reads a reserved, unwritten keyring as empty" "empty" \
+    "$(keyring_format "${keyring_fixtures}/reserved.keyring")"
 rm -rf "${keyring_fixtures}"
 
 keyring_dir="${HOME:-/home/$(id -un)}/.local/share/keyrings"
 login_keyring="${keyring_dir}/login.keyring"
-if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+signin_probe=/usr/bin/punar-signin-probe
+if ! command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    note "FAIL gnome-keyring-daemon is not installed, so no login keyring exists to hold a secret"
+    FAILED=1
+elif [ ! -x "${signin_probe}" ]; then
+    note "FAIL ${signin_probe} is not on this image, so no password went through the greetd sign-in stack"
+    FAILED=1
+else
     keyring_bus="unix:path=${XDG_RUNTIME_DIR}/bus"
-    if command -v pamtester >/dev/null 2>&1; then
-        keyring_route="the greetd sign-in stack (pamtester)"
-        # The session's daemon, running and locked, as D-Bus activation
-        # leaves it; the stack's auth line finds it and unlocks it.
-        DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
-            timeout 20 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 || true
-        pam_result=0
-        printf '%s\n' "${lock_password}" \
-            | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
-                timeout 30 pamtester greetd "$(id -un)" authenticate open_session close_session \
-                >/dev/null 2>&1 || pam_result=$?
-        check_eq "the greetd sign-in stack accepts the password (pamtester exit)" "0" "${pam_result}"
-    else
-        keyring_route="gnome-keyring's own unlock; pamtester is not on this image"
-        printf '%s' "${lock_password}" \
-            | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
-                timeout 20 gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1 || true
-    fi
+    # The session's daemon, running and locked, as D-Bus activation leaves
+    # it; the stack's auth line finds it and unlocks the login keyring, or
+    # creates it under the password.
+    DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+        timeout 20 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 || true
+    login_before="$(keyring_format "${login_keyring}")"
+    check_eq "no login keyring before the sign-in, so a mistyped password can show whether it makes one (a second run in one boot fails here)" \
+        "absent" "${login_before}"
+    # NEGATIVE LEG FIRST: a mistyped password is refused, and creates no
+    # login keyring. Under `auth required pam_unix.so` the stack ran on into
+    # pam_gnome_keyring with the typo, which created one under whatever had
+    # been typed, and a check of the format alone would have passed it. The
+    # daemon answers the stack before the stack returns, so a keyring the typo
+    # made is on disk by the time the probe exits.
+    login_sum_before="$(sha256sum "${login_keyring}" 2>/dev/null | awk '{print $1}')"
+    typo_result=0
+    printf '%s\n' "${lock_wrong}" \
+        | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+            timeout 30 "${signin_probe}" greetd "$(id -un)" >/dev/null 2>&1 \
+        || typo_result=$?
+    check_eq "the greetd sign-in stack refuses a mistyped password (sign-in probe exit)" \
+        "1" "${typo_result}"
+    check_eq "a mistyped password creates no login keyring and changes none (format, digest)" \
+        "${login_before} ${login_sum_before:-none}" \
+        "$(keyring_format "${login_keyring}") $(sha256sum "${login_keyring}" 2>/dev/null | awk '{print $1}' | grep . || echo none)"
+    signin_result=0
+    signin_errors="$(printf '%s\n' "${lock_password}" \
+        | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+            timeout 30 "${signin_probe}" greetd "$(id -un)" 2>&1 >/dev/null)" \
+        || signin_result=$?
+    # One line, so the report's FAIL line carries all of it.
+    signin_errors="$(printf '%s' "${signin_errors}" | tr '\n' ' ')"
+    check_eq "the greetd sign-in stack accepts the password (sign-in probe exit${signin_errors:+: ${signin_errors}})" \
+        "0" "${signin_result}"
     keyring_waited=0
-    while [ "${keyring_waited}" -lt 10 ] && [ ! -f "${login_keyring}" ]; do
+    while [ "${keyring_waited}" -lt 30 ] \
+            && { [ ! -s "${login_keyring}" ] || ! keyrings_written "${keyring_dir}"; }; do
         sleep 1
         keyring_waited=$((keyring_waited + 1))
     done
-    check_eq "after the password went through ${keyring_route}, the login keyring on disk is" \
-        "encrypted" "$(keyring_format "${login_keyring}")"
+    login_format="$(keyring_format "${login_keyring}")"
+    if [ "${login_format}" = encrypted ]; then
+        note "ok   the password sign-in through the greetd stack left the login keyring encrypted (it was ${login_before} before; written within ${keyring_waited}s)"
+    else
+        note "FAIL the password sign-in through the greetd stack did not leave an encrypted login keyring (expected 'encrypted', got '${login_format}'; it was ${login_before} before; waited ${keyring_waited}s; $(keyring_evidence "${login_keyring}"))"
+        FAILED=1
+    fi
     if [ -f "${login_keyring}" ]; then
         check_eq "the login keyring is readable only by its owner (mode)" "600" \
             "$(stat -c '%a' "${login_keyring}" 2>/dev/null)"
@@ -2107,9 +2211,10 @@ if command -v gnome-keyring-daemon >/dev/null 2>&1; then
     keyring_plain=""
     for keyring_file in "${keyring_dir}"/*.keyring; do
         [ -f "${keyring_file}" ] || continue
-        case "$(keyring_format "${keyring_file}")" in
+        keyring_class="$(keyring_format "${keyring_file}")"
+        case "${keyring_class}" in
             encrypted) ;;
-            *) keyring_plain="${keyring_plain} ${keyring_file##*/}" ;;
+            *) keyring_plain="${keyring_plain} ${keyring_file##*/} (${keyring_class})" ;;
         esac
     done
     if [ -n "${keyring_plain}" ]; then
@@ -2118,9 +2223,6 @@ if command -v gnome-keyring-daemon >/dev/null 2>&1; then
     else
         note "ok   every keyring on disk is encrypted"
     fi
-else
-    note "FAIL gnome-keyring-daemon is not installed, so no login keyring exists to hold a secret"
-    FAILED=1
 fi
 
 # --- group 8d: the lock's frosted glass samples the wallpaper ---------------

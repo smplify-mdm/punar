@@ -14,6 +14,7 @@
 //! such as `removable` and `ownership` are punard's to judge, so they travel
 //! in `document` untouched.
 use std::path::Path;
+use std::time::Instant;
 
 use punar_common::ipc::organization_name;
 use punar_smplifyd::budget::DISCOVERY_BUDGET;
@@ -51,6 +52,9 @@ pub fn domain_syntax_ok(domain: &str) -> bool {
 }
 
 pub fn discover(override_dir: &Path, domain: &str) -> Result<Organization, CallError> {
+    // The call's whole budget, fixed at its start: building the client
+    // below reads the system's roots, and that is spent from it too.
+    let deadline = Instant::now() + DISCOVERY_BUDGET;
     let domain = domain.trim().to_ascii_lowercase();
     if !domain_syntax_ok(&domain) {
         return Err(CallError::new(
@@ -70,7 +74,7 @@ pub fn discover(override_dir: &Path, domain: &str) -> Result<Organization, CallE
     }
     let url = parse_https_url(&format!("https://{domain}{WELL_KNOWN_PATH}"))
         .map_err(|_| CallError::new(ErrorCode::InvalidParams, "domain cannot form a URL"))?;
-    let client = Client::new(None, DISCOVERY_BUDGET)
+    let client = Client::new(None, deadline)
         .map_err(|_| CallError::new(ErrorCode::Internal, "TLS is unavailable"))?;
     let response = client
         .send(&Request {

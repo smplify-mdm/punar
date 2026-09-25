@@ -284,6 +284,19 @@ jobs:
       - name: Validate governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh
 
+      # M11's two-way context-separation check, with the check's own helpers:
+      # a probe counts only in Local Storage, never through the URL a session
+      # file recorded, and Chromium is closed through its browser process so
+      # its storage service commits instead of being signalled away.
+      - name: Validate the M11 storage probe and browser shutdown
+        run: ./tests/desktop/m11-storage-probe-test.sh
+
+      # The desktop gate's keyring classifier (surfaces-check.sh group 8k)
+      # against files gnome-keyring itself wrote: encrypted, plaintext, and
+      # the empty reservation it makes before writing a new keyring.
+      - name: Validate the keyring format classifier
+        run: ./tests/desktop/keyring-format-test.sh
+
       # The durable documents are what the next session starts from, so a
       # countable claim going quietly false in one of them is a defect, not
       # bookkeeping. Only values with a single unambiguous source in the tree
@@ -417,6 +430,8 @@ jobs:
             tests/desktop/qml-inline-component-depth-test.sh \
             tests/desktop/qml-url-surface-import-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
+            tests/desktop/m11-storage-probe-test.sh \
+            tests/desktop/keyring-format-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \

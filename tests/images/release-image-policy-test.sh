@@ -422,6 +422,11 @@ mutate_a5_timer_dropin() {
     mkdir -p "${CASE}/usr/lib/systemd/system/punard-reconcile.timer.d"
     : > "${CASE}/usr/lib/systemd/system/punard-reconcile.timer.d/10-dev-stoppable.conf"
 }
+# The sign-in harness the development image carries for the keyring gate.
+mutate_a5_signin_probe() {
+    mkdir -p "${CASE}/usr/bin"
+    : > "${CASE}/usr/bin/punar-signin-probe"
+}
 mutate_a6() {
     ln -s ../punar-idle-ram.service \
         "${CASE}/usr/lib/systemd/system/multi-user.target.wants/innocent.service"
@@ -668,6 +673,13 @@ mutate_a21_order() {
     mv "${CASE}/greetd.reordered" "${CASE}/etc/pam.d/greetd"
 }
 mutate_a21_module() { rm -f "${CASE}/usr/lib/security/pam_gnome_keyring.so"; }
+# pam_unix back to `required`: a mistyped password would run on into the
+# keyring line and create the login keyring under the typo.
+mutate_a21_required() {
+    sed -i 's/^auth\([[:space:]]\{1,\}\)requisite\([[:space:]]\{1,\}pam_unix\.so\)/auth\1required \2/' \
+        "${CASE}/etc/pam.d/greetd"
+    grep -Eq '^auth[[:space:]]+required[[:space:]]+pam_unix\.so' "${CASE}/etc/pam.d/greetd"
+}
 mutate_a21_missing() { rm -f "${CASE}/etc/pam.d/greetd"; }
 
 # A22: brightnessctl's own rule (chgrp video + g+w), a world-writable keyboard
@@ -865,6 +877,7 @@ expect_fail A4 mutate_a4
 expect_fail A5 mutate_a5
 expect_fail A5 mutate_a5_mock_dropin
 expect_fail A5 mutate_a5_timer_dropin
+expect_fail A5 mutate_a5_signin_probe
 expect_fail A6 mutate_a6
 expect_fail A7 mutate_a7
 expect_fail A13 mutate_a13
@@ -933,6 +946,7 @@ expect_fail A21 mutate_a21_auth
 expect_fail A21 mutate_a21_session
 expect_fail A21 mutate_a21_order
 expect_fail A21 mutate_a21_module
+expect_fail A21 mutate_a21_required
 expect_fail A21 mutate_a21_missing
 expect_fail A22 mutate_a22_brightnessctl
 expect_fail A22 mutate_a22_mode
