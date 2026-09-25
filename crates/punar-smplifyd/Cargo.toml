@@ -19,6 +19,7 @@ rustix = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { version = "1", features = ["std"] }
 rustls-platform-verifier = { workspace = true }
+sd-listen-fds = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

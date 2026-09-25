@@ -47,6 +47,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_units;
 pub mod agentd;
 pub mod aipolicy;
 pub mod approvals;

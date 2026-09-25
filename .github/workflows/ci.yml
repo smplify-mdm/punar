@@ -377,6 +377,7 @@ jobs:
             tests/images/bubblewrap-security-contract-test.sh \
             tests/images/vendor-sandbox-contract-test.sh \
             tests/images/clock-trust-contract-test.sh \
+            tests/images/smplifyd-activation-contract-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
             tests/performance/memory-attribution-contract-test.sh \
@@ -504,6 +505,12 @@ jobs:
       # every Punar service that is not a reviewed exclusion.
       - name: Test that the network and the session cannot set the clock
         run: ./tests/images/clock-trust-contract-test.sh
+
+      # A device that never enrolls runs no Smplify code: the agent is started
+      # by its socket on punard's first call, stays resident only while it
+      # holds an identity, and an administrator's stop is refused.
+      - name: Test that the Smplify agent is dormant until enrolled
+        run: ./tests/images/smplifyd-activation-contract-test.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all

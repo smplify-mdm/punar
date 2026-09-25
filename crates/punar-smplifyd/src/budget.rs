@@ -32,14 +32,29 @@ pub const DISCOVERY_BUDGET: Duration = Duration::from_millis(3500);
 /// rest.
 pub const REGISTER_BUDGET: Duration = Duration::from_secs(12);
 
+/// The calls the agent answers from this device alone, asking Smplify
+/// nothing: a file read, or a wipe. They cannot wait on a link, so punard
+/// reads a call of these that goes unanswered as the agent itself not
+/// answering (`punard::enroll::AgentFault::NotAnswering`), never as the
+/// network.
+pub const LOCAL_METHODS: [&str; 2] = ["identity.status", "enroll.unregister"];
+
+/// Whether the agent answers `method` without asking Smplify anything
+/// ([`LOCAL_METHODS`]).
+pub fn is_local(method: &str) -> bool {
+    LOCAL_METHODS.contains(&method)
+}
+
 /// The most one call of `method` may spend on Smplify, all of its requests
-/// together. Methods that ask Smplify nothing stay far inside
+/// together: nothing for the calls it answers locally ([`LOCAL_METHODS`]).
+/// Every other method that asks Smplify nothing stays far inside
 /// [`CALL_BUDGET`].
 pub fn call_budget(method: &str) -> Duration {
     match method {
         "org.discover" => DISCOVERY_BUDGET,
         "enroll.register" => REGISTER_BUDGET,
         "compliance.report" => PIN_BUDGET + CALL_BUDGET,
+        local if is_local(local) => Duration::ZERO,
         _ => CALL_BUDGET,
     }
 }

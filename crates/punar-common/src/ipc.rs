@@ -2177,6 +2177,52 @@ pub struct EnrollStatusResult {
     /// enrolled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<EnrollPolicyStatus>,
+    /// Whether the organization can manage this device right now: `active`,
+    /// or `interrupted` while the built-in agent cannot be used, with why and
+    /// since when (docs/api/ipc.md section 5.10). Present exactly when
+    /// enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management: Option<ManagementStatus>,
+    /// A Smplify identity an `enroll.stop` asked the agent to wipe and the
+    /// agent has not confirmed wiped: punard keeps the device token and asks
+    /// again on every pass (docs/api/ipc.md section 5.11). Absent when there
+    /// is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_release: Option<IdentityRelease>,
+}
+
+/// `enroll.status.management`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagementStatus {
+    /// `active` | `interrupted`.
+    pub state: String,
+    /// While interrupted: why, a closed code (`socket_missing`,
+    /// `connection_refused`, `permission_denied`, `connect_failed`,
+    /// `connection_reset`, `closed_without_answer`, `not_answering`,
+    /// `identity_missing`, `identity_mismatch`, `identity_unreadable`,
+    /// `unexpected_answer`, `token_missing`, `unexpected_listener`,
+    /// `unit_modified`, `units_unreadable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// While interrupted: since when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// `enroll.status.identity_release`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityRelease {
+    /// `pending`: punard's release record says to wipe it and the agent has
+    /// not confirmed. `kept`: punard holds a token for it and nothing records
+    /// the end of the enrollment it belonged to, so it is kept, never wiped
+    /// by punard (docs/api/ipc.md section 5.11).
+    pub state: String,
+    /// `pending`: why the last attempt did not confirm it, an agent fault
+    /// code (as in [`ManagementStatus::reason`]) or `refused` when the agent
+    /// answered with an error, absent before the first attempt. `kept`: why,
+    /// `enrollment_record_missing` or `release_record_unreadable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `enroll.status.policy`. Every reconcile pass asks the control plane for
@@ -2250,6 +2296,12 @@ pub struct LastQuery {
 pub struct EnrollStopResult {
     pub enrolled: bool,
     pub removed_policy_ids: Vec<String>,
+    /// Whether the agent confirmed it wiped the device's Smplify identity
+    /// (`released`), or has not yet (`pending`: punard keeps the device
+    /// token and asks again on every pass, docs/api/ipc.md section 5.11).
+    /// Absent from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_release: Option<String>,
 }
 
 /// `status` result (contract section 5.1).
@@ -3865,6 +3917,8 @@ mod tests {
             organization_owned: None,
             organization_view: None,
             policy: None,
+            management: None,
+            identity_release: None,
         };
         assert_eq!(
             serde_json::to_string(&result).unwrap(),
@@ -4044,6 +4098,45 @@ mod tests {
         assert!(ENROLL_START_CLIENT_TIMEOUT > ENROLL_START_PROCESS_TIMEOUT);
         assert!(RECONCILE_CLIENT_TIMEOUT > RECONCILE_PROCESS_TIMEOUT);
         assert!(RECONCILE_PROCESS_TIMEOUT > SERVER_PROCESS_TIMEOUT);
+    }
+
+    /// The contract states `enroll.start`'s processing bound in two places,
+    /// section 2 and section 5.9, and both are the constant punard enforces:
+    /// a raised bound once left section 5.9 saying 60 s while section 2 and
+    /// the code said 70 s.
+    #[test]
+    fn the_contract_states_the_enroll_start_bound_the_daemon_enforces() {
+        let contract = include_str!("../../../docs/api/ipc.md");
+        let bound = ENROLL_START_PROCESS_TIMEOUT.as_secs();
+        let section = |heading: &str| {
+            let start = contract.find(heading).expect(heading);
+            let rest = &contract[start + heading.len()..];
+            let end = ["\n## ", "\n### "]
+                .iter()
+                .filter_map(|next| rest.find(next))
+                .min()
+                .unwrap_or(rest.len());
+            &rest[..end]
+        };
+        assert!(
+            section("## 2. Framing").contains(&format!(
+                "`enroll.start` (section 5.9) is processed\n  under a **{bound} s** bound"
+            )),
+            "section 2 must state the {bound} s bound"
+        );
+        let start = section("### 5.9 `enroll.start` (M5)");
+        let stated: Vec<&str> = start
+            .match_indices("Processed under the ")
+            .map(|(at, found)| {
+                let tail = &start[at + found.len()..];
+                &tail[..tail.find(' ').unwrap()]
+            })
+            .collect();
+        assert_eq!(
+            stated,
+            [bound.to_string().as_str()],
+            "section 5.9 must state the same bound"
+        );
     }
 
     // -- M4 typed results (contract sections 5.1, 5.6–5.8) ------------------

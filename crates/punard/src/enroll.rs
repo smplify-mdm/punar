@@ -54,6 +54,27 @@ pub const DEFAULT_CONTROL_PLANE_SOCKET: &str = "/run/punar-smplifyd/api.sock";
 /// Environment override for the control-plane socket path.
 pub const CONTROL_PLANE_SOCKET_ENV: &str = "PUNAR_CONTROL_PLANE_SOCKET";
 
+/// The development control plane's binary. Only an image that ships it (the
+/// development and CI images; release check A5 refuses it on every release
+/// image) honours [`CONTROL_PLANE_SOCKET_ENV`] or `--control-plane-socket`:
+/// anywhere else an override is a way to point punard at a stand-in for the
+/// agent, and it is refused and audited.
+pub const DEVELOPMENT_CONTROL_PLANE: &str = "/usr/bin/punar-mock-smplify";
+
+/// The control-plane socket punard dials, from what it was asked for (the
+/// flag, else [`CONTROL_PLANE_SOCKET_ENV`]) and whether the image ships the
+/// development control plane: the built-in agent's own socket, unless an
+/// override is asked for on a development image. `true` when an override was
+/// asked for and refused.
+pub fn resolve_control_plane(requested: Option<PathBuf>, development: bool) -> (PathBuf, bool) {
+    let default = PathBuf::from(DEFAULT_CONTROL_PLANE_SOCKET);
+    match requested {
+        Some(path) if path == default || development => (path, false),
+        Some(_) => (default, true),
+        None => (default, false),
+    }
+}
+
 /// Production path of the shell summary file (ipc.md section 9).
 pub const DEFAULT_STATUS_FILE: &str = "/run/punar/status.json";
 
@@ -77,6 +98,27 @@ pub const REGISTER_CALL_TIMEOUT: Duration = Duration::from_secs(14);
 /// that pins it, with a budget of its own, and then posts the report.
 pub const COMPLIANCE_REPORT_CALL_TIMEOUT: Duration = Duration::from_secs(9);
 
+/// `identity.status`'s timeout: punard's liveness call on every pass while
+/// enrolled. The agent answers it from one file read and asks Smplify
+/// nothing (`punar_smplifyd::budget::LOCAL_METHODS`), so an answer that does
+/// not come in this long is an agent that is not answering: frozen, stopped
+/// with its socket held, or unable to start at all. Most of it is room for a
+/// cold start: the first call after a boot, a kill or a dormant exit has the
+/// socket start a sandboxed service first (namespaces, the state directory,
+/// its accounting), on hardware as slow as a Raspberry Pi under the boot's
+/// own load. A warm agent answers in milliseconds, and a restart after a
+/// kill waits at most `RestartMaxDelaySec=` (punar-smplifyd.service), well
+/// inside this. How long a cold start takes on the release image is
+/// unmeasured (docs/development/smplify-enrollment.md section 3.4); a pass
+/// never waits on it longer than this.
+pub const IDENTITY_STATUS_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The calls the built-in agent answers from this device alone, asking
+/// Smplify nothing (`punar_smplifyd::budget::LOCAL_METHODS`, which a test
+/// holds this to). No answer in time to one of these is the agent not
+/// answering, never the network ([`AgentFault::NotAnswering`]).
+pub const AGENT_LOCAL_METHODS: [&str; 2] = ["identity.status", "enroll.unregister"];
+
 /// How long punard waits for the answer to one call of `method`: at least a
 /// second longer than the built-in agent may spend on the organization's
 /// server for it (`punar_smplifyd::budget`), so an answer that exists
@@ -86,6 +128,7 @@ pub fn call_timeout(method: &str) -> Duration {
     match method {
         "enroll.register" => REGISTER_CALL_TIMEOUT,
         "compliance.report" => COMPLIANCE_REPORT_CALL_TIMEOUT,
+        "identity.status" => IDENTITY_STATUS_CALL_TIMEOUT,
         _ => CONTROL_PLANE_CALL_TIMEOUT,
     }
 }
@@ -93,7 +136,9 @@ pub fn call_timeout(method: &str) -> Duration {
 /// The most one reconcile pass spends on the control plane: every call it
 /// makes together, the time each waits behind calls already in flight
 /// included ([`CallBudget`], docs/api/ipc.md section 2). Its calls, in order,
-/// are `policy.fetch`, `compliance.report`, `inventory.report` and
+/// are the liveness call `identity.status`, which a working agent answers in
+/// milliseconds and which ends the pass's calls when it fails, then
+/// `policy.fetch`, `compliance.report`, `inventory.report` and
 /// `queries.pending`, which wait at most 5 + 9 + 5 + 5 = 24 s with nothing
 /// ahead of them; answering queries uses what is left, 5 s a question. A call
 /// that no longer fits is not sent (a report stays pending for the next
@@ -158,8 +203,7 @@ impl AgentQueue {
         let free = due.iter().map(|(_, at)| *at).max().unwrap_or(now).max(now);
         let deadline = free + own;
         fits(deadline - now)?;
-        let stream = UnixStream::connect(socket)
-            .map_err(|e| UpstreamError::transport("connect failed", &e))?;
+        let stream = UnixStream::connect(socket).map_err(|e| UpstreamError::connect(&e))?;
         let id = self
             .tickets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -212,14 +256,108 @@ pub const MAX_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
 // Control-plane client (NDJSON RPC, the ipc.md section 3 envelope verbatim)
 // ---------------------------------------------------------------------------
 
+/// Why the built-in agent could not be used, as punard sees it on the
+/// agent's own local socket (docs/api/ipc.md section 6, `enroll.agent`).
+/// None of these is the network: the agent is on this device, and it answers
+/// a network outage itself, with an error, inside its budget. While the
+/// device is enrolled every one of them means management is interrupted, and
+/// several are what an administrator's way of stopping the agent looks like
+/// from here: a masked, stopped socket (`socket_missing` or
+/// `connection_refused`), an agent killed mid-call (`connection_reset`,
+/// `closed_without_answer`), a frozen one (`not_answering`), a deleted
+/// identity (`identity_missing`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFault {
+    /// No socket at the path (`ENOENT`).
+    SocketMissing,
+    /// A socket nobody listens on (`ECONNREFUSED`): its unit stopped or
+    /// failed.
+    ConnectionRefused,
+    /// punard may not connect (`EACCES`, `EPERM`).
+    PermissionDenied,
+    /// Any other failure to connect.
+    ConnectFailed,
+    /// The connection broke during the call (`ECONNRESET`, `EPIPE`).
+    ConnectionReset,
+    /// The agent closed the connection without answering.
+    ClosedWithoutAnswer,
+    /// No answer in time to a call the agent answers without the network
+    /// (`punar_smplifyd::budget::LOCAL_METHODS`).
+    NotAnswering,
+    /// The agent says it holds no identity while this device is enrolled.
+    IdentityMissing,
+    /// The agent holds an identity this device's token is not for.
+    IdentityMismatch,
+    /// The agent cannot read its identity.
+    IdentityUnreadable,
+    /// An answer to a call the agent answers from this device alone that is
+    /// not the agent's: a malformed or oversized line, another protocol
+    /// version, neither result nor error, an error the agent never gives, or
+    /// a liveness answer that does not say this device's identity is the one
+    /// it holds. What answers is not the agent this device enrolled with.
+    UnexpectedAnswer,
+    /// punard holds no device token while the device is enrolled: it cannot
+    /// ask for, or report on, this device's identity at all.
+    TokenMissing,
+    /// The socket at the agent's path was not put there by systemd: its
+    /// listener's credentials name a process other than PID 1, so another
+    /// program bound its own socket where the agent's was.
+    UnexpectedListener,
+    /// A unit management depends on is not as the image ships it
+    /// ([`crate::agent_units`]): a drop-in, a mask, an override of its
+    /// fragment, or an agent process that is not the image's binary.
+    UnitModified,
+    /// systemd could not be asked about the units management depends on, or
+    /// its answer could not be read: the check fails closed, since what it
+    /// cannot see it cannot vouch for.
+    UnitsUnreadable,
+}
+
+impl AgentFault {
+    /// The closed code `enroll.status`, `status.json`'s neighbour
+    /// `punarctl enroll status` and the `enroll.agent` audit resource carry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentFault::SocketMissing => "socket_missing",
+            AgentFault::ConnectionRefused => "connection_refused",
+            AgentFault::PermissionDenied => "permission_denied",
+            AgentFault::ConnectFailed => "connect_failed",
+            AgentFault::ConnectionReset => "connection_reset",
+            AgentFault::ClosedWithoutAnswer => "closed_without_answer",
+            AgentFault::NotAnswering => "not_answering",
+            AgentFault::IdentityMissing => "identity_missing",
+            AgentFault::IdentityMismatch => "identity_mismatch",
+            AgentFault::IdentityUnreadable => "identity_unreadable",
+            AgentFault::UnexpectedAnswer => "unexpected_answer",
+            AgentFault::TokenMissing => "token_missing",
+            AgentFault::UnexpectedListener => "unexpected_listener",
+            AgentFault::UnitModified => "unit_modified",
+            AgentFault::UnitsUnreadable => "units_unreadable",
+        }
+    }
+
+    fn of_connect(error: &io::Error) -> AgentFault {
+        match error.kind() {
+            io::ErrorKind::NotFound => AgentFault::SocketMissing,
+            io::ErrorKind::ConnectionRefused => AgentFault::ConnectionRefused,
+            io::ErrorKind::PermissionDenied => AgentFault::PermissionDenied,
+            _ => AgentFault::ConnectFailed,
+        }
+    }
+}
+
 /// A control-plane call failure, already split the way the enrollment
 /// pipeline needs it: transport trouble (→ `upstream_unreachable`) vs. a
 /// structured refusal from the mock (`not_found`, `unauthorized`, …).
 #[derive(Debug)]
 pub enum UpstreamError {
-    /// Connect/send/receive failed or timed out, or the answer was not a
-    /// valid protocol frame. The message never contains payload bytes.
+    /// No answer in time to a call that may wait on the organization's
+    /// server, a call not sent because it did not fit its budget, or an
+    /// answer that was not a valid protocol frame. The message never
+    /// contains payload bytes.
     Unreachable(String),
+    /// The agent's own socket failed: see [`AgentFault`]. Never the network.
+    AgentUnavailable(AgentFault),
     /// The control plane answered with a structured error.
     Refused { code: String, message: String },
     /// The control plane answered with more than [`MAX_ANSWER_BYTES`]. It is
@@ -258,9 +396,87 @@ pub struct RecoveryEscrowOutcome {
 }
 
 impl UpstreamError {
-    fn transport(what: &str, err: &io::Error) -> UpstreamError {
-        UpstreamError::Unreachable(format!("{what} ({})", err.kind()))
+    /// An answer that is not a valid protocol frame. From a call the agent
+    /// answers without the network, only the agent could have written it,
+    /// and the agent never does: something else answers on its socket, or
+    /// the agent is broken ([`AgentFault::UnexpectedAnswer`]). From any
+    /// other call it stays what it always was.
+    fn malformed(method: &str, what: &str) -> UpstreamError {
+        if AGENT_LOCAL_METHODS.contains(&method) {
+            UpstreamError::AgentUnavailable(AgentFault::UnexpectedAnswer)
+        } else {
+            UpstreamError::Unreachable(what.to_string())
+        }
     }
+
+    /// A failure to connect to the agent's socket: always the agent's.
+    fn connect(err: &io::Error) -> UpstreamError {
+        UpstreamError::AgentUnavailable(AgentFault::of_connect(err))
+    }
+
+    /// A failure once connected. A timeout is the agent not answering when
+    /// the call needs no network, and may be the organization's server
+    /// otherwise; anything else broke the connection, which only the agent
+    /// can do.
+    fn exchange(method: &str, what: &str, err: &io::Error) -> UpstreamError {
+        match err.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+                if AGENT_LOCAL_METHODS.contains(&method) {
+                    UpstreamError::AgentUnavailable(AgentFault::NotAnswering)
+                } else {
+                    UpstreamError::Unreachable(format!("{what} ({})", err.kind()))
+                }
+            }
+            _ => UpstreamError::AgentUnavailable(AgentFault::ConnectionReset),
+        }
+    }
+}
+
+impl std::fmt::Display for UpstreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpstreamError::Unreachable(why) => write!(f, "{why}"),
+            UpstreamError::AgentUnavailable(fault) => {
+                write!(f, "the built-in agent is unavailable ({})", fault.as_str())
+            }
+            UpstreamError::Refused { code, message } => write!(f, "{code}: {message}"),
+            UpstreamError::TooLarge => write!(f, "the answer was larger than this device reads"),
+        }
+    }
+}
+
+/// Whether the listener behind a connected Unix stream socket was created by
+/// systemd: the kernel records the listening process's credentials when it
+/// calls `listen()`, and a connection reports them (`SO_PEERCRED`). A socket
+/// unit's listener is PID 1's, as root; a socket some other program bound
+/// names that program, whatever it later does, and no process can present
+/// PID 1's credentials but PID 1 (another PID namespace's PID 1 appears here
+/// under its PID in punard's).
+pub fn listener_is_systemds(stream: &UnixStream) -> bool {
+    rustix::net::sockopt::socket_peercred(stream)
+        .is_ok_and(|cred| cred.pid == rustix::process::Pid::INIT && cred.uid.is_root())
+}
+
+/// Whether the listener behind a connected Unix stream socket was bound at
+/// `path` itself. A connection reports the address its listener bound
+/// (`getpeername`), not the path that was dialled, so a symlink at `path`, or
+/// a bind mount over it or over its directory, that leads to another socket
+/// shows that socket's own address, even when systemd created that one too
+/// (measured on systemd 257: PID 1's credentials, another address).
+pub fn listener_bound_at(stream: &UnixStream, path: &Path) -> bool {
+    stream
+        .peer_addr()
+        .is_ok_and(|addr| addr.as_pathname() == Some(path))
+}
+
+/// What `identity.status` said, as far as punard's liveness check reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentIdentity {
+    /// Whether the agent holds an identity at all.
+    pub enrolled: bool,
+    /// Whether it is the one this device's token names; `None` when no token
+    /// was presented or the agent does not say.
+    pub token_matches: Option<bool>,
 }
 
 /// One-call-per-connection NDJSON client for the (mock) control plane.
@@ -271,6 +487,7 @@ pub struct ControlPlaneClient {
     socket: PathBuf,
     queue: Option<std::sync::Arc<AgentQueue>>,
     budget: Option<CallBudget>,
+    systemd_listener: bool,
 }
 
 impl ControlPlaneClient {
@@ -279,7 +496,23 @@ impl ControlPlaneClient {
             socket: socket.into(),
             queue: None,
             budget: None,
+            systemd_listener: false,
         }
+    }
+
+    /// Send nothing over a connection whose listener systemd did not create
+    /// ([`listener_is_systemds`]), or did not bind at the path dialled
+    /// ([`listener_bound_at`]): the built-in agent's socket is
+    /// `punar-smplifyd.socket`'s, so every connection to it names PID 1 as
+    /// the listener and the agent's path as its address. One that names
+    /// another process reached a socket some other program bound at the
+    /// agent's path, and one that names another address was led elsewhere
+    /// by a symlink or a bind mount ([`AgentFault::UnexpectedListener`]).
+    /// Only for the agent's own path: the development mock and tests bind
+    /// their sockets themselves.
+    pub fn requiring_systemd_listener(mut self, required: bool) -> Self {
+        self.systemd_listener = required;
+        self
     }
 
     /// Wait for each answer behind the calls `queue` knows are in flight.
@@ -321,11 +554,18 @@ impl ControlPlaneClient {
             }
             None => {
                 fits(own)?;
-                let stream = UnixStream::connect(&self.socket)
-                    .map_err(|e| UpstreamError::transport("connect failed", &e))?;
+                let stream =
+                    UnixStream::connect(&self.socket).map_err(|e| UpstreamError::connect(&e))?;
                 (stream, Instant::now() + own, None)
             }
         };
+        if self.systemd_listener
+            && !(listener_bound_at(&stream, &self.socket) && listener_is_systemds(&stream))
+        {
+            return Err(UpstreamError::AgentUnavailable(
+                AgentFault::UnexpectedListener,
+            ));
+        }
         let wait = deadline
             .saturating_duration_since(Instant::now())
             .max(Duration::from_millis(1));
@@ -345,7 +585,7 @@ impl ControlPlaneClient {
         let mut writer = &stream;
         writer
             .write_all(line.as_bytes())
-            .map_err(|e| UpstreamError::transport("send failed", &e))?;
+            .map_err(|e| UpstreamError::exchange(method, "send failed", &e))?;
 
         // One byte past the bound is read, so an answer that reaches it is
         // told apart from one that ends exactly there.
@@ -353,22 +593,30 @@ impl ControlPlaneClient {
         let mut response = String::new();
         let read = reader
             .read_line(&mut response)
-            .map_err(|e| UpstreamError::transport("no answer", &e))?;
+            .map_err(|e| UpstreamError::exchange(method, "no answer", &e))?;
         if read == 0 {
-            return Err(UpstreamError::Unreachable(
-                "the control plane closed the connection without answering".to_string(),
+            // The agent answers every call from root, so a connection closed
+            // before the answer is an agent that stopped mid-call.
+            return Err(UpstreamError::AgentUnavailable(
+                AgentFault::ClosedWithoutAnswer,
             ));
         }
         if read as u64 > MAX_ANSWER_BYTES {
+            if AGENT_LOCAL_METHODS.contains(&method) {
+                return Err(UpstreamError::AgentUnavailable(
+                    AgentFault::UnexpectedAnswer,
+                ));
+            }
             return Err(UpstreamError::TooLarge);
         }
 
         let mut value: Value = serde_json::from_str(response.trim_end()).map_err(|_| {
-            UpstreamError::Unreachable("the control plane answered with a malformed line".into())
+            UpstreamError::malformed(method, "the control plane answered with a malformed line")
         })?;
         if value.get("v") != Some(&json!(1)) {
-            return Err(UpstreamError::Unreachable(
-                "the control plane answered with an unsupported protocol version".into(),
+            return Err(UpstreamError::malformed(
+                method,
+                "the control plane answered with an unsupported protocol version",
             ));
         }
         if let Some(error) = value.get("error") {
@@ -391,8 +639,9 @@ impl ControlPlaneClient {
             });
         }
         value.get_mut("result").map(Value::take).ok_or_else(|| {
-            UpstreamError::Unreachable(
-                "the control plane answered with neither result nor error".into(),
+            UpstreamError::malformed(
+                method,
+                "the control plane answered with neither result nor error",
             )
         })
     }
@@ -442,16 +691,46 @@ impl ControlPlaneClient {
         Ok((Redacted::new(token.to_string()), attestation))
     }
 
-    /// `enroll.unregister {device_token}`: ask the control plane to forget
-    /// this device's identity. Best effort by contract — unenrollment is a
-    /// local restore that must succeed offline (SPEC section 55), so the
-    /// caller logs a failure and continues.
-    pub fn unregister(&self, token: &Redacted<String>) -> Result<(), UpstreamError> {
-        self.call(
-            "enroll.unregister",
-            json!({ "device_token": token.expose_secret() }),
-        )
-        .map(|_| ())
+    /// `identity.status {device_token?}`: punard's liveness call. The agent
+    /// answers it locally, from one file read; with the token, it also says
+    /// whether the identity it holds is this device's.
+    pub fn identity_status(
+        &self,
+        token: Option<&Redacted<String>>,
+    ) -> Result<AgentIdentity, UpstreamError> {
+        let params = match token {
+            Some(token) => json!({ "device_token": token.expose_secret() }),
+            None => json!({}),
+        };
+        let result = self.call("identity.status", params)?;
+        // The agent always says whether it holds an identity; an answer that
+        // does not is not the agent's.
+        let enrolled = result.get("enrolled").and_then(Value::as_bool).ok_or(
+            UpstreamError::AgentUnavailable(AgentFault::UnexpectedAnswer),
+        )?;
+        Ok(AgentIdentity {
+            enrolled,
+            token_matches: result.get("token_matches").and_then(Value::as_bool),
+        })
+    }
+
+    /// `enroll.unregister {device_token?, any_identity: true}`: ask the
+    /// agent to wipe whatever identity it holds. Local on the agent's side
+    /// (it asks Smplify nothing), so it works offline; until it is confirmed
+    /// punard keeps its record of the release and asks again on every pass
+    /// (docs/api/ipc.md section 5.11), so no key is ever left on disk with no
+    /// way to finish. `any_identity` because punard sends it only while it
+    /// holds no enrollment, under the enrollment guard: nothing the agent
+    /// holds then is one punard uses, and a registration punard never
+    /// received the answer to, or an identity that is not the token's, is
+    /// wiped as surely as the one the token names. The token goes along when
+    /// punard has one.
+    pub fn unregister(&self, token: Option<&Redacted<String>>) -> Result<(), UpstreamError> {
+        let mut params = json!({ "any_identity": true });
+        if let Some(token) = token {
+            params["device_token"] = Value::String(token.expose_secret().clone());
+        }
+        self.call("enroll.unregister", params).map(|_| ())
     }
 
     /// `policy.fetch {device_token}` → the policy-source envelopes (each
@@ -813,6 +1092,62 @@ pub struct Enrollment {
     /// on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_pending: Option<PendingPolicyChange>,
+    /// Management interrupted: the built-in agent could not be used when
+    /// the last pass checked it, since when, and why. Kept here so the
+    /// audit trail's pair of `enroll.agent` events survives a restart: an
+    /// episode that began before it ends with its recovery event after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_unavailable: Option<AgentUnavailableRecord>,
+    /// When the last reconcile pass ran, on which boot's monotonic clock:
+    /// the next pass audits a gap longer than the reconcile timer allows
+    /// (`enroll.gap`), which is what a stopped timer or punard leaves.
+    /// Written with the rest of the record on every pass, so it costs no
+    /// write of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pass: Option<PassMark>,
+    /// When punard last stopped cleanly, on the same clock: a gap that ended
+    /// in a shutdown is measured to it at the next boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<PassMark>,
+}
+
+/// A moment on one boot's monotonic clock, which does not advance while the
+/// machine is suspended, exactly like the reconcile timer's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassMark {
+    /// `/proc/sys/kernel/random/boot_id`.
+    pub boot_id: String,
+    /// `CLOCK_MONOTONIC`, in milliseconds.
+    pub monotonic_ms: u64,
+}
+
+/// How long the reconcile passes of an enrolled device went without one,
+/// suspend excluded: from the last pass to now on the same boot, or to the
+/// clean stop that ended the last pass's boot. `None` when it cannot be told
+/// (no pass recorded yet, or a boot that ended without a clean stop).
+pub fn reconcile_gap(
+    last_pass: Option<&PassMark>,
+    stopped: Option<&PassMark>,
+    now: &PassMark,
+) -> Option<Duration> {
+    let last = last_pass?;
+    let end = if last.boot_id == now.boot_id {
+        now
+    } else {
+        stopped.filter(|stopped| stopped.boot_id == last.boot_id)?
+    };
+    end.monotonic_ms
+        .checked_sub(last.monotonic_ms)
+        .map(Duration::from_millis)
+}
+
+/// An episode of management interrupted ([`Enrollment::agent_unavailable`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUnavailableRecord {
+    /// [`AgentFault::as_str`] as the last pass found it.
+    pub reason: String,
+    /// When the episode began.
+    pub since: String,
 }
 
 /// A policy change that has begun and not yet been recorded as done
@@ -1140,6 +1475,89 @@ pub fn save_device_token(path: &Path, token: &Redacted<String>) -> io::Result<()
 }
 
 // ---------------------------------------------------------------------------
+// identity-release.json — an identity punard has decided about, positively
+// ---------------------------------------------------------------------------
+
+/// Beside `enrollment.json`: why punard holds, or may have left with the
+/// agent, a Smplify identity while no enrollment is committed
+/// (docs/api/ipc.md section 5.11). A device token with no enrollment record
+/// used to be read as an unenrollment waiting to finish, so deleting
+/// `enrollment.json` was enough to make punard wipe the organization's
+/// identity itself, audited as an ordinary release. Now only a record that
+/// says so is released: `enroll.stop` writes one before it removes the
+/// enrollment, `enroll.start` before it registers (a registration whose
+/// answer is lost leaves an identity with the agent and none with punard),
+/// and a token found with neither is kept, audited and shown instead.
+pub const IDENTITY_RELEASE_FILE: &str = "identity-release.json";
+
+/// What punard does with the identity [`IDENTITY_RELEASE_FILE`] describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseState {
+    /// Ask the agent to wipe it on every pass until it confirms.
+    Release,
+    /// Never ask: punard holds a token for it and no record of ending the
+    /// enrollment it belonged to. Only a new registration replaces it.
+    Kept,
+}
+
+impl ReleaseState {
+    /// `enroll.status.identity_release.state` and `status.json`'s
+    /// `identity_release`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReleaseState::Release => "pending",
+            ReleaseState::Kept => "kept",
+        }
+    }
+}
+
+/// The contents of [`IDENTITY_RELEASE_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityReleaseRecord {
+    pub version: u32,
+    pub state: ReleaseState,
+    /// Why: `unenroll` (an `enroll.stop`), `registration` (an
+    /// `enroll.start` from before its register call until it commits),
+    /// `enrollment_record_missing` (a token found with no enrollment and no
+    /// record), `release_record_unreadable`.
+    pub cause: String,
+    /// When punard decided.
+    pub since: String,
+}
+
+impl IdentityReleaseRecord {
+    pub fn new(state: ReleaseState, cause: &str, since: String) -> IdentityReleaseRecord {
+        IdentityReleaseRecord {
+            version: 1,
+            state,
+            cause: cause.to_string(),
+            since,
+        }
+    }
+}
+
+/// Load [`IDENTITY_RELEASE_FILE`]: `None` when absent, `InvalidData` when it
+/// is not one punard wrote.
+pub fn load_identity_release(path: &Path) -> io::Result<Option<IdentityReleaseRecord>> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write [`IDENTITY_RELEASE_FILE`], durably and 0600: it is written before
+/// the change it makes safe (the enrollment record's removal, a register
+/// call), so a crash between them cannot lose it.
+pub fn save_identity_release(path: &Path, record: &IdentityReleaseRecord) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(record).expect("release record serializes");
+    write_atomic_synced(path, &bytes, 0o600)
+}
+
+// ---------------------------------------------------------------------------
 // organization-view.json — what the organization last received (SPEC § 24.2)
 // ---------------------------------------------------------------------------
 
@@ -1334,6 +1752,16 @@ pub struct StatusSummary {
     /// without this the shell offered apps that only exist for another CPU
     /// and the refusal arrived after the person had chosen one.
     pub architecture: String,
+    /// Whether the organization can manage this device right now: `active`,
+    /// `interrupted` while the built-in agent cannot be used, `null` on a
+    /// personal device. The reason is in `enroll.status`; this file is
+    /// world-readable and says only what the shell draws.
+    pub management: Option<String>,
+    /// On a device with no enrollment: `pending` while a Smplify identity is
+    /// still to be wiped, `kept` while punard keeps one it has no record of
+    /// ending (docs/api/ipc.md section 5.11), `null` otherwise. The shell
+    /// draws the same line `punarctl enroll status` prints.
+    pub identity_release: Option<String>,
     pub ts: String,
 }
 
@@ -1529,6 +1957,9 @@ mod tests {
             policy_changed_at: None,
             policy_refresh: None,
             policy_pending: None,
+            agent_unavailable: None,
+            last_pass: None,
+            stopped: None,
         }
     }
 
@@ -2212,6 +2643,8 @@ mod tests {
                 device_class: "laptop".into(),
                 device_class_source: "observed".into(),
                 architecture: "aarch64".into(),
+                management: Some("interrupted".into()),
+                identity_release: None,
                 ts: "2026-08-26T09:02:00Z".into(),
             },
         )
@@ -2238,12 +2671,17 @@ mod tests {
                 "device_class",
                 "device_class_source",
                 "enrolled",
+                "identity_release",
+                "management",
                 "org_name",
                 "ts",
                 "v"
             ]
         );
         assert_eq!(raw["org_name"], "Acme Engineering");
+        // Whether the organization can manage the device now, and nothing of
+        // why: the reason is for the device's own users, in enroll.status.
+        assert_eq!(raw["management"], "interrupted");
         // The shell decides whether to OFFER an application on this value, so
         // an empty or absent one has to be readable as "not known yet" rather
         // than as an architecture nothing matches.
@@ -2415,6 +2853,7 @@ mod tests {
             "org.discover",
             "enroll.register",
             "enroll.unregister",
+            "identity.status",
             "policy.fetch",
             "compliance.report",
             "inventory.report",
@@ -2430,6 +2869,13 @@ mod tests {
                 call_timeout(method)
             );
         }
+    }
+
+    /// punard reads a call that goes unanswered as the agent not answering
+    /// only for the calls the agent itself says it answers locally.
+    #[test]
+    fn the_local_calls_are_the_agents() {
+        assert_eq!(AGENT_LOCAL_METHODS, punar_smplifyd::budget::LOCAL_METHODS);
     }
 
     /// The calls one reconcile pass makes, waited out in full, fit its
@@ -2475,14 +2921,67 @@ mod tests {
         assert!(ENROLL_START_PROCESS_TIMEOUT < ENROLL_START_CLIENT_TIMEOUT);
     }
 
+    /// The gap between reconcile passes is measured on one boot's monotonic
+    /// clock: to now on the same boot, or to the clean stop that ended the
+    /// last pass's boot; a boot that ended without one, or no pass yet, tells
+    /// nothing, and a clock that went backwards is not a gap.
     #[test]
-    fn client_maps_a_missing_socket_to_unreachable() {
+    fn a_reconcile_gap_is_measured_on_one_boots_clock() {
+        let mark = |boot: &str, ms: u64| PassMark {
+            boot_id: boot.to_string(),
+            monotonic_ms: ms,
+        };
+        let now = mark("b", 900_000);
+        assert_eq!(
+            reconcile_gap(Some(&mark("b", 780_000)), None, &now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            reconcile_gap(Some(&mark("a", 60_000)), Some(&mark("a", 3_660_000)), &now),
+            Some(Duration::from_secs(3600)),
+            "the previous boot, to its clean stop"
+        );
+        assert_eq!(reconcile_gap(Some(&mark("a", 60_000)), None, &now), None);
+        assert_eq!(
+            reconcile_gap(Some(&mark("a", 60_000)), Some(&mark("c", 1)), &now),
+            None
+        );
+        assert_eq!(reconcile_gap(None, None, &now), None);
+        assert_eq!(reconcile_gap(Some(&mark("b", 950_000)), None, &now), None);
+    }
+
+    /// punard dials the built-in agent unless an override is asked for on an
+    /// image that ships the development control plane; anywhere else the
+    /// override is refused, and said to be.
+    #[test]
+    fn a_control_plane_override_is_honoured_only_on_a_development_image() {
+        let default = PathBuf::from(DEFAULT_CONTROL_PLANE_SOCKET);
+        let other = PathBuf::from("/run/x.sock");
+        assert_eq!(resolve_control_plane(None, false), (default.clone(), false));
+        assert_eq!(resolve_control_plane(None, true), (default.clone(), false));
+        assert_eq!(
+            resolve_control_plane(Some(other.clone()), true),
+            (other.clone(), false)
+        );
+        assert_eq!(
+            resolve_control_plane(Some(other), false),
+            (default.clone(), true)
+        );
+        assert_eq!(
+            resolve_control_plane(Some(default.clone()), false),
+            (default, false),
+            "the lab names the agent's own socket"
+        );
+    }
+
+    /// The agent is on this device: a socket that is not there is the
+    /// agent unavailable, never the network.
+    #[test]
+    fn client_maps_a_missing_socket_to_the_agent_unavailable() {
         let client = ControlPlaneClient::new("/nonexistent/punar-mock/api.sock");
         match client.org_discover("acme.com") {
-            Err(UpstreamError::Unreachable(why)) => {
-                assert!(why.contains("connect failed"), "{why}");
-            }
-            other => panic!("expected Unreachable, got {other:?}"),
+            Err(UpstreamError::AgentUnavailable(AgentFault::SocketMissing)) => {}
+            other => panic!("expected socket_missing, got {other:?}"),
         }
     }
 

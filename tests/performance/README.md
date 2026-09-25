@@ -86,11 +86,24 @@ the canonical window fixed in
   and max;
 - per service: `cpu.stat usage_usec` and `io.stat wbytes` deltas from the
   `punard`, `punar-agentd`, `punar-secrets`, and `punar-netd` systemd cgroups;
+- the built-in Smplify agent, dormant until enrolled:
+  `PUNAR_SMPLIFYD_START_MONOTONIC_US`, when systemd last started its main
+  process this boot (0 for never), `PUNAR_SMPLIFYD_PROCS`, the process count
+  of its `punar-smplifyd.service` cgroup (none when the cgroup does not
+  exist), and `PUNAR_SMPLIFYD_SOCKET`, the state of the socket that would
+  start it. The measured image never enrolls, so the agent is not in the
+  resident services' PSS, and the gate below holds it to never having
+  started; punard's side (it never connects while unenrolled) is its own
+  test's, since on this image punard dials the mock control plane;
 - periodic work: the persistent, low-priority `punar-background.slice`
   accumulates timer-triggered reconcile and agent-discovery work even though
   their individual oneshot cgroups disappear between samples;
 - whole guest, context only: `/proc/stat` busy ratio and physical block-device
-  sectors-written delta;
+  sectors-written delta, and where those writes went, without counting a byte
+  twice: the journal (`systemd-journald.service`), every top-level cgroup
+  summed, and the kernel/filesystem metadata no cgroup was charged for (the
+  device total from the root cgroup's `io.stat`, or diskstats, minus that
+  sum);
 - memory pressure: `/sys/block/zram0` existence, size, active algorithm and
   `/proc/swaps` membership are observed on the live boot, not inferred from
   configuration;
@@ -130,8 +143,10 @@ not drift from it:
 | combined first-party service PSS > target | 100 MB | `::warning::`, job passes |
 | any first-party cgroup idle CPU ≥ ceiling | 0.50% of one CPU | `::error::`, job **fails** |
 | combined first-party writes > ceiling | 98,304 B / 5 min | `::error::`, job **fails** |
+| Smplify agent started this boot or running on the unenrolled image, or its socket not active | never started, 0 processes, socket `active` | `::error::`, job **fails**, including under TCG |
 | any required runtime fact missing | — | `::error::`, job **fails**, including under TCG |
 | whole-guest writes | informational | recorded and uploaded for diagnosis, not attributed to Punar |
+| whole-guest write attribution missing, its remainder not the device total minus the cgroups, its device total further from diskstats than writes in flight explain, or its cgroup sum above the device by more than that | slack 512 KiB + 1/32 of diskstats | `::error::`, job **fails**, including under TCG (root plus children counts every charged byte twice, in the remainder or in the device total) |
 
 **TCG caveat:** when the runner has no usable `/dev/kvm`, boot-test degrades
 to TCG software emulation. Numeric performance results from such runs are labeled

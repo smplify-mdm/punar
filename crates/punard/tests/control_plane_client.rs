@@ -5,14 +5,14 @@
 //! server is a listener too.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use punar_common::Redacted;
 use punard::enroll::{
-    AgentQueue, Assignment, CallBudget, ControlPlaneClient, FetchedPolicy, MAX_ANSWER_BYTES,
-    UpstreamError,
+    AgentFault, AgentQueue, Assignment, CallBudget, ControlPlaneClient, FetchedPolicy,
+    MAX_ANSWER_BYTES, UpstreamError, listener_bound_at,
 };
 use serde_json::{Value, json};
 
@@ -226,4 +226,218 @@ fn a_call_that_does_not_fit_its_budget_is_not_sent() {
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(accepted.load(Ordering::SeqCst), 0, "nothing reached it");
     assert!(budget.left() > std::time::Duration::from_millis(3900));
+}
+
+/// A socket served on a thread of its own, each connection handed to
+/// `serve`: the path, and the thread.
+fn serving(
+    calls: usize,
+    serve: impl Fn(std::os::unix::net::UnixStream) + Send + 'static,
+) -> (PathBuf, std::thread::JoinHandle<()>) {
+    let dir = std::env::temp_dir().join(format!(
+        "punard-cp-fault-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("control-plane.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let served = std::thread::spawn(move || {
+        for _ in 0..calls {
+            let (stream, _) = listener.accept().unwrap();
+            serve(stream);
+        }
+    });
+    (socket, served)
+}
+
+fn agent_fault(result: Result<punard::enroll::AgentIdentity, UpstreamError>) -> AgentFault {
+    match result {
+        Err(UpstreamError::AgentUnavailable(fault)) => fault,
+        other => panic!("expected the agent unavailable, got {other:?}"),
+    }
+}
+
+/// The agent's socket is on this device, so every way it fails is the agent
+/// unavailable, each with its own reason, and never the network: a socket
+/// node nobody listens on, an agent that closes the connection having read
+/// the call, one that resets it, and one that does not answer a call it
+/// answers without the network. A call that may wait on the organization's
+/// server and goes unanswered is still the network's.
+#[test]
+fn every_failure_of_the_agents_own_socket_is_the_agent_unavailable() {
+    let token = Redacted::new("tok_x".to_string());
+
+    let (socket, served) = serving(0, |_| {});
+    served.join().unwrap();
+    std::fs::remove_file(&socket).unwrap();
+    drop(UnixListener::bind(&socket).unwrap());
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+        AgentFault::ConnectionRefused
+    );
+
+    let (socket, served) = serving(1, |stream| {
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+    });
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+        AgentFault::ClosedWithoutAnswer
+    );
+    served.join().unwrap();
+
+    let (socket, served) = serving(1, |stream| {
+        // Give the call time to arrive, then close without reading it.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(stream);
+    });
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+        AgentFault::ConnectionReset
+    );
+    served.join().unwrap();
+
+    // Held past the liveness call's whole wait, which leaves room for a cold
+    // start (IDENTITY_STATUS_CALL_TIMEOUT), and then some.
+    let held = punard::enroll::IDENTITY_STATUS_CALL_TIMEOUT + std::time::Duration::from_secs(2);
+    let (socket, served) = serving(2, move |stream| {
+        std::thread::sleep(held);
+        drop(stream);
+    });
+    let started = std::time::Instant::now();
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+        AgentFault::NotAnswering
+    );
+    assert!(started.elapsed() >= punard::enroll::IDENTITY_STATUS_CALL_TIMEOUT);
+    assert!(started.elapsed() < held);
+    match ControlPlaneClient::new(&socket).policy_fetch(&token) {
+        Err(UpstreamError::Unreachable(why)) => assert!(why.starts_with("no answer"), "{why}"),
+        other => panic!("a fetch that may wait on the network is not the agent's: {other:?}"),
+    }
+    served.join().unwrap();
+}
+
+/// punard may not connect: the agent unavailable, as `permission_denied`.
+/// Root is never refused a connection, so this runs only unprivileged.
+#[test]
+fn a_socket_punard_may_not_open_is_the_agent_unavailable() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let (socket, served) = serving(0, |_| {});
+    served.join().unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(None)),
+        AgentFault::PermissionDenied
+    );
+}
+
+/// An answer to the liveness call that is not the agent's is the agent
+/// unavailable (`unexpected_answer`): the agent answers it from this device
+/// alone and always in the protocol, so a malformed or oversized line,
+/// another version, an envelope with neither result nor error, or a result
+/// that does not say whether it holds an identity came from something else
+/// on its socket. The same answers to a call that may wait on the
+/// organization's server stay what they were.
+#[test]
+fn an_answer_to_the_liveness_call_that_is_not_the_agents_is_unexpected() {
+    let token = Redacted::new("tok_x".to_string());
+    let answer = |line: String| {
+        serving(1, move |stream| {
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            let mut writer = &stream;
+            let _ = writer.write_all(line.as_bytes());
+        })
+    };
+    for line in [
+        "not the protocol\n".to_string(),
+        "{\"v\":2,\"id\":\"x\",\"result\":{\"enrolled\":true}}\n".to_string(),
+        "{\"v\":1,\"id\":\"x\"}\n".to_string(),
+        "{\"v\":1,\"id\":\"x\",\"result\":{}}\n".to_string(),
+        format!(
+            "{{\"v\":1,\"result\":{{\"pad\":\"{}\"}}}}\n",
+            "x".repeat(MAX_ANSWER_BYTES as usize)
+        ),
+    ] {
+        let (socket, served) = answer(line.clone());
+        assert_eq!(
+            agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+            AgentFault::UnexpectedAnswer,
+            "{}",
+            &line[..line.len().min(60)]
+        );
+        served.join().unwrap();
+    }
+    let (socket, served) = answer("not the protocol\n".to_string());
+    match ControlPlaneClient::new(&socket).policy_fetch(&token) {
+        Err(UpstreamError::Unreachable(why)) => assert!(why.contains("malformed"), "{why}"),
+        other => panic!("a network call's garbled answer is not the agent's: {other:?}"),
+    }
+    served.join().unwrap();
+}
+
+/// A socket some other program bound at the agent's path is not the agent's:
+/// systemd creates the agent's listener, so a connection to it names PID 1,
+/// and one that names another process is the agent unavailable
+/// (`unexpected_listener`), with nothing sent over it. Without the
+/// requirement (the development mock, tests) the same socket is served.
+#[test]
+fn a_listener_systemd_did_not_create_is_not_the_agents() {
+    let token = Redacted::new("tok_x".to_string());
+    let (socket, served) = serving(1, |stream| {
+        let mut request = String::new();
+        let read = BufReader::new(&stream).read_line(&mut request).unwrap_or(0);
+        assert_eq!(read, 0, "nothing is sent to it: {request}");
+    });
+    assert_eq!(
+        agent_fault(
+            ControlPlaneClient::new(&socket)
+                .requiring_systemd_listener(true)
+                .identity_status(Some(&token))
+        ),
+        AgentFault::UnexpectedListener
+    );
+    served.join().unwrap();
+
+    let (socket, served) = serving(1, |stream| {
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+        let mut writer = &stream;
+        writer
+            .write_all(b"{\"v\":1,\"id\":\"x\",\"result\":{\"enrolled\":false}}\n")
+            .unwrap();
+    });
+    let identity = ControlPlaneClient::new(&socket)
+        .identity_status(Some(&token))
+        .unwrap();
+    assert!(!identity.enrolled);
+    served.join().unwrap();
+}
+
+/// A connection reports the address its listener bound, not the path that
+/// was dialled: a symlink at the agent's path (a bind mount over it reads the
+/// same) that leads to another socket names that socket. That is how punard
+/// tells a re-routed path apart when systemd created the other listener too,
+/// and so passes the PID 1 check (measured on systemd 257; see
+/// docs/development/smplify-enrollment.md section 3.4).
+#[test]
+fn a_listener_reached_through_a_symlink_is_not_bound_at_the_dialled_path() {
+    let (socket, served) = serving(2, |_stream| {});
+    let agents_path = socket.with_file_name("api.sock");
+    std::os::unix::fs::symlink(&socket, &agents_path).unwrap();
+    let direct = UnixStream::connect(&socket).unwrap();
+    assert!(listener_bound_at(&direct, &socket));
+    let redirected = UnixStream::connect(&agents_path).unwrap();
+    assert!(!listener_bound_at(&redirected, &agents_path));
+    assert!(
+        listener_bound_at(&redirected, &socket),
+        "it names the socket it reached"
+    );
+    served.join().unwrap();
 }

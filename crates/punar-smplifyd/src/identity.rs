@@ -21,6 +21,11 @@ const DEVICE_JSON: &str = "device.json";
 const DEVICE_KEY: &str = "device.key";
 const DEVICE_CERT: &str = "device.crt";
 const CA_CERT: &str = "ca.crt";
+/// Where [`write_private`] writes each file before renaming it into place
+/// (`Path::with_extension`): a crash in between leaves one of these, which
+/// may hold the key.
+const DEVICE_TMP: &str = "device.tmp";
+const CA_TMP: &str = "ca.tmp";
 
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
@@ -117,10 +122,31 @@ impl Store {
         Ok(())
     }
 
-    /// Remove every identity file. The record goes first so a crash midway
-    /// leaves no half-identity that reads as enrolled.
+    /// Whether anything at all is in the state directory: an identity, or
+    /// any part of one (a key, a certificate, a file a crash left half
+    /// written). The agent goes dormant only when this is `false`
+    /// ([`crate::activation`]), so a record deleted from under it with the
+    /// key left behind keeps it running, and a directory it cannot read
+    /// counts as holding something.
+    pub fn holds_anything(&self) -> bool {
+        match fs::read_dir(&self.dir) {
+            Ok(mut entries) => entries.next().is_some(),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        }
+    }
+
+    /// Remove every identity file, and any a crash left half written. The
+    /// record goes first so a crash midway leaves no half-identity that
+    /// reads as enrolled.
     pub fn wipe(&self) -> Result<(), IdentityError> {
-        for name in [DEVICE_JSON, DEVICE_KEY, DEVICE_CERT, CA_CERT] {
+        for name in [
+            DEVICE_JSON,
+            DEVICE_KEY,
+            DEVICE_CERT,
+            CA_CERT,
+            DEVICE_TMP,
+            CA_TMP,
+        ] {
             match fs::remove_file(self.dir.join(name)) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -295,6 +321,30 @@ mod tests {
         assert!(!serde_json::to_string(&loaded).unwrap().contains(&*token));
         store.wipe().unwrap();
         assert!(store.load().unwrap().is_none());
+        assert!(!store.holds_anything(), "a wipe leaves nothing behind");
+        let _ = fs::remove_dir_all(store.path());
+    }
+
+    /// The agent goes dormant only on an empty state directory: a record
+    /// deleted with the key left behind, or a key a crash left half written,
+    /// still counts, and a wipe removes both.
+    #[test]
+    fn anything_left_of_an_identity_counts_until_a_wipe() {
+        let store = temp_store();
+        assert!(!store.holds_anything(), "no directory yet");
+        let (_, digest) = new_device_token().unwrap();
+        store
+            .save(&record(digest), &Zeroizing::new("k".into()), "c", "a")
+            .unwrap();
+        fs::remove_file(store.path().join(DEVICE_JSON)).unwrap();
+        assert!(store.load().unwrap().is_none(), "no record");
+        assert!(store.holds_anything(), "but the key is still there");
+        store.wipe().unwrap();
+        assert!(!store.holds_anything());
+        fs::write(store.path().join(DEVICE_TMP), "half a key").unwrap();
+        assert!(store.holds_anything(), "a file a crash left counts too");
+        store.wipe().unwrap();
+        assert!(!store.holds_anything());
         let _ = fs::remove_dir_all(store.path());
     }
 }
