@@ -11,6 +11,23 @@ if ! getent group punar >/dev/null 2>&1; then
     groupadd --system punar
 fi
 
+# Device administrators (F0-S1; docs/api/ipc.md section 23). Onboarding puts
+# the first account in this group and the account materializer keeps a device
+# from ever booting with no member. The image ships it EMPTY: release gate A18
+# refuses a tree that names a member, because an administrator is a person on
+# this device, never a property of the image.
+if ! getent group punar-admin >/dev/null 2>&1; then
+    groupadd --system punar-admin
+fi
+
+# Readers of the whole audit trail (F0-S3; docs/api/ipc.md section 6). No
+# person is a member: a person reads their own events, and the device's,
+# through `audit.tail`. /var/log/punar and every audit file are root-owned in
+# this group (tmpfiles.d/punard.conf; release gate A17).
+if ! getent group punar-audit >/dev/null 2>&1; then
+    groupadd --system punar-audit
+fi
+
 # Mail, Calendar and Reminders state belongs to a locked service identity, not
 # to the signed-in uid. This prevents an arbitrary same-uid process from
 # opening account metadata, messages or encrypted credential material.

@@ -64,15 +64,13 @@ HELPERS = {
     "/usr/lib/punar/punar-terminal-app.sh": (("Services/Apps.qml",),
         "the launcher's terminal adapter for a Terminal=true desktop entry; "
         "`punarctl app open <desktop-id>` runs the same adapter for the same entry"),
-    "/usr/lib/punar/punar-policy-set.sh": (("SystemControl/ControlData.qml",),
-        "the policy editor's re-authentication pipe: the password (on stdin) goes to "
-        "`punar-auth --admin` and its ticket straight into `punarctl policy set`, so no "
-        "bearer ticket is parked in the shell and the change is punarctl's "
-        "(parity plan section 3C)"),
 }
 
 # A launch whose argv is a variable. Each names what fills it.
 DYNAMIC = {
+    ("Services/PasswordRun.qml", "argv"):
+        "PasswordRun.start's funnel; every caller passes a literal punarctl argv with "
+        "--password-from-parent, which this test checks",
     ("SystemControl/ControlData.qml", "argv"):
         "runMutation's own funnel; every caller passes a literal argv this test checks",
     ("SystemControl/ControlData.qml", "probe"):

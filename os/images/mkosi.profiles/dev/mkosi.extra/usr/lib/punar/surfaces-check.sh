@@ -2346,12 +2346,22 @@ fi
 
 # --- group 9c: a device policy change needs a password, and then works ------
 #
-# THE PATH THIS COVERS, end to end and as the session user: System Control's
-# Policy view offers an administrator a pin, asks for a reason and a password,
-# and runs /usr/lib/punar/punar-policy-set.sh, which re-authenticates through
-# punar-authd and spends the ticket on `punarctl policy set`. Every piece of
-# that has unit tests; none of them proves the CHAIN, and the chain is where a
-# missing binary, a socket group, a PAM stack or a ticket directory mode fails.
+# THE PATH THIS COVERS, end to end and as the session user: `punarctl policy
+# set` asks for the password on its controlling terminal with echo off, sends
+# it straight to punar-authd's socket (punar-reauth, F0-S4), and spends the
+# ticket on policy.set — which also needs the caller to be a device
+# administrator (F0-S1; the dev user is one, as a product's first account is).
+# System Control runs the same command with --password-from-parent, handing
+# the password over a private socket instead of a terminal; that handoff is
+# proven by punar-reauth's and punarctl's own tests. Every piece has unit
+# tests; none of them proves the CHAIN, and the chain is where a missing
+# binary, a socket group, a PAM stack or a ticket directory mode fails.
+#
+# The terminal is a pseudo-terminal from script(1) (util-linux, or bsdutils on
+# Debian), and the answer arrives two seconds after the command starts:
+# punarctl flushes pending input when it turns echo off, so a line typed
+# before the prompt would be discarded, exactly as at a keyboard. Nothing here
+# is a pipe into punarctl — a pipe is what F0-S4 took away.
 #
 # NEGATIVE LEGS FIRST. If a change went through without a password, the positive
 # leg below would pass on a machine with no authentication at all.
@@ -2369,6 +2379,12 @@ policy_source_kind() {
 policy_effective_value() {
     punarctl policy explain "$1" --json 2>/dev/null \
         | sed -n 's/.*"effective_value":"\([a-z]*\)".*/\1/p'
+}
+# Answer punarctl's password prompt ($1) for a fixed command ($2) on a
+# pseudo-terminal; the command's exit status is the function's.
+policy_by_terminal() {
+    { sleep 2; printf '%s\n' "$1"; sleep 12; } \
+        | script -qec "$2" /dev/null >/dev/null 2>&1
 }
 
 policy_before_kind="$(policy_source_kind "${policy_path}")"
@@ -2392,12 +2408,11 @@ else
             ;;
     esac
 
-    # 2. A wrong password. The helper must stop before punarctl is reached.
-    printf '%s\n' "${policy_wrong}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" "${policy_value}" "gate: wrong password" \
-          >/dev/null 2>&1
+    # 2. A wrong password. punar-authd refuses it before punard is reached.
+    policy_by_terminal "${policy_wrong}" \
+        "punarctl policy set ${policy_path} ${policy_value} --reason 'gate: wrong password'"
     policy_wrong_rc="$?"
-    check_eq "the helper's exit status for a wrong password" "3" "${policy_wrong_rc}"
+    check_eq "punarctl's exit status for a wrong password" "3" "${policy_wrong_rc}"
     check_eq "the winning source after a wrong password" \
         "${policy_before_kind}" "$(policy_source_kind "${policy_path}")"
 
@@ -2405,22 +2420,20 @@ else
     #    nothing about the machine and everything about the provenance, which
     #    is what is being asserted — a gate must not leave a CI VM with its
     #    firewall in a different state than it found it.
-    printf '%s\n' "${policy_password}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" "${policy_value}" "gate: administrator pin" \
-          >/dev/null 2>&1
+    policy_by_terminal "${policy_password}" \
+        "punarctl policy set ${policy_path} ${policy_value} --reason 'gate: administrator pin'"
     policy_set_rc="$?"
-    check_eq "the helper's exit status for a correct password" "0" "${policy_set_rc}"
+    check_eq "punarctl's exit status for a correct password" "0" "${policy_set_rc}"
     check_eq "the winning source after an administrator pin" \
         "device_specific_override" "$(policy_source_kind "${policy_path}")"
     check_eq "the effective value is unchanged by a same-value pin" \
         "${policy_value}" "$(policy_effective_value "${policy_path}")"
 
     # 4. And withdrawing it hands the path back to the layer underneath.
-    printf '%s\n' "${policy_password}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" --clear "gate: withdraw" \
-          >/dev/null 2>&1
+    policy_by_terminal "${policy_password}" \
+        "punarctl policy clear ${policy_path} --reason 'gate: withdraw'"
     policy_clear_rc="$?"
-    check_eq "the helper's exit status for a withdrawal" "0" "${policy_clear_rc}"
+    check_eq "punarctl's exit status for a withdrawal" "0" "${policy_clear_rc}"
     check_eq "the winning source after withdrawing the pin" \
         "${policy_before_kind}" "$(policy_source_kind "${policy_path}")"
 
@@ -2451,9 +2464,8 @@ else
     # nothing to do with what it is testing. One unconditional attempt, and a
     # loud line if even that does not take.
     if [ "$(policy_source_kind "${policy_path}")" = "device_specific_override" ]; then
-        printf '%s\n' "${policy_password}" \
-            | /usr/lib/punar/punar-policy-set.sh "${policy_path}" --clear "gate: cleanup" \
-              >/dev/null 2>&1
+        policy_by_terminal "${policy_password}" \
+            "punarctl policy clear ${policy_path} --reason 'gate: cleanup'"
         if [ "$(policy_source_kind "${policy_path}")" = "device_specific_override" ]; then
             note "FAIL ${policy_path} is still pinned by this gate; later policy groups will fail for the wrong reason"
             FAILED=1

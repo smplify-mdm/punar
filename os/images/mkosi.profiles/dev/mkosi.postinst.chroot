@@ -10,7 +10,12 @@ set -eu
 if ! getent group punar >/dev/null 2>&1; then
     groupadd --system punar
 fi
-useradd -m -g punar -G wheel,video,input,uucp -s /bin/bash punar
+# The dev user administers its device (F0-S1), as a product's first account
+# does, so the in-VM gates exercise the role rather than a bypass.
+if ! getent group punar-admin >/dev/null 2>&1; then
+    groupadd --system punar-admin
+fi
+useradd -m -g punar -G wheel,video,input,uucp,punar-admin -s /bin/bash punar
 echo 'punar:punar' | chpasswd
 
 # Rootless podman: subordinate uid/gid ranges (spec §76 M1 Podman

@@ -392,6 +392,102 @@ if [ -e "${LOCK_EXERCISE}" ]; then
     fail A15 'the lock exercise seam is present: usr/lib/punar/lock-exercise.allow'
 fi
 
+# A16 (F0-S2): Yama lets a process ptrace-attach only to its own descendants.
+# Without it every program a person runs can read the memory of every other —
+# the shell while a password is typed, punarctl while it holds a ticket. Arch
+# starts Yama at 1 and Debian patches it to 0, so the value must be STATED by
+# this image, and nothing else in the tree may state a different one: exactly
+# 1, because 3 would also forbid punard's by-pid descriptor fetch.
+YAMA_CONF="${ROOT}/usr/lib/sysctl.d/50-punar-yama.conf"
+if [ ! -f "${YAMA_CONF}" ]; then
+    fail A16 'the Yama policy is missing: usr/lib/sysctl.d/50-punar-yama.conf'
+else
+    yama_value=$(sed -n \
+        's/^[[:space:]]*kernel[./]yama[./]ptrace_scope[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' \
+        "${YAMA_CONF}" | tail -n 1)
+    if [ "${yama_value}" != 1 ]; then
+        fail A16 "the Yama policy sets kernel.yama.ptrace_scope to '${yama_value}', not 1"
+    fi
+fi
+for sysctl_dir in usr/lib/sysctl.d usr/local/lib/sysctl.d etc/sysctl.d run/sysctl.d; do
+    [ -d "${ROOT}/${sysctl_dir}" ] || continue
+    for sysctl_conf in "${ROOT}/${sysctl_dir}"/*.conf; do
+        [ -f "${sysctl_conf}" ] && [ ! -L "${sysctl_conf}" ] || continue
+        [ "${sysctl_conf}" = "${YAMA_CONF}" ] && continue
+        if grep -Eq '^[[:space:]]*-?kernel[./]yama[./]ptrace_scope[[:space:]]*=' \
+                "${sysctl_conf}"; then
+            fail A16 "${sysctl_conf#"${ROOT}"/} also sets kernel.yama.ptrace_scope"
+        fi
+    done
+done
+if [ -f "${ROOT}/etc/sysctl.conf" ] \
+    && grep -Eq '^[[:space:]]*-?kernel[./]yama[./]ptrace_scope[[:space:]]*=' \
+        "${ROOT}/etc/sysctl.conf"; then
+    fail A16 'etc/sysctl.conf also sets kernel.yama.ptrace_scope'
+fi
+
+# A17 (F0-S3): the audit trail belongs to root and group punar-audit, which no
+# person is in. It used to be group punar — every account — so every person
+# could read every person's events. A person reads their own through
+# audit.tail. The directory, the live file, its rotation and its lock are all
+# declared here, where an auditor reads them; no tmpfiles line anywhere may
+# hand /var/log/punar to another group.
+PUNARD_TMPFILES="${ROOT}/usr/lib/tmpfiles.d/punard.conf"
+if [ ! -f "${PUNARD_TMPFILES}" ]; then
+    fail A17 'the audit trail modes are undeclared: usr/lib/tmpfiles.d/punard.conf is missing'
+else
+    if ! grep -Eq '^d[[:space:]]+/var/log/punar[[:space:]]+0750[[:space:]]+root[[:space:]]+punar-audit([[:space:]]|$)' \
+            "${PUNARD_TMPFILES}"; then
+        fail A17 '/var/log/punar is not declared 0750 root:punar-audit'
+    fi
+    for audit_file in audit.jsonl audit.jsonl.1 audit.jsonl.lock; do
+        if ! grep -Eq "^z[[:space:]]+/var/log/punar/${audit_file}[[:space:]]+0640[[:space:]]+root[[:space:]]+punar-audit([[:space:]]|\$)" \
+                "${PUNARD_TMPFILES}"; then
+            fail A17 "/var/log/punar/${audit_file} is not declared 0640 root:punar-audit"
+        fi
+    done
+fi
+for tmpfiles_dir in usr/lib/tmpfiles.d etc/tmpfiles.d; do
+    [ -d "${ROOT}/${tmpfiles_dir}" ] || continue
+    AUDIT_GRANTS=$(awk '
+        $1 !~ /^#/ && $2 ~ /^\/var\/log\/punar(\/|$)/ \
+            && $5 != "punar-audit" && $5 != "root" && $5 != "-" { print FILENAME ": " $0 }
+    ' "${ROOT}/${tmpfiles_dir}"/*.conf 2>/dev/null || true)
+    if [ -n "${AUDIT_GRANTS}" ]; then
+        fail A17 "a tmpfiles line gives the audit trail to another group: $(printf '%s' "${AUDIT_GRANTS}" | sed "s#${ROOT}/##g" | tr '\n' ' ')"
+    fi
+done
+group_members() {
+    awk -F: -v name="$1" '$1 == name { found = 1; print "members=" $4 } END { if (!found) print "missing" }' \
+        "${ROOT}/etc/group"
+}
+if [ ! -f "${ROOT}/etc/group" ]; then
+    fail A17 '/etc/group is missing; the audit and administrator groups cannot be proven'
+else
+    case "$(group_members punar-audit)" in
+        missing) fail A17 'the punar-audit group does not exist' ;;
+        'members=') ;;
+        *) fail A17 "the punar-audit group names members: $(group_members punar-audit)" ;;
+    esac
+fi
+
+# A18 (F0-S1): the device-administrator group exists, so onboarding can put
+# the first account in it, and it is EMPTY in the image: an administrator is a
+# person on the device, never a property of the release. A member here would
+# be an account every installed device trusts to act on everyone on it.
+if [ -f "${ROOT}/etc/group" ]; then
+    case "$(group_members punar-admin)" in
+        missing) fail A18 'the punar-admin group does not exist; onboarding could not make the first account an administrator' ;;
+        'members=') ;;
+        *) fail A18 "the punar-admin group names members in the image: $(group_members punar-admin)" ;;
+    esac
+fi
+if [ -f "${ROOT}/etc/gshadow" ] \
+    && awk -F: '($1 == "punar-admin" || $1 == "punar-audit") && $4 != "" { bad = 1 } END { exit bad ? 0 : 1 }' \
+        "${ROOT}/etc/gshadow"; then
+    fail A18 '/etc/gshadow names members of punar-admin or punar-audit'
+fi
+
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \
         "${FAILURES}" >&2

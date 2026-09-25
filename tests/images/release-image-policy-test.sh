@@ -29,6 +29,14 @@ grep -Fq 'systemctl mask seatd.service' "${ARM_POSTINSTALL}" || {
 # control planes remain dormant and root-only until the fixed broker starts
 # them together for a concrete profile.
 for postinstall in "${ARCH_POSTINSTALL}" "${AMD_POSTINSTALL}" "${ARM_POSTINSTALL}"; do
+    # F0-S1/F0-S3: every lane creates the administrator and audit groups
+    # before tmpfiles and onboarding run (release gates A17, A18).
+    for product_group in punar-admin punar-audit; do
+        grep -Fq "groupadd --system ${product_group}" "${postinstall}" || {
+            echo "FAIL groups: ${product_group} is not created by ${postinstall}" >&2
+            exit 1
+        }
+    done
     grep -Fq 'useradd --system --gid punar-pim' "${postinstall}" || {
         echo "FAIL PIM service: locked account missing from ${postinstall}" >&2
         exit 1
@@ -191,6 +199,17 @@ printf '%s\n' \
     'daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin' \
     > "${CLEAN}/etc/passwd"
 printf '%s\n' \
+    'root:x:0:' \
+    'punar:x:970:' \
+    'punar-admin:x:971:' \
+    'punar-audit:x:972:' \
+    > "${CLEAN}/etc/group"
+mkdir -p "${CLEAN}/usr/lib/sysctl.d" "${CLEAN}/usr/lib/tmpfiles.d"
+cp "${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/sysctl.d/50-punar-yama.conf" \
+    "${CLEAN}/usr/lib/sysctl.d/50-punar-yama.conf"
+cp "${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/tmpfiles.d/punard.conf" \
+    "${CLEAN}/usr/lib/tmpfiles.d/punard.conf"
+printf '%s\n' \
     'ID=punar-test-substrate' \
     'VERSION_ID=1' \
     'IMAGE_ID=punar-desktop' \
@@ -331,6 +350,39 @@ mutate_a15() {
         > "${CASE}/usr/lib/punar/lock-exercise.allow"
 }
 
+# A16 has three ways to be wrong: no stated value (Debian's kernel then runs
+# at 0), a stated 0, and another file overriding a correct one.
+mutate_a16() { rm -f "${CASE}/usr/lib/sysctl.d/50-punar-yama.conf"; }
+mutate_a16_zero() {
+    sed -i 's/^kernel.yama.ptrace_scope = 1$/kernel.yama.ptrace_scope = 0/' \
+        "${CASE}/usr/lib/sysctl.d/50-punar-yama.conf"
+}
+mutate_a16_override() {
+    mkdir -p "${CASE}/etc/sysctl.d"
+    printf '%s\n' 'kernel.yama.ptrace_scope = 0' > "${CASE}/etc/sysctl.d/99-debug.conf"
+}
+# A17: the directory handed back to every account, a file left undeclared,
+# another tmpfiles line granting the trail, and a person in the group.
+mutate_a17() {
+    sed -i 's|^d /var/log/punar 0750 root punar-audit -$|d /var/log/punar 0750 root punar -|' \
+        "${CASE}/usr/lib/tmpfiles.d/punard.conf"
+}
+mutate_a17_file() {
+    sed -i '\|^z /var/log/punar/audit.jsonl  |d' "${CASE}/usr/lib/tmpfiles.d/punard.conf"
+}
+mutate_a17_grant() {
+    printf '%s\n' 'z /var/log/punar/audit.jsonl 0644 root punar -' \
+        > "${CASE}/usr/lib/tmpfiles.d/zz-local.conf"
+}
+mutate_a17_member() {
+    sed -i 's/^punar-audit:x:972:$/punar-audit:x:972:alice/' "${CASE}/etc/group"
+}
+# A18: no administrator group at all, and one that ships a member.
+mutate_a18() { sed -i '/^punar-admin:/d' "${CASE}/etc/group"; }
+mutate_a18_member() {
+    sed -i 's/^punar-admin:x:971:$/punar-admin:x:971:punar/' "${CASE}/etc/group"
+}
+
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
     | grep -q PUNAR_RELEASE_IMAGE_POLICY_OK
@@ -393,6 +445,15 @@ expect_fail A14 mutate_a14_trigger
 expect_fail A14 mutate_a14_forever
 expect_fail A14 mutate_a14_unreadable
 expect_fail A15 mutate_a15
+expect_fail A16 mutate_a16
+expect_fail A16 mutate_a16_zero
+expect_fail A16 mutate_a16_override
+expect_fail A17 mutate_a17
+expect_fail A17 mutate_a17_file
+expect_fail A17 mutate_a17_grant
+expect_fail A17 mutate_a17_member
+expect_fail A18 mutate_a18
+expect_fail A18 mutate_a18_member
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \
