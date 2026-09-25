@@ -1158,12 +1158,86 @@ fn enrollment_rows(
 
 /// The policy ids, or what their absence means: a Smplify tenant can enroll
 /// a device before assigning it anything, and an empty row reads as broken.
+/// The device asks for the organization's policy on every sync, so one
+/// assigned later applies at the next.
 fn policy_summary(policy_ids: &[String]) -> String {
     if policy_ids.is_empty() {
-        "none assigned yet · the organization's policy arrives on a later sync".to_string()
+        "none in force · checked on every sync, and applied as soon as one is assigned".to_string()
     } else {
         policy_ids.join(" · ")
     }
+}
+
+/// How the last check for the organization's policy went, and since when the
+/// device has enforced the one it holds. Every answer but the three that
+/// mean "enforcing what the organization serves" says what went wrong and
+/// that the last good policy is still in force. Fixed text around the
+/// daemon's closed reason codes: nothing the organization chose is quoted.
+fn policy_refresh_row(policy: &model::EnrollPolicy) -> Option<Row> {
+    let received = policy
+        .fetched_at
+        .as_deref()
+        .map(|at| fmt::timestamp(&printable(at)))?;
+    let Some(refresh) = &policy.last_refresh else {
+        return Some(Row::new(
+            "Policy check",
+            "Current",
+            Slot::Ok,
+            &format!("policy received {received}"),
+        ));
+    };
+    let reason = refresh
+        .reason
+        .as_deref()
+        .map(|reason| printable(reason).replace('_', " "))
+        .unwrap_or_else(|| "no reason given".to_string());
+    let (value, what) = match refresh.result.as_str() {
+        "unchanged" | "applied" | "withdrawn" => {
+            return Some(Row::new(
+                "Policy check",
+                "Current",
+                Slot::Ok,
+                &format!("policy received {received}"),
+            ));
+        }
+        "rejected" => (
+            "Not applied",
+            format!("the organization's latest policy was refused ({reason})"),
+        ),
+        "held" => (
+            "Not applied",
+            match refresh.reason.as_deref() {
+                Some("unusable_assignment") => {
+                    "the organization assigned something this device cannot use".to_string()
+                }
+                _ => {
+                    "the control plane sent no policy and did not say none is assigned".to_string()
+                }
+            },
+        ),
+        "failed" => (
+            "Not applied",
+            format!("this device could not install the organization's latest policy ({reason})"),
+        ),
+        "unreachable" => (
+            "Not received",
+            "could not reach the control plane".to_string(),
+        ),
+        "refused" => (
+            "Not received",
+            format!("the control plane refused to send the policy ({reason})"),
+        ),
+        other => (
+            "Unknown",
+            format!("the last check ended {:?}", printable(other)),
+        ),
+    };
+    Some(Row::new(
+        "Policy check",
+        value,
+        Slot::Warn,
+        &format!("{what} · still enforcing the policy received {received}"),
+    ))
 }
 
 /// What the attestation label means, said plainly for each value the
@@ -1338,6 +1412,9 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
             desc.push_str(" · report queued — retried on the next reconcile pass");
         }
         rows.push(Row::new("Last sync", value, slot, &desc));
+    }
+    if let Some(row) = status.policy.as_ref().and_then(policy_refresh_row) {
+        rows.push(row);
     }
     out.push_str(&fmt::rows(style, &rows));
     if let Some(view) = &status.organization_view {
@@ -5326,7 +5403,8 @@ mod tests {
         assert!(!text.to_lowercase().contains("mock"), "{text}");
         assert!(text.contains("hardware not measured"), "{text}");
         assert!(text.contains("enrollment code"), "{text}");
-        assert!(text.contains("none assigned yet"), "{text}");
+        assert!(text.contains("none in force"), "{text}");
+        assert!(text.contains("checked on every sync"), "{text}");
         let verdict = text
             .lines()
             .find(|line| line.contains("✓ ENROLLED"))
@@ -5563,6 +5641,86 @@ mod tests {
             "categories": [{"category": "os\u{1b}[2J", "fields": ["name\u{1b}[31m"]}]
         })));
         assert!(!text.contains('\u{1b}'), "{text:?}");
+    }
+
+    /// The person sees whether the device enforces the organization's
+    /// current policy, and when it was received; after a check that went
+    /// wrong, what went wrong and that the last good policy is still in force.
+    /// A daemon that predates the field gets no row.
+    #[test]
+    fn enroll_status_says_whether_the_policy_is_current() {
+        let style = Style::plain();
+        let status = |policy: Option<Value>| {
+            let mut result = json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": ["eng-baseline-v12"],
+                "enrolled_at": "2026-09-24T09:00:00Z",
+                "attestation": "none"
+            });
+            if let Some(policy) = policy {
+                result["policy"] = policy;
+            }
+            enroll_status(&style, &result, "mac-punar").unwrap()
+        };
+        let row = |text: &str| {
+            text.lines()
+                .find(|line| line.starts_with("POLICY CHECK"))
+                .map(str::to_string)
+        };
+        let policy = |refresh: Value| {
+            json!({
+                "revision": "sha256:ab",
+                "fetched_at": "2026-09-24T10:00:00Z",
+                "changed_at": "2026-09-24T09:00:00Z",
+                "last_refresh": refresh
+            })
+        };
+
+        for refresh in [
+            Value::Null,
+            json!({"at": "2026-09-24T10:00:00Z", "result": "unchanged"}),
+            json!({"at": "2026-09-24T10:00:00Z", "result": "applied"}),
+        ] {
+            let line = row(&status(Some(policy(refresh)))).expect("a policy row");
+            assert!(line.contains("CURRENT"), "{line}");
+            assert!(
+                line.ends_with("policy received 2026-09-24 10:00:00"),
+                "{line}"
+            );
+        }
+        for (refresh, what) in [
+            (
+                json!({"at": "t", "result": "rejected", "reason": "duplicate_policy_id"}),
+                "the organization's latest policy was refused (duplicate policy id)",
+            ),
+            (
+                json!({"at": "t", "result": "held", "reason": "unusable_assignment"}),
+                "the organization assigned something this device cannot use",
+            ),
+            (
+                json!({"at": "t", "result": "unreachable"}),
+                "could not reach the control plane",
+            ),
+            (
+                json!({"at": "t", "result": "failed", "reason": "swap_unsupported"}),
+                "could not install the organization's latest policy (swap unsupported)",
+            ),
+        ] {
+            let line = row(&status(Some(policy(refresh)))).expect("a policy row");
+            assert!(line.contains(what), "{line}");
+            assert!(
+                line.ends_with("still enforcing the policy received 2026-09-24 10:00:00"),
+                "{line}"
+            );
+        }
+        let line = row(&status(Some(policy(json!({
+            "at": "t", "result": "refused", "reason": "other\u{1b}[2J"
+        })))))
+        .unwrap();
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        assert!(line.contains("NOT RECEIVED"), "{line}");
+        assert_eq!(row(&status(None)), None);
     }
 
     #[test]

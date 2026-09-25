@@ -199,6 +199,34 @@ pub struct EnrollStatus {
     /// received. Absent from a daemon that predates it.
     #[serde(default)]
     pub organization_view: Option<OrganizationView>,
+    /// The organization's policy as the device enforces it, and how the last
+    /// check for a newer one went. Absent from a daemon that predates it.
+    #[serde(default)]
+    pub policy: Option<EnrollPolicy>,
+}
+
+/// The `policy` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct EnrollPolicy {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub revision: Option<String>,
+    /// When the device fetched the policy it enforces.
+    #[serde(default)]
+    pub fetched_at: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub changed_at: Option<String>,
+    #[serde(default)]
+    pub last_refresh: Option<PolicyRefresh>,
+}
+
+/// The `last_refresh` object of [`EnrollPolicy`].
+#[derive(Deserialize)]
+pub struct PolicyRefresh {
+    pub result: String,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// The `organization_view` object of [`EnrollStatus`].
