@@ -536,6 +536,24 @@ ShellRoot {
             shortcutsSurface.releaseIfClosed();
             return result;
         }
+        // Type-to-filter and the "Not tried yet" hint, read over IPC so the
+        // gates can hold them (SMP-1405 WP-02).
+        function filter(text: string): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcFilter(text);
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
+        function untried(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "";
+            var result = surface.ipcUntried();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
     }
 
     // The M9 approval gate (Plate D-003). It has no keybinding by

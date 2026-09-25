@@ -175,6 +175,24 @@ DeferredSurfaceBase {
         return seen.join(",");
     }
 
+    // What a typed filter leaves, decided by the same matches() the surface
+    // renders with: the count, then each matching row's description. For
+    // the gates, which cannot type into a text field over IPC.
+    function ipcFilter(text: string): string {
+        var q = String(text).trim().toLowerCase();
+        var found = [];
+        for (var i = 0; i < Local.BindTable.rows.length; i++) {
+            if (root.matches(Local.BindTable.rows[i], q))
+                found.push(Local.BindTable.rows[i].label);
+        }
+        return found.length + (found.length > 0 ? ": " + found.join(" | ") : "");
+    }
+
+    // The "Not tried yet" line exactly as the unfiltered reference shows it.
+    function ipcUntried(): string {
+        return root.untriedText();
+    }
+
     Timer {
         id: hideTimer
         interval: Theme.durStandard

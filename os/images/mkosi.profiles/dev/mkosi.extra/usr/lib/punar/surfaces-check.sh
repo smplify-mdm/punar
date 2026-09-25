@@ -1540,6 +1540,40 @@ else
     note "ok   no live bind table to compare the fold against; skipping the fold relation"
 fi
 
+# TYPE-TO-FILTER AND THE "NOT TRIED YET" HINT (SMP-1405 WP-02), through the
+# same matches() the surface renders with. Every word must match, so "move
+# mon" keeps only moves between monitors; a filter that matches nothing
+# leaves nothing; and the hint never suggests a surface this session has
+# already opened (group 5 opened the command center above).
+sc_text() { ipc "$@" | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+sc_filter="$(sc_text shortcuts filter 'move mon')"
+case "${sc_filter}" in
+    ''|0*)
+        note "FAIL the shortcut filter 'move mon' kept no rows"
+        FAILED=1 ;;
+    *)
+        if printf '%s\n' "${sc_filter#*: }" | tr '|' '\n' | grep -v -i 'move' | grep -q '[^[:space:]]'; then
+            note "FAIL the shortcut filter 'move mon' kept a row that is not a move: ${sc_filter}"
+            FAILED=1
+        else
+            note "ok   the shortcut filter keeps only matching rows ('move mon' -> ${sc_filter%%:*})"
+        fi ;;
+esac
+if [ "$(sc_text shortcuts filter 'zzqq')" = 0 ]; then
+    note "ok   a shortcut filter that matches nothing leaves no rows"
+else
+    note "FAIL the shortcut filter 'zzqq' kept rows: $(sc_text shortcuts filter 'zzqq')"
+    FAILED=1
+fi
+sc_untried="$(sc_text shortcuts untried)"
+case "${sc_untried}" in
+    *"Open command center"*)
+        note "FAIL the not-tried-yet hint still suggests the command center after it was opened: ${sc_untried}"
+        FAILED=1 ;;
+    *)
+        note "ok   the not-tried-yet hint leaves out what was used (${sc_untried:-nothing left to suggest})" ;;
+esac
+
 ipc shortcuts close >/dev/null 2>&1 || true
 
 # --- group 5c: flatpak ACCEPTS the argv punard actually sends ----------------
