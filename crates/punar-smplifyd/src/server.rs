@@ -394,22 +394,34 @@ impl Daemon {
         }))
     }
 
-    /// Wipe the identity punard's token names, locally: it asks Smplify
-    /// nothing, so unenrolling works offline, and the agent goes dormant once
-    /// the answer is written. With no identity at all there is nothing to
-    /// authorize, and whatever a crash or an earlier wipe left (a key, a
-    /// certificate) goes the same way: punard asks again until a wipe is
-    /// confirmed (docs/api/ipc.md section 5.11), so a wipe whose answer was
-    /// lost must be confirmable. An identity punard's token does not match is
-    /// refused and kept.
+    /// Wipe the identity, locally: it asks Smplify nothing, so unenrolling
+    /// works offline, and the agent goes dormant once the answer is written.
+    /// With no identity at all there is nothing to authorize, and whatever a
+    /// crash or an earlier wipe left (a key, a certificate) goes the same
+    /// way: punard asks again until a wipe is confirmed (docs/api/ipc.md
+    /// section 5.11), so a wipe whose answer was lost must be confirmable.
+    ///
+    /// `any_identity: true` wipes whatever is held, the token or none. punard
+    /// sends it only while it holds no enrollment, under its enrollment
+    /// guard: an identity it never received the token for (a registration
+    /// whose answer was lost) or one its token does not name is then nothing
+    /// punard uses, and must not stay. Only root can ask (`SO_PEERCRED`), and
+    /// root could remove the files itself. Without it, the identity punard's
+    /// token names is wiped and any other is refused and kept.
     fn enroll_unregister(&self, params: Option<&Value>) -> Result<Value, CallError> {
-        let presented = param_str(params, "device_token")?;
-        if let Some(record) = self.store.load().map_err(internal)? {
-            if !identity::token_matches(&record, &presented) {
-                return Err(CallError::new(
-                    ErrorCode::Unauthorized,
-                    "the device token does not match this identity",
-                ));
+        let any_identity = params
+            .and_then(|params| params.get("any_identity"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !any_identity {
+            let presented = param_str(params, "device_token")?;
+            if let Some(record) = self.store.load().map_err(internal)? {
+                if !identity::token_matches(&record, &presented) {
+                    return Err(CallError::new(
+                        ErrorCode::Unauthorized,
+                        "the device token does not match this identity",
+                    ));
+                }
             }
         }
         self.store.wipe().map_err(internal)?;
@@ -1421,6 +1433,41 @@ mod tests {
         );
         assert!(line.contains(r#""wiped":true"#), "{line}");
         assert!(!d.store.holds_anything(), "the key went too");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// punard, holding no enrollment, asks for whatever the agent holds to
+    /// go (`any_identity`): an identity its token does not name, and one it
+    /// never received a token for (a registration whose answer was lost),
+    /// are wiped as surely as its own, so no key is left with nothing that
+    /// can remove it. Without the flag the token still has to match.
+    #[test]
+    fn an_unregister_for_any_identity_wipes_one_the_token_does_not_name() {
+        let (d, root) = daemon();
+        enrolled_store(&d);
+        let refused = d.answer_line(
+            &json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                    "params": {"device_token": "not-the-token"}})
+            .to_string(),
+        );
+        assert!(refused.contains("unauthorized"), "{refused}");
+        assert!(d.store.holds_anything());
+        let line = d.answer_line(
+            &json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                    "params": {"device_token": "not-the-token", "any_identity": true}})
+            .to_string(),
+        );
+        assert!(line.contains(r#""wiped":true"#), "{line}");
+        assert!(!d.store.holds_anything());
+
+        enrolled_store(&d);
+        let line = d.answer_line(
+            &json!({"v": 1, "id": "u", "method": "enroll.unregister",
+                    "params": {"any_identity": true}})
+            .to_string(),
+        );
+        assert!(line.contains(r#""wiped":true"#), "{line}");
+        assert!(!d.store.holds_anything(), "no token needed");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -75,12 +75,13 @@ use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
     AgentFault, AgentIdentity, AgentQueue, AgentUnavailableRecord, Assignment, CallBudget,
     ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, ENROLL_CONTROL_PLANE_BUDGET, Enrollment,
-    INVENTORY_RETRY_BASE, InventoryRetry, InventorySources, LastQueryRecord, LastSyncRecord,
-    ORGANIZATION_VIEW_FILE, OrgRecord, OrganizationViewRecord, PolicyRefreshRecord,
-    RECONCILE_CONTROL_PLANE_BUDGET, StatusSummary, UpstreamError, compliance_report_body,
-    inventory_body, inventory_resend_due, load_device_token, load_enrollment,
-    load_organization_view, organization_view_summary, save_device_token, save_enrollment,
-    save_enrollment_durable, save_organization_view, write_status_summary,
+    IDENTITY_RELEASE_FILE, INVENTORY_RETRY_BASE, IdentityReleaseRecord, InventoryRetry,
+    InventorySources, LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE, OrgRecord,
+    OrganizationViewRecord, PolicyRefreshRecord, RECONCILE_CONTROL_PLANE_BUDGET, ReleaseState,
+    StatusSummary, UpstreamError, compliance_report_body, inventory_body, inventory_resend_due,
+    load_device_token, load_enrollment, load_identity_release, load_organization_view,
+    organization_view_summary, save_device_token, save_enrollment, save_enrollment_durable,
+    save_identity_release, save_organization_view, write_status_summary,
 };
 use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
@@ -125,19 +126,17 @@ pub const RESOURCE_ENROLLMENT: &str = "enrollment";
 /// fetch the server answers badly, an envelope the loader rejects, a store
 /// that will not write) used to leave the agent holding that identity while
 /// punard reported the device unenrolled — so the next attempt met a stale
-/// one. Dropping this releases it, exactly like `enroll.stop`'s release: the
-/// agent wipes it locally, and when it does not confirm that, its token is
-/// kept as the device's identity still to be released and asked about again
-/// on every pass ([`Inner::release_pending_identity`]). The registration
-/// replaced any identity the agent held before, so a release still pending
-/// from an earlier unenrollment is settled either way.
+/// one. Dropping this releases it, exactly like `enroll.stop`'s release
+/// ([`Inner::release_uncommitted`]): the agent wipes it locally, and when it
+/// does not confirm that, the release record enroll.start wrote before it
+/// registered stays, with the token, and every pass asks again
+/// ([`Inner::release_pending_identity`]). The registration replaced any
+/// identity the agent held before, so a release still pending from an
+/// earlier unenrollment is settled either way.
 struct UncommittedRegistration<'a> {
-    client: ControlPlaneClient,
+    inner: &'a Inner,
+    actor: AuditActor,
     token: Option<Redacted<String>>,
-    /// punard's device token slot, and the file behind it.
-    held: &'a Mutex<Option<Redacted<String>>>,
-    token_path: PathBuf,
-    release_failure: &'a Mutex<Option<String>>,
 }
 
 impl UncommittedRegistration<'_> {
@@ -149,33 +148,8 @@ impl UncommittedRegistration<'_> {
 
 impl Drop for UncommittedRegistration<'_> {
     fn drop(&mut self) {
-        let Some(token) = self.token.take() else {
-            return;
-        };
-        match self.client.unregister(&token) {
-            Ok(()) => {
-                // Nothing of any identity is left with the agent.
-                if self.held.lock().unwrap().take().is_some() {
-                    if let Err(e) = remove_synced(&self.token_path) {
-                        eprintln!("punard: could not remove the released device token: {e}");
-                    }
-                }
-                *self.release_failure.lock().unwrap() = None;
-            }
-            Err(e) => {
-                eprintln!(
-                    "punard: enroll.start could not release the uncommitted registration \
-                     ({e}); it is released on a later pass"
-                );
-                if let Err(e) = save_device_token(&self.token_path, &token) {
-                    eprintln!(
-                        "punard: could not keep the device token of the identity still to be \
-                         released ({e})"
-                    );
-                }
-                *self.held.lock().unwrap() = Some(token);
-                *self.release_failure.lock().unwrap() = Some(release_failure_reason(&e));
-            }
+        if let Some(token) = self.token.take() {
+            self.inner.release_uncommitted(&self.actor, token);
         }
     }
 }
@@ -579,11 +553,18 @@ struct Inner {
     /// M5: the device token, [`Redacted`] the moment it exists in memory —
     /// no formatter or serializer can print it (SPEC section 53). Kept past
     /// an unenrollment until the agent confirms it wiped the identity the
-    /// token names: while no enrollment is held, a token here is an identity
-    /// still to be released ([`Inner::release_pending_identity`]).
+    /// token names ([`Inner::release_pending_identity`]); what punard does
+    /// with a token while no enrollment is held is the release record's to
+    /// say (`identity_release`), never the token's.
     device_token: Mutex<Option<Redacted<String>>>,
     /// Why the last attempt to release that identity did not confirm it.
     release_failure: Mutex<Option<String>>,
+    /// punard's record of an identity it holds or may have left with the
+    /// agent while no enrollment is committed (mirrors
+    /// [`IDENTITY_RELEASE_FILE`]): one to release, or one it keeps because
+    /// nothing says the enrollment it belonged to was ended. Only a record
+    /// makes punard ask the agent to wipe anything; a token alone never does.
+    identity_release: Mutex<Option<IdentityReleaseRecord>>,
     /// M5 offline queue (SPEC section 55): bounded latest-wins — two
     /// booleans, not a spool. Compliance/inventory are state snapshots; a
     /// missed intermediate report carries nothing the next snapshot does
@@ -881,12 +862,73 @@ impl Daemon {
                  compliance/inventory sync will fail until re-enrollment"
             );
         }
-        if enrollment.is_none() && device_token.is_some() {
+        // What punard does with an identity while no enrollment is committed
+        // is decided by its release record alone (IDENTITY_RELEASE_FILE). A
+        // device token with neither an enrollment nor a record is not an
+        // unenrollment waiting to finish: nothing ended the enrollment it
+        // belonged to (deleting enrollment.json would otherwise make punard
+        // wipe the organization's identity itself, recorded as an ordinary
+        // release). It is kept, never released, audited once as
+        // `enroll.release` `kept`, and shown; a new enrollment replaces it.
+        let release_path = cfg.state_dir.join(IDENTITY_RELEASE_FILE);
+        let keep = |cause: &str, audit: &mut AuditWriter, audit_events: &mut u64| {
+            let record = IdentityReleaseRecord::new(ReleaseState::Kept, cause, utc_now_rfc3339());
+            if let Err(e) = save_identity_release(&release_path, &record) {
+                eprintln!("punard: could not record the kept Smplify identity ({e})");
+            }
             eprintln!(
-                "punard: an unenrollment has not yet been confirmed by the Smplify agent; \
-                 its identity is released on the next pass"
+                "punard: a Smplify identity is held with no enrollment and no record of ending \
+                 one ({cause}); it is kept, not released, until a new enrollment replaces it"
             );
-        }
+            let event = enrollment_event(
+                &device_id,
+                &AuditActor::daemon(),
+                "enroll.release",
+                &format!("agent.{cause}"),
+                ReleaseState::Kept.as_str(),
+                Vec::new(),
+            );
+            match audit.append(&event) {
+                Ok(()) => *audit_events += 1,
+                Err(e) => eprintln!("punard: FAILED to append enroll.release audit event: {e}"),
+            }
+            record
+        };
+        let identity_release = match (&enrollment, load_identity_release(&release_path)) {
+            // Enrolled: the enrollment the record was written for was
+            // committed, or never ended. Nothing is to be released.
+            (Some(_), Ok(None)) => None,
+            (Some(_), _) => {
+                if let Err(e) = remove_synced(&release_path) {
+                    eprintln!("punard: could not remove a settled identity release record: {e}");
+                }
+                None
+            }
+            (None, Ok(Some(record))) => {
+                if record.state == ReleaseState::Release {
+                    eprintln!(
+                        "punard: the Smplify agent has not confirmed it wiped an identity \
+                         ({}); it is asked again on the next pass",
+                        record.cause
+                    );
+                }
+                Some(record)
+            }
+            (None, Ok(None)) if device_token.is_some() => Some(keep(
+                "enrollment_record_missing",
+                &mut audit,
+                &mut audit_events,
+            )),
+            (None, Ok(None)) => None,
+            (None, Err(e)) => {
+                eprintln!("punard: the identity release record is unreadable ({e})");
+                Some(keep(
+                    "release_record_unreadable",
+                    &mut audit,
+                    &mut audit_events,
+                ))
+            }
+        };
 
         // M9: the approval store and the AI authority document. A store
         // that will not open is fatal — a daemon that cannot record an
@@ -921,6 +963,7 @@ impl Daemon {
                 enrollment_epoch: AtomicU64::new(0),
                 device_token: Mutex::new(device_token),
                 release_failure: Mutex::new(None),
+                identity_release: Mutex::new(identity_release),
                 pending_compliance: AtomicBool::new(false),
                 pending_inventory: AtomicBool::new(false),
                 inventory_retry: Mutex::new(None),
@@ -5410,19 +5453,54 @@ impl Inner {
             random_hex(crate::enroll::BOOTSTRAP_SECRET_BYTES)
                 .map_err(|e| fail_audit(self.internal(&format!("bootstrap secret: {e}"))))?,
         );
-        let (token, attestation) = client
-            .register(&self.device_id, &bootstrap, code.as_ref())
-            .map_err(|e| fail_audit(self.upstream_error("register", e)))?;
+        // Before register, durably: the agent keeps the identity Smplify
+        // issues before it answers, so a registration whose answer never
+        // arrives (punard killed, the machine off, a broken connection)
+        // leaves an identity with the agent and none with punard. This
+        // record is what lets a later pass wipe it (docs/api/ipc.md section
+        // 5.11). It covers a release still pending from an earlier
+        // unenrollment too; a registration that commits removes it.
+        let release_path = self.cfg.state_dir.join(IDENTITY_RELEASE_FILE);
+        let prior_release = self.identity_release.lock().unwrap().clone();
+        let registering =
+            IdentityReleaseRecord::new(ReleaseState::Release, "registration", utc_now_rfc3339());
+        save_identity_release(&release_path, &registering).map_err(|e| {
+            fail_audit(self.internal(&format!("identity release record store: {e}")))
+        })?;
+        *self.identity_release.lock().unwrap() = Some(registering);
+        let (token, attestation) = match client.register(&self.device_id, &bootstrap, code.as_ref())
+        {
+            Ok(registered) => registered,
+            Err(e) => {
+                // Refused by the organization's server: the agent keeps an
+                // identity only once Smplify has accepted the code, so only
+                // what was owed before is still owed. Anything else (no
+                // answer, a broken connection, the agent's own failure) may
+                // have left one, and the record stays.
+                let refused =
+                    matches!(&e, UpstreamError::Refused { code, .. } if code != "internal");
+                if refused {
+                    let restored = match &prior_release {
+                        Some(prior) => save_identity_release(&release_path, prior),
+                        None => remove_synced(&release_path),
+                    };
+                    match restored {
+                        Ok(()) => *self.identity_release.lock().unwrap() = prior_release,
+                        Err(e) => eprintln!(
+                            "punard: could not restore the identity release record ({e}); the \
+                             agent is asked to release what it holds on the next pass"
+                        ),
+                    }
+                }
+                return Err(fail_audit(self.upstream_error("register", e)));
+            }
+        };
         // From here to the commit point every refusal releases the identity
         // the control plane just issued; see [`UncommittedRegistration`].
         let registration = UncommittedRegistration {
-            // Its own client, outside the budget: a registration is released
-            // however long enrolling took.
-            client: self.control_plane(),
+            inner: self,
+            actor: actor.clone(),
             token: Some(token.clone()),
-            held: &self.device_token,
-            token_path: self.cfg.state_dir.join("device-token"),
-            release_failure: &self.release_failure,
         };
         // The attestation step is SIMULATED (milestone-5.md section 5.2):
         // the label is stored and surfaced verbatim; nothing was measured.
@@ -5502,9 +5580,16 @@ impl Inner {
         let attestation_label = enrollment.attestation.clone();
         registration.commit();
         // The registration replaced whatever identity the agent held, one an
-        // earlier unenrollment was still releasing included.
+        // earlier unenrollment was still releasing, or punard was keeping,
+        // included: nothing is left to release. A record that cannot be
+        // removed now is removed at the next start, which finds it beside
+        // the committed enrollment.
         *self.device_token.lock().unwrap() = Some(token);
         *self.release_failure.lock().unwrap() = None;
+        if let Err(e) = remove_synced(&release_path) {
+            eprintln!("punard: could not remove the registration's release record: {e}");
+        }
+        *self.identity_release.lock().unwrap() = None;
         {
             let mut slot = self.enrollment.lock().unwrap();
             *slot = Some(enrollment);
@@ -5762,17 +5847,31 @@ impl Inner {
         }
     }
 
-    /// An identity an unenrollment asked the agent to wipe and the agent
-    /// has not confirmed wiped, for `enroll.status`.
+    /// What punard's release record says, for `enroll.status` and the
+    /// status file: an identity the agent has not confirmed wiped
+    /// (`pending`, with the last attempt's reason), or one punard keeps
+    /// because nothing ended the enrollment it belonged to (`kept`, with
+    /// why). A registration still in progress is not shown as either.
     fn pending_release(&self) -> Option<IdentityRelease> {
-        self.device_token
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|_| IdentityRelease {
-                state: "pending".to_string(),
-                reason: self.release_failure.lock().unwrap().clone(),
-            })
+        let record = self.identity_release.lock().unwrap().clone()?;
+        match record.state {
+            ReleaseState::Release => {
+                if record.cause == "registration"
+                    && self.enroll_in_progress.load(Ordering::SeqCst)
+                    && self.release_failure.lock().unwrap().is_none()
+                {
+                    return None;
+                }
+                Some(IdentityRelease {
+                    state: ReleaseState::Release.as_str().to_string(),
+                    reason: self.release_failure.lock().unwrap().clone(),
+                })
+            }
+            ReleaseState::Kept => Some(IdentityRelease {
+                state: ReleaseState::Kept.as_str().to_string(),
+                reason: Some(record.cause),
+            }),
+        }
     }
 
     /// `enroll.stop` (contract section 5.11): local restore — remove exactly
@@ -5835,6 +5934,18 @@ impl Inner {
         // The authoritative check: under the guard no enrollment can be
         // committed or ended, so what is taken next is what was judged.
         self.refuse_kept_enrollment(&actor)?;
+        // Before anything of the enrollment is removed, durably: from here
+        // on the identity is one to release, and a crash anywhere below
+        // leaves a record that says so (without it a token with no
+        // enrollment is kept, never released).
+        let release_path = self.cfg.state_dir.join(IDENTITY_RELEASE_FILE);
+        let releasing =
+            IdentityReleaseRecord::new(ReleaseState::Release, "unenroll", utc_now_rfc3339());
+        if self.enrollment.lock().unwrap().is_some() {
+            if let Err(e) = save_identity_release(&release_path, &releasing) {
+                return Err(self.internal(&format!("identity release record store: {e}")));
+            }
+        }
         let taken = {
             let mut slot = self.enrollment.lock().unwrap();
             let taken = slot.take();
@@ -5876,6 +5987,19 @@ impl Inner {
             ));
         };
 
+        *self.identity_release.lock().unwrap() = Some(releasing);
+        // An episode of management interrupted open when the enrollment ends
+        // ends with it: one closing event, so every episode in the audit has
+        // both ends.
+        if let Some(open) = &enrollment.agent_unavailable {
+            self.log_audit(self.enroll_event(
+                &actor,
+                "enroll.agent",
+                &format!("agent.{}", open.reason),
+                "ended",
+                enrollment.policy_ids(),
+            ));
+        }
         let policy_dir = self.cfg.state_dir.join("policy.d");
         for file in &enrollment.policy_files {
             if let Err(e) = std::fs::remove_file(policy_dir.join(file)) {
@@ -5895,11 +6019,10 @@ impl Inner {
         // identity is still to be released, docs/api/ipc.md section 5.11), so
         // a key is never left on disk with no way to finish, and every pass
         // asks again (Inner::release_pending_identity).
+        // Asked even without a token: the agent may hold an identity punard
+        // lost its token for, and nothing of one may stay behind.
         let token = self.device_token.lock().unwrap().clone();
-        let released = match &token {
-            Some(token) => self.control_plane().unregister(token),
-            None => Ok(()),
-        };
+        let released = self.control_plane().unregister(token.as_ref());
         if let Err(e) = crate::enroll::remove_terms(&self.cfg.state_dir.join("enrollment.json")) {
             eprintln!("punard: enroll.stop could not remove the enrollment terms: {e}");
         }
@@ -5909,31 +6032,18 @@ impl Inner {
             }
         }
         let identity_release = match released {
-            Ok(()) => {
-                if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join("device-token")) {
-                    if e.kind() != io::ErrorKind::NotFound {
-                        eprintln!("punard: enroll.stop could not remove device-token: {e}");
-                    }
-                }
-                *self.device_token.lock().unwrap() = None;
-                *self.release_failure.lock().unwrap() = None;
-                "released"
-            }
+            Ok(()) if self.forget_released_identity() => "released",
+            // Wiped, and punard's own token or record could not be removed:
+            // the next pass asks again, the agent confirms at once, and they
+            // go then.
+            Ok(()) => "pending",
             Err(e) => {
-                let reason = release_failure_reason(&e);
                 eprintln!(
                     "punard: enroll.stop: the Smplify agent did not confirm it wiped this \
                      device's identity ({e}); the device token is kept and the wipe is asked \
                      for again on every pass"
                 );
-                self.log_audit(self.enroll_event(
-                    &actor,
-                    "enroll.release",
-                    &format!("agent.{reason}"),
-                    "pending",
-                    enrollment.policy_ids(),
-                ));
-                *self.release_failure.lock().unwrap() = Some(reason);
+                self.release_not_confirmed(&actor, &e, enrollment.policy_ids());
                 "pending"
             }
         };
@@ -6497,52 +6607,48 @@ impl Inner {
         }
     }
 
-    /// An identity an unenrollment asked the agent to wipe and the agent did
-    /// not confirm wiped (docs/api/ipc.md section 5.11): asked again on every
-    /// pass until it is, then the device token goes and the release is
-    /// audited. The call holds no lock; the result is committed under the
-    /// enrollment guard, which an `enroll.start` holds from before it
-    /// registers until its own token is in place, so a new enrollment's
-    /// token is never the one removed.
+    /// An identity punard's release record says to wipe and the agent has
+    /// not confirmed wiped (docs/api/ipc.md section 5.11): an unenrollment's,
+    /// or a registration's enroll.start did not commit or never heard the
+    /// answer to. Asked again on every pass until it is; then the token and
+    /// the record go and the release is audited. A token without a record
+    /// is never released ([`ReleaseState::Kept`]).
+    ///
+    /// The whole exchange holds the enrollment guard, and never waits for it:
+    /// the agent is asked to wipe whatever it holds (`any_identity`), which is
+    /// right only while no enrollment is committed or being made, and the
+    /// guard is what keeps an `enroll.start` from registering in between. The
+    /// call is local and short, so an enrollment that finds the guard taken
+    /// for it waits at most for one answer from an agent that is slow anyway.
     fn release_pending_identity(&self, actor: &AuditActor, budget: &CallBudget) {
-        // Not while an enrollment change is running: `enroll.stop` has just
-        // asked, and `enroll.start` replaces the identity anyway.
-        if self.enrollment.lock().unwrap().is_some()
-            || self.enroll_in_progress.load(Ordering::SeqCst)
-        {
+        let releasing = self
+            .identity_release
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|record| record.state == ReleaseState::Release);
+        if !releasing || self.enrollment.lock().unwrap().is_some() {
             return;
         }
-        let Some(token) = self.device_token.lock().unwrap().clone() else {
-            return;
-        };
-        let released = self
-            .control_plane()
-            .within(budget.clone())
-            .unregister(&token);
         let Some(_guard) = EnrollGuard::acquire(&self.enroll_in_progress) else {
             return;
         };
         if self.enrollment.lock().unwrap().is_some() {
             return;
         }
-        let mut held = self.device_token.lock().unwrap();
-        if held.as_ref().map(|held| held.expose_secret()) != Some(token.expose_secret()) {
-            return;
-        }
-        match released {
+        let token = self.device_token.lock().unwrap().clone();
+        match self
+            .control_plane()
+            .within(budget.clone())
+            .unregister(token.as_ref())
+        {
             Ok(()) => {
-                if let Err(e) = remove_synced(&self.cfg.state_dir.join("device-token")) {
-                    eprintln!(
-                        "punard: the Smplify agent wiped this device's identity, and the device \
-                         token could not be removed ({e}); retried on the next pass"
-                    );
+                if !self.forget_released_identity() {
                     return;
                 }
-                *held = None;
-                *self.release_failure.lock().unwrap() = None;
                 eprintln!(
                     "punard: the Smplify agent confirmed it wiped this device's identity; the \
-                     unenrollment is complete"
+                     release is complete"
                 );
                 self.log_audit(self.enroll_event(
                     actor,
@@ -6552,17 +6658,95 @@ impl Inner {
                     Vec::new(),
                 ));
             }
+            Err(e) => self.release_not_confirmed(actor, &e, Vec::new()),
+        }
+    }
+
+    /// A registration enroll.start could not commit, released at once and
+    /// under enroll.start's own guard: with its own client, outside the
+    /// budget, so it is released however long enrolling took. When the agent
+    /// does not confirm, the token is kept beside the release record
+    /// enroll.start wrote before it registered, `enroll.release` `pending` is
+    /// audited, and every pass asks again.
+    fn release_uncommitted(&self, actor: &AuditActor, token: Redacted<String>) {
+        match self.control_plane().unregister(Some(&token)) {
+            Ok(()) => {
+                self.forget_released_identity();
+            }
             Err(e) => {
-                let reason = release_failure_reason(&e);
-                let mut last = self.release_failure.lock().unwrap();
-                if last.as_deref() != Some(reason.as_str()) {
+                eprintln!(
+                    "punard: enroll.start could not release the uncommitted registration \
+                     ({e}); it is released on a later pass"
+                );
+                if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token)
+                {
                     eprintln!(
-                        "punard: the Smplify agent has still not confirmed it wiped this \
-                         device's identity ({e}); asked again on the next pass"
+                        "punard: could not keep the device token of the identity still to be \
+                         released ({e}); the release record alone asks for it"
                     );
                 }
-                *last = Some(reason);
+                *self.device_token.lock().unwrap() = Some(token);
+                self.release_not_confirmed(actor, &e, Vec::new());
             }
+        }
+    }
+
+    /// The agent confirmed it wiped what it held: nothing of an identity is
+    /// left, so neither the device token nor the release record is. The
+    /// token goes first: a record left behind only asks the agent once more,
+    /// and it confirms at once, while a token left without its record would
+    /// read as one to keep. `false` when either could not be removed; the
+    /// next pass tries again.
+    fn forget_released_identity(&self) -> bool {
+        if let Err(e) = remove_synced(&self.cfg.state_dir.join("device-token")) {
+            eprintln!(
+                "punard: the Smplify agent wiped this device's identity, and the device token \
+                 could not be removed ({e}); retried on the next pass"
+            );
+            return false;
+        }
+        *self.device_token.lock().unwrap() = None;
+        if let Err(e) = remove_synced(&self.cfg.state_dir.join(IDENTITY_RELEASE_FILE)) {
+            eprintln!(
+                "punard: the Smplify agent wiped this device's identity, and its release record \
+                 could not be removed ({e}); retried on the next pass"
+            );
+            return false;
+        }
+        *self.identity_release.lock().unwrap() = None;
+        *self.release_failure.lock().unwrap() = None;
+        true
+    }
+
+    /// The agent did not confirm a wipe. `enroll.release` `pending` is
+    /// audited when the reason is news (the first failure, or one unlike the
+    /// last), never once per pass, and the reason is kept for
+    /// `enroll.status`.
+    fn release_not_confirmed(
+        &self,
+        actor: &AuditActor,
+        error: &UpstreamError,
+        policy_ids: Vec<String>,
+    ) {
+        let reason = release_failure_reason(error);
+        let news = {
+            let mut last = self.release_failure.lock().unwrap();
+            let news = last.as_deref() != Some(reason.as_str());
+            *last = Some(reason.clone());
+            news
+        };
+        if news {
+            eprintln!(
+                "punard: the Smplify agent has not confirmed it wiped this device's identity \
+                 ({error}); asked again on every pass"
+            );
+            self.log_audit(self.enroll_event(
+                actor,
+                "enroll.release",
+                &format!("agent.{reason}"),
+                "pending",
+                policy_ids,
+            ));
         }
     }
 
@@ -6709,6 +6893,11 @@ impl Inner {
             ),
             None => (false, None, None),
         };
+        let identity_release = if enrolled {
+            None
+        } else {
+            self.pending_release().map(|release| release.state)
+        };
         let overall = self
             .tracker
             .lock()
@@ -6730,6 +6919,7 @@ impl Inner {
             .to_string(),
             architecture: self.apps.architecture().to_string(),
             management,
+            identity_release,
             ts: utc_now_rfc3339(),
         };
         let mut written = self.status_written.lock().unwrap();
@@ -6737,6 +6927,7 @@ impl Inner {
             w.enrolled == summary.enrolled
                 && w.org_name == summary.org_name
                 && w.management == summary.management
+                && w.identity_release == summary.identity_release
                 && w.compliance_overall == summary.compliance_overall
                 && w.device_class == summary.device_class
                 && w.device_class_source == summary.device_class_source

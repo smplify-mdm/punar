@@ -59,6 +59,13 @@ Singleton {
     // Enrollment pane draws. Never true on a personal device.
     property bool managementInterrupted: false
 
+    // On a device with no enrollment: "pending" while its Smplify identity
+    // is still to be wiped, "kept" while punard keeps one nothing ended the
+    // enrollment of (status.json `identity_release`, docs/api/ipc.md §9);
+    // "" otherwise. The Enrollment pane draws the words punarctl enroll
+    // status prints for the same state.
+    property string identityRelease: ""
+
     // "ok" | "warn" | "bad" — maps 1:1 to spec §52 decision states.
     readonly property string state: {
         switch (root.complianceState) {
@@ -158,6 +165,7 @@ Singleton {
         root.deviceClassSource = "unknown";
         root.architecture = "";
         root.managementInterrupted = false;
+        root.identityRelease = "";
     }
 
     function loadStatus(): void {
@@ -183,6 +191,9 @@ Singleton {
             : "";
         root.architecture = typeof j.architecture === "string" ? j.architecture : "";
         root.managementInterrupted = root.enrolled && j.management === "interrupted";
+        root.identityRelease = (!root.enrolled
+            && (j.identity_release === "pending" || j.identity_release === "kept"))
+            ? j.identity_release : "";
         var deviceClass = typeof j.device_class === "string" ? j.device_class : "";
         root.deviceClass = ["workstation", "laptop", "appliance"].indexOf(deviceClass) >= 0
             ? deviceClass : "appliance";

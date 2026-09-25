@@ -1888,7 +1888,10 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
             "personal device",
         )];
         if let Some(release) = &status.identity_release {
-            rows.push(identity_release_row(release.reason.as_deref()));
+            rows.push(match release.state.as_str() {
+                "kept" => identity_kept_row(release.reason.as_deref()),
+                _ => identity_release_row(release.reason.as_deref()),
+            });
         }
         out.push_str(&fmt::rows(style, &rows));
         out.push_str(&fmt::note(
@@ -2099,6 +2102,24 @@ fn identity_release_row(reason: Option<&str>) -> Row {
         &format!(
             "the agent has not yet confirmed it wiped this device's key{why} · asked again on \
              every reconcile pass"
+        ),
+    )
+}
+
+/// A Smplify identity punard holds a token for and no record of ending the
+/// enrollment it belonged to (the enrollment record was deleted): kept, never
+/// wiped by punard itself, and audited. The same words the shell draws.
+fn identity_kept_row(reason: Option<&str>) -> Row {
+    let why = reason
+        .map(|reason| format!(" ({})", printable(reason).replace('_', " ")))
+        .unwrap_or_default();
+    Row::new(
+        "Smplify identity",
+        "Kept",
+        Slot::Bad,
+        &format!(
+            "nothing records the end of the enrollment it belongs to{why} · punard keeps it and \
+             asks the agent nothing · audited as enroll.release · a new enrollment replaces it"
         ),
     )
 }
@@ -6367,6 +6388,17 @@ mod tests {
         .unwrap();
         assert!(text.contains("RELEASE PENDING"), "{text}");
         assert!(text.contains("not answering"), "{text}");
+        let text = enroll_status(
+            &style,
+            &json!({"enrolled": false,
+                    "identity_release": {"state": "kept",
+                                         "reason": "enrollment_record_missing"}}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("KEPT"), "{text}");
+        assert!(text.contains("enrollment record missing"), "{text}");
+        assert!(!text.contains("RELEASE PENDING"), "{text}");
         let text = enroll_stop(
             &style,
             &json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],

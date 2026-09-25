@@ -225,7 +225,7 @@ pub struct Management {
 /// The `identity_release` object of [`EnrollStatus`].
 #[derive(Deserialize)]
 pub struct IdentityRelease {
-    #[allow(dead_code)]
+    /// `pending` or `kept`.
     pub state: String,
     #[serde(default)]
     pub reason: Option<String>,

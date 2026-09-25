@@ -95,8 +95,11 @@ translated key by key into `systemInfo` (§3.3) — nothing else. Both answer
 punard `{sent: <the body posted>}`. `queries.*` → empty until the backend has
 `punar-query`. `recovery.*` → `out_of_scope`. `enroll.unregister` → wipes the
 identity locally (it asks Smplify nothing, so it works offline) and the agent
-goes dormant; `enroll.stop` never waits on it, and punard keeps the device
-token until the agent confirms the wipe, asking again on every pass (§3.4).
+goes dormant; with `any_identity: true`, which punard sends only while it
+holds no enrollment and under its enrollment guard, whatever is held goes,
+the token's identity or not. `enroll.stop` never waits on it, and punard
+keeps its release record and the device token until the agent confirms the
+wipe, asking again on every pass (§3.4).
 `identity.status` → local as well: punard's liveness call on every pass while
 enrolled (§3.4).
 
@@ -533,14 +536,30 @@ option D of the activation design, with the review's corrections.
   then fails, which punard reports as `connection_refused`, and root recovers
   it once the cause is fixed with `systemctl start punar-smplifyd.socket`, or a
   reboot does.
-- **Unenroll.** `enroll.stop` asks the agent to wipe the identity
-  (`enroll.unregister`, local, works offline); the agent answers and exits 75
-  at once. Unenrollment never waits on it, and never forgets the identity
-  either: until the agent confirms the wipe, punard keeps the device token,
-  `enroll.status` says `identity_release: pending`, and every pass asks again;
-  the confirmation is audited as `enroll.release` `success`
-  (docs/api/ipc.md §5.11). The same holds for a registration `enroll.start`
-  could not commit.
+- **Unenroll.** `enroll.stop` first writes punard's release record
+  (`identity-release.json`, durably), then asks the agent to wipe the
+  identity (`enroll.unregister`, local, works offline); the agent answers and
+  exits 75 at once. Unenrollment never waits on it, and never forgets the
+  identity either: until the agent confirms the wipe, punard keeps the record
+  and the device token, `enroll.status` and `status.json` say
+  `identity_release: pending`, and every pass asks again; the confirmation is
+  audited as `enroll.release` `success` (docs/api/ipc.md §5.11). An episode
+  still open when the enrollment ends is closed with `enroll.agent` `ended`.
+- **A registration that does not commit, or whose answer is lost.**
+  `enroll.start` writes the same record, cause `registration`, before it
+  calls `enroll.register`, because the agent keeps the identity Smplify
+  issued before it answers: punard killed, the machine off or a connection
+  broken during registration leaves an identity with the agent and nothing
+  with punard but this record, and the next pass asks the agent to wipe
+  whatever it holds. A registration that commits removes the record.
+- **Only a record releases.** A device token found with no enrollment and no
+  release record (someone deleted `enrollment.json`) is not an unenrollment
+  waiting to finish: nothing ended the enrollment. punard keeps the identity,
+  never asks the agent to wipe it (and so never starts the agent for it),
+  audits `enroll.release` `kept` once (resource
+  `agent.enrollment_record_missing`), and shows `identity_release: kept` in
+  `enroll.status`, `status.json`, `punarctl enroll status` and the shell's
+  Enrollment pane. A new enrollment replaces it.
 
 **Who can stop it, and how each path is noticed.** No person is root and
 nobody holds a manage-units grant (onboarding.md §1.6; the Punar polkit rules
@@ -558,6 +577,7 @@ What is left is another root process:
 | delete every identity file | the agent goes dormant 30 s later | `identity_missing`: the next call starts it, and it holds none |
 | an identity punard did not register | the agent answers for it | `identity_mismatch` |
 | delete punard's `device-token` and restart punard | punard cannot ask about or report on this device | `token_missing` (nothing is sent) |
+| delete `enrollment.json` (and its terms) and restart punard | punard no longer enforces or reports for the enrollment; the organization's policy files stay in `policy.d` as foreign files | the identity is kept, not released: `enroll.release` `kept` once, `identity_release: kept` everywhere the enrollment is shown |
 | another program answering on the agent's socket with anything but this device's identity | whatever it says | `unexpected_answer` (the liveness call fails closed) |
 | an agent that cannot start (a missing or broken binary) | the socket fails after 20 starts in 10 s | `connection_refused` |
 

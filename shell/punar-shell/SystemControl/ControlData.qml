@@ -722,6 +722,15 @@ Scope {
                     {id: "privilege", name: "Privilege"}
                 ]
             });
+        } else if (Status.identityRelease !== "") {
+            // The one organization fact a personal device can carry: an
+            // unenrollment still finishing, or an identity punard keeps.
+            sections.push({
+                section: "Organization",
+                items: [
+                    {id: "enrollment", name: "Enrollment"}
+                ]
+            });
         }
         return sections;
     }
@@ -2107,7 +2116,7 @@ Scope {
 
     function orgView(id: string): var {
         if (id === "enrollment" && !Status.enrolled)
-            return null;
+            return Status.identityRelease === "" ? null : data.viewIdentityRelease();
         if (id === "enrollment")
             return data.viewEnrollment();
         if (id === "compliance")
@@ -2156,6 +2165,30 @@ Scope {
             note: Status.managementInterrupted
                 ? "Management interrupted: this device cannot reach its organization's agent, so reports wait until it answers. The organization keeps what it already received, and the policy it set is still enforced. punarctl enroll status says why."
                 : "Enrollment adds chrome; it never redraws the machine. Every section of this panel looked the same before it and looks the same after, with the organization's answers annotated on top."
+        };
+    }
+
+    // A personal device whose Smplify identity is not gone yet. The words
+    // punarctl enroll status prints for the same state.
+    function viewIdentityRelease(): var {
+        var kept = Status.identityRelease === "kept";
+        return {
+            title: "Enrollment",
+            sub: "Organization · personal device",
+            kv: [
+                {
+                    k: "Enrollment",
+                    v: "NONE"
+                },
+                {
+                    k: "Smplify identity",
+                    v: kept ? "KEPT" : "RELEASE PENDING",
+                    tone: kept ? "bad" : "warn"
+                }
+            ],
+            note: kept
+                ? "Nothing records the end of the enrollment this device's Smplify identity belongs to, so punard keeps it rather than wiping it, and asks the agent nothing. It is in the audit log as enroll.release, and a new enrollment replaces it. punarctl enroll status says the same."
+                : "This device is personal. Its Smplify agent has not yet confirmed it wiped the device's key, and is asked again on every reconcile pass. punarctl enroll status says why."
         };
     }
 

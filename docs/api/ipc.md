@@ -1111,9 +1111,14 @@ attempted sync, and `pending` is true. The device token appears in no field.
 cannot be used: `reason` is the section 6 `enroll.agent` reason the last pass
 found, `since` when the episode began. While it is interrupted no report is
 sent and `last_sync.pending` is true. `identity_release`, absent when there
-is none, is `{"state": "pending", "reason": …}` while an unenrollment's
-Smplify identity is still to be wiped (section 5.11); it can appear on an
-unenrolled device, and `reason` is an agent reason or `refused`.
+is none and only ever on a device with no enrollment, is
+`{"state": "pending", "reason": …}` while a Smplify identity punard's release
+record says to wipe is not confirmed wiped (section 5.11; `reason` is an
+agent reason or `refused`, absent before the first attempt), or
+`{"state": "kept", "reason": "enrollment_record_missing"}` while punard keeps
+an identity it holds a token for and nothing records the end of the
+enrollment it belonged to (`release_record_unreadable` when the record is
+not one punard wrote).
 
 ### 5.11 `enroll.stop` (M5)
 
@@ -1138,17 +1143,30 @@ layer per spec section 39), rewrites the section 9 status file. Result:
 `{"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],
 "identity_release": "released"}`.
 
-**The identity is released, or kept until it is.** The wipe is local on the
+**The identity is released, or kept until it is.** Before anything of the
+enrollment is removed, punard writes its release record
+(`/var/lib/punar/identity-release.json`, 0600, durably); only that record
+ever makes punard ask the agent to wipe an identity. The wipe is local on the
 agent's side (it asks Smplify nothing), so unenrolling works offline, and the
-agent goes dormant once it has answered. Unenrollment never waits on it, and
-never forgets the identity either: when the agent does not confirm the wipe
-(its socket is gone, it does not answer, it refuses), the result says
-`"identity_release": "pending"`, punard keeps the device token, audits
-`enroll.release` `pending` (section 6), and asks again on every reconcile
-pass; once the agent confirms, the token goes and `enroll.release` `success`
-is audited. `enroll.status.identity_release` shows it meanwhile. So no key is
-ever left on disk with no way to finish. A registration `enroll.start` could
-not commit is released the same way.
+agent goes dormant once it has answered. punard asks with `any_identity:
+true` (it holds no enrollment, and holds its enrollment guard for the whole
+exchange, so no registration can come in between): whatever the agent holds
+goes, the token's identity or one the token does not name. Unenrollment
+never waits on it, and never forgets the identity either: when the agent does
+not confirm the wipe (its socket is gone, it does not answer, it refuses),
+the result says `"identity_release": "pending"`, punard keeps the record and
+the device token, audits `enroll.release` `pending` (section 6), and asks
+again on every reconcile pass; once the agent confirms, the token and the
+record go and `enroll.release` `success` is audited.
+`enroll.status.identity_release` and `status.json` show it meanwhile. So no
+key is ever left on disk with no way to finish. `enroll.start` writes the
+same record before `enroll.register`, so a registration it could not commit,
+or whose answer it never received (punard killed, the machine off, a broken
+connection, with the identity already kept by the agent), is released the
+same way, and a registration that commits removes it. A device token found
+with no enrollment and no record is not an unenrollment waiting to finish:
+punard keeps it, asks the agent nothing, audits `enroll.release` `kept` once,
+and shows `identity_release: kept`; a new enrollment replaces it.
 
 **What unenrolling does not do:** the organization keeps its device record
 and every report it received. Unenrollment stops all future sync and
@@ -1939,8 +1957,14 @@ or path other than the confirmed target device. An installed system returns
   its budget. So an episode is never also an `enroll.sync` outage, and a
   policy fetch the agent's socket failed is not an `enroll.policy`
   `unreachable`: the network was not asked, and the episode is the record. `enroll.release` (resource
-  `agent.<reason>` or `agent`): `pending` once when an unenrollment's
-  identity wipe is not confirmed, `success` once when it is (section 5.11).
+  `agent.<reason>` or `agent`): `pending` when a wipe punard's release
+  record asks for is not confirmed, again only when the reason changes,
+  `success` once when it is, and `kept` once when punard finds a device
+  token with no enrollment and no record and keeps the identity rather than
+  wipe it (resource `agent.enrollment_record_missing` or
+  `agent.release_record_unreadable`; section 5.11). An episode still open when
+  the enrollment ends is closed with `enroll.agent` `ended`, so every episode
+  has both ends.
 - **Installer planning addition:** `install.plan` is audited even though it
   is read-only, because it is the first attributable step of a destructive
   workflow. Its resource is `system_disk`; success is `success`, a safety or
@@ -2173,13 +2197,19 @@ render enrollment/compliance chrome without a socket connection or polling
   {"v": 1, "enrolled": true, "org_name": "Acme Engineering",
    "compliance_overall": "compliant", "device_class": "laptop",
    "device_class_source": "observed", "architecture": "aarch64",
-   "management": "active", "ts": "2026-08-26T09:02:00Z"}
+   "management": "active", "identity_release": null,
+   "ts": "2026-08-26T09:02:00Z"}
   ```
 
   (`org_name` and `management` are `null` and `enrolled` is `false` on a
   personal device.) `management` is `"interrupted"` while the built-in agent
   cannot be used (section 6, `enroll.agent`); the reason is in
   `enroll.status`, not here. Consumers read anything else as `"active"`.
+  `identity_release` is `null` while enrolled; on a device with no
+  enrollment it is `"pending"` while a Smplify identity is still to be wiped
+  and `"kept"` while punard keeps one nothing ended the enrollment of
+  (section 5.11), and `null` otherwise; consumers read anything else as
+  `null`.
   No raw hardware facts, per-capability rows, policy ids, device id, or
   hostname: the file is world-readable and carries
   only what the shell renders or uses for its resident-cost decision. A

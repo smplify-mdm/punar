@@ -398,7 +398,10 @@ struct IdentityStatusParams {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EnrollUnregisterParams {
-    device_token: String,
+    #[serde(default)]
+    device_token: Option<String>,
+    #[serde(default)]
+    any_identity: bool,
 }
 
 #[derive(Deserialize)]
@@ -609,9 +612,6 @@ fn enroll_register(inner: &Inner, params: Option<Value>) -> Result<Value, MockEr
     }))
 }
 
-/// Serve the published set — the default until `admin.policy_publish` names
-/// another — with the marker saying what the list is (docs/api/ipc.md
-/// section 5.9), so an empty one is never read as more than it says.
 /// Whether this control plane holds an identity for the device the token
 /// names: `{"enrolled": true, "token_matches": true}` for a token it issued,
 /// `{"enrolled": false}` otherwise. One device's view of a fleet: without a
@@ -634,10 +634,11 @@ fn identity_status(inner: &Inner, params: Option<Value>) -> Result<Value, MockEr
 /// record and everything the device reported (unenrollment cannot retract
 /// what the organization received), so there is nothing to change, and the
 /// answer confirms the wipe for any token, as the agent does once nothing is
-/// left.
+/// left. `any_identity` (punard holds no enrollment) needs no token; without
+/// it the token is required, as the agent requires it.
 fn enroll_unregister(_inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
     let p: EnrollUnregisterParams = parse_params("enroll.unregister", params)?;
-    if p.device_token.is_empty() {
+    if !p.any_identity && p.device_token.as_deref().is_none_or(str::is_empty) {
         return Err(MockError::with_details(
             ErrorCode::InvalidParams,
             "The device_token must be a non-empty string.".to_string(),
@@ -647,6 +648,9 @@ fn enroll_unregister(_inner: &Inner, params: Option<Value>) -> Result<Value, Moc
     Ok(json!({"wiped": true}))
 }
 
+/// Serve the published set — the default until `admin.policy_publish` names
+/// another — with the marker saying what the list is (docs/api/ipc.md
+/// section 5.9), so an empty one is never read as more than it says.
 fn policy_fetch(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
     let p: PolicyFetchParams = parse_params("policy.fetch", params)?;
     let state = inner.state.lock().unwrap();

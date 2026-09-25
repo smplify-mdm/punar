@@ -118,6 +118,12 @@ struct ControlPlaneState {
     other_identity: AtomicBool,
     /// Refuse `enroll.unregister`: an agent that cannot wipe.
     refuse_unregister: AtomicBool,
+    /// Every `enroll.unregister`'s params, as they arrived.
+    unregisters: Mutex<Vec<Value>>,
+    /// Whether punard's release record was on disk when `enroll.register`
+    /// arrived, for the `release_record` path set here.
+    release_record: Mutex<Option<PathBuf>>,
+    record_before_register: Mutex<Vec<bool>>,
     /// Serve a desired state that turns local policy editing off
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
@@ -207,6 +213,12 @@ impl ControlPlaneState {
                 Ok(json!({ "organization": org }))
             }
             "enroll.register" => {
+                if let Some(record) = self.release_record.lock().unwrap().as_ref() {
+                    self.record_before_register
+                        .lock()
+                        .unwrap()
+                        .push(record.exists());
+                }
                 let device_id = params["device_id"].as_str().unwrap_or_default();
                 let bootstrap = params["bootstrap"].as_str().unwrap_or_default();
                 // The mock's admission rule: ≥ 32 hex chars.
@@ -310,8 +322,15 @@ impl ControlPlaneState {
                 if self.refuse_unregister.load(Ordering::SeqCst) {
                     return Err(("internal", "identity storage failed (StorageFull)".into()));
                 }
-                let token = params["device_token"].as_str().unwrap_or_default();
-                self.devices.lock().unwrap().remove(token);
+                self.unregisters.lock().unwrap().push(params.clone());
+                // The agent holds one identity at most: `any_identity`
+                // wipes it, whatever token (or none) comes along.
+                if params["any_identity"] == json!(true) {
+                    self.devices.lock().unwrap().clear();
+                } else {
+                    let token = params["device_token"].as_str().unwrap_or_default();
+                    self.devices.lock().unwrap().remove(token);
+                }
                 Ok(json!({"wiped": true}))
             }
             // The agent's liveness call: its identity, and whether this
@@ -4934,10 +4953,36 @@ fn an_uncommitted_registration_the_agent_does_not_release_is_released_later() {
         json!({"state": "pending", "reason": "refused"})
     );
     assert_eq!(state.devices.lock().unwrap().len(), 1, "still held");
+    assert!(
+        daemon.state_path("identity-release.json").exists(),
+        "the release is recorded, not inferred from the token"
+    );
+    // Still refused: asked again, not audited again, and shown in the
+    // status file the shell reads.
+    daemon.result("reconcile", None);
+    assert_eq!(daemon.status_summary()["identity_release"], "pending");
+    let releases = |daemon: &TestDaemon| -> Vec<(String, String)> {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "enroll.release")
+            .map(|e| {
+                (
+                    e["result"].as_str().unwrap().to_string(),
+                    e["resource"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        releases(&daemon),
+        [("pending".to_string(), "agent.refused".to_string())]
+    );
 
     state.refuse_unregister.store(false, Ordering::SeqCst);
     daemon.result("reconcile", None);
     assert!(!daemon.state_path("device-token").exists());
+    assert!(!daemon.state_path("identity-release.json").exists());
     assert!(state.devices.lock().unwrap().is_empty(), "released");
     assert!(
         daemon
@@ -4945,14 +4990,188 @@ fn an_uncommitted_registration_the_agent_does_not_release_is_released_later() {
             .get("identity_release")
             .is_none()
     );
-    let released = daemon
-        .audit_events()
-        .iter()
-        .filter(|e| e["action"] == "enroll.release" && e["result"] == "success")
-        .count();
-    assert_eq!(released, 1);
+    assert_eq!(daemon.status_summary()["identity_release"], Value::Null);
+    assert_eq!(
+        releases(&daemon),
+        [
+            ("pending".to_string(), "agent.refused".to_string()),
+            ("success".to_string(), "agent".to_string())
+        ]
+    );
 
     // And the device enrolls as it would have.
     state.serve_bad_policy.store(false, Ordering::SeqCst);
     daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+}
+
+/// Deleting `enrollment.json` (and its terms) while the device token stays is
+/// not an unenrollment: nothing ended the enrollment, so punard keeps the
+/// organization's identity rather than wiping it itself, asks the agent
+/// nothing, audits it once as `enroll.release` `kept`, and shows it. A new
+/// enrollment replaces it.
+#[test]
+fn a_deleted_enrollment_record_keeps_the_identity_rather_than_releasing_it() {
+    let dir = test_dir("record-deleted");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    daemon.stop();
+    fs::remove_file(dir.join("state/enrollment.json")).unwrap();
+    fs::remove_file(dir.join("state/enrollment-terms.json")).unwrap();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let before = state.connections.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(
+        state.connections.load(Ordering::SeqCst),
+        before,
+        "the agent is asked nothing"
+    );
+    assert_eq!(state.devices.lock().unwrap().len(), 1, "the identity stays");
+    assert!(daemon.state_path("device-token").exists());
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["enrolled"], false);
+    assert_eq!(
+        status["identity_release"],
+        json!({"state": "kept", "reason": "enrollment_record_missing"})
+    );
+    assert_eq!(daemon.status_summary()["identity_release"], "kept");
+    let releases = |daemon: &TestDaemon| -> Vec<(String, String)> {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "enroll.release")
+            .map(|e| {
+                (
+                    e["result"].as_str().unwrap().to_string(),
+                    e["resource"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let kept = [(
+        "kept".to_string(),
+        "agent.enrollment_record_missing".to_string(),
+    )];
+    assert_eq!(releases(&daemon), kept);
+    // A restart is the same decision, not a second one.
+    daemon.stop();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result("reconcile", None);
+    assert_eq!(releases(&daemon), kept);
+    assert_eq!(state.devices.lock().unwrap().len(), 1);
+
+    // A new enrollment replaces it, and nothing is left to keep (the
+    // organization's file the old record owned is now a foreign one, which
+    // enrollment never overwrites: removed first, as its refusal says).
+    fs::remove_file(dir.join("state/policy.d/eng-baseline-v12.json")).unwrap();
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert!(!daemon.state_path("identity-release.json").exists());
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["enrolled"], true);
+    assert!(status.get("identity_release").is_none(), "{status}");
+}
+
+/// enroll.start records the release before it registers, so a registration
+/// whose answer never reached punard (killed, powered off, a broken
+/// connection) is not left with the agent: punard has no token and no
+/// enrollment, the record says to release, and the next pass asks the agent
+/// to wipe whatever it holds. A registration that commits removes the
+/// record.
+#[test]
+fn a_registration_whose_answer_was_lost_is_released_later() {
+    let dir = test_dir("registration-lost");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    *state.release_record.lock().unwrap() = Some(dir.join("state/identity-release.json"));
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    assert_eq!(*state.record_before_register.lock().unwrap(), [true]);
+    assert!(!daemon.state_path("identity-release.json").exists());
+
+    // punard dies after the agent kept the identity and before punard kept
+    // anything of it: only the record enroll.start wrote before registering.
+    daemon.stop();
+    for file in ["enrollment.json", "enrollment-terms.json", "device-token"] {
+        fs::remove_file(dir.join("state").join(file)).unwrap();
+    }
+    fs::write(
+        dir.join("state/identity-release.json"),
+        r#"{"version":1,"state":"release","cause":"registration","since":"2026-09-25T00:00:00Z"}"#,
+    )
+    .unwrap();
+    assert_eq!(state.devices.lock().unwrap().len(), 1);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result("reconcile", None);
+    assert!(state.devices.lock().unwrap().is_empty(), "released");
+    let asked = state.unregisters.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(asked, json!({"any_identity": true}), "no token to present");
+    assert!(!daemon.state_path("identity-release.json").exists());
+    assert!(
+        daemon
+            .result("enroll.status", None)
+            .get("identity_release")
+            .is_none()
+    );
+    assert!(
+        daemon
+            .audit_events()
+            .iter()
+            .any(|e| e["action"] == "enroll.release" && e["result"] == "success")
+    );
+}
+
+/// An unenrollment whose agent holds an identity the token does not name (one
+/// planted, or left by a registration punard never heard back from) still
+/// finishes: punard, holding no enrollment, asks for whatever the agent holds
+/// to go, and it goes, rather than being refused on every pass forever.
+#[test]
+fn a_release_the_token_does_not_name_is_not_refused_forever() {
+    let dir = test_dir("release-mismatch");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    state.refuse_unregister.store(true, Ordering::SeqCst);
+    let stopped = daemon.result("enroll.stop", None);
+    assert_eq!(stopped["identity_release"], "pending");
+    // The agent now holds an identity the kept token does not name.
+    state.devices.lock().unwrap().clear();
+    state
+        .devices
+        .lock()
+        .unwrap()
+        .insert("tok_planted".to_string(), "dev_planted".to_string());
+    state.refuse_unregister.store(false, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    assert!(state.devices.lock().unwrap().is_empty(), "wiped");
+    let asked = state.unregisters.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(asked["any_identity"], true, "{asked}");
+    assert!(!daemon.state_path("device-token").exists());
+    assert!(!daemon.state_path("identity-release.json").exists());
+}
+
+/// An episode of management interrupted still open when the enrollment ends
+/// is closed by it: one `enroll.agent` `ended` event, so every episode in the
+/// audit has both ends.
+#[test]
+fn an_episode_open_at_unenrollment_is_closed_by_it() {
+    let dir = test_dir("episode-at-stop");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    control_plane
+        .state
+        .forget_identity
+        .store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    daemon.result("enroll.stop", None);
+    assert_eq!(
+        agent_events(&daemon),
+        [
+            (
+                "agent_unavailable".to_string(),
+                "agent.identity_missing".to_string()
+            ),
+            ("ended".to_string(), "agent.identity_missing".to_string())
+        ]
+    );
 }

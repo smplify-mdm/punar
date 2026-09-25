@@ -2211,11 +2211,15 @@ pub struct ManagementStatus {
 /// `enroll.status.identity_release`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityRelease {
-    /// `pending`.
+    /// `pending`: punard's release record says to wipe it and the agent has
+    /// not confirmed. `kept`: punard holds a token for it and nothing records
+    /// the end of the enrollment it belonged to, so it is kept, never wiped
+    /// by punard (docs/api/ipc.md section 5.11).
     pub state: String,
-    /// Why the last attempt did not confirm it: an agent fault code (as in
-    /// [`ManagementStatus::reason`]), or `refused` when the agent answered
-    /// with an error.
+    /// `pending`: why the last attempt did not confirm it, an agent fault
+    /// code (as in [`ManagementStatus::reason`]) or `refused` when the agent
+    /// answered with an error, absent before the first attempt. `kept`: why,
+    /// `enrollment_record_missing` or `release_record_unreadable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

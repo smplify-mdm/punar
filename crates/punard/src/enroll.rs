@@ -630,17 +630,23 @@ impl ControlPlaneClient {
         })
     }
 
-    /// `enroll.unregister {device_token}`: ask the agent to wipe this
-    /// device's identity. Local on the agent's side (it asks Smplify
-    /// nothing), so it works offline; until it is confirmed punard keeps the
-    /// device token and asks again on every pass (docs/api/ipc.md section
-    /// 5.11), so no key is ever left on disk with no way to finish.
-    pub fn unregister(&self, token: &Redacted<String>) -> Result<(), UpstreamError> {
-        self.call(
-            "enroll.unregister",
-            json!({ "device_token": token.expose_secret() }),
-        )
-        .map(|_| ())
+    /// `enroll.unregister {device_token?, any_identity: true}`: ask the
+    /// agent to wipe whatever identity it holds. Local on the agent's side
+    /// (it asks Smplify nothing), so it works offline; until it is confirmed
+    /// punard keeps its record of the release and asks again on every pass
+    /// (docs/api/ipc.md section 5.11), so no key is ever left on disk with no
+    /// way to finish. `any_identity` because punard sends it only while it
+    /// holds no enrollment, under the enrollment guard: nothing the agent
+    /// holds then is one punard uses, and a registration punard never
+    /// received the answer to, or an identity that is not the token's, is
+    /// wiped as surely as the one the token names. The token goes along when
+    /// punard has one.
+    pub fn unregister(&self, token: Option<&Redacted<String>>) -> Result<(), UpstreamError> {
+        let mut params = json!({ "any_identity": true });
+        if let Some(token) = token {
+            params["device_token"] = Value::String(token.expose_secret().clone());
+        }
+        self.call("enroll.unregister", params).map(|_| ())
     }
 
     /// `policy.fetch {device_token}` → the policy-source envelopes (each
@@ -1344,6 +1350,89 @@ pub fn save_device_token(path: &Path, token: &Redacted<String>) -> io::Result<()
 }
 
 // ---------------------------------------------------------------------------
+// identity-release.json — an identity punard has decided about, positively
+// ---------------------------------------------------------------------------
+
+/// Beside `enrollment.json`: why punard holds, or may have left with the
+/// agent, a Smplify identity while no enrollment is committed
+/// (docs/api/ipc.md section 5.11). A device token with no enrollment record
+/// used to be read as an unenrollment waiting to finish, so deleting
+/// `enrollment.json` was enough to make punard wipe the organization's
+/// identity itself, audited as an ordinary release. Now only a record that
+/// says so is released: `enroll.stop` writes one before it removes the
+/// enrollment, `enroll.start` before it registers (a registration whose
+/// answer is lost leaves an identity with the agent and none with punard),
+/// and a token found with neither is kept, audited and shown instead.
+pub const IDENTITY_RELEASE_FILE: &str = "identity-release.json";
+
+/// What punard does with the identity [`IDENTITY_RELEASE_FILE`] describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseState {
+    /// Ask the agent to wipe it on every pass until it confirms.
+    Release,
+    /// Never ask: punard holds a token for it and no record of ending the
+    /// enrollment it belonged to. Only a new registration replaces it.
+    Kept,
+}
+
+impl ReleaseState {
+    /// `enroll.status.identity_release.state` and `status.json`'s
+    /// `identity_release`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReleaseState::Release => "pending",
+            ReleaseState::Kept => "kept",
+        }
+    }
+}
+
+/// The contents of [`IDENTITY_RELEASE_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityReleaseRecord {
+    pub version: u32,
+    pub state: ReleaseState,
+    /// Why: `unenroll` (an `enroll.stop`), `registration` (an
+    /// `enroll.start` from before its register call until it commits),
+    /// `enrollment_record_missing` (a token found with no enrollment and no
+    /// record), `release_record_unreadable`.
+    pub cause: String,
+    /// When punard decided.
+    pub since: String,
+}
+
+impl IdentityReleaseRecord {
+    pub fn new(state: ReleaseState, cause: &str, since: String) -> IdentityReleaseRecord {
+        IdentityReleaseRecord {
+            version: 1,
+            state,
+            cause: cause.to_string(),
+            since,
+        }
+    }
+}
+
+/// Load [`IDENTITY_RELEASE_FILE`]: `None` when absent, `InvalidData` when it
+/// is not one punard wrote.
+pub fn load_identity_release(path: &Path) -> io::Result<Option<IdentityReleaseRecord>> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write [`IDENTITY_RELEASE_FILE`], durably and 0600: it is written before
+/// the change it makes safe (the enrollment record's removal, a register
+/// call), so a crash between them cannot lose it.
+pub fn save_identity_release(path: &Path, record: &IdentityReleaseRecord) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(record).expect("release record serializes");
+    write_atomic_synced(path, &bytes, 0o600)
+}
+
+// ---------------------------------------------------------------------------
 // organization-view.json — what the organization last received (SPEC § 24.2)
 // ---------------------------------------------------------------------------
 
@@ -1543,6 +1632,11 @@ pub struct StatusSummary {
     /// personal device. The reason is in `enroll.status`; this file is
     /// world-readable and says only what the shell draws.
     pub management: Option<String>,
+    /// On a device with no enrollment: `pending` while a Smplify identity is
+    /// still to be wiped, `kept` while punard keeps one it has no record of
+    /// ending (docs/api/ipc.md section 5.11), `null` otherwise. The shell
+    /// draws the same line `punarctl enroll status` prints.
+    pub identity_release: Option<String>,
     pub ts: String,
 }
 
@@ -2423,6 +2517,7 @@ mod tests {
                 device_class_source: "observed".into(),
                 architecture: "aarch64".into(),
                 management: Some("interrupted".into()),
+                identity_release: None,
                 ts: "2026-08-26T09:02:00Z".into(),
             },
         )
@@ -2449,6 +2544,7 @@ mod tests {
                 "device_class",
                 "device_class_source",
                 "enrolled",
+                "identity_release",
                 "management",
                 "org_name",
                 "ts",
