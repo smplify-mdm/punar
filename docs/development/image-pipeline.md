@@ -356,6 +356,21 @@ as built:
   `m5-received-*.jsonl` (never `devices.json`, which holds the
   server-side token record).
 
+## The sign-in probe (desktop gate)
+
+`/usr/bin/punar-signin-probe` (crate `punar-signin-probe`) is the second dev/CI
+harness in the development profile, compiled and staged next to the mock on
+all three lanes (Arch x86_64, Debian amd64, Debian arm64) and never into the
+product tree; release-image policy A5 fails an image that carries it. It runs
+one PAM service's whole stack for the calling account, in greetd's order
+(authenticate, account, credentials and session open, then close), with the
+password on stdin. `surfaces-check.sh` group 8k signs the dev user in through
+`/etc/pam.d/greetd` with it, because the image autologins and greetd's
+`initial_session` never runs the auth stack, and then holds the login keyring
+that sign-in wrote to the encrypted format and mode 600. It replaced
+`pamtester` on the Debian lanes, which Arch does not package, so every lane
+runs the same stack.
+
 ## The M6 punar-env base image (Milestone 6)
 
 Full decisions in [milestone-6.md](milestone-6.md) §6. `punar-env up`

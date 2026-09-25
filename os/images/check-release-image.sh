@@ -145,6 +145,10 @@ scan_dev_paths() {
 
     [ -e "${ROOT}/usr/bin/punar-mock-smplify" ] \
         && printf '%s\n' "${ROOT}/usr/bin/punar-mock-smplify"
+    # The desktop gate's sign-in harness: a PAM driver for any service,
+    # which has no place on a machine a person signs in to.
+    [ -e "${ROOT}/usr/bin/punar-signin-probe" ] \
+        && printf '%s\n' "${ROOT}/usr/bin/punar-signin-probe"
     [ -e "${ROOT}/usr/share/punar/fixtures" ] \
         && printf '%s\n' "${ROOT}/usr/share/punar/fixtures"
 }

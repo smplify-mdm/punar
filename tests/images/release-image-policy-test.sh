@@ -392,6 +392,11 @@ mutate_a5_timer_dropin() {
     mkdir -p "${CASE}/usr/lib/systemd/system/punard-reconcile.timer.d"
     : > "${CASE}/usr/lib/systemd/system/punard-reconcile.timer.d/10-dev-stoppable.conf"
 }
+# The sign-in harness the development image carries for the keyring gate.
+mutate_a5_signin_probe() {
+    mkdir -p "${CASE}/usr/bin"
+    : > "${CASE}/usr/bin/punar-signin-probe"
+}
 mutate_a6() {
     ln -s ../punar-idle-ram.service \
         "${CASE}/usr/lib/systemd/system/multi-user.target.wants/innocent.service"
@@ -727,6 +732,7 @@ expect_fail A4 mutate_a4
 expect_fail A5 mutate_a5
 expect_fail A5 mutate_a5_mock_dropin
 expect_fail A5 mutate_a5_timer_dropin
+expect_fail A5 mutate_a5_signin_probe
 expect_fail A6 mutate_a6
 expect_fail A7 mutate_a7
 expect_fail A13 mutate_a13

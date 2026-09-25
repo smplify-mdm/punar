@@ -81,7 +81,7 @@ stage_punar_binaries() {
                 -p punard -p punarctl -p punar-env -p punar-agentd \
                 -p punar-secrets -p punar-netd -p punar-onboard -p punar-auth \
                 -p punar-pimd -p punar-smplifyd \
-                -p punar-mock-smplify
+                -p punar-mock-smplify -p punar-signin-probe
     )
 
     install -d "${extra}/usr/bin"
@@ -109,8 +109,11 @@ stage_punar_binaries() {
     # as punar-fetch@.service's dynamic user, never as root.
     install -m 0755 "${cargo_target}/release/punar-fetch" \
         "${extra}/usr/lib/punar/punar-fetch"
+    # The dev/CI harnesses: the mock control plane, and the sign-in probe
+    # surfaces-check.sh group 8k drives the greetd PAM stack with.
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
+        "${cargo_target}/release/punar-signin-probe" \
         "${dev_extra}/usr/bin/"
 
     local binary
@@ -134,11 +137,13 @@ stage_punar_binaries() {
         echo "error: punar-fetch is not an AArch64 binary" >&2
         exit 1
     }
-    readelf -h "${dev_extra}/usr/bin/punar-mock-smplify" \
-        | grep -q 'Machine:.*AArch64' || {
-        echo "error: punar-mock-smplify is not an AArch64 binary" >&2
-        exit 1
-    }
+    for binary in punar-mock-smplify punar-signin-probe; do
+        readelf -h "${dev_extra}/usr/bin/${binary}" \
+            | grep -q 'Machine:.*AArch64' || {
+            echo "error: ${binary} is not an AArch64 binary" >&2
+            exit 1
+        }
+    done
 
     "${REPO_ROOT}/tests/images/check-staged-service-executables.sh" \
         "${extra}" "${dev_extra}" \

@@ -387,6 +387,11 @@ stage_punar_binaries() {
     # punar-netd is M12's fourth least-privilege daemon. It owns only the
     # punar-net nftables table and the bounded on-demand network view.
     # idle-ram.sh counts all four service cgroups in the one services budget.
+    # punar-signin-probe is a second dev/CI harness, staged beside the mock
+    # and never into the product tree: surfaces-check.sh signs the dev user
+    # in through the real greetd PAM stack with it (group 8k), because the
+    # image autologins and no password reaches PAM otherwise. Release-image
+    # policy A5 refuses it anywhere else.
     echo "==> Building Punar product services, onboarding and CLIs + dev mock (release, --locked; $(rustc --version))"
     (
         cd "${REPO_ROOT}" &&
@@ -396,10 +401,10 @@ stage_punar_binaries() {
                     -p punard -p punarctl -p punar-env -p punar-agentd \
                     -p punar-secrets -p punar-netd -p punar-onboard -p punar-auth \
                     -p punar-pimd -p punar-smplifyd \
-                    -p punar-mock-smplify
+                    -p punar-mock-smplify -p punar-signin-probe
     )
 
-    echo "==> Staging product binaries into ${extra}/usr/bin and the mock into ${dev_extra}/usr/bin"
+    echo "==> Staging product binaries into ${extra}/usr/bin and the dev harnesses into ${dev_extra}/usr/bin"
     install -d "${extra}/usr/bin"
     install -m 0755 \
         "${cargo_target}/release/punard" \
@@ -427,6 +432,7 @@ stage_punar_binaries() {
         "${extra}/usr/lib/punar/punar-fetch"
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
+        "${cargo_target}/release/punar-signin-probe" \
         "${dev_extra}/usr/bin/"
 
     "${REPO_ROOT}/tests/images/check-staged-service-executables.sh" \
