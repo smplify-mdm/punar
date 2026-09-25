@@ -1051,7 +1051,9 @@ Scope {
 
             Process {
                 id: exitGreeter
-                command: ["hyprctl", "dispatch", "exit"]
+                // punar-greeter.lua is a Lua config: Hyprland 0.56 accepts
+                // only Lua dispatcher expressions on its request socket.
+                command: ["hyprctl", "dispatch", "hl.dsp.exit()"]
             }
 
             Image {

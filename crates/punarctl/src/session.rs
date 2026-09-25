@@ -687,8 +687,10 @@ pub fn session(command: SessionCommand, style: &Style, json_output: bool) -> Exi
         SessionCommand::Shutdown => "Shutting down",
     };
     let Some([program, verb]) = session_argv(&command) else {
-        // Ending the session is the compositor's own exit.
-        return match hypr::dispatch("exit") {
+        // Ending the session is the compositor's own exit, sent as the Lua
+        // dispatcher the End-session bind uses: Hyprland 0.56's request
+        // socket refuses the legacy `exit` grammar at runtime.
+        return match hypr::dispatch("hl.dsp.exit()") {
             Ok(()) => done(style, json_output, what),
             Err(error) => hypr_fail(error),
         };

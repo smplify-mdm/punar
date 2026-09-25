@@ -295,7 +295,11 @@ fn session_end_and_display_list_use_the_compositor() {
     let session = Session::start(desktop);
     let output = session.run(&["session", "end"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(session.requests().contains(&"dispatch exit".to_string()));
+    assert!(
+        session
+            .requests()
+            .contains(&"dispatch hl.dsp.exit()".to_string())
+    );
 
     let output = session.run(&["display", "list"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
