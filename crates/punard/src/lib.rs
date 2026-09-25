@@ -62,6 +62,7 @@ pub mod install;
 pub mod inventory;
 pub mod pi_update;
 pub mod policy;
+pub mod policy_set;
 pub mod reauth;
 pub mod server;
 pub mod state;
