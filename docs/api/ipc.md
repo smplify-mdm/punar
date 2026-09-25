@@ -1858,6 +1858,16 @@ or path other than the confirmed target device. An installed system returns
   (`action: "reconcile.remediate"`, resource = capability id) and the
   one-shot M3-store migration (`action: "state.migrate"`,
   `resource: "state_store"`, `source: "service"`, `user_id: "punard"`).
+  **Compliance changes:** `reconcile.compliance` (resource = capability id,
+  `result` = the new SPEC section 52 state, `policy_ids` = the policy that
+  decided it), when a capability's state differs from the last pass's, and
+  at the first pass after a start for every capability that is not
+  `compliant`. It records the drift nothing remediates (alert-only, awaiting
+  approval, a value only the image can change), which no remediation event
+  names; with the per-pass `reconcile` event and the remediation events it
+  is why the reconcile timer's own output can be quiet (`punarctl reconcile
+  --quiet`: one journal line when a pass remediated or failed to, nothing
+  otherwise).
   Both action names match the schema's dotted-lowercase `action` pattern —
   no schema change. The `policy.*` READS (`policy.effective`,
   `policy.explain`) remain unaudited; `policy.set` (section 5.8a) is a

@@ -4316,7 +4316,15 @@ impl Inner {
                 actor,
                 &mut remediated_count,
             );
-            self.tracker.lock().unwrap().states.insert(id, state);
+            let previous = self
+                .tracker
+                .lock()
+                .unwrap()
+                .states
+                .insert(id.clone(), state);
+            if compliance_is_news(previous, state) {
+                self.log_audit(self.compliance_event(actor, &id, &policy_id, state));
+            }
 
             entries.push(ReconcileEntry {
                 capability: meta.capability,
@@ -4491,6 +4499,21 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// A capability's SPEC section 52 state changed (docs/api/ipc.md section
+    /// 6, `reconcile.compliance`): resource the capability, result the new
+    /// state, citing the policy that decided it.
+    fn compliance_event(
+        &self,
+        actor: &AuditActor,
+        capability: &str,
+        policy_id: &str,
+        state: ComplianceState,
+    ) -> AuditEvent {
+        let mut event = self.remediation_event(actor, capability, policy_id, state.as_str());
+        event.action = "reconcile.compliance".to_string();
+        event
     }
 
     /// One schema-conformant audit event per remediation attempt
@@ -6640,6 +6663,21 @@ impl Inner {
     }
 }
 
+/// Whether a capability's compliance state is news for the audit trail
+/// (docs/api/ipc.md section 6, `reconcile.compliance`): a change from the
+/// last pass's state, and, on the first pass after a start, any state but
+/// `compliant`. The reconcile summary event says every pass whether drift
+/// was found; this says which capability left or returned to compliance,
+/// including drift nothing remediates (alert-only, awaiting approval, a
+/// value only the image can change), which no remediation event records.
+/// Never one per pass: a steady state encodes nothing new.
+fn compliance_is_news(previous: Option<ComplianceState>, state: ComplianceState) -> bool {
+    match previous {
+        Some(previous) => previous != state,
+        None => state != ComplianceState::Compliant,
+    }
+}
+
 /// `enroll.start`'s refusal of a policy set the organization served. The
 /// two cases enrollment always refused keep their words; the rules the live
 /// refresh brought (docs/api/ipc.md section 5.9) say which one failed.
@@ -7105,6 +7143,33 @@ mod tests {
         fs::create_dir_all(config.browser_policy_source.join("in-the-way")).unwrap();
         assert!(Daemon::new(config, Registry::new(Vec::new())).is_ok());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A capability's compliance is audited when it changes, and at the
+    /// first pass after a start when it is not compliant; a steady state is
+    /// never audited again.
+    #[test]
+    fn a_compliance_state_is_audited_when_it_changes() {
+        use ComplianceState::*;
+        assert!(
+            !compliance_is_news(None, Compliant),
+            "a start that finds it fine"
+        );
+        assert!(
+            compliance_is_news(None, NonCompliant),
+            "a start that finds it not"
+        );
+        assert!(compliance_is_news(Some(Compliant), NonCompliant));
+        assert!(
+            compliance_is_news(Some(NonCompliant), Compliant),
+            "the recovery"
+        );
+        assert!(compliance_is_news(Some(Remediating), Exception));
+        assert!(
+            !compliance_is_news(Some(NonCompliant), NonCompliant),
+            "steady"
+        );
+        assert!(!compliance_is_news(Some(Compliant), Compliant), "steady");
     }
 
     #[test]

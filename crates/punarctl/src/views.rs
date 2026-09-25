@@ -1375,6 +1375,71 @@ pub fn audit(style: &Style, result: &Value, hostname: &str) -> Result<String, St
 /// the marker. An M3-shaped result (report-only daemon) still renders
 /// with the M3 wording — the view never claims a remediation that did
 /// not happen.
+/// `punarctl reconcile --quiet`: one line when the pass changed something
+/// or failed to, nothing when it only confirmed what was already so. The
+/// timer runs this every two minutes, and the journal is durable: the full
+/// report of an unchanged pass there said nothing new, while every pass is
+/// audited in punard's own log (a `reconcile` event, one per remediation
+/// attempt and one per compliance change; docs/api/ipc.md section 6).
+/// Capability ids are the daemon's closed identifiers; no value is printed.
+pub fn reconcile_change_line(result: &Value) -> Result<Option<String>, String> {
+    let report: model::Reconcile = parse(result)?;
+    let named = |outcomes: &[&str]| -> Vec<&str> {
+        report
+            .capabilities
+            .iter()
+            .filter(|entry| {
+                entry
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|remediation| outcomes.contains(&remediation))
+            })
+            .map(|entry| entry.capability.as_str())
+            .collect()
+    };
+    let applied = named(&["applied"]);
+    let failed = named(&["apply_failed", "verify_failed"]);
+    if applied.is_empty() && failed.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = Vec::new();
+    if !applied.is_empty() {
+        parts.push(format!("remediated {}", applied.join(", ")));
+    }
+    if !failed.is_empty() {
+        parts.push(format!("remediation failed for {}", failed.join(", ")));
+    }
+    Ok(Some(format!(
+        "punarctl reconcile: {} (drift in {} of {} capabilities before the pass)",
+        parts.join("; "),
+        report.drift_count,
+        report.capabilities.len()
+    )))
+}
+
+/// `punarctl agents scan --quiet`: one line when the pass changed the
+/// detection set, nothing when it did not. Changes are audited by
+/// punar-agentd itself (`agents.scan` detected/cleared); a pass that changes
+/// nothing writes nothing anywhere.
+pub fn agents_scan_change_line(result: &Value) -> Result<Option<String>, String> {
+    let changed = result.get("changed").and_then(Value::as_bool);
+    if changed != Some(true) {
+        return Ok(None);
+    }
+    let count = |key: &str| {
+        result
+            .get(key)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    Ok(Some(format!(
+        "punarctl agents scan: the detection set changed ({} detections, {} sessions this \
+         boot)",
+        count("detections"),
+        count("sessions")
+    )))
+}
+
 pub fn reconcile(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let report: model::Reconcile = parse(result)?;
     let mut out = fmt::masthead(style, "Reconcile", &personal_context(hostname));
@@ -6140,6 +6205,49 @@ mod tests {
         let text = set(&style, &result, "punar-m5", None).unwrap();
         assert!(text.contains("✓ APPLIED"), "{text}");
         assert!(!text.contains("RECORDED, NOT APPLIED"), "{text}");
+    }
+
+    /// The timer's quiet pass prints one line when it changed something or
+    /// failed to, and nothing at all when it only confirmed what was so.
+    #[test]
+    fn a_quiet_reconcile_prints_only_a_change_or_a_failure() {
+        let entry = |capability: &str, drift: bool, remediation: &str| {
+            json!({"capability": capability, "desired_state": "enabled",
+                   "current_state": if drift { "disabled" } else { "enabled" },
+                   "drift": drift, "verified": true, "remediation": remediation})
+        };
+        let quiet = json!({"drift_count": 1, "remediated_count": 0, "capabilities": [
+            entry("security.firewall", false, "none"),
+            entry("system.hostname", true, "alert_only"),
+        ]});
+        assert_eq!(reconcile_change_line(&quiet).unwrap(), None);
+        let changed = json!({"drift_count": 2, "remediated_count": 1, "capabilities": [
+            entry("security.firewall", true, "applied"),
+            entry("time.timezone", true, "apply_failed"),
+        ]});
+        let line = reconcile_change_line(&changed).unwrap().unwrap();
+        assert!(line.contains("remediated security.firewall"), "{line}");
+        assert!(
+            line.contains("remediation failed for time.timezone"),
+            "{line}"
+        );
+        assert!(!line.contains("disabled"), "no value: {line}");
+        assert!(!line.contains('\n'), "one line: {line}");
+
+        assert_eq!(
+            agents_scan_change_line(&json!({"changed": false, "detections": []})).unwrap(),
+            None
+        );
+        assert_eq!(
+            agents_scan_change_line(&json!({"sessions": []})).unwrap(),
+            None
+        );
+        let line = agents_scan_change_line(
+            &json!({"changed": true, "detections": [{}, {}], "sessions": [{}]}),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(line.contains("2 detections, 1 sessions"), "{line}");
     }
 
     #[test]

@@ -301,6 +301,30 @@ at the 10-minute mark, and the reported value is the mean over the window
   of btrfs metadata and writeback. The journal and the audit log stay
   persistent: making either volatile would trade audit durability for
   writes, which is not a trade Punar makes.
+- **Quieter timers, no record lost.** Much of that journal traffic was
+  Punar's own timers: `punard-reconcile.service` printed its whole report
+  every two minutes and `punar-agentd-scan.service` its whole registry every
+  four, each wrapped in systemd's own start and finish lines. Both now run
+  `--quiet` (one line when a pass changed something or failed, nothing
+  otherwise) at `SyslogLevel=notice` with `LogLevelMax=notice`, which drops
+  systemd's info lines for each run and keeps every failure line (measured
+  on systemd 261). Nothing the audit trail needs went with them: every pass
+  is a `reconcile` event, each remediation attempt and each capability's
+  compliance change is its own event (`reconcile.compliance`, added for the
+  drift nothing remediates, which only the old output named), and each
+  detection change is `punar-agentd`'s (docs/api/ipc.md section 6). The saving is
+  not measured yet.
+- **Duplicate kernel audit lines: investigated, kept.** Each timer run's
+  `SERVICE_START`/`SERVICE_STOP` records reach the journal twice, as
+  `audit[1]: …` and as `kernel: audit: …` (measured in the same window).
+  From the kernel source, not measured on the image: with no audit daemon
+  registered, the kernel both multicasts every record (journald's audit
+  socket receives all of them) and prints it to its log, rate-limited. Each
+  way to drop one copy loses records or adds cost: disabling
+  `systemd-journald-audit.socket` keeps only the rate-limited kernel copy,
+  `audit=0` stops the records altogether, and registering an audit daemon to
+  silence the kernel copy adds a resident process with its own log. Both
+  copies stay.
 
 ### 2.6 Boot
 
