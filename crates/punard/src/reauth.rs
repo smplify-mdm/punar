@@ -17,14 +17,16 @@
 //! fact the filesystem already states.
 //!
 //! WHAT THE TICKET SAYS: WHEN, ON THE BOOT CLOCK (SMP-1405). The file holds one
-//! [`BootStamp`] — `{"boot_id": …, "raw_bt_ms": …}` — taken by punar-authd at
-//! the moment of the PAM success, and its age is judged against punard's own
-//! boot clock ([`punar_common::trusted_time`]). It used to be the file's mtime
-//! against the wall clock, which anyone who could step that clock back could
-//! stretch. A ticket is refused as expired when it is from another boot, when
-//! its stamp is in the future of this clock, when it carries no readable stamp
-//! (an empty ticket an older punar-authd minted during an upgrade: the person
-//! types their password again), or when punard cannot read its own clock.
+//! [`BootStamp`] — `{"boot_id": …, "raw_bt_ms": …, "sleep_ms": …,
+//! "suspends": …}` — taken by punar-authd at the moment of the PAM success,
+//! and its age is judged against punard's own boot clock
+//! ([`punar_common::trusted_time`]). It used to be the file's mtime against
+//! the wall clock, which anyone who could step that clock back could stretch.
+//! A ticket is refused as expired when it is from another boot, when the
+//! machine has suspended since it was minted, when its stamp is in the future
+//! of this clock, when it carries no readable stamp (an empty ticket an older
+//! punar-authd minted during an upgrade: the person types their password
+//! again), or when punard cannot read its own clock.
 //!
 //! WHAT SPENDING MEANS. The unlink is the commit, and it happens before the age
 //! is judged. Two callers racing on one token may both read the file; only one
@@ -262,6 +264,27 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A ticket minted before a suspend is refused after it, however little
+    /// time passed awake: the kernel may have under-counted the sleep.
+    #[test]
+    fn a_ticket_from_before_a_suspend_is_refused() {
+        let dir = scratch("suspend");
+        let clock = ManualClock::new(BOOT, T0);
+        let path = mint(&dir, 1000, TOKEN, &clock);
+        clock.advance_secs(5);
+        clock.suspend(3_000);
+        assert_eq!(
+            consume(&dir, 1000, TOKEN, &clock),
+            Err(ReauthError::Expired)
+        );
+        assert!(!path.exists(), "and it was spent all the same");
+        // One minted after the resume is good.
+        mint(&dir, 1000, TOKEN, &clock);
+        clock.advance_secs(5);
+        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A stamp in this clock's future is a forgery or a clock that moved;
     /// either way it is not "infinitely fresh".
     #[test]
@@ -306,9 +329,13 @@ mod tests {
             String::new(),
             "not json".to_string(),
             format!(r#"{{"boot_id":"{BOOT}"}}"#),
-            format!(r#"{{"boot_id":"{BOOT}","raw_bt_ms":{T0},"extra":1}}"#),
-            format!(r#"{{"boot_id":"not-a-boot","raw_bt_ms":{T0}}}"#),
-            format!(r#"{{"boot_id":"{BOOT}","raw_bt_ms":-1}}"#),
+            format!(r#"{{"boot_id":"{BOOT}","raw_bt_ms":{T0}}}"#),
+            format!(
+                r#"{{"boot_id":"{BOOT}","raw_bt_ms":{T0},"sleep_ms":0,"suspends":0,"extra":1}}"#
+            ),
+            format!(r#"{{"boot_id":"not-a-boot","raw_bt_ms":{T0},"sleep_ms":0,"suspends":0}}"#),
+            format!(r#"{{"boot_id":"{BOOT}","raw_bt_ms":-1,"sleep_ms":0,"suspends":0}}"#),
+            format!(r#"{{"boot_id":"{BOOT}","raw_bt_ms":{T0},"sleep_ms":-1,"suspends":0}}"#),
             oversized,
         ] {
             let path = mint_body(&dir, 1000, TOKEN, body.as_bytes());

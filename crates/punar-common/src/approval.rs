@@ -357,8 +357,9 @@ impl ApprovalEnvelope {
     ///
     /// Lapsed unless every one of these holds: the record carries a
     /// [`lifetime`](Self::lifetime) (an older punard's record does not), the
-    /// clock could be read (`now` is `Some`), `now` is the same boot, and the
-    /// drift-shortened window is still open
+    /// clock could be read (`now` is `Some`), `now` is the same boot with no
+    /// suspend since the approval was raised, and the drift-shortened window
+    /// is still open
     /// ([`crate::trusted_time::BootWindow::is_open`]). The wall clock is not
     /// an input, so rolling it back — or reading it as 1970 — changes nothing.
     /// An unparsable `expires_at` is also lapsed: a damaged record
@@ -396,13 +397,13 @@ pub struct Grant {
     pub granted_at: String,
     /// When the window ends on the **wall** clock, for people to read. The
     /// decision is [`lifetime`](Self::lifetime), which may close earlier:
-    /// by the drift allowance, and at the next reboot.
+    /// by the drift allowance, and at the next suspend or reboot.
     pub expires_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
     /// **What decides expiry** (SMP-1405): the granted minutes as a window
-    /// on the boot clock. A grant lapses at reboot. Absent on a grant an
-    /// older punard wrote, and such a grant is dead.
+    /// on the boot clock. A grant lapses at reboot and at suspend. Absent on
+    /// a grant an older punard wrote, and such a grant is dead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<BootWindow>,
 }
@@ -411,8 +412,9 @@ impl Grant {
     /// Whether this grant authorizes anything at `now`.
     ///
     /// Live only while unrevoked, with a readable `expires_at`, a
-    /// [`lifetime`](Self::lifetime), a readable clock, the same boot, and the
-    /// drift-shortened window still open. Everything else is dead — fail
+    /// [`lifetime`](Self::lifetime), a readable clock, the same boot with no
+    /// suspend since it was granted, and the drift-shortened window still
+    /// open. Everything else is dead — fail
     /// closed. The wall clock is not an input.
     pub fn is_live(&self, now: Option<&BootStamp>) -> bool {
         self.revoked_at.is_none()
@@ -656,6 +658,8 @@ mod tests {
         BootStamp {
             boot_id: BOOT.to_string(),
             raw_bt_ms,
+            sleep_ms: 0,
+            suspends: 0,
         }
     }
 
@@ -856,6 +860,8 @@ mod tests {
         let rebooted = BootStamp {
             boot_id: NEXT_BOOT.to_string(),
             raw_bt_ms: 1_001,
+            sleep_ms: 0,
+            suspends: 0,
         };
         assert!(
             env.has_lapsed(Some(&rebooted)),
@@ -926,8 +932,37 @@ mod tests {
         let rebooted = BootStamp {
             boot_id: NEXT_BOOT.to_string(),
             raw_bt_ms: 1,
+            sleep_ms: 0,
+            suspends: 0,
         };
         assert!(!grant.is_live(Some(&rebooted)), "grants lapse at reboot");
+
+        // A suspend closes the grant too, a minute into fifteen: the kernel
+        // may have under-counted the sleep, so nothing is judged across it.
+        let resumed = BootStamp {
+            boot_id: BOOT.to_string(),
+            raw_bt_ms: 60_000 + 30_000,
+            sleep_ms: 30_000,
+            suspends: 1,
+        };
+        assert!(!grant.is_live(Some(&resumed)), "grants lapse at suspend");
+        let counted_only = BootStamp {
+            sleep_ms: 0,
+            raw_bt_ms: 60_000,
+            ..resumed.clone()
+        };
+        assert!(
+            !grant.is_live(Some(&counted_only)),
+            "a suspend the kernel counted but did not measure closes it too"
+        );
+        let mut env = envelope();
+        assert!(env.is_answerable(Some(&stamp(2_000))));
+        assert!(
+            !env.is_answerable(Some(&resumed)),
+            "so do pending approvals"
+        );
+        env.approval.status = ApprovalStatus::Approved;
+        assert!(env.has_lapsed(Some(&resumed)));
 
         let revoked = Grant {
             revoked_at: Some("2026-08-25T10:01:00Z".to_string()),
@@ -960,6 +995,7 @@ mod tests {
     fn the_lifetime_is_additive_on_the_wire() {
         let mut value = serde_json::to_value(envelope()).unwrap();
         assert_eq!(value["lifetime"]["start"]["boot_id"], BOOT);
+        assert_eq!(value["lifetime"]["start"]["suspends"], 0);
         assert_eq!(value["lifetime"]["duration_ms"], 300_000);
         assert!(value["approval"].get("lifetime").is_none());
         value.as_object_mut().unwrap().remove("lifetime");

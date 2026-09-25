@@ -41,7 +41,7 @@
 //! created, and every decision here takes a `now` from
 //! [`punar_common::trusted_time`]: `None` when the clock cannot be read, and
 //! `None` authorizes nothing. So a grant or a pending approval lapses at
-//! reboot, a wall clock rolled back (or read as 1970) revives nothing, and a
+//! reboot and at suspend, a wall clock rolled back (or read as 1970) revives nothing, and a
 //! record an older punard wrote — which has no window — is expired at the
 //! first sweep after an upgrade: the person asks again. The wall-clock
 //! `expires_at` stays on every record for people to read.
@@ -555,6 +555,8 @@ mod tests {
         BootStamp {
             boot_id: BOOT.to_string(),
             raw_bt_ms,
+            sleep_ms: 0,
+            suspends: 0,
         }
     }
 
@@ -879,6 +881,8 @@ mod tests {
         let rebooted = BootStamp {
             boot_id: NEXT_BOOT.to_string(),
             raw_bt_ms: T0 + 1,
+            sleep_ms: 0,
+            suspends: 0,
         };
         assert!(
             store

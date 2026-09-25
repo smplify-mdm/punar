@@ -46,8 +46,8 @@
 //!   two things that can drift.
 //! - [`time`] — RFC 3339 UTC helpers (deliberately no time crate).
 //! - [`trusted_time`] — expiry on the boot clock: a [`trusted_time::BootStamp`]
-//!   is `{boot_id, raw_bt_ms}`, and a window lapses at reboot and never reads
-//!   the wall clock. Every grant, approval, re-authentication ticket and
+//!   is `{boot_id, raw_bt_ms, sleep_ms, suspends}`, and a window lapses at
+//!   reboot and at suspend and never reads the wall clock. Every grant, approval, re-authentication ticket and
 //!   brokered credential decides its expiry here (SMP-1405, phase P0a).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).

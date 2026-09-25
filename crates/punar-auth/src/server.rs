@@ -410,7 +410,9 @@ mod tests {
             stamp,
             BootStamp {
                 boot_id: BOOT.to_string(),
-                raw_bt_ms: 7_000
+                raw_bt_ms: 7_000,
+                sleep_ms: 0,
+                suspends: 0,
             }
         );
 
@@ -458,7 +460,7 @@ mod tests {
         let previous_boot = per_uid.join("11".repeat(32));
         fs::write(
             &previous_boot,
-            format!(r#"{{"boot_id":"{NEXT_BOOT}","raw_bt_ms":7000}}"#),
+            format!(r#"{{"boot_id":"{NEXT_BOOT}","raw_bt_ms":7000,"sleep_ms":0,"suspends":0}}"#),
         )
         .unwrap();
 

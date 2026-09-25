@@ -31,8 +31,8 @@
 //!
 //! Each record's TTL is a [`BootWindow`] opened at issuance and judged on the
 //! boot clock ([`punar_common::trusted_time`]), shortened by the drift
-//! allowance so it closes early and never late. A wall clock rolled back
-//! cannot stretch a credential, and a broker that cannot read the boot clock
+//! allowance so it closes early and never late, and closed by a suspend or a
+//! reboot. A wall clock rolled back cannot stretch a credential, and a broker that cannot read the boot clock
 //! issues nothing and validates nothing. `issued_at` and `expires_at` stay on
 //! the wall clock, for people to read.
 
@@ -89,7 +89,8 @@ pub struct IssuedRecord {
     /// Wall clock, for people to read. The decision is `lifetime`.
     pub expires_at: String,
     /// **What decides expiry**: the TTL on the boot clock, opened at
-    /// issuance. Lapses at the drift-shortened edge and at reboot.
+    /// issuance. Lapses at the drift-shortened edge, at suspend and at
+    /// reboot.
     pub lifetime: BootWindow,
     /// Set on the record handed to the audit path when a token is revoked.
     /// The map entry itself is dropped at the same moment — a tombstone
@@ -378,6 +379,8 @@ mod tests {
         BootStamp {
             boot_id: BOOT.to_string(),
             raw_bt_ms,
+            sleep_ms: 0,
+            suspends: 0,
         }
     }
 
@@ -492,6 +495,8 @@ mod tests {
         let rebooted = BootStamp {
             boot_id: NEXT_BOOT.to_string(),
             raw_bt_ms: 100_001,
+            sleep_ms: 0,
+            suspends: 0,
         };
         for judged_at in [Some(rebooted), Some(at(99_999)), None] {
             let mut store = store();
