@@ -1095,7 +1095,12 @@ the user can change it, what the next step is. No `EPERM`.
 
   **Does `update.check` need the ticket? Yes**, decided by whether it
   mutates cached state, and it does. It writes the root-owned verified
-  channel cache under `/var/lib/punar/update/`. It makes the device contact
+  channel cache under `/var/lib/punar/update/`. (That cache answers a
+  non-forced check for 15 minutes measured on the boot clock from the
+  start of the fetch that filled it, held in punard's memory — not the
+  file's mtime against the wall clock — so after a punard restart, a
+  suspend or a reboot the next check fetches again; SMP-1405, ipc.md
+  §5.17.) It makes the device contact
   its update source. It is audited as a mutation (§7.1). Without a
   password, a stolen shell could drive that traffic and rewrite root-owned
   state whenever it liked.

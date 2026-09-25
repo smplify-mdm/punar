@@ -810,9 +810,18 @@ impl Inner {
         // --- Rule 3: state. Expiry beats everything: a lapsed approval is
         // `expired`, never `conflict`, because "you were too late" and
         // "someone already answered" are different facts.
-        if env.approval.status == ApprovalStatus::Pending
-            && env.has_lapsed(self.trusted_now().as_ref())
-        {
+        //
+        // One boot-clock reading judges the whole answer: whether it came in
+        // time, and when a grant it earns opens. Without one, nothing is
+        // answered and the card is left pending — saying `expired` here would
+        // be a claim the daemon cannot back, and the sweep that would make it
+        // true is skipped for the same reason.
+        let Some(now) = self.trusted_now() else {
+            return Err(self.internal(&format!(
+                "the boot clock could not be read, so {id} was not answered"
+            )));
+        };
+        if env.approval.status == ApprovalStatus::Pending && env.has_lapsed(Some(&now)) {
             self.sweep_approvals(&mut store);
             return Err(IpcError::expired(id, &env.approval.expires_at));
         }
@@ -847,7 +856,7 @@ impl Inner {
         });
 
         if params.decision == ResolveDecision::Approved {
-            let execution = self.execute_approved(&mut store, &resolved);
+            let execution = self.execute_approved(&mut store, &resolved, &now);
             resolved.execution = execution;
         }
 
@@ -879,6 +888,7 @@ impl Inner {
         &self,
         store: &mut ApprovalStore,
         env: &ApprovalEnvelope,
+        now: &BootStamp,
     ) -> Option<Execution> {
         match env.kind {
             // The broker spends this later through `approvals.consume`.
@@ -886,7 +896,9 @@ impl Inner {
             // token must never enter the daemon that writes /etc.
             ApprovalKind::CredentialRequest => None,
             ApprovalKind::CapabilitySet => Some(self.execute_approved_capability(env)),
-            ApprovalKind::PrivilegeRequest => Some(self.execute_approved_privilege(store, env)),
+            ApprovalKind::PrivilegeRequest => {
+                Some(self.execute_approved_privilege(store, env, now))
+            }
         }
     }
 
@@ -934,11 +946,14 @@ impl Inner {
         execution
     }
 
-    /// Mint the grant a resolved `privilege_request` earned.
+    /// Mint the grant a resolved `privilege_request` earned, its window
+    /// opening at `now` — the reading that found the approval still
+    /// answerable.
     fn execute_approved_privilege(
         &self,
         store: &mut ApprovalStore,
         env: &ApprovalEnvelope,
+        now: &BootStamp,
     ) -> Execution {
         // Clamped again on the way out: the record is punard's own, but the
         // bound on how long privilege lasts is not something to trust a file
@@ -950,22 +965,9 @@ impl Inner {
                 .parse::<u64>()
                 .unwrap_or(punar_common::approval::GRANT_DEFAULT_MINUTES),
         ));
-        // The grant's window opens now, on the boot clock, and ends at the
-        // next reboot at the latest. No readable clock, no grant: a window
-        // that cannot be judged is never issued.
-        let Some(lifetime) =
-            BootWindow::opening_now(self.cfg.trusted_clock.as_ref(), minutes.saturating_mul(60))
-        else {
-            return Execution {
-                result: "internal".to_string(),
-                error: Some(
-                    "This device could not read its boot clock, so no time-limited \
-                     privilege was granted and nothing changed. Ask again."
-                        .to_string(),
-                ),
-                ..Execution::default()
-            };
-        };
+        // The grant's window opens at the resolving reading, on the boot
+        // clock, and ends at the next suspend or reboot at the latest.
+        let lifetime = BootWindow::of_secs(now.clone(), minutes.saturating_mul(60));
         let uid = env
             .requester_peer
             .as_ref()
@@ -1067,7 +1069,14 @@ impl Inner {
         }
         // An approved credential approval **still expires**: a human's yes
         // is not a standing grant, and a second issuance raises a new one.
-        if env.has_lapsed(self.trusted_now().as_ref()) {
+        // Without a boot-clock reading nothing is spent, and the approval is
+        // not called expired when the daemon cannot say that it is.
+        let Some(now) = self.trusted_now() else {
+            return Err(self.internal(&format!(
+                "the boot clock could not be read, so {id} was not consumed"
+            )));
+        };
+        if env.has_lapsed(Some(&now)) {
             return Err(IpcError::expired(id, &env.approval.expires_at));
         }
         if env.approval.status != ApprovalStatus::Approved {

@@ -117,11 +117,16 @@ fn decide(uid: u32, reader: &mut dyn Read) -> (Verdict, Purpose) {
 /// whose ticket it is.
 ///
 /// THE CONTENTS SAY WHEN, and only when: one `BootStamp`
-/// (`{"boot_id":…,"raw_bt_ms":…}`) read from the boot clock at mint time
-/// (SMP-1405). punard judges the ticket's age against its own boot clock, so
-/// neither a wall clock stepped back nor a touched mtime can stretch it. A
-/// clock that cannot be read mints no ticket: the caller sees `ok` with no
-/// ticket, and punard refuses the change for a stated, fixable reason.
+/// (`{"boot_id":…,"raw_bt_ms":…,"sleep_ms":…,"suspends":…}`) read from the
+/// boot clock at mint time (SMP-1405). punard judges the ticket's age against
+/// its own boot clock, so neither a wall clock stepped back nor a touched
+/// mtime can stretch it. A clock that cannot be read mints no ticket: the
+/// caller sees `ok` with no ticket, and punard refuses the change for a
+/// stated, fixable reason.
+///
+/// The clock is read ONCE. The same reading dates the new ticket and judges
+/// the old ones in the sweep, so a read that fails halfway through cannot
+/// make every other ticket look expired and delete it.
 fn mint_ticket(dir: &Path, uid: u32, clock: &dyn TrustedClock) -> Option<String> {
     let stamp = clock.now()?;
     let body = serde_json::to_vec(&stamp).ok()?;
@@ -134,7 +139,7 @@ fn mint_ticket(dir: &Path, uid: u32, clock: &dyn TrustedClock) -> Option<String>
     // recursive(true) does not apply the mode to a directory that already
     // exists, and a wrong mode here is the one thing that would matter.
     fs::set_permissions(&per_uid, fs::Permissions::from_mode(0o700)).ok()?;
-    sweep_expired(&per_uid, clock);
+    sweep_expired(&per_uid, &stamp);
 
     let mut raw = [0_u8; 32];
     let mut filled = 0;
@@ -151,8 +156,9 @@ fn mint_ticket(dir: &Path, uid: u32, clock: &dyn TrustedClock) -> Option<String>
     // The stamp is written under a private name first and linked into place
     // complete, so no reader — punard spending it, or another punar-authd
     // sweeping — can ever find the ticket empty. The staging name starts
-    // with a dot, which is never a token and never swept.
-    let staging = per_uid.join(format!(".{name}.minting"));
+    // with a dot, which is never a token; the sweep removes one only once
+    // the stamp inside it has aged out (a mint killed after writing it).
+    let staging = per_uid.join(staging_name(&name));
     let linked = OpenOptions::new()
         .write(true)
         // create_new, here and in hard_link below: a name this daemon just
@@ -179,23 +185,45 @@ fn is_ticket_name(name: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+const STAGING_SUFFIX: &str = ".minting";
+
+/// Where the ticket `name` is written before it is linked into place.
+fn staging_name(name: &str) -> String {
+    format!(".{name}{STAGING_SUFFIX}")
+}
+
+/// Whether `name` is a staging file this daemon writes: `.<token>.minting`.
+fn is_staging_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(STAGING_SUFFIX))
+        .is_some_and(is_ticket_name)
+}
+
 /// The largest ticket body this daemon writes, and the most it reads back.
 const TICKET_MAX_BYTES: u64 = 256;
 
-/// Whether the ticket at `path` is still within its window on `clock`. A file
-/// that cannot be read, is oversized, or holds no stamp is not.
-fn ticket_is_live(path: &Path, clock: &dyn TrustedClock) -> bool {
+/// The stamp inside the ticket (or staging file) at `path`, or `None` when
+/// it cannot be read, is oversized, or holds no stamp.
+fn read_ticket_stamp(path: &Path) -> Option<BootStamp> {
     let mut body = Vec::new();
-    let read = fs::File::open(path)
+    fs::File::open(path)
         .and_then(|file| file.take(TICKET_MAX_BYTES + 1).read_to_end(&mut body))
-        .is_ok();
-    if !read || body.len() as u64 > TICKET_MAX_BYTES {
-        return false;
+        .ok()?;
+    if body.len() as u64 > TICKET_MAX_BYTES {
+        return None;
     }
-    serde_json::from_slice::<BootStamp>(&body).is_ok_and(|stamp| {
-        BootWindow::of_secs(stamp, crate::protocol::TICKET_MAX_AGE_SECS)
-            .is_open(clock.now().as_ref())
-    })
+    serde_json::from_slice(&body).ok()
+}
+
+/// Whether a ticket minted at `stamp` is still within its window at `now`.
+fn stamp_is_live(stamp: BootStamp, now: &BootStamp) -> bool {
+    BootWindow::of_secs(stamp, crate::protocol::TICKET_MAX_AGE_SECS).is_open(Some(now))
+}
+
+/// Whether the ticket at `path` is still within its window at `now`. A file
+/// that cannot be read, is oversized, or holds no stamp is not.
+fn ticket_is_live(path: &Path, now: &BootStamp) -> bool {
+    read_ticket_stamp(path).is_some_and(|stamp| stamp_is_live(stamp, now))
 }
 
 /// Remove EXPIRED tickets before minting another, so a session that asks
@@ -208,19 +236,34 @@ fn ticket_is_live(path: &Path, clock: &dyn TrustedClock) -> bool {
 /// clock; punard unlinks on use and re-checks the age, and that is where the
 /// guarantee lives.
 ///
-/// Age is read from each ticket's own stamp on the boot clock, never from its
-/// mtime. A ticket that cannot be dated (an empty one an older punar-authd
-/// minted, a damaged one, one from another boot) is not one to keep.
-fn sweep_expired(per_uid: &Path, clock: &dyn TrustedClock) {
+/// Age is read from each ticket's own stamp against `now` — the one reading
+/// the caller took — on the boot clock, never from its mtime. A ticket that
+/// cannot be dated (an empty one an older punar-authd minted, a damaged one,
+/// one from another boot or before a suspend) is not one to keep.
+///
+/// A STAGING file is left behind only when a mint is killed between writing
+/// it and removing it. It is removed once the stamp inside it has aged out,
+/// exactly like a ticket. One that is empty or unreadable is kept: it may be
+/// another punar-authd's mint, opened this instant and not yet written, and
+/// deleting it would fail that person's mint. (The staging name can never be
+/// spent: punard only accepts a 64-hex token.)
+fn sweep_expired(per_uid: &Path, now: &BootStamp) {
     let Ok(entries) = fs::read_dir(per_uid) else {
         return;
     };
     for entry in entries.flatten() {
-        if !entry.file_name().to_str().is_some_and(is_ticket_name) {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
-        }
+        };
         let path = entry.path();
-        if !ticket_is_live(&path, clock) {
+        let expired = if is_ticket_name(&name) {
+            !ticket_is_live(&path, now)
+        } else if is_staging_name(&name) {
+            read_ticket_stamp(&path).is_some_and(|stamp| !stamp_is_live(stamp, now))
+        } else {
+            false
+        };
+        if expired {
             let _ = fs::remove_file(path);
         }
     }
@@ -503,7 +546,74 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(names.iter().filter(|n| n.starts_with('.')).count(), 1);
-        assert!(ticket_is_live(&per_uid.join(&first), &clock));
+        assert!(ticket_is_live(&per_uid.join(&first), &clock.now().unwrap()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A clock that answers once and then cannot be read.
+    #[derive(Debug)]
+    struct OneReading(std::sync::Mutex<Option<BootStamp>>);
+
+    impl TrustedClock for OneReading {
+        fn now(&self) -> Option<BootStamp> {
+            self.0.lock().unwrap().take()
+        }
+    }
+
+    /// The sweep judges every other ticket on the reading that dated the new
+    /// one. A clock that fails after that reading must not make a live
+    /// ticket — another session's, minted a moment ago — look expired and
+    /// delete it.
+    #[test]
+    fn a_clock_that_fails_after_the_mint_reading_sweeps_nothing_live() {
+        let dir = std::env::temp_dir().join(format!("punar-auth-onceread-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let clock = ManualClock::new(BOOT, 7_000);
+        let first = mint_ticket(&dir, 1000, &clock).expect("mint");
+        clock.advance_secs(10);
+        let flaky = OneReading(std::sync::Mutex::new(clock.now()));
+        let second = mint_ticket(&dir, 1000, &flaky).expect("mint on one reading");
+        assert!(
+            dir.join("1000").join(&first).exists(),
+            "a live ticket was swept over a failed clock read"
+        );
+        assert!(dir.join("1000").join(&second).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A mint killed after writing its staging file leaves it behind. The
+    /// sweep removes it once the stamp inside has aged out, like a ticket;
+    /// an empty one (a concurrent mint not yet written) and any other dot
+    /// file are left alone.
+    #[test]
+    fn a_staging_file_a_killed_mint_left_is_swept_once_it_ages_out() {
+        let dir = std::env::temp_dir().join(format!("punar-auth-litter-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let clock = ManualClock::new(BOOT, 7_000);
+        mint_ticket(&dir, 1000, &clock).expect("mint");
+        let per_uid = dir.join("1000");
+        let left = per_uid.join(staging_name(&"33".repeat(32)));
+        fs::write(&left, serde_json::to_vec(&clock.now().unwrap()).unwrap()).unwrap();
+        let empty = per_uid.join(staging_name(&"44".repeat(32)));
+        fs::write(&empty, b"").unwrap();
+        let other = per_uid.join(".not-a-staging-file");
+        fs::write(&other, serde_json::to_vec(&clock.now().unwrap()).unwrap()).unwrap();
+
+        mint_ticket(&dir, 1000, &clock).expect("mint inside the window");
+        assert!(
+            left.exists(),
+            "a staging file still inside the window is kept"
+        );
+
+        clock.advance_secs(crate::protocol::TICKET_MAX_AGE_SECS);
+        mint_ticket(&dir, 1000, &clock).expect("mint after the window");
+        assert!(!left.exists(), "an aged-out staging file is litter");
+        assert!(empty.exists(), "an empty one may be a mint in progress");
+        assert!(other.exists(), "the sweep touches only names it writes");
+
+        assert!(is_staging_name(&staging_name(&"ab".repeat(32))));
+        assert!(!is_staging_name(".short.minting"));
+        assert!(!is_staging_name(&"ab".repeat(32)));
         let _ = fs::remove_dir_all(&dir);
     }
 

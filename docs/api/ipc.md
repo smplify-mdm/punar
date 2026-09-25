@@ -1341,7 +1341,12 @@ verified channel cache and contacts the update source; `update.status` needs
 none.
 
 Audited. The request may select only whether to bypass the
-15-minute verified cache. A caller cannot provide a URL, path, channel, key,
+15-minute verified cache. The 15 minutes run on the boot clock (SMP-1405,
+§14.4) from the moment the fetch that filled the cache **began**, and the
+stamp is held in punard's memory, not read from the cache file's mtime:
+after a punard restart, a suspend or a reboot the cache is not fresh, and
+a non-forced check fetches again (offline, it then reports the source
+unreachable rather than serving the cached answer). A caller cannot provide a URL, path, channel, key,
 target identity, mirror, artifact, digest, executable, or option. The daemon
 resolves the precedence-winning `system.update_channel`, running image id and
 version, host architecture, boot platform, device cohort identity, fixed

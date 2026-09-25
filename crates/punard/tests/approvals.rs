@@ -1586,6 +1586,96 @@ fn records_an_older_punard_wrote_are_expired_after_an_upgrade() {
     assert_eq!(user.set("disabled")["error"]["code"], "denied");
 }
 
+/// A boot clock punard cannot read authorizes nothing and destroys nothing
+/// (SMP-1405): no approval is raised or answered, no grant is live, the
+/// sweep leaves every record alone rather than expiring it over a failed
+/// read, and handing privilege back still works. The pending card is never
+/// called `expired` meanwhile, so once the clock is back it can be answered.
+#[test]
+fn an_unreadable_boot_clock_authorizes_nothing_and_destroys_nothing() {
+    use punar_common::trusted_time::TrustedClock;
+
+    let user = TestDaemon::as_user(CONSOLE_UID);
+    let requested = user.call(
+        "privilege.request",
+        Some(json!({"capability": GATED, "reason": "clock test", "duration_minutes": 1})),
+    );
+    let approval_id = requested["error"]["details"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reading = user.clock.now();
+    let grants_on_disk = || {
+        fs::read_dir(user.dir.join("state/grants"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+
+    user.clock.set(None);
+    let raised = user.call(
+        "privilege.request",
+        Some(json!({"capability": GATED, "reason": "while the clock is unreadable"})),
+    );
+    assert_eq!(raised["error"]["code"], "internal", "{raised}");
+    let answered = user.resolve(&approval_id, "approved");
+    assert_eq!(answered["error"]["code"], "internal", "{answered}");
+    let got = user.call("approvals.get", Some(json!({ "approval_id": approval_id })));
+    assert_eq!(got["result"]["approval"]["status"], "pending", "{got}");
+    assert!(user.events("approval.expire").is_empty());
+    assert!(user.events("approval.resolve").is_empty());
+    assert_eq!(grants_on_disk(), 0, "no grant was minted");
+    assert_eq!(user.set("disabled")["error"]["code"], "denied");
+
+    // The clock reads again: the same card is answerable and earns a grant.
+    user.clock.set(reading.clone());
+    let answered = user.resolve(&approval_id, "approved");
+    assert_eq!(
+        answered["result"]["execution"]["result"], "granted",
+        "{answered}"
+    );
+    let grant_id = answered["result"]["execution"]["grant_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(user.set("disabled").get("result").is_some());
+
+    // Unreadable again: the grant authorizes nothing, but is not swept away
+    // either ...
+    user.clock.set(None);
+    assert_eq!(user.set("enabled")["error"]["code"], "denied");
+    let status = user.call("privilege.status", None);
+    assert!(
+        status["result"]["grants"].as_array().unwrap().is_empty(),
+        "{status}"
+    );
+    assert_eq!(grants_on_disk(), 1, "the sweep is skipped, not run blind");
+    assert!(user.events("privilege.expire").is_empty());
+    // ... and handing it back needs no clock at all.
+    let revoked = user.call("privilege.revoke", Some(json!({"all": true})));
+    assert_eq!(revoked["result"]["revoked"], json!([grant_id]), "{revoked}");
+    assert_eq!(grants_on_disk(), 0);
+}
+
+/// A suspend closes a grant, as a reboot does (SMP-1405): the kernel may
+/// have under-counted the sleep, so nothing is judged across one.
+#[test]
+fn a_grant_lapses_at_suspend() {
+    let user = TestDaemon::as_user(CONSOLE_UID);
+    let grant_id = granted(&user, 60);
+    assert!(user.set("disabled").get("result").is_some());
+    user.clock.advance_secs(30);
+    user.clock.suspend(5_000);
+    let status = user.call("privilege.status", None);
+    assert!(
+        status["result"]["grants"].as_array().unwrap().is_empty(),
+        "{status}"
+    );
+    let expiries = user.events("privilege.expire");
+    assert_eq!(expiries.len(), 1);
+    assert_eq!(expiries[0]["resource"], grant_id);
+    assert_eq!(user.set("enabled")["error"]["code"], "denied");
+}
+
 /// **A grant is never issued to an AI agent** (SPEC sections 48, 60). Agents
 /// get per-request approvals; they never get a time window.
 #[test]

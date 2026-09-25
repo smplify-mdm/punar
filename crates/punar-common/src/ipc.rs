@@ -2576,9 +2576,12 @@ pub struct PrivilegeStatusResult {
     pub checked_at: String,
 }
 
-/// Result of `privilege.revoke`: the grant ids that were live and are not
-/// any more. Revoking nothing is a success with an empty list — idempotent,
-/// because handing back privilege must never fail for lack of privilege.
+/// Result of `privilege.revoke`: the grant ids that were dropped. With
+/// `grant_id`, that grant; with `all`, every grant record the caller held —
+/// including one that had already lapsed but was not yet swept, because
+/// handing privilege back reads no clock (SMP-1405). Revoking nothing is a
+/// success with an empty list — idempotent, because handing back privilege
+/// must never fail for lack of privilege.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrivilegeRevokeResult {
     pub revoked: Vec<String>,
