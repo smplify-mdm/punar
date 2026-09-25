@@ -3398,13 +3398,9 @@ fn enrollment_keeps_a_root_drop_and_refuses_to_take_one_over() {
         error["details"]["reason"], "foreign_file_collision",
         "{error}"
     );
-    assert!(
-        error["message"]
-            .as_str()
-            .unwrap()
-            .contains("policy.d/local-lab.json"),
-        "{error}"
-    );
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("policy.d/local-lab.json"), "{error}");
+    assert!(message.contains("remove it and enroll again"), "{error}");
     assert_eq!(fs::read(policy_d.join("local-lab.json")).unwrap(), squatted);
     assert!(!daemon.state_path("enrollment.json").exists());
 }

@@ -6105,6 +6105,23 @@ fn enroll_policy_refusal(rejection: &Rejection) -> IpcError {
             ),
             json!({ "param": "policy.spec.browser", "reason": "browser policy refused" }),
         ),
+        // The one refusal a person on the device can resolve: the file may
+        // be left from an earlier enrollment. It is theirs to remove; punard
+        // never takes over a file it did not write.
+        Rejection::ForeignFileCollision(name) => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!(
+                "The organization's policy set uses the name of a file already in \
+                 policy.d that this device did not receive from it: {name}.\n\
+                 Policy: os default — enrollment never overwrites a file an \
+                 administrator put in /var/lib/punar/policy.d (docs/api/ipc.md section \
+                 5.9); nothing was written.\n\
+                 Next step: if /var/lib/punar/policy.d/{name} is left from an earlier \
+                 enrollment, remove it and enroll again; otherwise ask your \
+                 administrator to rename the policy."
+            ),
+            json!({ "param": "policy", "reason": rejection.reason() }),
+        ),
         other => IpcError::with_details(
             ErrorCode::InvalidParams,
             format!(
