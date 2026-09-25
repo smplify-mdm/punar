@@ -145,7 +145,7 @@ disagree, the machine is right.** The whole grammar is in
 | `PUNAR + Tab` | Project overview |
 | `PUNAR + A` | AI panel |
 | `PUNAR + S` | System control |
-| `PUNAR + /` | Shortcut help |
+| `PUNAR + /` or `PUNAR + F1` | Shortcut help (`/` sits behind Shift on German, French, Spanish and Italian keyboards; F1 is F1 on every layout) |
 | `PUNAR + SHIFT + N` | Notification centre (the plate asks for `PUNAR+N`; the notes scratchpad has held it since M2) |
 | `PUNAR + SHIFT + B` | Focus the bar's status cluster (the plate asks for `PUNAR+B`; the browser has held it since M1) |
 | `PUNAR + Q` | Ask the focused window to close normally |

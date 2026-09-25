@@ -789,14 +789,24 @@ pub fn chord(bind: &Value) -> String {
     }
     let key = bind.get("key").and_then(Value::as_str).unwrap_or("");
     parts.push(if key.is_empty() {
-        format!(
-            "code {}",
-            bind.get("keycode").and_then(Value::as_u64).unwrap_or(0)
-        )
+        let keycode = bind.get("keycode").and_then(Value::as_u64).unwrap_or(0);
+        match number_row_digit(keycode) {
+            Some(digit) => digit.to_string(),
+            None => format!("code {keycode}"),
+        }
     } else {
         key.to_string()
     });
     parts.join(" + ")
+}
+
+/// The digit on a number-row key bound by its XKB keycode (10 is the 1 key,
+/// 19 the 0 key). The workspace binds use these codes, as Omarchy's do, so
+/// they fire under every layout (on AZERTY the unshifted keys type `&`,
+/// `é`, ...); every layout prints the digit on that key, so the digit is
+/// the honest name for it (SMP-1405 WP-02 review).
+pub fn number_row_digit(keycode: u64) -> Option<u64> {
+    (10..=19).contains(&keycode).then(|| (keycode - 9) % 10)
 }
 
 /// The families the shell has not seen tried, from its own state file: the
@@ -949,6 +959,17 @@ mod tests {
             chord(&json!({"modmask": 64, "key": "", "keycode": 272})),
             "Punar + code 272"
         );
+        // The workspace binds, bound by number-row keycode, read as digits.
+        assert_eq!(
+            chord(&json!({"modmask": 64, "key": "", "keycode": 10})),
+            "Punar + 1"
+        );
+        assert_eq!(
+            chord(&json!({"modmask": 65, "key": "", "keycode": 19})),
+            "Punar + Shift + 0"
+        );
+        assert_eq!(number_row_digit(9), None);
+        assert_eq!(number_row_digit(20), None);
         assert_eq!(
             chord(&json!({"modmask": 0, "key": "XF86AudioPlay"})),
             "XF86AudioPlay"

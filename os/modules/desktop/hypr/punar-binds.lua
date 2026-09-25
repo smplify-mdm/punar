@@ -11,9 +11,20 @@
 -- maximize, pop-out, a tenth workspace, quiet moves, workspace scroll, moving
 -- a workspace between monitors), Alt+Tab with previews, the media, microphone
 -- and brightness keys, the optional Mac-style clipboard keys, the file
--- manager on PUNAR+E, three session-only look toggles, and pointer move and
--- resize. Keys that reach the system run a `punarctl` verb, so a terminal and
--- the keyboard do each thing one way.
+-- manager on PUNAR+E, three kept look toggles, and pointer move and resize.
+-- Keys that reach the system run a `punarctl` verb, so a terminal and the
+-- keyboard do each thing one way.
+--
+-- EVERY CHORD WORKS UNDER EVERY KEYBOARD LAYOUT. Hyprland matches a keysym
+-- bind against the first layout's UNSHIFTED symbol for the key pressed. A
+-- letter is unshifted on every Latin layout (and the Latin lead covers the
+-- rest, punar-input.lua), but digits and punctuation are not: on AZERTY the
+-- number row types & é " ' ( … unshifted, and German, Spanish and Italian
+-- put / and the brackets behind Shift or AltGr. So the number row is bound
+-- by its key CODE (code:10 is the 1 key … code:19 the 0 key), as Omarchy's
+-- workspace keys are, and every punctuation chord has a twin on a key every
+-- layout names the same (F1, Tab), or a stated reason
+-- (tests/desktop/keybind-contract-test.sh holds both rules).
 
 return function(ctx)
     local mod = ctx.mod
@@ -46,6 +57,10 @@ return function(ctx)
     bind(mod .. " + SHIFT + G", hl.dsp.window.move({ out_of_group = true }), "Move window out of group")
     bind(mod .. " + bracketleft", hl.dsp.group.prev(), "Previous window in group")
     bind(mod .. " + bracketright", hl.dsp.group.next(), "Next window in group")
+    -- The brackets sit behind AltGr on German, French and Spanish keyboards;
+    -- Tab is Tab everywhere (Omarchy's own chord for this, K58/K59).
+    bind(mod .. " + ALT + Tab", hl.dsp.group.next(), "Next window in group (any layout)")
+    bind(mod .. " + ALT + SHIFT + Tab", hl.dsp.group.prev(), "Previous window in group (any layout)")
     bind(mod .. " + CTRL + H", hl.dsp.window.move({ into_group = "left" }), "Move window into group left")
     bind(mod .. " + CTRL + J", hl.dsp.window.move({ into_group = "down" }), "Move window into group below")
     bind(mod .. " + CTRL + K", hl.dsp.window.move({ into_group = "up" }), "Move window into group above")
@@ -92,18 +107,20 @@ return function(ctx)
     --
     -- Ten workspaces, as Omarchy has: the tenth is on the 0 key, the key
     -- after 9 on the number row, and the reference folds it into the run.
-    for workspace = 1, 10 do
-        local key = tostring(workspace % 10)
-        bind(mod .. " + " .. key, hl.dsp.focus({ workspace = workspace }), "Workspace " .. workspace)
+    -- By key CODE (the header says why): code:10 is the 1 key and code:19
+    -- the 0 key on every keyboard, whatever the layout prints unshifted.
+    local function number_key(workspace)
+        return "code:" .. tostring(workspace + 9)
     end
     for workspace = 1, 10 do
-        local key = tostring(workspace % 10)
-        bind(mod .. " + SHIFT + " .. key, hl.dsp.window.move({ workspace = workspace }), "Move window to workspace " .. workspace)
+        bind(mod .. " + " .. number_key(workspace), hl.dsp.focus({ workspace = workspace }), "Workspace " .. workspace)
+    end
+    for workspace = 1, 10 do
+        bind(mod .. " + SHIFT + " .. number_key(workspace), hl.dsp.window.move({ workspace = workspace }), "Move window to workspace " .. workspace)
     end
     -- Quiet: the window goes, the person stays where they are.
     for workspace = 1, 10 do
-        local key = tostring(workspace % 10)
-        bind(mod .. " + ALT + " .. key, hl.dsp.window.move({ workspace = workspace, follow = false }), "Move window quietly to workspace " .. workspace)
+        bind(mod .. " + ALT + " .. number_key(workspace), hl.dsp.window.move({ workspace = workspace, follow = false }), "Move window quietly to workspace " .. workspace)
     end
 
     bind(mod .. " + Tab", hl.dsp.exec_cmd(ctx.overview), "Project overview")
@@ -211,10 +228,14 @@ return function(ctx)
     end
     bind("ALT + Tab", switch_step(1), "Switch windows")
     bind("ALT + SHIFT + Tab", switch_step(-1), "Switch windows backwards")
-    bind("ALT + Alt_L", switch_done, "Choose the window on Alt release", { release = true })
-    bind("ALT + Alt_R", switch_done, "Choose the window on right Alt release", { release = true })
-    bind("ALT + SHIFT + Alt_L", switch_done, "Choose the window on Shift+Alt release", { release = true })
-    bind("ALT + SHIFT + Alt_R", switch_done, "Choose the window on Shift+right Alt release", { release = true })
+    -- NON-CONSUMING: the release of Alt still reaches the focused window.
+    -- A consuming release bind would eat EVERY Alt release, switching or not,
+    -- and Firefox, Thunderbird and every GTK or Qt app with a menu bar opens
+    -- it on a bare Alt release. The bind only listens; it never takes the key.
+    bind("ALT + Alt_L", switch_done, "Choose the window on Alt release", { release = true, non_consuming = true })
+    bind("ALT + Alt_R", switch_done, "Choose the window on right Alt release", { release = true, non_consuming = true })
+    bind("ALT + SHIFT + Alt_L", switch_done, "Choose the window on Shift+Alt release", { release = true, non_consuming = true })
+    bind("ALT + SHIFT + Alt_R", switch_done, "Choose the window on Shift+right Alt release", { release = true, non_consuming = true })
     bind("CTRL + ALT + Tab", hl.dsp.focus({ monitor = "+1" }), "Focus next monitor")
     bind("CTRL + ALT + SHIFT + Tab", hl.dsp.focus({ monitor = "-1" }), "Focus previous monitor")
 
@@ -249,6 +270,10 @@ return function(ctx)
 
     bind(mod .. " + SHIFT + E", hl.dsp.exit(), "End session")
     bind(mod .. " + slash", hl.dsp.exec_cmd(ctx.shell .. " ipc call shortcuts toggle"), "Shortcut help")
+    -- / is Shift+7 on German, Spanish and Italian keyboards and Shift+: on
+    -- French ones, where PUNAR+/ cannot be pressed at all; F1 is F1 on every
+    -- layout, and it is the help key everywhere else too.
+    bind(mod .. " + F1", hl.dsp.exec_cmd(ctx.shell .. " ipc call shortcuts toggle"), "Shortcut help (any layout)")
     bind(mod .. " + SHIFT + B", hl.dsp.exec_cmd(ctx.shell .. " ipc call bar focus"), "Focus status cluster")
     bind(mod .. " + S", hl.dsp.exec_cmd(ctx.shell .. " ipc call systemcontrol toggle"), "System control")
     bind(mod .. " + escape", hl.dsp.exec_cmd(ctx.lock), "Lock session")

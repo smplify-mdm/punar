@@ -267,11 +267,29 @@ Singleton {
             "mouse_up": "Wheel ↑"
         })
 
+    // The digit a number-row bind is about: its keysym when bound by a
+    // digit, or the number-row key it names by CODE (code:10 is the 1 key
+    // … code:19 the 0 key). punar-binds.lua binds the workspaces by code so
+    // they fire under every layout (AZERTY types & é " … unshifted there),
+    // and every layout prints the digit on that key, so the digit is the
+    // honest label. "" for anything else. SMP-1405 WP-02.
+    function numberRowKey(key: string, keycode: int): string {
+        if (/^\d$/.test(key))
+            return key;
+        if (key === "" && keycode >= 10 && keycode <= 19)
+            return String((keycode - 9) % 10);
+        return "";
+    }
+
     function keyLabel(key: string, keycode: int): string {
-        if (key === "")
+        if (key === "") {
+            var digit = table.numberRowKey(key, keycode);
+            if (digit !== "")
+                return digit;
             // Bound by keycode rather than keysym: still a row, still
             // true, just spelled the only way the table can spell it.
             return keycode > 0 ? "Code " + keycode : "?";
+        }
         if (table.keyNames.hasOwnProperty(key))
             return table.keyNames[key];
         return key;
@@ -410,13 +428,14 @@ Singleton {
         for (var j = 0; j < described.length; j++) {
             var r = described[j];
             var m = /^(.*?) (\d+)$/.exec(r.label);
-            var isDigit = /^\d$/.test(r.key);
+            var digit = table.numberRowKey(r.key, r.keycode);
+            var isDigit = digit !== "";
             // The number the row is about: the label's, whose key is that
             // number's last digit — so the tenth workspace, on the 0 key
             // after 9 on the number row, continues the run 1…9 (SMP-1405
             // WP-02). A label whose digit disagrees with its key never folds.
             var index = m !== null ? Number(m[2]) : -1;
-            var keyMatches = isDigit && index >= 0 && Number(r.key) === index % 10;
+            var keyMatches = isDigit && index >= 0 && Number(digit) === index % 10;
 
             if (m !== null && keyMatches && prev !== null && prev.foldBase === m[1]
                     && prev.modmask === r.modmask && prev.dispatcher === r.dispatcher

@@ -5,9 +5,20 @@
 #      described, so an undescribed chord is one nobody can find;
 #   2. no chord is bound twice in one mode — Hyprland fires both binds when
 #      two share a chord, which is how PUNAR+SHIFT+L once meant three things;
-#   3. each Omarchy key family (Appendix B of the Punar-vs-Omarchy plan,
-#      K1-K193) has a Punar row or a stated reason, so parity is a table a
-#      reviewer can read rather than a claim.
+#   3. every Omarchy key (Appendix B of the Punar-vs-Omarchy plan, K1-K193)
+#      is either bound in Punar, named by the live description that binds
+#      it, or unbound with a stated reason, ONE KEY AT A TIME, so parity is a
+#      table a reviewer can read rather than a claim;
+#   4. every chord works under every keyboard layout: a key is a letter, a
+#      named key every layout spells the same (Return, Tab, F1, arrows, the
+#      media keys), or a key CODE; a digit is never a keysym (the number row
+#      types & é " … on AZERTY); and a punctuation keysym (/, [, ], comma,
+#      period) is allowed only with a twin chord for the same action on a
+#      layout-safe key, or a stated reason, because German, French, Spanish
+#      and Italian keyboards put those symbols behind Shift or AltGr, where
+#      Hyprland's first-layout, unshifted match never sees them;
+#   5. the login screen's list of layouts that cannot type Latin letters is
+#      punar_common::keymap's, so both lead such a layout with US English.
 #
 # HOW IT READS THE BINDS. It runs the real hyprland.lua, which requires the
 # real punar-binds.lua, under a Lua interpreter with a recording stand-in for
@@ -99,7 +110,7 @@ for mode in standard mac; do
         "${LUA}" "${TMP}/harness.lua" "${REPO_ROOT}" > "${TMP}/binds-${mode}.tsv"
 done
 
-python3 - "${TMP}" <<'PY'
+python3 - "${TMP}" "${REPO_ROOT}" <<'PY'
 import pathlib
 import re
 import sys
@@ -160,11 +171,78 @@ for description in ("Toggle floating", "Center floating window"):
     if not keys or not all("ALT" in k for k in keys):
         problems.append(f"Mac-style grammar did not move {description!r} to PUNAR+ALT: {keys}")
 
-# The tenth workspace is on the 0 key, in all three workspace families.
+# The number row is bound by key code, 1..9 then 0 (code:10..code:19), in all
+# three workspace families: the tenth workspace is on the 0 key.
 for family in ("Workspace ", "Move window to workspace ", "Move window quietly to workspace "):
-    tens = [r["keys"] for r in modes["standard"] if r["description"] == family + "10"]
-    if not tens or not tens[0].replace(" ", "").endswith("+0"):
-        problems.append(f"{family.strip()} 10 is not on the 0 key: {tens}")
+    for number in range(1, 11):
+        keys = [r["keys"] for r in modes["standard"] if r["description"] == f"{family}{number}"]
+        want = f"code:{number + 9}"
+        if not keys or not keys[0].replace(" ", "").endswith("+" + want):
+            problems.append(f"{family}{number} is not on the number-row key {want}: {keys}")
+
+# ---------------------------------------------------------------------------
+# Rule 4: every chord works under every keyboard layout.
+# ---------------------------------------------------------------------------
+LAYOUT_SAFE = {
+    "return", "space", "tab", "escape", "backspace", "delete", "insert", "home",
+    "end", "left", "right", "up", "down", "print", "alt_l", "alt_r",
+    "mouse_up", "mouse_down", "mouse:272", "mouse:273",
+} | {f"f{n}" for n in range(1, 13)}
+
+
+def layout_safe(key):
+    return (
+        (len(key) == 1 and key.isalpha())
+        or key in LAYOUT_SAFE
+        or key.startswith("xf86")
+        or re.fullmatch(r"code:\d{1,3}", key) is not None
+    )
+
+
+# A punctuation keysym, the action it does, and either the twin chord's
+# description prefix (which must be live on a layout-safe key) or a reason.
+PUNCTUATION = {
+    "slash": ("Shortcut help", "twin", "Shortcut help (any layout)"),
+    "bracketleft": ("Previous window in group", "twin", "Previous window in group (any layout)"),
+    "bracketright": ("Next window in group", "twin", "Next window in group (any layout)"),
+    "comma": ("Previous layout preset", "reason",
+              "comma is unshifted on every Latin layout the login screen offers, "
+              "the previous-preset key alone cycles through all five presets, and "
+              "the command center sets any preset by name on every layout"),
+    "period": ("Next layout preset", "reason",
+               "period is Shift+; on AZERTY only; there PUNAR+comma cycles every "
+               "preset and the command center sets any preset by name"),
+}
+for mode, rows in modes.items():
+    for row in rows:
+        key, _ = chord(row["keys"])
+        if layout_safe(key):
+            continue
+        if key.isdigit():
+            problems.append(
+                f"{mode}: {row['keys']!r} binds a digit keysym; bind the number row "
+                f"by code (code:10 is the 1 key) so it fires under AZERTY"
+            )
+            continue
+        entry = PUNCTUATION.get(key)
+        if entry is None:
+            problems.append(
+                f"{mode}: {row['keys']!r} ({row['description']!r}) uses a keysym some "
+                f"layouts put behind Shift or AltGr; give it a layout-safe twin or a reason"
+            )
+            continue
+        action, kind, detail = entry
+        if not row["description"].startswith(action):
+            problems.append(f"{mode}: {row['keys']!r} is listed for {action!r} but binds {row['description']!r}")
+        if kind == "twin":
+            twins = [
+                r for r in rows
+                if r["description"].startswith(detail) and layout_safe(chord(r["keys"])[0])
+            ]
+            if not twins:
+                problems.append(f"{mode}: {row['keys']!r} has no layout-safe twin described {detail!r}")
+        elif len(detail) < 30:
+            problems.append(f"{mode}: {row['keys']!r} needs a real reason to stay layout-bound")
 
 # Pointer move and resize are mouse binds (the back-out's missing piece).
 for description in ("Move window with the pointer", "Resize window with the pointer"):
