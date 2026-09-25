@@ -134,6 +134,15 @@ scan_dev_paths() {
         -o -name '10-mock-control-plane.conf' \
         -o -name 'in-agent-scope.sh' \) -print
 
+    # The development image's unit drop-ins: one points punard at the mock
+    # control plane, one lets its exercises stop the reconcile timer. Both
+    # live in a unit's .d directory, which the maxdepth-1 scans above never
+    # reach.
+    [ -d "${ROOT}/usr/lib/systemd/system" ] && find \
+        "${ROOT}/usr/lib/systemd/system" -mindepth 2 -maxdepth 2 -path '*.d/*' \
+        \( -name '10-mock-control-plane.conf' \
+        -o -name '10-dev-stoppable.conf' \) -print
+
     [ -e "${ROOT}/usr/bin/punar-mock-smplify" ] \
         && printf '%s\n' "${ROOT}/usr/bin/punar-mock-smplify"
     [ -e "${ROOT}/usr/share/punar/fixtures" ] \

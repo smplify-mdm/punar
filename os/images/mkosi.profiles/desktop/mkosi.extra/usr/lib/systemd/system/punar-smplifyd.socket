@@ -44,13 +44,15 @@ SocketMode=0600
 DirectoryMode=0700
 Accept=no
 FileDescriptorName=api
-# An agent that cannot start (a missing or crashing binary) with a call
-# queued would be started again the moment it exits, forever. At twenty
-# starts in ten seconds the socket gives up instead: punard then reads
-# connection_refused, reports management interrupted and audits it. Normal
-# use starts the agent at most a few times a minute: it stays resident while
-# enrolled, and exits only when nothing of an identity is left. Recovery,
-# once the cause is fixed: `systemctl start punar-smplifyd.socket` as root,
-# or a reboot.
+# A bound on how often a call can start the agent. A crash or kill does not
+# count here: the service restarts itself with a back-off
+# (punar-smplifyd.service), and while it is restarting systemd counts it as
+# starting, so a call starts nothing sooner. What this bounds is an agent
+# that exits cleanly (75) at once, again and again, with calls queued: at
+# twenty starts in ten seconds the socket gives up, punard reads
+# connection_refused or socket_missing, reports management interrupted, and
+# asks systemd to start the socket again on its next pass. Normal use starts
+# the agent at most a few times a minute: it stays resident while enrolled,
+# and exits only when nothing of an identity is left.
 TriggerLimitIntervalSec=10s
 TriggerLimitBurst=20

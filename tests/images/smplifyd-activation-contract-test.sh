@@ -13,13 +13,20 @@
 #       RuntimeDirectory= (stopping the service would delete the socket node),
 #       Requires=/After= the socket, a manual stop refused, restarted after
 #       every exit but the dormant one, whose status is the agent's own
-#       constant, no start limit, no network-online ordering, no [Install];
-#   S3  punard.service Wants= and is ordered After= the socket, and Requires=
-#       neither the socket nor the service (cached policy enforces with the
-#       agent down);
-#   S4  no tree ships a wants link to either unit, no reviewed enabled-units
-#       manifest names the agent, and the Smplify lab installs the socket
-#       rather than an enablement;
+#       constant, at once after a kill and backing off to less than punard's
+#       liveness wait, no start limit, no network-online ordering, no
+#       CPUAccounting= (removed in systemd 258), no [Install];
+#   S3  punard.service Wants= and is ordered After= the socket and the
+#       service (it stops first at shutdown), Requires= neither (cached
+#       policy enforces with the agent down) in the unit or any drop-in of
+#       any profile, refuses a manual stop and is restarted after any exit
+#       with no start limit; punard-reconcile.timer, which makes every pass,
+#       refuses a manual stop, and the one drop-in that lifts it is the
+#       development image's, which release check A5 refuses;
+#   S4  no tree ships a wants, requires or upholds link to either unit, no
+#       other unit Wants=, Requires=, BindsTo=, Requisite=, Upholds= or
+#       PartOf= the agent, no reviewed enabled-units manifest names it, and
+#       the Smplify lab installs the socket rather than an enablement;
 #   S5  the idle-RAM sampler no longer sums the agent into the resident
 #       services (it is not resident on the measured image) and reports its
 #       process count instead, which tests/performance/check-budgets.sh gates
@@ -89,6 +96,18 @@ rust_const() {
     sed -n "s/.*const $2: [^=]*= *\"\{0,1\}\([^\";]*\)\"\{0,1\};.*/\1/p" "$1" | head -n 1
 }
 
+# A systemd time span in milliseconds (`100ms`, `5s`, `2min`, `1`), or empty.
+span_ms() {
+    case "$1" in
+        *ms) n=${1%ms}; unit=1 ;;
+        *min) n=${1%min}; unit=60000 ;;
+        *s) n=${1%s}; unit=1000 ;;
+        *) n=$1; unit=1000 ;;
+    esac
+    case "${n}" in ''|*[!0-9]*) return 0 ;; esac
+    echo $((n * unit))
+}
+
 # check_tree ROOT — print every violation; exit non-zero if any.
 check_tree() (
     root=$1
@@ -96,6 +115,7 @@ check_tree() (
     socket="${units}/punar-smplifyd.socket"
     service="${units}/punar-smplifyd.service"
     punard="${units}/punard.service"
+    timer="${units}/punard-reconcile.timer"
     activation="${root}/crates/punar-smplifyd/src/activation.rs"
     violations=0
     violation() {
@@ -112,7 +132,7 @@ check_tree() (
         ini_values "$1" "$2" "$3" | grep -Fxq "$4"
     }
 
-    for file in "${socket}" "${service}" "${punard}" "${activation}"; do
+    for file in "${socket}" "${service}" "${punard}" "${timer}" "${activation}"; do
         [ -f "${file}" ] || { violation "missing ${file#"${root}"/}"; }
     done
     [ "${violations}" -eq 0 ] || exit 1
@@ -163,20 +183,58 @@ check_tree() (
     [ -n "${dormant}" ] || violation "S2: DORMANT_EXIT_STATUS not found in activation.rs"
     expect "${service}" Service RestartPreventExitStatus "${dormant}"
     expect "${service}" Service SuccessExitStatus "${dormant}"
+    # A call made while a restart is pending waits it out (systemd counts the
+    # service as starting and queues no earlier start), so the delay after a
+    # kill must be short, and the back-off must end well inside punard's
+    # liveness wait.
+    restart_ms=$(span_ms "$(ini_value "${service}" Service RestartSec)")
+    max_ms=$(span_ms "$(ini_value "${service}" Service RestartMaxDelaySec)")
+    liveness=$(sed -n 's/.*IDENTITY_STATUS_CALL_TIMEOUT: Duration = Duration::from_secs(\([0-9]*\));.*/\1/p' \
+        "${root}/crates/punard/src/enroll.rs")
+    [ -n "${restart_ms}" ] && [ "${restart_ms}" -le 1000 ] \
+        || violation "S2: RestartSec=${restart_ms:-unset} ms; a call after a kill waits it out"
+    [ -n "${max_ms}" ] && [ -n "${liveness}" ] && [ "${max_ms}" -lt $((liveness * 1000)) ] \
+        || violation "S2: RestartMaxDelaySec=${max_ms:-unset} ms is not inside punard's ${liveness:-?} s liveness wait"
+    case "$(ini_value "${service}" Service RestartSteps)" in
+        unset|empty|0) violation "S2: no RestartSteps=, so a failing agent is restarted without backing off" ;;
+    esac
+    [ "$(ini_value "${service}" Service CPUAccounting)" = unset ] \
+        || violation "S2: the service sets CPUAccounting=, which systemd 258+ warns about on every load"
     ! has_section "${service}" Install || violation "S2: the service has an [Install] section"
 
-    # --- S3 punard -----------------------------------------------------------
+    # --- S3 punard and the timer that drives every pass -----------------------
     lists "${punard}" Unit Wants punar-smplifyd.socket \
         || violation "S3: punard.service does not Want= the agent's socket"
     lists "${punard}" Unit After punar-smplifyd.socket \
         || violation "S3: punard.service is not ordered After= the agent's socket"
-    for unit in punar-smplifyd.socket punar-smplifyd.service; do
-        ! lists "${punard}" Unit Requires "${unit}" \
-            || violation "S3: punard.service Requires= ${unit}; cached policy must enforce without it"
+    lists "${punard}" Unit After punar-smplifyd.service \
+        || violation "S3: punard.service is not ordered After= the agent, so it may not stop first"
+    for unit_file in "${punard}" $(find "${root}/os/images/mkosi.profiles" -path '*/punard.service.d/*.conf' 2>/dev/null); do
+        for unit in punar-smplifyd.socket punar-smplifyd.service; do
+            for key in Requires BindsTo Requisite; do
+                ! lists "${unit_file}" Unit "${key}" "${unit}" \
+                    || violation "S3: ${unit_file#"${root}"/} ${key}= ${unit}; cached policy must enforce without it"
+            done
+        done
+    done
+    expect "${punard}" Unit RefuseManualStop yes
+    expect "${punard}" Unit StartLimitIntervalSec 0
+    expect "${punard}" Service Restart always
+    expect "${timer}" Unit RefuseManualStop yes
+    lifted=$(grep -rlE '^[[:space:]]*RefuseManualStop=(no|false|0)' \
+        "${root}/os/images/mkosi.profiles" 2>/dev/null || true)
+    for dropin in ${lifted}; do
+        case "${dropin}" in
+            */mkosi.profiles/dev/*/punard-reconcile.timer.d/*.conf)
+                grep -qF "${dropin##*/}" "${root}/os/images/check-release-image.sh" \
+                    || violation "S3: release check A5 does not refuse ${dropin##*/}" ;;
+            *) violation "S3: ${dropin#"${root}"/} lifts RefuseManualStop= outside the development image's timer drop-in" ;;
+        esac
     done
 
     # --- S4 nothing enables it -----------------------------------------------
     links=""
+    pulls=""
     for tree in \
         "${root}/os/images/mkosi.profiles" \
         "${root}/os/images/debian-mkosi.extra" \
@@ -185,9 +243,26 @@ check_tree() (
         "${root}/os/images/amd64-debian" \
         "${root}/os/modules"; do
         [ -d "${tree}" ] || continue
-        links="${links}$(find "${tree}" -path '*.wants/punar-smplifyd.*' 2>/dev/null || true)"
+        links="${links}$(find "${tree}" \( -path '*.wants/punar-smplifyd.*' \
+            -o -path '*.requires/punar-smplifyd.*' -o -path '*.upholds/punar-smplifyd.*' \) \
+            2>/dev/null || true)"
+        # Any other unit pulling the agent in, but punard's Wants= of the
+        # socket, which is the whole of its lifetime.
+        pulls="${pulls}$(find "${tree}" -type f \( -name '*.service' -o -name '*.socket' \
+            -o -name '*.target' -o -name '*.timer' -o -name '*.path' -o -name '*.conf' \) \
+            ! -name 'punar-smplifyd.*' -exec grep -lE \
+            '^[[:space:]]*(Wants|Requires|BindsTo|Requisite|Upholds|PartOf)=.*punar-smplifyd' {} + \
+            2>/dev/null | while IFS= read -r file; do
+                if [ "${file##*/}" = punard.service ] \
+                    && ! grep -E '^[[:space:]]*(Wants|Requires|BindsTo|Requisite|Upholds|PartOf)=.*punar-smplifyd' "${file}" \
+                        | grep -vxq 'Wants=punar-smplifyd.socket'; then
+                    continue
+                fi
+                printf '%s ' "${file#"${root}"/}"
+            done)"
     done
-    [ -z "${links}" ] || violation "S4: a wants link enables the agent: ${links}"
+    [ -z "${links}" ] || violation "S4: a link enables the agent: ${links}"
+    [ -z "${pulls}" ] || violation "S4: another unit pulls the agent in: ${pulls}"
     for manifest in "${root}"/os/images/expected-enabled-units.*.txt; do
         ! grep -q 'punar-smplifyd' "${manifest}" \
             || violation "S4: ${manifest##*/} names punar-smplifyd"
@@ -224,7 +299,9 @@ fixture() {
     mkdir -p "${WORK}/tree"
     (cd "${REPO_ROOT}" && tar -cf - \
         os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system \
+        os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/systemd/system \
         os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
+        os/images/check-release-image.sh \
         os/images/expected-enabled-units.arm64.txt \
         os/images/expected-enabled-units.x86_64.txt \
         os/images/expected-enabled-units.x86_64-debian.txt \
@@ -301,5 +378,60 @@ rejects "the agent's dormant status and the unit's differ"
 fixture; edit os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
     's|^PUNAR_SERVICE_UNITS="\(.*\)"|PUNAR_SERVICE_UNITS="\1 punar-smplifyd.service"|'
 rejects "the sampler sums the agent as resident"
+fixture; edit os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
+    '/PUNAR_SMPLIFYD_PROCS=/d'
+rejects "the sampler does not report the agent's process count"
+fixture; edit "${UNITS}/punar-smplifyd.socket" 's|^SocketUser=root|SocketUser=punar|'
+rejects "the socket belongs to another user"
+fixture; edit "${UNITS}/punar-smplifyd.socket" 's|^SocketGroup=root|SocketGroup=punar|'
+rejects "the socket belongs to another group"
+fixture; edit "${UNITS}/punar-smplifyd.socket" 's|^DirectoryMode=0700|DirectoryMode=0755|'
+rejects "the socket's directory is open to everyone"
+fixture; edit "${UNITS}/punar-smplifyd.socket" 's|^FileDescriptorName=.*|FileDescriptorName=other|'
+rejects "the descriptor is named as the agent does not expect"
+fixture; edit "${UNITS}/punar-smplifyd.socket" 's|^TriggerLimitIntervalSec=.*|TriggerLimitIntervalSec=0|'
+rejects "the trigger interval is unbounded"
+fixture; edit "${UNITS}/punar-smplifyd.service" 's|^SuccessExitStatus=.*|SuccessExitStatus=0|'
+rejects "the dormant exit counts as a failure"
+fixture; edit "${UNITS}/punar-smplifyd.service" 's|^Requires=punar-smplifyd.socket|Requires=|'
+rejects "the service does not require its socket"
+fixture; edit "${UNITS}/punar-smplifyd.service" 's|^After=punar-smplifyd.socket|After=|'
+rejects "the service is not ordered after its socket"
+fixture; printf '\n[Install]\nWantedBy=multi-user.target\n' >> "${WORK}/tree/${UNITS}/punar-smplifyd.service"
+rejects "the service is enabled on every device"
+fixture; edit "${UNITS}/punar-smplifyd.service" 's|^RestartSec=.*|RestartSec=10s|'
+rejects "a call after a kill waits ten seconds"
+fixture; edit "${UNITS}/punar-smplifyd.service" 's|^RestartMaxDelaySec=.*|RestartMaxDelaySec=30s|'
+rejects "the back-off outlasts the liveness wait"
+fixture; edit "${UNITS}/punar-smplifyd.service" '/^RestartSteps=/d'
+rejects "a failing agent is restarted without backing off"
+fixture; insert_after "${UNITS}/punar-smplifyd.service" 'IOAccounting=yes' 'CPUAccounting=yes'
+rejects "the service sets a directive systemd has removed"
+fixture; edit "${UNITS}/punard.service" 's|^After=punar-smplifyd.socket punar-smplifyd.service|After=punar-smplifyd.socket|'
+rejects "punard may stop after the agent at shutdown"
+fixture; edit "${UNITS}/punard.service" 's|^RefuseManualStop=yes|RefuseManualStop=no|'
+rejects "punard can be stopped by hand"
+fixture; edit "${UNITS}/punard.service" 's|^Restart=always|Restart=on-failure|'
+rejects "a punard stopped by a signal stays stopped"
+fixture; edit "${UNITS}/punard.service" 's|^StartLimitIntervalSec=0|StartLimitIntervalSec=10s|'
+rejects "a few kills leave punard stopped"
+fixture; edit "${UNITS}/punard-reconcile.timer" 's|^RefuseManualStop=yes|RefuseManualStop=no|'
+rejects "the reconcile timer can be stopped by hand"
+fixture; mkdir -p "${WORK}/tree/${UNITS}/punard.service.d" \
+    && printf '[Unit]\nRequires=punar-smplifyd.service\n' > "${WORK}/tree/${UNITS}/punard.service.d/50-x.conf"
+rejects "a punard drop-in makes it depend on the agent"
+fixture; mkdir -p "${WORK}/tree/${UNITS}/punard.service.d" \
+    && printf '[Unit]\nRefuseManualStop=no\n' > "${WORK}/tree/${UNITS}/punard.service.d/50-x.conf"
+rejects "a drop-in lets punard be stopped by hand"
+fixture; mkdir -p "${WORK}/tree/${UNITS}/punar-smplifyd.service.d" \
+    && printf '[Unit]\nRefuseManualStop=no\n' > "${WORK}/tree/${UNITS}/punar-smplifyd.service.d/50-x.conf"
+rejects "a drop-in lets the agent be stopped by hand"
+fixture; edit os/images/check-release-image.sh 's|10-dev-stoppable.conf|10-other.conf|g'
+rejects "release check A5 lets the timer's development drop-in ship"
+fixture; mkdir -p "${WORK}/tree/${UNITS}/multi-user.target.requires" \
+    && ln -s ../punar-smplifyd.socket "${WORK}/tree/${UNITS}/multi-user.target.requires/punar-smplifyd.socket"
+rejects "a requires link pulls the agent in at boot"
+fixture; printf '[Unit]\nWants=punar-smplifyd.service\n' > "${WORK}/tree/${UNITS}/punar-x.service"
+rejects "another unit pulls the agent in"
 
 echo "PUNAR_SMPLIFYD_ACTIVATION_CONTRACT_OK"

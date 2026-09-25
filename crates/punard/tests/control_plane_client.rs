@@ -381,3 +381,41 @@ fn an_answer_to_the_liveness_call_that_is_not_the_agents_is_unexpected() {
     }
     served.join().unwrap();
 }
+
+/// A socket some other program bound at the agent's path is not the agent's:
+/// systemd creates the agent's listener, so a connection to it names PID 1,
+/// and one that names another process is the agent unavailable
+/// (`unexpected_listener`), with nothing sent over it. Without the
+/// requirement (the development mock, tests) the same socket is served.
+#[test]
+fn a_listener_systemd_did_not_create_is_not_the_agents() {
+    let token = Redacted::new("tok_x".to_string());
+    let (socket, served) = serving(1, |stream| {
+        let mut request = String::new();
+        let read = BufReader::new(&stream).read_line(&mut request).unwrap_or(0);
+        assert_eq!(read, 0, "nothing is sent to it: {request}");
+    });
+    assert_eq!(
+        agent_fault(
+            ControlPlaneClient::new(&socket)
+                .requiring_systemd_listener(true)
+                .identity_status(Some(&token))
+        ),
+        AgentFault::UnexpectedListener
+    );
+    served.join().unwrap();
+
+    let (socket, served) = serving(1, |stream| {
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+        let mut writer = &stream;
+        writer
+            .write_all(b"{\"v\":1,\"id\":\"x\",\"result\":{\"enrolled\":false}}\n")
+            .unwrap();
+    });
+    let identity = ControlPlaneClient::new(&socket)
+        .identity_status(Some(&token))
+        .unwrap();
+    assert!(!identity.enrolled);
+    served.join().unwrap();
+}

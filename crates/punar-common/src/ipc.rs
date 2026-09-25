@@ -2200,7 +2200,8 @@ pub struct ManagementStatus {
     /// `connection_refused`, `permission_denied`, `connect_failed`,
     /// `connection_reset`, `closed_without_answer`, `not_answering`,
     /// `identity_missing`, `identity_mismatch`, `identity_unreadable`,
-    /// `unexpected_answer`, `token_missing`).
+    /// `unexpected_answer`, `token_missing`, `unexpected_listener`,
+    /// `unit_modified`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// While interrupted: since when.

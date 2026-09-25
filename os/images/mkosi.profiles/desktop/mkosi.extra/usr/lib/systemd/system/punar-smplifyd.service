@@ -13,9 +13,10 @@
 # a root `systemctl stop` or `restart` is refused, a kill is restarted, and
 # the ways left (mask then stop, a runtime drop-in, a freeze, deleting the
 # identity) are each noticed by punard within one reconcile pass and audited
-# as enroll.agent agent_unavailable. Once it holds nothing it exits with 75,
-# which this unit treats as a clean exit it does not restart, and the socket
-# starts it again on the next call.
+# as enroll.agent agent_unavailable (a drop-in or mask by punard's unit
+# check, crates/punard/src/agent_units.rs). Once it holds nothing it exits
+# with 75, which this unit treats as a clean exit it does not restart, and
+# the socket starts it again on the next call.
 [Unit]
 Description=Punar built-in Smplify device agent (identity and transport)
 Documentation=file:/usr/share/doc/punar/smplify-enrollment.md
@@ -30,8 +31,9 @@ After=punar-smplifyd.socket
 # stop); an administrator's stop is refused.
 RefuseManualStop=yes
 # Never stop restarting it: with a start limit, a few kills in a row would
-# leave an enrolled device unmanaged until reboot. The socket's own trigger
-# limit (punar-smplifyd.socket) catches an agent that cannot start at all.
+# leave an enrolled device unmanaged until reboot. An agent that cannot
+# start at all is restarted with a back-off (below), forever, and punard
+# reads it as not_answering.
 StartLimitIntervalSec=0
 
 [Service]
@@ -53,7 +55,15 @@ UMask=0077
 # holds no identity (punar_smplifyd::activation::DORMANT_EXIT_STATUS), a
 # clean exit the socket undoes on the next call.
 Restart=always
-RestartSec=10s
+# At once after a kill: while a restart is pending systemd counts the
+# service as starting, and a new call to the socket then starts nothing
+# sooner, so a call made meanwhile waits out this delay. 100 ms, doubling
+# after each failure in a row up to 5 s, keeps a killed agent's next answer
+# far inside punard's liveness wait (10 s), and one that cannot start at all
+# from spinning.
+RestartSec=100ms
+RestartSteps=5
+RestartMaxDelaySec=5s
 RestartPreventExitStatus=75
 SuccessExitStatus=75
 TimeoutStopSec=5s
@@ -82,7 +92,8 @@ RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
-CPUAccounting=yes
+# No CPUAccounting=: systemd 258 and later account CPU for every unit and
+# warn on each load that the setting is gone; cpu.stat is there either way.
 IOAccounting=yes
 IPAccounting=yes
 StandardOutput=journal

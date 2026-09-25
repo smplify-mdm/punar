@@ -1947,9 +1947,23 @@ or path other than the confirmed target device. An installed system returns
   the liveness call's 10 s: frozen, or unable to start), `identity_missing`
   (it holds no identity while this device is enrolled), `identity_mismatch`
   (not this device's), `identity_unreadable`, `unexpected_answer` (an answer
-  the agent never gives: something else answers on its socket), and
+  the agent never gives: something else answers on its socket),
   `token_missing` (punard's own device token is gone, so this device cannot
-  be asked about or reported on at all). The liveness call fails closed: the
+  be asked about or reported on at all), `unexpected_listener` (the socket at
+  the agent's path was not created by systemd: its listener's credentials do
+  not name PID 1, checked on every connection before anything is sent), and
+  `unit_modified` (a unit management depends on — the agent's socket and
+  service, `punard.service`, `punard-reconcile.timer` and `.service` — is not
+  as the image ships it: masked, a fragment or drop-in outside
+  `/usr/lib/systemd/system`, the socket listening elsewhere, or the agent's
+  process not `/usr/bin/punar-smplifyd`; checked with `systemctl show` on
+  every pass while enrolled, and before `enroll.start` sends anything). A
+  socket that is gone or no longer listened on is started again
+  (`systemctl start --no-block punar-smplifyd.socket`). An override of the
+  control-plane socket (`PUNAR_CONTROL_PLANE_SOCKET`,
+  `--control-plane-socket`) on an image that ships no development control
+  plane is refused, and audited once per start as `enroll.agent` `denied`
+  (resource `agent.control_plane_override`). The liveness call fails closed: the
   one answer that means the agent is there is `enrolled: true` with
   `token_matches: true`, and only a call that was not sent (it did not fit
   the pass's budget) leaves the state as it was. None of these is the
@@ -1965,6 +1979,14 @@ or path other than the confirmed target device. An installed system returns
   `agent.release_record_unreadable`; section 5.11). An episode still open when
   the enrollment ends is closed with `enroll.agent` `ended`, so every episode
   has both ends.
+- **Reconcile passes:** `enroll.gap` (resource `reconcile`, result
+  `interrupted`) when the passes of an enrolled device were further apart
+  than three periods of `punard-reconcile.timer` and a minute (420 s) on the
+  boot's monotonic clock, which does not count suspended time: what a
+  stopped timer or punard leaves. Audited once, when passes resume: on the
+  same boot, or, when the gap ended in a clean stop, at the next boot's first
+  pass. The last pass and a clean stop are kept in `enrollment.json`, which
+  every pass already writes.
 - **Installer planning addition:** `install.plan` is audited even though it
   is read-only, because it is the first attributable step of a destructive
   workflow. Its resource is `system_disk`; success is `success`, a safety or

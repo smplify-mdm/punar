@@ -390,7 +390,28 @@ pub struct DaemonConfig {
     /// What one reconcile pass may spend on the control plane
     /// ([`RECONCILE_CONTROL_PLANE_BUDGET`]); shorter in tests.
     pub reconcile_control_plane_budget: Duration,
+    /// How the management chain's own units are checked on every pass while
+    /// enrolled, and whether a connection to the agent must reach systemd's
+    /// listener ([`crate::agent_units`], [`ControlPlaneClient::requiring_systemd_listener`]).
+    /// Set by `main.rs` when punard dials the built-in agent's own socket;
+    /// `None` for the development mock and in tests.
+    pub agent_integrity: Option<crate::agent_units::AgentIntegrity>,
+    /// `main.rs` was asked to point punard at another control-plane socket
+    /// on an image that ships no development control plane, and refused:
+    /// audited once at start (`enroll.agent` `denied`).
+    pub control_plane_override_refused: bool,
+    /// The current boot's id, for the reconcile-gap record
+    /// (`/proc/sys/kernel/random/boot_id`).
+    pub boot_id_path: PathBuf,
+    /// The longest two reconcile passes of an enrolled device may be apart,
+    /// suspend excluded, before the gap is audited ([`RECONCILE_GAP_LIMIT`]).
+    pub reconcile_gap_limit: Duration,
 }
+
+/// Three periods of `punard-reconcile.timer` (120 s) and a minute: a pass
+/// runs every two minutes while enrolled, so passes further apart than this
+/// mean the timer, or punard, did not run them (`enroll.gap`).
+pub const RECONCILE_GAP_LIMIT: Duration = Duration::from_secs(3 * 120 + 60);
 
 impl DaemonConfig {
     pub fn new(socket_path: PathBuf, state_dir: PathBuf, audit_path: PathBuf) -> Self {
@@ -446,6 +467,10 @@ impl DaemonConfig {
             pi_update_sources,
             inventory_retry_base: INVENTORY_RETRY_BASE,
             reconcile_control_plane_budget: RECONCILE_CONTROL_PLANE_BUDGET,
+            agent_integrity: None,
+            control_plane_override_refused: false,
+            boot_id_path: PathBuf::from("/proc/sys/kernel/random/boot_id"),
+            reconcile_gap_limit: RECONCILE_GAP_LIMIT,
         }
     }
 }
@@ -894,6 +919,26 @@ impl Daemon {
             }
             record
         };
+        if cfg.control_plane_override_refused {
+            // Someone set PUNAR_CONTROL_PLANE_SOCKET or --control-plane-socket
+            // on an image with no development control plane: punard dials
+            // the built-in agent regardless, and says so once per start.
+            let event = enrollment_event(
+                &device_id,
+                &AuditActor::daemon(),
+                "enroll.agent",
+                "agent.control_plane_override",
+                "denied",
+                enrollment
+                    .as_ref()
+                    .map(Enrollment::policy_ids)
+                    .unwrap_or_default(),
+            );
+            match audit.append(&event) {
+                Ok(()) => audit_events += 1,
+                Err(e) => eprintln!("punard: FAILED to append enroll.agent audit event: {e}"),
+            }
+        }
         let identity_release = match (&enrollment, load_identity_release(&release_path)) {
             // Enrolled: the enrollment the record was written for was
             // committed, or never ended. Nothing is to be released.
@@ -1049,6 +1094,7 @@ impl DaemonHandle {
 
     /// Request shutdown, wake the accept loop, and join it.
     pub fn stop(self) {
+        self.inner.record_stop();
         self.inner.shutdown.store(true, Ordering::SeqCst);
         self.inner.slot_freed.notify_all();
         // Nudge a blocked accept(2) with a throwaway connection.
@@ -5314,6 +5360,24 @@ impl Inner {
             .map(str::trim)
             .filter(|c| !c.is_empty())
             .map(|c| Redacted::new(c.to_string()));
+        // Nothing, the enrollment code least of all, goes to an agent whose
+        // units are not the image's (a drop-in replacing its ExecStart= would
+        // run anything as the agent).
+        if let Some(integrity) = &self.cfg.agent_integrity {
+            match integrity.check() {
+                Ok(()) => {}
+                Err(finding @ crate::agent_units::UnitFinding::Modified { .. }) => {
+                    eprintln!("punard: enroll.start refused: {finding}");
+                    return Err(fail_audit(self.upstream_error(
+                        "discover",
+                        UpstreamError::AgentUnavailable(AgentFault::UnitModified),
+                    )));
+                }
+                Err(finding) => {
+                    eprintln!("punard: the management units were not checked: {finding}");
+                }
+            }
+        }
         // Discover.
         let client = self
             .control_plane()
@@ -5569,6 +5633,8 @@ impl Inner {
             }),
             policy_pending: None,
             agent_unavailable: None,
+            last_pass: None,
+            stopped: None,
         };
         let installed = self
             .install_enrollment(&enrollment, &token, &prepared)
@@ -6463,6 +6529,34 @@ impl Inner {
         if last_query.is_some() {
             current.last_query = last_query;
         }
+        // The passes themselves: one further from the last than the timer
+        // allows, suspend excluded, is what a stopped timer or punard leaves
+        // (masked, killed, a target that stops it, a rescue isolate), and it
+        // is audited once when passes resume, on this boot or, when the gap
+        // ended in a clean stop, on the next.
+        if let Some(mark) = self.pass_mark() {
+            let gap = crate::enroll::reconcile_gap(
+                current.last_pass.as_ref(),
+                current.stopped.as_ref(),
+                &mark,
+            );
+            if let Some(gap) = gap.filter(|gap| *gap > self.cfg.reconcile_gap_limit) {
+                eprintln!(
+                    "punard: no reconcile pass ran for {} min while enrolled; the timer or \
+                     punard was stopped",
+                    gap.as_secs() / 60
+                );
+                self.log_audit(self.enroll_event(
+                    actor,
+                    "enroll.gap",
+                    "reconcile",
+                    "interrupted",
+                    current.policy_ids(),
+                ));
+            }
+            current.last_pass = Some(mark);
+            current.stopped = None;
+        }
         if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
             eprintln!("punard: could not persist enrollment sync state: {e}");
         }
@@ -6506,6 +6600,37 @@ impl Inner {
         let Some(token) = token else {
             return Liveness::Unavailable(AgentFault::TokenMissing);
         };
+        let liveness = self.agent_answers(client, token);
+        let Some(integrity) = &self.cfg.agent_integrity else {
+            return liveness;
+        };
+        match liveness {
+            // Answering as this device's agent is not enough: it must be the
+            // image's agent, behind the image's units (crate::agent_units).
+            Liveness::Available => match integrity.check() {
+                Ok(()) => Liveness::Available,
+                Err(finding @ crate::agent_units::UnitFinding::Modified { .. }) => {
+                    eprintln!("punard: a unit management depends on was modified: {finding}");
+                    Liveness::Unavailable(AgentFault::UnitModified)
+                }
+                // Not knowing is not a finding: the agent answered as itself.
+                Err(finding) => {
+                    eprintln!("punard: the management units were not checked: {finding}");
+                    Liveness::Available
+                }
+            },
+            // A socket that is gone or no longer listened on is started
+            // again: punard's Wants= on it acts only when punard starts.
+            Liveness::Unavailable(AgentFault::SocketMissing | AgentFault::ConnectionRefused) => {
+                integrity.start_socket();
+                liveness
+            }
+            _ => liveness,
+        }
+    }
+
+    /// [`Inner::agent_liveness`]'s call, classified.
+    fn agent_answers(&self, client: &ControlPlaneClient, token: &Redacted<String>) -> Liveness {
         match client.identity_status(Some(token)) {
             Ok(AgentIdentity {
                 enrolled: true,
@@ -6755,6 +6880,47 @@ impl Inner {
     fn control_plane(&self) -> ControlPlaneClient {
         ControlPlaneClient::new(&self.cfg.control_plane_socket)
             .behind(Arc::clone(&self.control_plane_queue))
+            .requiring_systemd_listener(
+                self.cfg
+                    .agent_integrity
+                    .as_ref()
+                    .is_some_and(|integrity| integrity.require_systemd_listener),
+            )
+    }
+
+    /// Now, on this boot's monotonic clock; `None` when the boot id cannot
+    /// be read.
+    fn pass_mark(&self) -> Option<crate::enroll::PassMark> {
+        let boot_id = std::fs::read_to_string(&self.cfg.boot_id_path).ok()?;
+        let boot_id = boot_id.trim();
+        if boot_id.is_empty() {
+            return None;
+        }
+        let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+        let monotonic_ms = u64::try_from(now.tv_sec)
+            .ok()?
+            .saturating_mul(1000)
+            .saturating_add(u64::try_from(now.tv_nsec / 1_000_000).ok()?);
+        Some(crate::enroll::PassMark {
+            boot_id: boot_id.to_string(),
+            monotonic_ms,
+        })
+    }
+
+    /// A clean stop, recorded on an enrolled device so the next boot can
+    /// measure a gap in the reconcile passes that ended in it.
+    fn record_stop(&self) {
+        let Some(mark) = self.pass_mark() else {
+            return;
+        };
+        let mut slot = self.enrollment.lock().unwrap();
+        let Some(current) = slot.as_mut() else {
+            return;
+        };
+        current.stopped = Some(mark);
+        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
+            eprintln!("punard: could not record the clean stop: {e}");
+        }
     }
 
     /// A client for the single inter-daemon edge. Constructed per use — it

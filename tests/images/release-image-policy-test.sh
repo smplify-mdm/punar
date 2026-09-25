@@ -276,6 +276,15 @@ mutate_a2() { printf '%s\n' 'punar:x:1000:1000::/home/punar:/bin/sh' >> "${CASE}
 mutate_a3() { printf '%s\n' 'punar:100000:65536' > "${CASE}/etc/subuid"; }
 mutate_a4() { printf '%s\n' '[initial_session]' >> "${CASE}/etc/greetd/config.toml"; }
 mutate_a5() { : > "${CASE}/usr/lib/punar/m10-check.sh"; }
+# The development drop-ins live one directory down, in a unit's .d.
+mutate_a5_mock_dropin() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punard.service.d"
+    : > "${CASE}/usr/lib/systemd/system/punard.service.d/10-mock-control-plane.conf"
+}
+mutate_a5_timer_dropin() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punard-reconcile.timer.d"
+    : > "${CASE}/usr/lib/systemd/system/punard-reconcile.timer.d/10-dev-stoppable.conf"
+}
 mutate_a6() {
     ln -s ../punar-idle-ram.service \
         "${CASE}/usr/lib/systemd/system/multi-user.target.wants/innocent.service"
@@ -383,6 +392,8 @@ expect_fail A2 mutate_a2
 expect_fail A3 mutate_a3
 expect_fail A4 mutate_a4
 expect_fail A5 mutate_a5
+expect_fail A5 mutate_a5_mock_dropin
+expect_fail A5 mutate_a5_timer_dropin
 expect_fail A6 mutate_a6
 expect_fail A7 mutate_a7
 expect_fail A13 mutate_a13

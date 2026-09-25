@@ -27,6 +27,7 @@ use std::time::Duration;
 use ed25519_dalek::{Signer, SigningKey};
 use punar_common::storage::StorageSources;
 use punar_common::update::{Architecture, BootPlatform};
+use punard::agent_units::{AGENT_EXECUTABLE, AgentIntegrity};
 use punard::authz::{Peer, PeerSource};
 use punard::capability::Registry;
 use punard::capability::mock::MockCapability;
@@ -5173,5 +5174,284 @@ fn an_episode_open_at_unenrollment_is_closed_by_it() {
             ),
             ("ended".to_string(), "agent.identity_missing".to_string())
         ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The management units, the agent's listener, and the passes themselves
+// ---------------------------------------------------------------------------
+
+/// What systemd shows for the management units as the image ships them,
+/// the agent running as process 4242.
+fn shipped_units() -> String {
+    "Id=punar-smplifyd.socket\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punar-smplifyd.socket\nDropInPaths=\n\
+     Listen=/run/punar-smplifyd/api.sock (Stream)\n\n\
+     MainPID=4242\nId=punar-smplifyd.service\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punar-smplifyd.service\nDropInPaths=\n\n\
+     MainPID=812\nId=punard.service\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punard.service\nDropInPaths=\n\n\
+     Id=punard-reconcile.timer\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punard-reconcile.timer\nDropInPaths=\n\n\
+     MainPID=0\nId=punard-reconcile.service\nLoadState=loaded\n\
+     FragmentPath=/usr/lib/systemd/system/punard-reconcile.service\nDropInPaths=\n"
+        .to_string()
+}
+
+/// A stand-in for `systemctl` in `dir/units`: `show` prints `shown.txt`,
+/// `start` appends its arguments to `started.txt`; and a /proc where process
+/// 4242 runs the image's agent.
+fn fake_systemctl(dir: &Path, require_systemd_listener: bool) -> AgentIntegrity {
+    let units = dir.join("units");
+    fs::create_dir_all(units.join("proc/4242")).unwrap();
+    fs::write(units.join("shown.txt"), shipped_units()).unwrap();
+    std::os::unix::fs::symlink(AGENT_EXECUTABLE, units.join("proc/4242/exe")).unwrap();
+    let systemctl = units.join("systemctl");
+    fs::write(
+        &systemctl,
+        "#!/bin/sh\nhere=$(dirname \"$0\")\ncase \"$1\" in\n\
+         show) cat \"${here}/shown.txt\" ;;\n\
+         start) echo \"$*\" >> \"${here}/started.txt\" ;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    AgentIntegrity {
+        systemctl,
+        proc_root: units.join("proc"),
+        require_systemd_listener,
+    }
+}
+
+fn with_integrity(
+    dir: &Path,
+    control_plane: &ControlPlane,
+    integrity: AgentIntegrity,
+) -> TestDaemon {
+    TestDaemon::start_with(
+        dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        Vec::new(),
+        move |cfg| cfg.agent_integrity = Some(integrity),
+    )
+}
+
+/// An agent that answers as this device's, behind units that are not the
+/// image's, is management interrupted (`unit_modified`), once per episode:
+/// a drop-in on punard pointing it elsewhere, a drop-in replacing the
+/// agent's `ExecStart=`, a masked reconcile timer, a socket listening
+/// elsewhere, and an agent process that is not the image's binary.
+#[test]
+fn a_modified_management_unit_is_management_interrupted() {
+    let dir = test_dir("units-modified");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = with_integrity(&dir, &control_plane, fake_systemctl(&dir, false));
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    daemon.result("reconcile", None);
+    assert_eq!(
+        daemon.result("enroll.status", None)["management"]["state"],
+        "active"
+    );
+    let shown = dir.join("units/shown.txt");
+    let exe = dir.join("units/proc/4242/exe");
+    let modifications: [(&str, &dyn Fn()); 5] = [
+        ("punard re-routed", &|| {
+            fs::write(
+                &shown,
+                shipped_units().replace(
+                    "punard.service\nDropInPaths=",
+                    "punard.service\nDropInPaths=/etc/systemd/system/punard.service.d/route.conf",
+                ),
+            )
+            .unwrap()
+        }),
+        ("agent replaced", &|| {
+            fs::write(
+                &shown,
+                shipped_units().replace(
+                    "punar-smplifyd.service\nDropInPaths=",
+                    "punar-smplifyd.service\nDropInPaths=/run/systemd/system/punar-smplifyd.service.d/exec.conf",
+                ),
+            )
+            .unwrap()
+        }),
+        ("timer masked", &|| {
+            fs::write(
+                &shown,
+                shipped_units().replace(
+                    "Id=punard-reconcile.timer\nLoadState=loaded",
+                    "Id=punard-reconcile.timer\nLoadState=masked",
+                ),
+            )
+            .unwrap()
+        }),
+        ("socket moved", &|| {
+            fs::write(
+                &shown,
+                shipped_units().replace("punar-smplifyd/api.sock", "x/api.sock"),
+            )
+            .unwrap()
+        }),
+        ("another binary", &|| {
+            fs::remove_file(&exe).unwrap();
+            std::os::unix::fs::symlink("/tmp/impostor", &exe).unwrap();
+        }),
+    ];
+    for (what, modify) in modifications {
+        modify();
+        daemon.result("reconcile", None);
+        let status = daemon.result("enroll.status", None);
+        assert_eq!(status["management"]["state"], "interrupted", "{what}");
+        assert_eq!(status["management"]["reason"], "unit_modified", "{what}");
+        fs::write(&shown, shipped_units()).unwrap();
+        fs::remove_file(&exe).unwrap();
+        std::os::unix::fs::symlink(AGENT_EXECUTABLE, &exe).unwrap();
+        daemon.result("reconcile", None);
+        assert_eq!(
+            daemon.result("enroll.status", None)["management"]["state"],
+            "active",
+            "{what}"
+        );
+    }
+    assert_eq!(
+        agent_events(&daemon),
+        ["agent_unavailable", "success"]
+            .repeat(5)
+            .iter()
+            .map(|result| (result.to_string(), "agent.unit_modified".to_string()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Nothing, the enrollment code least of all, goes to an agent behind
+/// modified units, or over a socket systemd did not create.
+#[test]
+fn enrollment_sends_nothing_to_an_agent_it_cannot_vouch_for() {
+    let dir = test_dir("enroll-modified");
+    let control_plane = ControlPlane::start(&dir);
+    let integrity = fake_systemctl(&dir, false);
+    fs::write(
+        dir.join("units/shown.txt"),
+        shipped_units().replace(
+            "punar-smplifyd.service\nDropInPaths=",
+            "punar-smplifyd.service\nDropInPaths=/etc/systemd/system/punar-smplifyd.service.d/x.conf",
+        ),
+    )
+    .unwrap();
+    let daemon = with_integrity(&dir, &control_plane, integrity);
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "code": "ENROLL-CODE"})),
+    );
+    assert_eq!(error["details"]["agent"], "unit_modified", "{error}");
+    assert_eq!(control_plane.state.connections.load(Ordering::SeqCst), 0);
+    daemon.stop();
+
+    // Units as shipped, and a listener some other program bound (the test's
+    // own): refused on the first connection, with nothing sent over it.
+    fs::write(dir.join("units/shown.txt"), shipped_units()).unwrap();
+    let integrity = AgentIntegrity {
+        require_systemd_listener: true,
+        ..fake_systemctl(&test_dir("enroll-listener"), false)
+    };
+    let daemon = with_integrity(&dir, &control_plane, integrity);
+    let error = daemon.error(
+        "enroll.start",
+        Some(json!({"org_domain": "acme.com", "code": "ENROLL-CODE"})),
+    );
+    assert_eq!(error["details"]["agent"], "unexpected_listener", "{error}");
+    assert!(control_plane.state.methods.lock().unwrap().is_empty());
+    assert!(!daemon.state_path("enrollment.json").exists());
+}
+
+/// A socket that is gone or no longer listened on is started again: punard's
+/// `Wants=` on it acts only when punard itself starts, so without this a
+/// socket stopped once stayed stopped until a reboot.
+#[test]
+fn a_socket_that_stopped_listening_is_started_again() {
+    let dir = test_dir("socket-restart");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = with_integrity(&dir, &control_plane, fake_systemctl(&dir, false));
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert!(!dir.join("units/started.txt").exists());
+    let _saved = control_plane.stop();
+    daemon.result("reconcile", None);
+    assert_eq!(
+        fs::read_to_string(dir.join("units/started.txt")).unwrap(),
+        "start --no-block punar-smplifyd.socket\n"
+    );
+}
+
+/// Passes further apart than the timer allows, suspend excluded, are audited
+/// once when they resume (`enroll.gap`): on the same boot, and, when the gap
+/// ended in a clean stop, on the next.
+#[test]
+fn a_gap_in_the_reconcile_passes_is_audited_when_they_resume() {
+    const LIMIT: Duration = Duration::from_millis(300);
+    let dir = test_dir("reconcile-gap");
+    let control_plane = ControlPlane::start(&dir);
+    let boot_id = dir.join("boot_id");
+    fs::write(&boot_id, "boot-a\n").unwrap();
+    let start = |boot_id: PathBuf| {
+        TestDaemon::start_with(
+            &dir,
+            Peer::root(),
+            &control_plane.socket,
+            "enabled",
+            Vec::new(),
+            move |cfg| {
+                cfg.boot_id_path = boot_id;
+                cfg.reconcile_gap_limit = LIMIT;
+            },
+        )
+    };
+    let gaps = |daemon: &TestDaemon| {
+        daemon
+            .audit_events()
+            .iter()
+            .filter(|e| e["action"] == "enroll.gap")
+            .count()
+    };
+    let daemon = start(boot_id.clone());
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    daemon.result("reconcile", None);
+    assert_eq!(gaps(&daemon), 0);
+    std::thread::sleep(LIMIT * 2);
+    daemon.result("reconcile", None);
+    assert_eq!(gaps(&daemon), 1);
+    daemon.result("reconcile", None);
+    assert_eq!(gaps(&daemon), 1, "once, when passes resume");
+
+    // No pass for a while, then a clean stop, then another boot.
+    std::thread::sleep(LIMIT * 2);
+    daemon.stop();
+    fs::write(&boot_id, "boot-b\n").unwrap();
+    let daemon = start(boot_id.clone());
+    assert_eq!(gaps(&daemon), 2, "measured to the clean stop");
+    daemon.result("reconcile", None);
+    assert_eq!(gaps(&daemon), 2);
+}
+
+/// An override of the control-plane socket refused on an image with no
+/// development control plane is audited once at start.
+#[test]
+fn a_refused_control_plane_override_is_audited() {
+    let dir = test_dir("override-refused");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = TestDaemon::start_with(
+        &dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        Vec::new(),
+        |cfg| cfg.control_plane_override_refused = true,
+    );
+    assert_eq!(
+        agent_events(&daemon),
+        [(
+            "denied".to_string(),
+            "agent.control_plane_override".to_string()
+        )]
     );
 }

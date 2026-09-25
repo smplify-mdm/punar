@@ -24,11 +24,27 @@ After=punar-smplifyd.socket punar-smplifyd.service
 # /run/punard, /var/lib/punar, /var/log/punar come from
 # tmpfiles.d/punard.conf; systemd-tmpfiles-setup orders before basic.target,
 # which every default-dependency service (this one) starts after.
+#
+# punard is what notices every other way management is stopped
+# (docs/development/smplify-enrollment.md section 3.4), so it must not be
+# the easy one. Only a dependency may stop it (shutdown); an administrator's
+# `systemctl stop` or `restart` is refused, and any exit, a kill included,
+# is restarted, with no start limit a few kills in a row could exhaust. What
+# root has left (mask then kill, a drop-in, isolating another target) is
+# noticed: a mask or drop-in by the unit check on the next pass, and the gap
+# in reconcile passes when they resume (`enroll.gap`).
+RefuseManualStop=yes
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/punard run
-Restart=on-failure
+Restart=always
+# At once after a kill, backing off to 30 s between restarts when it keeps
+# failing, so a crash at start never spins.
+RestartSec=1s
+RestartSteps=5
+RestartMaxDelaySec=30s
 # The stabilized-idle gate reads this unit's cgroup counters on every kernel.
 # Do not rely on a parent slice or distribution default to enable controllers.
 CPUAccounting=yes

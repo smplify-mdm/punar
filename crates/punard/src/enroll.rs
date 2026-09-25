@@ -54,6 +54,27 @@ pub const DEFAULT_CONTROL_PLANE_SOCKET: &str = "/run/punar-smplifyd/api.sock";
 /// Environment override for the control-plane socket path.
 pub const CONTROL_PLANE_SOCKET_ENV: &str = "PUNAR_CONTROL_PLANE_SOCKET";
 
+/// The development control plane's binary. Only an image that ships it (the
+/// development and CI images; release check A5 refuses it on every release
+/// image) honours [`CONTROL_PLANE_SOCKET_ENV`] or `--control-plane-socket`:
+/// anywhere else an override is a way to point punard at a stand-in for the
+/// agent, and it is refused and audited.
+pub const DEVELOPMENT_CONTROL_PLANE: &str = "/usr/bin/punar-mock-smplify";
+
+/// The control-plane socket punard dials, from what it was asked for (the
+/// flag, else [`CONTROL_PLANE_SOCKET_ENV`]) and whether the image ships the
+/// development control plane: the built-in agent's own socket, unless an
+/// override is asked for on a development image. `true` when an override was
+/// asked for and refused.
+pub fn resolve_control_plane(requested: Option<PathBuf>, development: bool) -> (PathBuf, bool) {
+    let default = PathBuf::from(DEFAULT_CONTROL_PLANE_SOCKET);
+    match requested {
+        Some(path) if path == default || development => (path, false),
+        Some(_) => (default, true),
+        None => (default, false),
+    }
+}
+
 /// Production path of the shell summary file (ipc.md section 9).
 pub const DEFAULT_STATUS_FILE: &str = "/run/punar/status.json";
 
@@ -278,6 +299,14 @@ pub enum AgentFault {
     /// punard holds no device token while the device is enrolled: it cannot
     /// ask for, or report on, this device's identity at all.
     TokenMissing,
+    /// The socket at the agent's path was not put there by systemd: its
+    /// listener's credentials name a process other than PID 1, so another
+    /// program bound its own socket where the agent's was.
+    UnexpectedListener,
+    /// A unit management depends on is not as the image ships it
+    /// ([`crate::agent_units`]): a drop-in, a mask, an override of its
+    /// fragment, or an agent process that is not the image's binary.
+    UnitModified,
 }
 
 impl AgentFault {
@@ -297,6 +326,8 @@ impl AgentFault {
             AgentFault::IdentityUnreadable => "identity_unreadable",
             AgentFault::UnexpectedAnswer => "unexpected_answer",
             AgentFault::TokenMissing => "token_missing",
+            AgentFault::UnexpectedListener => "unexpected_listener",
+            AgentFault::UnitModified => "unit_modified",
         }
     }
 
@@ -409,6 +440,18 @@ impl std::fmt::Display for UpstreamError {
     }
 }
 
+/// Whether the listener behind a connected Unix stream socket was created by
+/// systemd: the kernel records the listening process's credentials when it
+/// calls `listen()`, and a connection reports them (`SO_PEERCRED`). A socket
+/// unit's listener is PID 1's, as root; a socket some other program bound
+/// names that program, whatever it later does, and no process can present
+/// PID 1's credentials but PID 1 (another PID namespace's PID 1 appears here
+/// under its PID in punard's).
+pub fn listener_is_systemds(stream: &UnixStream) -> bool {
+    rustix::net::sockopt::socket_peercred(stream)
+        .is_ok_and(|cred| cred.pid == rustix::process::Pid::INIT && cred.uid.is_root())
+}
+
 /// What `identity.status` said, as far as punard's liveness check reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentIdentity {
@@ -427,6 +470,7 @@ pub struct ControlPlaneClient {
     socket: PathBuf,
     queue: Option<std::sync::Arc<AgentQueue>>,
     budget: Option<CallBudget>,
+    systemd_listener: bool,
 }
 
 impl ControlPlaneClient {
@@ -435,7 +479,20 @@ impl ControlPlaneClient {
             socket: socket.into(),
             queue: None,
             budget: None,
+            systemd_listener: false,
         }
+    }
+
+    /// Send nothing over a connection whose listener systemd did not create
+    /// ([`listener_is_systemds`]): the built-in agent's socket is
+    /// `punar-smplifyd.socket`'s, so every connection to it names PID 1 as
+    /// the listener, and one that names another process reached a socket
+    /// some other program bound at the agent's path
+    /// ([`AgentFault::UnexpectedListener`]). Only for the agent's own path:
+    /// the development mock and tests bind their sockets themselves.
+    pub fn requiring_systemd_listener(mut self, required: bool) -> Self {
+        self.systemd_listener = required;
+        self
     }
 
     /// Wait for each answer behind the calls `queue` knows are in flight.
@@ -482,6 +539,11 @@ impl ControlPlaneClient {
                 (stream, Instant::now() + own, None)
             }
         };
+        if self.systemd_listener && !listener_is_systemds(&stream) {
+            return Err(UpstreamError::AgentUnavailable(
+                AgentFault::UnexpectedListener,
+            ));
+        }
         let wait = deadline
             .saturating_duration_since(Instant::now())
             .max(Duration::from_millis(1));
@@ -1014,6 +1076,47 @@ pub struct Enrollment {
     /// episode that began before it ends with its recovery event after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_unavailable: Option<AgentUnavailableRecord>,
+    /// When the last reconcile pass ran, on which boot's monotonic clock:
+    /// the next pass audits a gap longer than the reconcile timer allows
+    /// (`enroll.gap`), which is what a stopped timer or punard leaves.
+    /// Written with the rest of the record on every pass, so it costs no
+    /// write of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pass: Option<PassMark>,
+    /// When punard last stopped cleanly, on the same clock: a gap that ended
+    /// in a shutdown is measured to it at the next boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<PassMark>,
+}
+
+/// A moment on one boot's monotonic clock, which does not advance while the
+/// machine is suspended, exactly like the reconcile timer's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassMark {
+    /// `/proc/sys/kernel/random/boot_id`.
+    pub boot_id: String,
+    /// `CLOCK_MONOTONIC`, in milliseconds.
+    pub monotonic_ms: u64,
+}
+
+/// How long the reconcile passes of an enrolled device went without one,
+/// suspend excluded: from the last pass to now on the same boot, or to the
+/// clean stop that ended the last pass's boot. `None` when it cannot be told
+/// (no pass recorded yet, or a boot that ended without a clean stop).
+pub fn reconcile_gap(
+    last_pass: Option<&PassMark>,
+    stopped: Option<&PassMark>,
+    now: &PassMark,
+) -> Option<Duration> {
+    let last = last_pass?;
+    let end = if last.boot_id == now.boot_id {
+        now
+    } else {
+        stopped.filter(|stopped| stopped.boot_id == last.boot_id)?
+    };
+    end.monotonic_ms
+        .checked_sub(last.monotonic_ms)
+        .map(Duration::from_millis)
 }
 
 /// An episode of management interrupted ([`Enrollment::agent_unavailable`]).
@@ -1833,6 +1936,8 @@ mod tests {
             policy_refresh: None,
             policy_pending: None,
             agent_unavailable: None,
+            last_pass: None,
+            stopped: None,
         }
     }
 
@@ -2792,6 +2897,59 @@ mod tests {
                 <= ENROLL_START_PROCESS_TIMEOUT
         );
         assert!(ENROLL_START_PROCESS_TIMEOUT < ENROLL_START_CLIENT_TIMEOUT);
+    }
+
+    /// The gap between reconcile passes is measured on one boot's monotonic
+    /// clock: to now on the same boot, or to the clean stop that ended the
+    /// last pass's boot; a boot that ended without one, or no pass yet, tells
+    /// nothing, and a clock that went backwards is not a gap.
+    #[test]
+    fn a_reconcile_gap_is_measured_on_one_boots_clock() {
+        let mark = |boot: &str, ms: u64| PassMark {
+            boot_id: boot.to_string(),
+            monotonic_ms: ms,
+        };
+        let now = mark("b", 900_000);
+        assert_eq!(
+            reconcile_gap(Some(&mark("b", 780_000)), None, &now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            reconcile_gap(Some(&mark("a", 60_000)), Some(&mark("a", 3_660_000)), &now),
+            Some(Duration::from_secs(3600)),
+            "the previous boot, to its clean stop"
+        );
+        assert_eq!(reconcile_gap(Some(&mark("a", 60_000)), None, &now), None);
+        assert_eq!(
+            reconcile_gap(Some(&mark("a", 60_000)), Some(&mark("c", 1)), &now),
+            None
+        );
+        assert_eq!(reconcile_gap(None, None, &now), None);
+        assert_eq!(reconcile_gap(Some(&mark("b", 950_000)), None, &now), None);
+    }
+
+    /// punard dials the built-in agent unless an override is asked for on an
+    /// image that ships the development control plane; anywhere else the
+    /// override is refused, and said to be.
+    #[test]
+    fn a_control_plane_override_is_honoured_only_on_a_development_image() {
+        let default = PathBuf::from(DEFAULT_CONTROL_PLANE_SOCKET);
+        let other = PathBuf::from("/run/x.sock");
+        assert_eq!(resolve_control_plane(None, false), (default.clone(), false));
+        assert_eq!(resolve_control_plane(None, true), (default.clone(), false));
+        assert_eq!(
+            resolve_control_plane(Some(other.clone()), true),
+            (other.clone(), false)
+        );
+        assert_eq!(
+            resolve_control_plane(Some(other), false),
+            (default.clone(), true)
+        );
+        assert_eq!(
+            resolve_control_plane(Some(default.clone()), false),
+            (default, false),
+            "the lab names the agent's own socket"
+        );
     }
 
     /// The agent is on this device: a socket that is not there is the
