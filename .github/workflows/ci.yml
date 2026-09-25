@@ -240,6 +240,12 @@ jobs:
       - name: Validate stabilized-window memory attribution wiring
         run: ./tests/performance/memory-attribution-contract-test.sh
 
+      - name: Validate the benchmark probe against its fixtures
+        run: ./tests/performance/bench-probe-test.sh
+
+      - name: Validate the benchmark report's win rule, losses and parsers
+        run: ./tests/performance/bench-summarize-test.sh
+
       - name: Validate release-image policy gate branches
         run: ./tests/images/release-image-policy-test.sh
 
