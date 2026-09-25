@@ -1318,8 +1318,18 @@ pub fn set(
 pub fn audit(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let tail: model::AuditTail = parse(result)?;
     let mut out = fmt::masthead(style, "Audit", &personal_context(hostname));
+    // Other people's events are theirs (F0-S3): the daemon leaves them out
+    // and says how many, so "is this everything?" has an honest answer.
+    let withheld = match tail.withheld {
+        Some(0) | None => String::new(),
+        Some(1) => " · 1 event of another person on this device withheld".to_string(),
+        Some(n) => format!(" · {n} events of other people on this device withheld"),
+    };
     if tail.events.is_empty() {
-        out.push_str(&fmt::note(style, "No audit events recorded yet"));
+        out.push_str(&fmt::note(
+            style,
+            &format!("No audit events recorded yet{withheld}"),
+        ));
         return Ok(out);
     }
 
@@ -1363,7 +1373,7 @@ pub fn audit(style: &Style, result: &Value, hostname: &str) -> Result<String, St
     out.push_str(&fmt::note(
         style,
         &format!(
-            "{} events · newest last · local only · nothing leaves this machine",
+            "{} events · newest last · local only · nothing leaves this machine{withheld}",
             tail.events.len()
         ),
     ));
@@ -1583,6 +1593,135 @@ pub fn policy_set(style: &Style, result: &Value) -> Result<String, String> {
         ));
     }
     out.push_str(&fmt::note(style, POLICY_NOTE));
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// F0-S1 device administrators (contract section 23)
+// ---------------------------------------------------------------------------
+
+/// `punarctl admins list`: who administers this device, who decides that,
+/// and whether the reader does. Names are shown through `term_safe_name`:
+/// an organization's name is text somebody else chose.
+pub fn admins_list(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let mode = result["mode"].as_str().unwrap_or("local");
+    let administrators: Vec<String> = result["administrators"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(punar_common::ipc::term_safe_name)
+                .collect()
+        })
+        .unwrap_or_default();
+    let organization = result["source"]["name"]
+        .as_str()
+        .map(punar_common::ipc::term_safe_name);
+    let policy_id = result["source"]["policy_id"].as_str().unwrap_or_default();
+    let mut out = fmt::masthead(style, "Administrators", &personal_context(hostname));
+    let decided_by = match (mode, &organization) {
+        ("pinned", Some(org)) => format!("{org} lists them ({policy_id})"),
+        ("none", Some(org)) => format!("{org} turned local administration off ({policy_id})"),
+        _ => "this device's own list (group punar-admin)".to_string(),
+    };
+    let mut rows = vec![Row::new("Decided by", "", Slot::Neutral, &decided_by)];
+    let listed = if administrators.is_empty() {
+        "none".to_string()
+    } else {
+        administrators.join(", ")
+    };
+    rows.push(Row::new(
+        "Administrators",
+        &listed,
+        if administrators.is_empty() {
+            Slot::Warn
+        } else {
+            Slot::Neutral
+        },
+        "",
+    ));
+    let caller = &result["caller"];
+    let you = if caller["root"].as_bool() == Some(true) {
+        ("root", "needs no role")
+    } else if caller["administrator"].as_bool() == Some(true) {
+        ("administrator", "")
+    } else {
+        (
+            "not an administrator",
+            "ask an administrator to act, or to add you",
+        )
+    };
+    rows.push(Row::new("You", you.0, Slot::Neutral, you.1));
+    for account in result["accounts"].as_array().into_iter().flatten() {
+        let name = punar_common::ipc::term_safe_name(account["user"].as_str().unwrap_or("?"));
+        let role = if account["administrator"].as_bool() == Some(true) {
+            "administrator"
+        } else {
+            "person"
+        };
+        let origin = if account["origin"] == "image" {
+            "part of this image"
+        } else {
+            ""
+        };
+        rows.push(Row::new(
+            &format!("Account {name}"),
+            role,
+            Slot::Neutral,
+            origin,
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        "An administrator may change what reaches everyone on this device: policy, \
+         updates, enrollment, other people's sessions. The last one can never be removed.",
+    ));
+    Ok(out)
+}
+
+/// `punarctl admins add|remove`: what changed, and who administers now.
+pub fn admins_set(style: &Style, result: &Value) -> Result<String, String> {
+    let user = punar_common::ipc::term_safe_name(result["user"].as_str().unwrap_or("?"));
+    let administrator = result["administrator"].as_bool() == Some(true);
+    let changed = result["changed"].as_bool() == Some(true);
+    let now: Vec<String> = result["administrators"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(punar_common::ipc::term_safe_name)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = fmt::masthead(style, "Administrators", &user);
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                &user,
+                if administrator {
+                    "administrator"
+                } else {
+                    "person"
+                },
+                Slot::Neutral,
+                if changed {
+                    ""
+                } else {
+                    "already so; nothing changed"
+                },
+            ),
+            Row::new("Administrators", &now.join(", "), Slot::Neutral, ""),
+        ],
+    ));
+    if changed {
+        out.push_str(&fmt::note(
+            style,
+            "Takes effect for the next action they take; a session already open keeps \
+             running. Recorded in the audit trail.",
+        ));
+    }
     Ok(out)
 }
 

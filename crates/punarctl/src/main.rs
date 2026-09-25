@@ -283,6 +283,12 @@ enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
+    /// Device administrators: who may act on everyone on this device
+    /// (device policy, updates, enrollment, other people's sessions).
+    Admins {
+        #[command(subcommand)]
+        command: AdminsCommand,
+    },
     /// Re-observe every capability, remediate drift per the effective
     /// policy (SPEC section 42; Milestone 4), and report the outcome.
     Reconcile,
@@ -440,9 +446,9 @@ enum PolicyCommand {
     /// (device_specific_override, rank 4).
     ///
     /// Asks for your password on the terminal unless you are root. Scripts
-    /// pass a confirmation on standard input instead (--ticket-stdin), so it
-    /// is never an argument and never reaches /proc — the same discipline the
-    /// lock screen uses.
+    /// hand it over on a socket (--password-fd, --ticket-fd), never on a pipe
+    /// or as an argument: any program running as you can read those through
+    /// /proc first. Needs a device administrator (`punarctl admins list`).
     Set {
         /// Dotted capability path, like `security.firewall`.
         path: CapabilityId,
@@ -452,11 +458,8 @@ enum PolicyCommand {
         /// anyone who asks why this value is pinned.
         #[arg(long)]
         reason: String,
-        /// Read a re-authentication ticket from the first line of standard
-        /// input instead of asking for the password: `punar-auth --admin`'s
-        /// answer as it prints it (`ok <ticket>`), or the bare ticket.
-        #[arg(long)]
-        ticket_stdin: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Withdraw the administrator's entry for a path, handing it back to the
     /// layers underneath. Asks for your password, as `set` does.
@@ -466,12 +469,52 @@ enum PolicyCommand {
         /// Why you are withdrawing it.
         #[arg(long)]
         reason: String,
-        /// Read a re-authentication ticket from the first line of standard
-        /// input instead of asking for the password (`ok <ticket>` or the bare
-        /// ticket).
-        #[arg(long)]
-        ticket_stdin: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
+}
+
+/// How a verb that needs your password receives it (F0-S4; docs/api/ipc.md
+/// section 23.5). With none of these, punarctl asks on the controlling
+/// terminal with echo off.
+///
+/// Every source is a terminal or a socket. A pipe, a file, standard input
+/// and the command line are refused: any program running as you can reopen a
+/// pipe or file through /proc/<pid>/fd, or read /proc/<pid>/cmdline, before
+/// punarctl reads it. A socket reopened that way gives ENXIO.
+#[derive(clap::Args, Debug, Default, Clone)]
+struct Confirm {
+    /// Read your password from descriptor N, which must be a Unix socket
+    /// (for example one end of a socketpair the caller keeps).
+    #[arg(long, value_name = "N")]
+    password_fd: Option<i32>,
+    /// Read a confirmation ticket from descriptor N, which must be a Unix
+    /// socket: `punar-auth --admin`'s answer as it prints it (`ok <ticket>`)
+    /// or the bare 64-character ticket.
+    #[arg(long, value_name = "N", conflicts_with = "password_fd")]
+    ticket_fd: Option<i32>,
+    /// Print the path of a private socket as the first line of output, and
+    /// read your password from the program that started punarctl — only that
+    /// program; any other is refused. System Control and the approval
+    /// overlay use this.
+    #[arg(long, conflicts_with_all = ["password_fd", "ticket_fd"])]
+    password_from_parent: bool,
+    /// Removed: a pipe on standard input can be read by any program running
+    /// as you before punarctl reads it. Use --ticket-fd or --password-fd.
+    #[arg(long, hide = true)]
+    ticket_stdin: bool,
+    /// Never accepted, for the reason --ticket-stdin was removed. Use
+    /// --password-fd.
+    #[arg(long, hide = true)]
+    password_stdin: bool,
+}
+
+impl Confirm {
+    /// Whether the caller named a source, rather than leaving punarctl to
+    /// ask on the terminal.
+    fn named(&self) -> bool {
+        self.password_fd.is_some() || self.ticket_fd.is_some() || self.password_from_parent
+    }
 }
 
 #[derive(Subcommand)]
@@ -552,6 +595,12 @@ enum ApprovalsCommand {
         /// deliberately or not at all.
         #[arg(long, value_parser = ["approved", "denied"])]
         decision: String,
+        /// Approving a change to a device setting needs a device
+        /// administrator's password (contract section 23.2): punarctl asks
+        /// on the terminal when the daemon says so, or takes it from a
+        /// socket named here.
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Wait for one approval to be answered (Plate D-014 register 05).
     ///
@@ -726,6 +775,28 @@ enum RelayCommand {
 }
 
 #[derive(Subcommand)]
+enum AdminsCommand {
+    /// Who administers this device, who decides that, and whether you do.
+    List,
+    /// Make an account a device administrator. Needs an administrator's
+    /// password.
+    Add {
+        /// The account name, as `punarctl admins list` shows it.
+        user: String,
+        #[command(flatten)]
+        confirm: Confirm,
+    },
+    /// Take the administrator role away from an account. The last
+    /// administrator can never be removed. Needs an administrator's password.
+    Remove {
+        /// The account name, as `punarctl admins list` shows it.
+        user: String,
+        #[command(flatten)]
+        confirm: Confirm,
+    },
+}
+
+#[derive(Subcommand)]
 enum AuditCommand {
     /// Tail recent audit events (newest last).
     Tail {
@@ -745,6 +816,8 @@ enum UpdateCommand {
         /// Bypass a recent verified cache and require the configured source.
         #[arg(long)]
         force: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Stage one exact signed channel-head release into the inactive slot.
     /// Asks for your password.
@@ -757,6 +830,8 @@ enum UpdateCommand {
         /// Restart after the verified transaction returns successfully.
         #[arg(long)]
         reboot: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Internal boot-service handoff for a native Raspberry Pi transaction.
     /// The daemon accepts no slot, path, digest or health data from this command.
@@ -771,6 +846,8 @@ enum UpdateCommand {
         /// Restart after the selector change returns successfully.
         #[arg(long)]
         reboot: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
 }
 
@@ -839,6 +916,8 @@ enum EnrollCommand {
         /// is no terminal to ask on.
         #[arg(long)]
         accept_organization_owned: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Show enrollment state (never the device token).
     Status,
@@ -850,6 +929,8 @@ enum EnrollCommand {
         /// Skip the interactive confirmation.
         #[arg(long)]
         yes: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
 }
 
@@ -872,72 +953,212 @@ fn local_hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
-/// Read a re-authentication ticket from the first line of standard input.
+/// The refusal for a removed stdin flag, said once for every verb.
+const STDIN_SECRET_REMOVED: &str = "punarctl: --ticket-stdin and --password-stdin are not accepted.\n\
+Why: standard input is a pipe, and any program running as you can reopen a pipe \
+through /proc/<pid>/fd and read your password or ticket before punarctl does.\n\
+Next step: run the command in a terminal, which asks for your password with echo off; \
+or hand it over on a Unix socket with --password-fd N (or a ticket with --ticket-fd N); \
+or make the change from System Control.";
+
+/// The confirmation a verb carries: from the source the caller named, or the
+/// person's password asked on the terminal (root needs none). `Ok(None)` when
+/// there is no terminal and no source: the request then goes without one and
+/// punard, which decides, says what to run. The client gathers a credential
+/// when it can; it never makes the authorization decision itself.
 ///
-/// ON STDIN AND NOT ON ARGV, deliberately. A ticket is a bearer object with a
-/// two-minute life: anything on the command line is world-readable in
-/// `/proc/<pid>/cmdline` for as long as the process runs, which is exactly long
-/// enough for another local process to take it and spend it first. The lock
-/// screen passes a password the same way, for the same reason.
-///
-/// Accepts what `punar-auth --admin` prints (`ok <ticket>`) as well as the bare
-/// ticket, so its answer can be piped straight in. Anything else — `denied`,
-/// `unavailable`, a truncated line — is refused here with what it means,
-/// rather than sent to punard as if it were a ticket.
-fn read_ticket(enabled: bool) -> Result<Option<Zeroizing<String>>, String> {
-    if !enabled {
+/// Before any secret is read this process is made non-dumpable with no core
+/// file ([`punar_reauth::harden`]), so no other program of the same person
+/// can read it out of /proc while it is held.
+fn confirmation(
+    confirm: &Confirm,
+    purpose: &str,
+) -> Result<Option<punar_reauth::Ticket>, ExitCode> {
+    if confirm.ticket_stdin || confirm.password_stdin {
+        eprintln!("{STDIN_SECRET_REMOVED}");
+        return Err(ExitCode::from(2));
+    }
+    let root = rustix::process::geteuid().is_root();
+    if root && !confirm.named() {
         return Ok(None);
     }
-    let mut line = Zeroizing::new(String::new());
-    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
-        .map_err(|e| format!("The confirmation could not be read from standard input: {e}"))?;
-    parse_stdin_ticket(line.trim())
-}
-
-/// The ticket in one line of `--ticket-stdin` input, or why there is none.
-fn parse_stdin_ticket(line: &str) -> Result<Option<Zeroizing<String>>, String> {
-    let next = "Next step: run the command without --ticket-stdin in a terminal, which asks \
-                for your password; or pipe `punar-auth --admin`'s answer into it; or make the \
-                change from System Control · Policy.";
-    if line.is_empty() {
-        return Err(format!(
-            "No confirmation arrived on standard input.\n{next}"
-        ));
+    if let Err(error) = punar_reauth::harden() {
+        eprintln!(
+            "punarctl: this process could not be protected before reading a secret \
+             ({error}), so nothing was read and nothing was changed."
+        );
+        return Err(ExitCode::from(1));
     }
-    match parse_auth_answer(&format!("{line}\n")) {
-        AuthAnswer::Ticket(ticket) => return Ok(Some(ticket)),
-        AuthAnswer::Denied => {
-            return Err(format!(
-                "The confirmation on standard input says the password was not accepted, so \
-                 nothing was changed.\n{next}"
-            ));
+    let unreadable = |error: punar_reauth::SourceError| {
+        eprintln!("punarctl: the confirmation could not be read: {error}.\nNothing was changed.");
+        ExitCode::from(2)
+    };
+    if let Some(fd) = confirm.ticket_fd {
+        return punar_reauth::ticket_from_fd(fd)
+            .map(Some)
+            .map_err(unreadable);
+    }
+    let password = if let Some(fd) = confirm.password_fd {
+        punar_reauth::password_from_fd(fd).map_err(unreadable)?
+    } else if confirm.password_from_parent {
+        password_from_parent().map_err(unreadable)?
+    } else {
+        match password_from_terminal(purpose)? {
+            Some(password) => password,
+            None => return Ok(None),
         }
-        AuthAnswer::Unavailable => {}
-    }
-    if line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Ok(Some(Zeroizing::new(line.to_string())));
-    }
-    Err(format!(
-        "What arrived on standard input is not a confirmation ticket: expected `ok <ticket>` \
-         or the 64-character ticket itself.\n{next}"
-    ))
-}
-
-/// The confirmation for a policy change: the one on standard input when asked
-/// for, otherwise the person's password, asked on the terminal (root needs
-/// none). With no terminal the request goes without one, and punard's refusal
-/// says what to run — the client never decides.
-fn policy_ticket(ticket_stdin: bool, purpose: &str) -> Result<Option<Zeroizing<String>>, ExitCode> {
-    if ticket_stdin {
-        return read_ticket(true).map_err(|why| {
-            eprintln!("{why}");
-            ExitCode::FAILURE
-        });
-    }
-    if rustix::process::geteuid().is_root() {
+    };
+    if root {
+        // punar-authd refuses uid 0 by design, and root needs no ticket.
         return Ok(None);
     }
-    admin_ticket(purpose)
+    ticket_for(&password).map(Some)
+}
+
+/// `--password-from-parent`: open the private rendezvous, say where it is on
+/// the first line of standard output, and take the password from the
+/// program that started this one.
+fn password_from_parent() -> Result<punar_reauth::Password, punar_reauth::SourceError> {
+    let parent = punar_reauth::parent_pid().ok_or(punar_reauth::SourceError::NotTheParent)?;
+    let handoff = punar_reauth::ParentHandoff::open()?;
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "password-socket {}", handoff.path().display());
+    let _ = stdout.flush();
+    drop(stdout);
+    handoff.receive(parent, punar_reauth::DELIVERY_TIMEOUT)
+}
+
+/// Ask on the terminal. `Ok(None)` when there is no terminal to ask on.
+///
+/// ONE ATTEMPT PER RUN. punar-authd checks the password through the lock
+/// screen's PAM stack, whose faillock tally every surface on the device
+/// shares. A retry loop here would spend most of it in one command, and once
+/// it is spent even the right password is refused, which is why a refusal
+/// names the pause instead of calling the password wrong. Empty lines are
+/// not attempts and are never sent.
+fn password_from_terminal(purpose: &str) -> Result<Option<punar_reauth::Password>, ExitCode> {
+    let mut prompt = format!("Enter your password to {purpose}.\nPassword: ");
+    let mut empty_lines = 0;
+    loop {
+        let Some(read) = punar_reauth::read_terminal_line(&prompt) else {
+            return Ok(None);
+        };
+        let Ok(password) = read else {
+            eprintln!(
+                "punarctl: the password could not be read from the terminal, so nothing was changed."
+            );
+            return Err(ExitCode::from(2));
+        };
+        if !password.is_empty() {
+            return Ok(Some(password));
+        }
+        // An empty line is usually a stray Enter (a repeated key, or the one
+        // that ended the code), so ask again rather than throwing the whole
+        // change away.
+        empty_lines += 1;
+        if empty_lines == EMPTY_PASSWORD_LINES {
+            eprintln!("No password was entered, so nothing was changed.");
+            return Err(ExitCode::from(3));
+        }
+        prompt = "Password (Ctrl-C cancels): ".to_string();
+    }
+}
+
+/// Exchange a password for a ticket at punar-authd, over its socket.
+fn ticket_for(password: &str) -> Result<punar_reauth::Ticket, ExitCode> {
+    match punar_reauth::request_ticket(password) {
+        punar_reauth::Verdict::Ticket(ticket) => Ok(ticket),
+        punar_reauth::Verdict::Denied => {
+            let conf = std::fs::read_to_string(FAILLOCK_CONF).unwrap_or_default();
+            eprintln!("{}", password_refused_message(&conf));
+            Err(ExitCode::from(3))
+        }
+        punar_reauth::Verdict::Unavailable => {
+            eprintln!(
+                "This device could not check your password just now, so nothing was \
+                 changed.\n\
+                 Next step: try again in a moment; `systemctl status punar-authd.socket` \
+                 shows why if it keeps happening."
+            );
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// `punarctl admins add|remove <user>`: one `admins.set`, confirmed with
+/// the caller's password (root needs none).
+fn admins_set(
+    client: &Client,
+    style: &Style,
+    json: bool,
+    user: &str,
+    administrator: bool,
+    confirm: &Confirm,
+) -> ExitCode {
+    let purpose = if administrator {
+        format!(
+            "make {} an administrator of this device",
+            term_safe_name(user)
+        )
+    } else {
+        format!(
+            "take the administrator role away from {}",
+            term_safe_name(user)
+        )
+    };
+    let mut params = json!({ "user": user, "administrator": administrator });
+    match confirmation(confirm, &purpose) {
+        Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
+        Ok(None) => {}
+        Err(exit) => return exit,
+    }
+    rpc(client, json, "admins.set", Some(params), |v| {
+        views::admins_set(style, v)
+    })
+}
+
+/// Answer one approval. Approving a change to a device setting needs the
+/// resolving person's fresh password (F0-S1, contract section 23.2), and
+/// punarctl asks for it only when the daemon says so — a denial, and a
+/// credential approval, never cost a password. A source the caller named is
+/// read up front, because the caller already knows the answer needs one.
+fn resolve_approval(
+    client: &Client,
+    id: &str,
+    decision: &str,
+    confirm: &Confirm,
+) -> Result<Result<Value, CallError>, ExitCode> {
+    if confirm.ticket_stdin || confirm.password_stdin {
+        eprintln!("{STDIN_SECRET_REMOVED}");
+        return Err(ExitCode::from(2));
+    }
+    let mut params = json!({ "approval_id": id, "decision": decision });
+    let purpose = format!("approve {id}, a change to a setting everyone on this device shares");
+    if decision == "approved" && confirm.named() {
+        if let Some(ticket) = confirmation(confirm, &purpose)? {
+            params["ticket"] = json!(ticket.as_str());
+        }
+        return Ok(client.call("approvals.resolve", Some(params)));
+    }
+    let first = client.call("approvals.resolve", Some(params.clone()));
+    let wants_password = matches!(
+        &first,
+        Err(error) if error
+            .server()
+            .and_then(|wire| wire.details.as_ref())
+            .and_then(|details| details["reason"].as_str())
+            == Some("reauthentication_required")
+    );
+    if decision != "approved" || !wants_password {
+        return Ok(first);
+    }
+    match confirmation(confirm, &purpose)? {
+        Some(ticket) => {
+            params["ticket"] = json!(ticket.as_str());
+            Ok(client.call("approvals.resolve", Some(params)))
+        }
+        None => Ok(first),
+    }
 }
 
 fn fail(error: &CallError) -> ExitCode {
@@ -1087,11 +1308,12 @@ fn restart_after_update(kind: UpdateRestart) -> ExitCode {
 /// No account on a Punar device is root, so checking, installing and rolling
 /// back take the same confirmation as enrolling. Without a terminal the
 /// request goes without one, and punard's refusal says what to run.
-fn with_person_ticket(mut params: Value, purpose: &str) -> Result<Value, ExitCode> {
-    if rustix::process::geteuid().is_root() {
-        return Ok(params);
-    }
-    if let Some(ticket) = admin_ticket(purpose)? {
+fn with_person_ticket(
+    mut params: Value,
+    confirm: &Confirm,
+    purpose: &str,
+) -> Result<Value, ExitCode> {
+    if let Some(ticket) = confirmation(confirm, purpose)? {
         params["ticket"] = json!(ticket.as_str());
     }
     Ok(params)
@@ -2764,10 +2986,13 @@ fn approvals_watch(
             let Some(decision) = ask_decision(tty, style, &current, hostname) else {
                 continue;
             };
-            match client.call(
-                "approvals.resolve",
-                Some(json!({ "approval_id": id, "decision": decision })),
-            ) {
+            let answered = match resolve_approval(client, id, decision, &Confirm::default()) {
+                Ok(answered) => answered,
+                // The password was refused or could not be read: said
+                // already; the watch goes on and the approval stays pending.
+                Err(_) => continue,
+            };
+            match answered {
                 Ok(resolved) => {
                     printed.insert(id.clone(), approval_status(&resolved));
                     if let Err(code) = emit(json, &resolved, |v| views::approval_event(style, v)) {
@@ -2848,6 +3073,7 @@ fn run_enroll_start(
     json: bool,
     domain: &str,
     code: Option<&Redacted<String>>,
+    confirm: &Confirm,
     mut accepted: Vec<EnrollmentTerm>,
     render: impl Fn(&Value) -> Result<String, String>,
 ) -> ExitCode {
@@ -2861,12 +3087,13 @@ fn run_enroll_start(
         }
         // Asked last, so the two-minute confirmation is spent by the call it
         // was typed for rather than by however long the code took to find.
-        if !rustix::process::geteuid().is_root() {
-            match admin_ticket(&format!("allow enrolling this device with {domain}")) {
-                Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
-                Ok(None) => {}
-                Err(exit) => return exit,
-            }
+        match confirmation(
+            confirm,
+            &format!("allow enrolling this device with {domain}"),
+        ) {
+            Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
+            Ok(None) => {}
+            Err(exit) => return exit,
         }
         // 90 s client budget for this one verb (contract section 2): the
         // pipeline runs a full reconcile pass server-side.
@@ -2982,7 +3209,7 @@ fn accept_terms_on_terminal(org: &str, terms: &[EnrollmentTerm]) -> Option<Resul
         .ok()?;
     let _ = write!(tty, "{}", enrollment_terms_prompt(org, terms));
     let _ = tty.flush();
-    Some(match read_secret_line(&mut tty) {
+    Some(match punar_reauth::read_secret_line(&mut tty) {
         Ok(answer) => Ok(answer.trim() == "accept"),
         Err(_) => {
             eprintln!("punarctl: the answer could not be read from the terminal.");
@@ -3039,7 +3266,8 @@ fn enrollment_code(code_stdin: bool) -> Result<Option<Redacted<String>>, ExitCod
         }
         return Ok(Some(Redacted::new(value)));
     }
-    let Some(read) = read_hidden_line("Enrollment code (leave blank if none): ") else {
+    let Some(read) = punar_reauth::read_terminal_line("Enrollment code (leave blank if none): ")
+    else {
         // No terminal and no --code-stdin: proceed without a code. The
         // control plane that needs one refuses with a message that says so.
         return Ok(None);
@@ -3054,74 +3282,6 @@ fn enrollment_code(code_stdin: bool) -> Result<Option<Redacted<String>>, ExitCod
     Ok((!value.is_empty()).then(|| Redacted::new(value)))
 }
 
-/// Ask on the controlling terminal with echo off and read one line. `None`
-/// when there is no terminal to ask on.
-///
-/// Whatever state the terminal was left in, it is put in canonical mode with
-/// echo off, and suspend (Ctrl-Z) is disabled for the duration: bash resumes
-/// a stopped job with echo back on, so the rest of a secret typed after `fg`
-/// would be shown. Interrupt (Ctrl-C) still works.
-fn read_hidden_line(prompt: &str) -> Option<std::io::Result<Zeroizing<String>>> {
-    use rustix::termios::{LocalModes, OptionalActions, SpecialCodeIndex, tcgetattr, tcsetattr};
-    let mut tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .ok()?;
-    let _ = write!(tty, "{prompt}");
-    let _ = tty.flush();
-    let saved = tcgetattr(&tty).ok();
-    if let Some(saved) = &saved {
-        let mut quiet = saved.clone();
-        quiet.local_modes.remove(LocalModes::ECHO);
-        quiet.local_modes.insert(LocalModes::ICANON);
-        // _POSIX_VDISABLE is 0 on Linux: no key suspends the prompt.
-        quiet.special_codes[SpecialCodeIndex::VSUSP] = 0;
-        let _ = tcsetattr(&tty, OptionalActions::Flush, &quiet);
-    }
-    let read = read_secret_line(&mut tty);
-    if let Some(saved) = &saved {
-        let _ = tcsetattr(&tty, OptionalActions::Flush, saved);
-    }
-    let _ = writeln!(tty);
-    Some(read)
-}
-
-/// The longest secret line accepted; punar-authd's whole request is bounded
-/// at 4096 bytes.
-const MAX_SECRET_LINE: usize = 4096;
-
-/// Read up to the first newline straight into a buffer that is wiped on drop
-/// and never grows, so no reallocation or buffered reader leaves a copy
-/// behind. Loops until the newline rather than trusting one `read` to be one
-/// line. A trailing CR is dropped; end of input ends the line.
-fn read_secret_line(input: &mut impl Read) -> std::io::Result<Zeroizing<String>> {
-    let mut buffer = Zeroizing::new(vec![0u8; MAX_SECRET_LINE + 1]);
-    let mut len = 0;
-    while !buffer[..len].contains(&b'\n') {
-        if len == buffer.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the line is longer than any password this device accepts",
-            ));
-        }
-        match input.read(&mut buffer[len..]) {
-            Ok(0) => break,
-            Ok(n) => len += n,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
-    }
-    let line = &buffer[..len];
-    let line = &line[..line.iter().position(|&b| b == b'\n').unwrap_or(len)];
-    let line = line.strip_suffix(b"\r").unwrap_or(line);
-    Ok(Zeroizing::new(String::from_utf8_lossy(line).into_owned()))
-}
-
-/// The unprivileged half of punar-auth: the lock screen and
-/// punar-policy-set.sh spawn this same fixed path.
-const PUNAR_AUTH: &str = "/usr/bin/punar-auth";
-
 /// Where the lock screen's faillock policy lives. Read only to say, in a
 /// refusal, how many wrong passwords pause checking and for how long.
 const FAILLOCK_CONF: &str = "/etc/security/faillock.conf";
@@ -3129,128 +3289,6 @@ const FAILLOCK_CONF: &str = "/etc/security/faillock.conf";
 /// Empty lines tolerated at the password prompt before giving up. They cost
 /// nothing (none is sent), so this only bounds a stuck key.
 const EMPTY_PASSWORD_LINES: u32 = 3;
-
-/// What `punar-auth --admin` said, read from its one line of output.
-#[derive(Debug, PartialEq, Eq)]
-enum AuthAnswer {
-    /// The password was accepted and punar-authd minted this ticket.
-    Ticket(Zeroizing<String>),
-    /// The password was refused.
-    Denied,
-    /// The device could not ask. Never a statement about the password.
-    Unavailable,
-}
-
-/// Parse punar-auth's output: `ok <ticket>`, `denied`, or anything else,
-/// which is `unavailable`. A ticket that is not 64 hex characters is not one
-/// punar-authd minted, so it is treated as the device failing to answer
-/// rather than passed on.
-fn parse_auth_answer(output: &str) -> AuthAnswer {
-    let line = output.strip_suffix('\n').unwrap_or(output);
-    if line == "denied" {
-        return AuthAnswer::Denied;
-    }
-    match line.strip_prefix("ok ") {
-        Some(ticket) if ticket.len() == 64 && ticket.bytes().all(|b| b.is_ascii_hexdigit()) => {
-            AuthAnswer::Ticket(Zeroizing::new(ticket.to_string()))
-        }
-        _ => AuthAnswer::Unavailable,
-    }
-}
-
-/// Relay one password to punar-authd through punar-auth and read the answer.
-/// The password goes down an anonymous pipe: never argv, never the
-/// environment, never disk.
-fn ask_punar_auth(password: &str) -> AuthAnswer {
-    let Ok(mut child) = std::process::Command::new(PUNAR_AUTH)
-        .arg("--admin")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return AuthAnswer::Unavailable;
-    };
-    let wrote = child.stdin.take().is_some_and(|mut stdin| {
-        stdin.write_all(password.as_bytes()).is_ok() && stdin.write_all(b"\n").is_ok()
-    });
-    let mut output = Zeroizing::new(String::new());
-    let read = child
-        .stdout
-        .take()
-        .is_some_and(|stdout| stdout.take(256).read_to_string(&mut output).is_ok());
-    let _ = child.wait();
-    if !wrote || !read {
-        return AuthAnswer::Unavailable;
-    }
-    parse_auth_answer(&output)
-}
-
-/// Confirm a change to this device's enrollment with the person's own
-/// password, and return the single-use ticket punard will spend.
-///
-/// WHY A PASSWORD AND NOT SUDO. No account on a Punar device holds sudo and
-/// root is locked (onboarding.md section 1.6), so "re-run as root" is advice a
-/// person can never follow. Enrollment decides who manages the device; a
-/// stolen shell must not be able to change that, so the person at the
-/// keyboard proves their password at the moment they do it, exactly as
-/// System Control does for a device policy change.
-///
-/// ONE ATTEMPT PER RUN. punar-authd checks the password through the lock
-/// screen's PAM stack, whose faillock tally every surface on the device
-/// shares. A retry loop here would spend most of it in one command, and once
-/// it is spent even the right password is refused, which is why a refusal
-/// names the pause instead of calling the password wrong.
-///
-/// `Ok(None)` when there is no terminal to ask on: the request then goes
-/// without a confirmation and punard, which is the one that decides, refuses
-/// it with a message that says what to do. The client gathers a credential
-/// when it can; it never makes the authorization decision itself.
-fn admin_ticket(purpose: &str) -> Result<Option<Zeroizing<String>>, ExitCode> {
-    let mut prompt = format!("Enter your password to {purpose}.\nPassword: ");
-    let mut empty_lines = 0;
-    let password = loop {
-        let Some(read) = read_hidden_line(&prompt) else {
-            return Ok(None);
-        };
-        let Ok(password) = read else {
-            eprintln!(
-                "punarctl: the password could not be read from the terminal, so nothing was changed."
-            );
-            return Err(ExitCode::from(2));
-        };
-        if !password.is_empty() {
-            break password;
-        }
-        // An empty line is not an attempt and is never sent: punar-authd
-        // would count it against the account for nothing. It is usually a
-        // stray Enter (a repeated key, or the one that ended the code), so
-        // ask again rather than throwing the whole change away.
-        empty_lines += 1;
-        if empty_lines == EMPTY_PASSWORD_LINES {
-            eprintln!("No password was entered, so nothing was changed.");
-            return Err(ExitCode::from(3));
-        }
-        prompt = "Password (Ctrl-C cancels): ".to_string();
-    };
-    match ask_punar_auth(&password) {
-        AuthAnswer::Ticket(ticket) => Ok(Some(ticket)),
-        AuthAnswer::Denied => {
-            let conf = std::fs::read_to_string(FAILLOCK_CONF).unwrap_or_default();
-            eprintln!("{}", password_refused_message(&conf));
-            Err(ExitCode::from(3))
-        }
-        AuthAnswer::Unavailable => {
-            eprintln!(
-                "This device could not check your password just now, so nothing was \
-                 changed.\n\
-                 Next step: try again in a moment; `systemctl status punar-authd.socket` \
-                 shows why if it keeps happening."
-            );
-            Err(ExitCode::from(1))
-        }
-    }
-}
 
 /// What to say when punar-authd refuses a password. Never "wrong password":
 /// while faillock has paused the account, the right one is refused too, and
@@ -4556,6 +4594,7 @@ fn main() -> ExitCode {
                     code_stdin,
                     accept_non_removable,
                     accept_organization_owned,
+                    confirm,
                 } => match already_enrolled(&client) {
                     Some((org, removable)) => {
                         let next = if removable {
@@ -4579,6 +4618,7 @@ fn main() -> ExitCode {
                             json,
                             &domain,
                             code.as_ref(),
+                            &confirm,
                             EnrollmentTerm::ALL
                                 .into_iter()
                                 .filter(|term| match term {
@@ -4593,7 +4633,7 @@ fn main() -> ExitCode {
                 EnrollCommand::Status => rpc(&client, json, "enroll.status", None, |v| {
                     views::enroll_status(&style, v, &hostname)
                 }),
-                EnrollCommand::Stop { yes } => {
+                EnrollCommand::Stop { yes, confirm } => {
                     // Nothing to remove: say so before asking for a yes or a
                     // password. A failed read falls through to punard's answer.
                     let status = client.call("enroll.status", None).ok();
@@ -4637,12 +4677,10 @@ fn main() -> ExitCode {
                     // Asked after the yes, so the two-minute confirmation is
                     // spent by the call it was typed for.
                     let mut params = None;
-                    if !rustix::process::geteuid().is_root() {
-                        match admin_ticket("allow unenrolling this device") {
-                            Ok(Some(ticket)) => params = Some(json!({ "ticket": ticket.as_str() })),
-                            Ok(None) => {}
-                            Err(exit) => return exit,
-                        }
+                    match confirmation(&confirm, "allow unenrolling this device") {
+                        Ok(Some(ticket)) => params = Some(json!({ "ticket": ticket.as_str() })),
+                        Ok(None) => {}
+                        Err(exit) => return exit,
                     }
                     rpc(&client, json, "enroll.stop", params, |v| {
                         views::enroll_stop(&style, v, &hostname)
@@ -4854,6 +4892,20 @@ fn main() -> ExitCode {
                 })
             }
         },
+        Command::Admins { command } => {
+            let hostname = local_hostname();
+            match command {
+                AdminsCommand::List => rpc(&client, json, "admins.list", None, |v| {
+                    views::admins_list(&style, v, &hostname)
+                }),
+                AdminsCommand::Add { user, confirm } => {
+                    admins_set(&client, &style, json, &user, true, &confirm)
+                }
+                AdminsCommand::Remove { user, confirm } => {
+                    admins_set(&client, &style, json, &user, false, &confirm)
+                }
+            }
+        }
         Command::Reconcile => {
             let hostname = local_hostname();
             // An enrolled device's pass also talks to the control plane,
@@ -4892,7 +4944,7 @@ fn main() -> ExitCode {
                 path,
                 value,
                 reason,
-                ticket_stdin,
+                confirm,
             } => {
                 // The value is DATA. It is parsed as JSON when it parses and
                 // passed as a string when it does not, so `true`, `42` and
@@ -4908,7 +4960,7 @@ fn main() -> ExitCode {
                 });
                 let purpose =
                     format!("allow pinning {path} to {value} for everyone on this device");
-                match policy_ticket(ticket_stdin, &purpose) {
+                match confirmation(&confirm, &purpose) {
                     Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
                     Ok(None) => {}
                     Err(exit) => return exit,
@@ -4920,7 +4972,7 @@ fn main() -> ExitCode {
             PolicyCommand::Clear {
                 path,
                 reason,
-                ticket_stdin,
+                confirm,
             } => {
                 let mut params = json!({
                     "capability": path.as_str(),
@@ -4928,7 +4980,7 @@ fn main() -> ExitCode {
                     "reason": reason,
                 });
                 let purpose = format!("allow withdrawing the pin on {path} for everyone");
-                match policy_ticket(ticket_stdin, &purpose) {
+                match confirmation(&confirm, &purpose) {
                     Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
                     Ok(None) => {}
                     Err(exit) => return exit,
@@ -5038,13 +5090,14 @@ fn main() -> ExitCode {
                 ApprovalsCommand::Resolve {
                     approval_id,
                     decision,
-                } => rpc(
-                    &client,
-                    json,
-                    "approvals.resolve",
-                    Some(json!({"approval_id": approval_id, "decision": decision})),
-                    |v| views::approval_resolved(&style, v, &hostname),
-                ),
+                    confirm,
+                } => match resolve_approval(&client, &approval_id, &decision, &confirm) {
+                    Ok(Ok(result)) => render_or_json(json, &result, |v| {
+                        views::approval_resolved(&style, v, &hostname)
+                    }),
+                    Ok(Err(error)) => fail(&error),
+                    Err(exit) => exit,
+                },
                 ApprovalsCommand::Wait {
                     approval_id,
                     timeout,
@@ -5499,9 +5552,10 @@ fn main() -> ExitCode {
                 UpdateCommand::Status => rpc(&client, json, "update.status", None, |v| {
                     views::update_status(&style, v)
                 }),
-                UpdateCommand::Check { force } => {
+                UpdateCommand::Check { force, confirm } => {
                     let params = match with_person_ticket(
                         json!({ "force": force }),
+                        &confirm,
                         "allow checking this device's update channel",
                     ) {
                         Ok(params) => params,
@@ -5515,12 +5569,14 @@ fn main() -> ExitCode {
                     version,
                     allow_downgrade,
                     reboot,
+                    confirm,
                 } => {
                     let params = match with_person_ticket(
                         json!({
                             "version": version,
                             "allow_downgrade": allow_downgrade,
                         }),
+                        &confirm,
                         &format!("allow installing Punar {version}"),
                     ) {
                         Ok(params) => params,
@@ -5573,7 +5629,11 @@ fn main() -> ExitCode {
                         Err(error) => fail(&error),
                     }
                 }
-                UpdateCommand::Rollback { to_version, reboot } => {
+                UpdateCommand::Rollback {
+                    to_version,
+                    reboot,
+                    confirm,
+                } => {
                     // Name what the password authorizes. Without --to the
                     // daemon picks the other retained release, which after an
                     // earlier rollback can be the newer one, so "previous"
@@ -5586,11 +5646,14 @@ fn main() -> ExitCode {
                                  release"
                             .to_string(),
                     };
-                    let params =
-                        match with_person_ticket(json!({ "to_version": to_version }), &purpose) {
-                            Ok(params) => params,
-                            Err(exit) => return exit,
-                        };
+                    let params = match with_person_ticket(
+                        json!({ "to_version": to_version }),
+                        &confirm,
+                        &purpose,
+                    ) {
+                        Ok(params) => params,
+                        Err(exit) => return exit,
+                    };
                     update_mutation(
                         &client,
                         &style,
@@ -5614,11 +5677,11 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        AuthAnswer, Cli, EnrollmentTerm, append_filtered_session_bus_mount, append_resolver_mount,
-        append_vendor_open_bridge, enrollment_terms_prompt, filtered_bus_proxy_command,
-        parse_auth_answer, parse_stdin_ticket, password_refused_message, read_secret_line,
-        read_vendor_callback_payload, unaccepted_terms, validated_vendor_callback_uris,
-        vendor_runtime_tmp, vendor_supervisor_command,
+        Cli, EnrollmentTerm, STDIN_SECRET_REMOVED, append_filtered_session_bus_mount,
+        append_resolver_mount, append_vendor_open_bridge, enrollment_terms_prompt,
+        filtered_bus_proxy_command, password_refused_message, read_vendor_callback_payload,
+        unaccepted_terms, validated_vendor_callback_uris, vendor_runtime_tmp,
+        vendor_supervisor_command,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -5627,52 +5690,81 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use crate::ipc::{CallError, Client, Target, WireError};
+    use punar_reauth::read_secret_line;
     use serde_json::json;
-    use zeroize::Zeroizing;
 
-    /// punar-auth answers with one word, or `ok <ticket>`. Only a ticket
-    /// shaped exactly as punar-authd mints one is ever forwarded to punard;
-    /// everything else is the device failing to answer, never a statement
-    /// about the password.
-    /// `--ticket-stdin` takes `punar-auth --admin`'s answer as it prints it,
-    /// or the bare ticket. A refusal or a malformed line never reaches punard
-    /// dressed as a ticket.
+    /// Every verb that takes a password takes it from the terminal or a
+    /// socket, and the same three flags name the socket (F0-S4). The removed
+    /// stdin flags still parse — so the refusal can say what replaced them —
+    /// and are hidden from help.
     #[test]
-    fn a_piped_confirmation_is_the_ticket_or_a_reason_why_not() {
-        let token = "0123456789abcdef".repeat(4);
-        for line in [format!("ok {token}"), token.clone()] {
-            let ticket = parse_stdin_ticket(&line).unwrap().unwrap();
-            assert_eq!(ticket.as_str(), token);
+    fn every_password_verb_takes_the_socket_flags_and_hides_the_stdin_ones() {
+        for argv in [
+            &[
+                "punarctl",
+                "policy",
+                "set",
+                "security.firewall",
+                "enabled",
+                "--reason",
+                "r",
+            ][..],
+            &[
+                "punarctl",
+                "policy",
+                "clear",
+                "security.firewall",
+                "--reason",
+                "r",
+            ],
+            &["punarctl", "enroll", "start", "acme.com"],
+            &["punarctl", "enroll", "stop"],
+            &["punarctl", "update", "check"],
+            &["punarctl", "update", "apply", "2026.08.27.1"],
+            &["punarctl", "update", "rollback"],
+            &[
+                "punarctl",
+                "approvals",
+                "resolve",
+                "apr_1",
+                "--decision",
+                "approved",
+            ],
+            &["punarctl", "admins", "add", "bob"],
+            &["punarctl", "admins", "remove", "bob"],
+        ] {
+            for extra in [
+                &["--password-fd", "3"][..],
+                &["--ticket-fd", "4"],
+                &["--password-from-parent"],
+                &["--ticket-stdin"],
+                &["--password-stdin"],
+            ] {
+                let mut full: Vec<&str> = argv.to_vec();
+                full.extend_from_slice(extra);
+                assert!(Cli::try_parse_from(&full).is_ok(), "{full:?}");
+            }
+            let mut both: Vec<&str> = argv.to_vec();
+            both.extend_from_slice(&["--password-fd", "3", "--ticket-fd", "4"]);
+            assert!(
+                Cli::try_parse_from(&both).is_err(),
+                "{both:?} must conflict"
+            );
         }
-        let denied = parse_stdin_ticket("denied").unwrap_err();
-        assert!(denied.contains("not accepted"), "{denied}");
-        for bad in ["", "unavailable", "ok ../1001/aaaa", "0123"] {
-            let why = parse_stdin_ticket(bad).unwrap_err();
-            assert!(why.contains("Next step"), "{bad:?}: {why}");
-            assert!(!why.contains("sudo"), "{why}");
-        }
-    }
-
-    #[test]
-    fn punar_auth_answers_parse_to_exactly_three_outcomes() {
-        let token = "0123456789abcdef".repeat(4);
-        assert_eq!(
-            parse_auth_answer(&format!("ok {token}\n")),
-            AuthAnswer::Ticket(Zeroizing::new(token.clone()))
-        );
-        assert_eq!(parse_auth_answer("denied\n"), AuthAnswer::Denied);
-        assert_eq!(parse_auth_answer("unavailable\n"), AuthAnswer::Unavailable);
-        // An unlock-shaped `ok` carries nothing punard could spend.
-        assert_eq!(parse_auth_answer("ok\n"), AuthAnswer::Unavailable);
-        assert_eq!(
-            parse_auth_answer("ok ../../1001/aaaa\n"),
-            AuthAnswer::Unavailable
-        );
-        assert_eq!(
-            parse_auth_answer(&format!("ok {token}\nextra\n")),
-            AuthAnswer::Unavailable
-        );
-        assert_eq!(parse_auth_answer(""), AuthAnswer::Unavailable);
+        let mut help = Vec::new();
+        Cli::command()
+            .find_subcommand_mut("policy")
+            .unwrap()
+            .find_subcommand_mut("set")
+            .unwrap()
+            .write_long_help(&mut help)
+            .unwrap();
+        let help = String::from_utf8(help).unwrap();
+        assert!(help.contains("--password-fd"), "{help}");
+        assert!(!help.contains("--ticket-stdin"), "{help}");
+        assert!(!help.contains("--password-stdin"), "{help}");
+        assert!(STDIN_SECRET_REMOVED.contains("/proc/<pid>/fd"));
+        assert!(STDIN_SECRET_REMOVED.contains("--password-fd"));
     }
 
     /// A refusal names the terms the request left unaccepted; punarctl asks

@@ -273,6 +273,10 @@ pub struct EnrollStop {
 #[derive(Deserialize)]
 pub struct AuditTail {
     pub events: Vec<AuditEventView>,
+    /// Other people's events inside the window, counted and never shown
+    /// (F0-S3). Absent from a daemon older than the scoping.
+    #[serde(default)]
+    pub withheld: Option<u64>,
 }
 
 #[derive(Deserialize)]

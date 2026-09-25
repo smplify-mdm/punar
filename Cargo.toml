@@ -15,6 +15,7 @@ members = [
     "crates/punar-onboard",
     "crates/punar-pimd",
     "crates/punar-policy",
+    "crates/punar-reauth",
     "crates/punar-recovery",
     "crates/punar-secrets",
     "crates/punar-smplifyd",
@@ -45,6 +46,7 @@ punar-mock-smplify = { path = "crates/punar-mock-smplify" }
 # key sets an organization receives are asserted end to end.
 punar-smplifyd = { path = "crates/punar-smplifyd" }
 punar-policy = { path = "crates/punar-policy" }
+punar-reauth = { path = "crates/punar-reauth" }
 punar-recovery = { path = "crates/punar-recovery" }
 
 # External

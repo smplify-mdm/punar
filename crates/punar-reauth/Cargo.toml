@@ -1,0 +1,17 @@
+[package]
+name = "punar-reauth"
+description = "The one client library for a person's password: terminal or socket in, a punar-authd ticket out, holders non-dumpable (F0-S4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Deliberately NOT punar-auth: that crate links libpam, and a client that
+# only relays a password to punar-authd must not carry an authenticator in its
+# address space. The wire contract is small and pinned by a test here against
+# the same bytes punar-auth's relay writes.
+rustix = { workspace = true, features = ["event", "fs", "net", "process", "termios"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+zeroize = { workspace = true }

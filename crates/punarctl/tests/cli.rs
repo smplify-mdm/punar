@@ -3111,75 +3111,128 @@ fn policy_set_respond(request: &Value) -> Result<Value, Value> {
     }
 }
 
-/// `--ticket-stdin` takes `punar-auth --admin`'s answer exactly as it prints
-/// it, or the bare ticket, and punard receives the bare ticket either way.
-/// Without a terminal and without the flag, nothing is invented: the request
+/// Run punarctl with `payload` waiting on descriptor 3, which is a socket
+/// when `socket` and a pipe otherwise — the two shapes a caller can hand it.
+/// `sh` moves the descriptor into place (`3<&0`) so no test code needs to
+/// touch raw descriptors.
+fn run_with_fd3(punard: &PathBuf, args: &[&str], payload: &str, socket: bool) -> Output {
+    use std::os::fd::OwnedFd;
+    use std::process::Stdio;
+    let stdin = if socket {
+        let (mut ours, theirs) = UnixStream::pair().expect("socketpair");
+        ours.write_all(payload.as_bytes()).expect("write payload");
+        drop(ours);
+        Stdio::from(OwnedFd::from(theirs))
+    } else {
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        writer.write_all(payload.as_bytes()).expect("write payload");
+        drop(writer);
+        Stdio::from(OwnedFd::from(reader))
+    };
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg("exec \"$0\" \"$@\" 3<&0 0</dev/null")
+        .arg(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", punard)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
+        .env("NO_COLOR", "1")
+        .stdin(stdin)
+        .output()
+        .expect("run punarctl")
+}
+
+/// A confirmation reaches punarctl on a socket and punard receives the bare
+/// ticket, whichever form it arrived in; the same bytes on a pipe are refused
+/// before anything is sent, because a pipe can be read by any program running
+/// as the person (F0-S4). The stdin flags are gone and say what replaced
+/// them. With no terminal and no source, nothing is invented: the request
 /// goes without a confirmation and punard's refusal is what prints.
 #[test]
-fn policy_set_takes_the_confirmation_as_punar_auth_prints_it() {
+fn policy_set_takes_a_confirmation_from_a_socket_and_never_a_pipe() {
     let socket = start_mock_with(policy_set_respond);
-    let unused = std::env::temp_dir().join("punarctl-no-secrets.sock");
-    for piped in [
-        format!("ok {POLICY_TICKET}\n"),
-        format!("{POLICY_TICKET}\n"),
-    ] {
+    let set = [
+        "policy",
+        "set",
+        "security.firewall",
+        "disabled",
+        "--reason",
+        "lab bench",
+        "--ticket-fd",
+        "3",
+    ];
+    // A seccomp filter (Docker's default profile) refuses the pidfd_getfd a
+    // descriptor number needs; punarctl then says so in words, and the
+    // descriptor legs below cannot run. In CI and on a device they do.
+    let filtered = fs::read_to_string("/proc/self/status")
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line.starts_with("Seccomp:") && line.trim_end().ends_with('2'));
+    if filtered {
+        let output = run_with_fd3(&socket, &set, &format!("ok {POLICY_TICKET}\n"), true);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(stderr(&output).contains("seccomp"), "{}", stderr(&output));
+        eprintln!("note: seccomp refuses pidfd_getfd here; the descriptor legs are skipped");
+    } else {
+        for payload in [
+            format!("ok {POLICY_TICKET}\n"),
+            format!("{POLICY_TICKET}\n"),
+        ] {
+            let output = run_with_fd3(&socket, &set, &payload, true);
+            assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        }
+        let clear = [
+            "policy",
+            "clear",
+            "security.firewall",
+            "--reason",
+            "back to the org",
+            "--ticket-fd",
+            "3",
+        ];
+        let output = run_with_fd3(&socket, &clear, &format!("ok {POLICY_TICKET}\n"), true);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+        // The same ticket on a pipe never leaves punarctl.
+        let output = run_with_fd3(&socket, &set, &format!("ok {POLICY_TICKET}\n"), false);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let text = stderr(&output);
+        assert!(text.contains("not a socket"), "{text}");
+        assert!(text.contains("Nothing was changed"), "{text}");
+
+        // punar-auth's refusal is not a ticket, and says so without a round
+        // trip.
+        let output = run_with_fd3(&socket, &set, "denied\n", true);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(stderr(&output).contains("not a confirmation ticket"));
+    }
+
+    // The removed flags refuse, naming what replaced them.
+    for flag in ["--ticket-stdin", "--password-stdin"] {
         let output = run_m9(
             &socket,
-            &unused,
+            &std::env::temp_dir().join("punarctl-no-secrets.sock"),
             &[
                 "policy",
                 "set",
                 "security.firewall",
                 "disabled",
                 "--reason",
-                "lab bench",
-                "--ticket-stdin",
+                "x",
+                flag,
             ],
-            Some(&piped),
+            Some(&format!("ok {POLICY_TICKET}\n")),
         );
-        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let text = stderr(&output);
+        assert!(text.contains("--password-fd"), "{text}");
+        assert!(text.contains("/proc/<pid>/fd"), "{text}");
     }
-    let output = run_m9(
-        &socket,
-        &unused,
-        &[
-            "policy",
-            "clear",
-            "security.firewall",
-            "--reason",
-            "back to the org",
-            "--ticket-stdin",
-        ],
-        Some(&format!("ok {POLICY_TICKET}\n")),
-    );
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 
-    // punar-auth's refusal is not a ticket, and says so without a round trip.
+    // No terminal, no source: the refusal names a command that asks.
     let output = run_m9(
         &socket,
-        &unused,
-        &[
-            "policy",
-            "set",
-            "security.firewall",
-            "disabled",
-            "--reason",
-            "x",
-            "--ticket-stdin",
-        ],
-        Some("denied\n"),
-    );
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("not accepted"),
-        "{}",
-        stderr(&output)
-    );
-
-    // No terminal, no flag: the refusal names a command that asks.
-    let output = run_m9(
-        &socket,
-        &unused,
+        &std::env::temp_dir().join("punarctl-no-secrets.sock"),
         &[
             "policy",
             "set",
@@ -3194,6 +3247,63 @@ fn policy_set_takes_the_confirmation_as_punar_auth_prints_it() {
     let text = stderr(&output);
     assert!(text.contains("it asks for your password"), "{text}");
     assert!(!text.contains("sudo"), "{text}");
+}
+
+/// `--password-from-parent`: the path of the private socket is the first line
+/// punarctl prints, the program that started it hands the password over that
+/// socket, and punarctl then asks punar-authd — which does not exist in this
+/// test, so the honest answer is that the device could not check, never that
+/// the password was wrong. The rendezvous leaves no name behind.
+#[test]
+fn the_password_comes_from_the_parent_over_a_private_socket() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let socket = start_mock_with(policy_set_respond);
+    let runtime = std::env::temp_dir().join(format!("punarctl-xdg-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&runtime);
+    fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args([
+            "policy",
+            "set",
+            "security.firewall",
+            "disabled",
+            "--reason",
+            "lab bench",
+            "--password-from-parent",
+        ])
+        .env("PUNARD_SOCKET", &socket)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn punarctl");
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    out.read_line(&mut first).unwrap();
+    let path = first
+        .trim_end()
+        .strip_prefix("password-socket ")
+        .unwrap_or_else(|| panic!("first line names the socket: {first:?}"))
+        .to_string();
+    assert!(path.starts_with(runtime.join("punar-reauth").to_str().unwrap()));
+    let mut stream = UnixStream::connect(&path).expect("connect to the rendezvous");
+    stream.write_all(b"three amber rivers\n").unwrap();
+    drop(stream);
+    let status = child.wait().unwrap();
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+    assert_eq!(status.code(), Some(1), "{err}");
+    assert!(err.contains("could not check your password"), "{err}");
+    assert!(!err.contains("not accepted"), "{err}");
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "no name is left behind"
+    );
+    let _ = fs::remove_dir_all(&runtime);
 }
 
 /// **Exit 4 is real.** An agent-originated mutation the AI policy gates
