@@ -221,9 +221,10 @@ DeferredSurfaceBase {
         root.failure = "";
         root.pending = kind;
         // Fixed argv, chosen by a switch over a closed set — never assembled
-        // from a string that reached this surface from anywhere else. Absolute
-        // paths: this surface must not depend on whatever PATH the login
-        // manager happened to hand the session.
+        // from a string that reached this surface from anywhere else: the
+        // `punarctl session` verb a terminal uses, which runs the same
+        // compositor exit and logind calls. Absolute path: this surface must
+        // not depend on whatever PATH the login manager handed the session.
         root.lastExit = -1;
         // exec() can throw before anything is started at all. Unguarded, that
         // left `pending` set with no process to ever clear it, and every row
@@ -231,11 +232,11 @@ DeferredSurfaceBase {
         // kind this surface was rewritten to stop having.
         try {
             if (kind === "sessionEnd")
-                power.exec(["/usr/bin/hyprctl", "dispatch", "exit"]);
+                power.exec(["/usr/bin/punarctl", "session", "end"]);
             else if (kind === "systemRestart")
-                power.exec(["/usr/bin/systemctl", "reboot"]);
+                power.exec(["/usr/bin/punarctl", "session", "restart"]);
             else if (kind === "systemPowerOff")
-                power.exec(["/usr/bin/systemctl", "poweroff"]);
+                power.exec(["/usr/bin/punarctl", "session", "shutdown"]);
         } catch (e) {
             root.settle(127);
         }

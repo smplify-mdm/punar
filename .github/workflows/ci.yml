@@ -363,6 +363,7 @@ jobs:
             tests/desktop/evolution-defaults-contract-test.sh \
             tests/desktop/bar-affordance-contract-test.sh \
             tests/desktop/system-control-parity-contract-test.sh \
+            tests/desktop/terminal-parity-gate-test.sh \
             tests/desktop/mail-identity-contract-test.sh \
             tests/desktop/qml-inline-component-depth-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
@@ -433,6 +434,13 @@ jobs:
       # policy command a person could run.
       - name: Validate System Control's parity claims and refusal handling
         run: ./tests/desktop/system-control-parity-contract-test.sh
+
+      # Terminal parity by construction: every process the shell starts is
+      # punarctl, a helper scoped to one file with its reason, or a documented
+      # funnel; and every System Control view names its punarctl verb (the
+      # punarctl unit tests prove each verb parses).
+      - name: Check the shell runs punarctl for what a terminal can do
+        run: ./tests/desktop/terminal-parity-gate-test.sh
 
       # The app id, the desktop file id and StartupWMClass must agree, because
       # the shell joins a running window to its product name by the desktop

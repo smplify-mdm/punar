@@ -693,6 +693,65 @@ ShellRoot {
             notificationCenterSurface.releaseIfClosed();
             return result;
         }
+
+        // Terminal parity (`punarctl notifications`). Read straight from the
+        // daemon through its sanitising accessors, so a terminal sees exactly
+        // the words the centre draws, newest first, and nothing a sender
+        // could use to steer a terminal. No surface is loaded to answer.
+        function list(): string {
+            var out = [];
+            var live = Notifications.tracked;
+            for (var i = live.length - 1; i >= 0; i--) {
+                var n = live[i];
+                if (n === null || n === undefined)
+                    continue;
+                var actions = [];
+                var offered = Notifications.actionsOf(n);
+                for (var j = 0; j < offered.length; j++) {
+                    actions.push({
+                        key: Notifications.sanitize(offered[j].identifier, Notifications.maxActionLabelChars),
+                        label: Notifications.actionLabelOf(offered[j])
+                    });
+                }
+                var at = Notifications.arrivedAt[Notifications.key(n)];
+                out.push({
+                    id: Notifications.key(n),
+                    source: Notifications.sourceOf(n),
+                    summary: Notifications.sentenceOf(n),
+                    detail: Notifications.detailOf(n),
+                    urgency: Notifications.urgencyOf(n),
+                    sticky: Notifications.sticky(n),
+                    arrived_at: typeof at === "number" ? new Date(at).toISOString() : null,
+                    actions: actions
+                });
+            }
+            return JSON.stringify({
+                notifications: out,
+                dnd: Notifications.dnd
+            });
+        }
+        // Dismiss one record by id; the id back, or "" when there is none.
+        function dismissId(id: string): string {
+            var n = Notifications.byKey(id);
+            if (n === null)
+                return "";
+            Notifications.dismiss(n);
+            return id;
+        }
+        // Invoke one of a record's own actions, by the key `list` printed.
+        function invoke(id: string, key: string): string {
+            var n = Notifications.byKey(id);
+            if (n === null)
+                return "no-notification";
+            var offered = Notifications.actionsOf(n);
+            for (var j = 0; j < offered.length; j++) {
+                if (Notifications.sanitize(offered[j].identifier, Notifications.maxActionLabelChars) === key) {
+                    Notifications.invokeAction(offered[j]);
+                    return "ok";
+                }
+            }
+            return "no-action";
+        }
     }
 
     // The volume/brightness OSD (Plate D-009 Sect III) — the one surface

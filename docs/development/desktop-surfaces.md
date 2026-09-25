@@ -184,10 +184,10 @@ prints fire that view's actions.
 | System · Network | `/proc/net/route` → `/sys/class/net/<if>/{operstate,address}` |
 | System · Displays | `Hyprland.monitors` (live via socket2) |
 | System · Audio | PipeWire default sink/source, live |
-| System · Power | `/sys/class/power_supply/BAT0/{capacity,status}` |
+| System · Power | `punarctl device posture --json`: `power.batteries`, found by the classifier's rule |
 | Security · Device | `punarctl status --json` + §40 explain cards |
-| Security · Encryption | `/sys/block/dm-0/dm/uuid` (LUKS detection) |
-| Security · Secure Boot | the EFI `SecureBoot` efivar + the daemon's attestation word — carries the **dashed SIMULATED · VM** tag |
+| Security · Encryption | `punarctl device posture --json`: `disk_encryption_enabled`, the one LUKS2 answer (every data path) |
+| Security · Secure Boot | `punarctl device posture --json` (Secure Boot, TPM, virtual) + the daemon's attestation word — carries the **dashed SIMULATED · VM** tag |
 | **Security · Firewall** | `punarctl capabilities --json` + `punarctl policy effective --json`; live toggle, drift promise, keyed action row |
 | AI · Agents / Permissions | `/run/punar/agents.json` |
 | Developer · Projects | live Hyprland workspaces |

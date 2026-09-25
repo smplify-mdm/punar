@@ -12,14 +12,14 @@
 //! app already has instead of starting a second copy. The candidates are the
 //! ones Apps.qml derives (the desktop id, the executable, and the catalog's
 //! own window ids), and the focus request is the same Hyprland dispatcher
-//! expression HyprlandActions.qml sends. Outside a Hyprland session there is
-//! nothing to raise and the app simply starts.
+//! expression `punarctl window focus --class` sends, over the compositor's
+//! own socket ([`crate::hypr`]). Outside a Hyprland session there is nothing
+//! to raise and the app simply starts.
 
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
@@ -27,10 +27,6 @@ use serde_json::Value;
 /// same file and hides them; `app list --all` lists them marked, so the two
 /// surfaces differ only on purpose, and visibly.
 pub const LAUNCHER_HIDDEN: &str = "/usr/share/punar/catalog/launcher-hidden-entries.json";
-
-/// The compositor's CLI, absolute for the reason ControlData.qml gives: this
-/// must not depend on whatever PATH the session handed us.
-const HYPRCTL: &str = "/usr/bin/hyprctl";
 
 /// Bounds on the scan, so a hostile or enormous data directory costs a
 /// bounded amount of work.
@@ -413,7 +409,7 @@ pub fn entry_candidates(entry: &DesktopEntry) -> BTreeSet<String> {
 }
 
 /// The class of the first open window whose class matches a candidate, from
-/// `hyprctl -j clients`.
+/// `j/clients`.
 pub fn matching_class(clients: &Value, candidates: &BTreeSet<String>) -> Option<String> {
     clients.as_array()?.iter().find_map(|client| {
         let class = client.get("class").and_then(Value::as_str)?.trim();
@@ -422,8 +418,9 @@ pub fn matching_class(clients: &Value, candidates: &BTreeSet<String>) -> Option<
     })
 }
 
-/// HyprlandActions.qml's `focusWindow("class:^<class>$")`: the class is a
-/// regex-escaped literal inside a Lua string literal.
+/// A window-focus dispatcher for one class: the class is a regex-escaped
+/// literal inside a Lua string literal, so it can neither widen the selector
+/// nor end the string.
 pub fn focus_expression(class: &str) -> String {
     let mut pattern = String::new();
     for c in class.chars() {
@@ -432,50 +429,26 @@ pub fn focus_expression(class: &str) -> String {
         }
         pattern.push(c);
     }
-    let selector = format!("class:^{pattern}$");
-    let mut lua = String::from("'");
-    for c in selector.chars() {
-        match c {
-            '\\' => lua.push_str("\\\\"),
-            '\'' => lua.push_str("\\'"),
-            '\r' => lua.push_str("\\r"),
-            '\n' => lua.push_str("\\n"),
-            other => lua.push(other),
-        }
-    }
-    lua.push('\'');
-    format!("hl.dsp.focus({{ window = {lua} }})")
+    format!(
+        "hl.dsp.focus({{ window = {} }})",
+        crate::hypr::lua_string(&format!("class:^{pattern}$"))
+    )
 }
 
 /// Raise an open window of the app, when this is a Hyprland session and one
 /// is open. `true` only when Hyprland answered `ok`, so the caller never
 /// claims a focus that did not happen and launches instead.
 pub fn focus_existing(candidates: &BTreeSet<String>) -> bool {
-    if env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() || candidates.is_empty() {
+    if candidates.is_empty() {
         return false;
     }
-    let Ok(output) = Command::new(HYPRCTL)
-        .args(["-j", "clients"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    let Ok(clients) = serde_json::from_slice::<Value>(&output.stdout) else {
+    let Ok(clients) = crate::hypr::json("clients") else {
         return false;
     };
     let Some(class) = matching_class(&clients, candidates) else {
         return false;
     };
-    Command::new(HYPRCTL)
-        .args(["dispatch", &focus_expression(&class)])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|done| {
-            done.status.success() && String::from_utf8_lossy(&done.stdout).trim() == "ok"
-        })
+    crate::hypr::dispatch(&focus_expression(&class)).is_ok()
 }
 
 #[cfg(test)]

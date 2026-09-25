@@ -21,6 +21,9 @@
 #   * System Control wrote a workspace binding straight into the state file,
 #     with its own rules and no refusal to show. The shell also read
 #     ~/.local/state even when punarctl wrote under $XDG_STATE_HOME.
+#   * Encryption, Secure Boot and Power read sysfs themselves. Encryption
+#     looked at dm-0 alone, a second LUKS2 answer that could disagree with
+#     the one punard reports to an organization and the Mail vault requires.
 #
 # Each rule below is mechanical: it reads the source, not a screenshot.
 set -euo pipefail
@@ -135,6 +138,18 @@ if re.search(r"function (use|bindToFocusedWorkspace)\(", browser):
     fail("context", "BrowserContext.qml still writes a person's choice itself")
 if "XDG_STATE_HOME" not in browser:
     fail("context", "BrowserContext.qml does not read the file punarctl writes")
+
+# 9. Encryption, Secure Boot and Power come from `punarctl device posture`,
+#    the device.posture answer, not from sysfs read on the side.
+if '"punarctl", "device", "posture", "--json"' not in control:
+    fail("posture", "ControlData.qml does not run `punarctl device posture --json`")
+for needle, what in [
+    ("/sys/block/dm-", "a device-mapper UUID"),
+    ("SecureBoot-8be4df61", "the SecureBoot EFI variable"),
+    ("/sys/class/power_supply", "the power_supply directory"),
+]:
+    if needle in control:
+        fail("posture", f"ControlData.qml reads {what} itself instead of device.posture")
 
 if problems:
     for problem in problems:

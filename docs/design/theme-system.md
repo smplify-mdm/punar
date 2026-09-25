@@ -20,18 +20,18 @@ strongest reason to ship it first.
 ## 0. Claim register (spec §1.22 · design language §7)
 
 Punar's stroke semantics apply to prose too: a solid claim is an operating
-path; a dashed claim is a mechanism that is designed but not shipped. Nothing
-in this document is implemented today.
+path; a dashed claim is a mechanism that is designed but not shipped. Rows
+03-07 were updated on 2026-09-24, when `punarctl theme` shipped.
 
-| # | Mechanism | Stroke | Where it stands (2026-08-25) |
+| # | Mechanism | Stroke | Where it stands |
 |---|---|---|---|
 | 01 | Token file consumed at runtime by the shell (`Theme.qml`, `FileView`, `blockLoading`) | **solid** | Shipped since M1. `shell/punar-shell/Theme/Theme.qml` already reloads on file change and has typed fallbacks. |
 | 02 | Design-language colour semantics (`ok`/`warn`/`bad` = allow / approval_required / deny) | **solid** | Shipped; §2 of the design language, `color.semantics` in the token file. |
-| 03 | `themes/` directory, per-theme documents, active pointer | *dashed* | Specified here (§3). No files exist. |
-| 04 | `punarctl theme validate` and the contrast gate | *dashed* | Specified here (§4), including the exact arithmetic. No code exists. |
-| 05 | The seven shipped themes | *dashed* | Palettes exist as data in §5 and every one of them passes the §4 gate as computed. They are not installed anywhere. |
-| 06 | Switching without restart (pointer → `FileView` → repaint) | *dashed* | The mechanism is the one the shell already uses for `status.json`/`alerts.json`; the theme wiring is not written. |
-| 07 | Derived terminal / border / background / wallpaper output | *dashed* | Derivations are specified in §7 and were computed for all seven themes. `foot.ini` and `punar-look.conf` still carry hand-transcribed v0 values. |
+| 03 | `themes/` directory, per-theme documents, active pointer | **solid** | `shell/theme/themes/`, staged to `/usr/share/punar/theme/themes/`; the pointer at `~/.config/punar/theme.json`. |
+| 04 | `punarctl theme validate` and the contrast gate | **solid** | Two implementations that must agree: `Theme/ThemeContrast.qml` in the shell and `crates/punarctl/src/theme.rs`. The Rust unit tests reproduce §5.3, §5.4 and §7.1 for all seven themes, and the shipped pointer's digest. Both compare at full precision (§4.1). The QML compared the rounded value until 2026-09-24, which let a 4.497 pair pass. `list`, `show`, `validate`, `set`, `reset`, `status` and `render` ship. The org-pin denial (exit 3) does not, because no pin exists (08). |
+| 05 | The seven shipped themes | **solid** | Installed with the shell; every one passes the gate (§5.3). |
+| 06 | Switching without restart (pointer → `FileView` → repaint) | **solid** | `Theme.qml` watches the pointer. `punarctl theme set` writes it with the complete receipt, including the SHA-256 digest the shell cannot compute, then calls `ipc call theme reload`. |
+| 07 | Derived terminal / border / background / wallpaper output | *dashed* | `punarctl theme render` prints each derivation. `theme set` does not write them yet, because nothing in the image sources a generated `foot.ini` or `punar-theme.conf`, and a file nothing reads is not a feature. The wallpaper target prints the three derived colours per variant, not an SVG: the shipped drawings do not follow §7.3's three-colour rule exactly. `foot.ini` and `punar-look.conf` still carry the v0 values. |
 | 08 | Managed pinning via a desired-state `appearance` block | *dashed* | Schema shape proposed in §8; `schemas/desired-state/desired-state.json` does not model it yet. |
 | 09 | An org pin as a *security* control | **never** | Refused by construction. A pinned theme is a configuration control on a user-owned session, and this document says so in §8.3 rather than implying otherwise. |
 

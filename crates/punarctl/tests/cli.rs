@@ -4384,3 +4384,148 @@ fn app_open_runs_a_desktop_entry_and_names_what_is_missing() {
     );
     let _ = fs::remove_dir_all(&home);
 }
+
+// ---------------------------------------------------------------------------
+// `device` and `device posture` (terminal parity, step 6)
+// ---------------------------------------------------------------------------
+
+fn fixture_device_posture(encrypted: Option<bool>) -> Value {
+    json!({
+        "posture": {
+            "secure_boot": true, "uefi": true, "tpm_present": true, "tpm_version": "2.0",
+            "is_virtual": true, "virtualization": "kvm",
+            "disk_encryption_enabled": encrypted,
+            "firewall_enabled": true, "firewall": "nftables",
+            "os_patch_status": "unknown", "reboot_required": null
+        },
+        "hardware": {
+            "manufacturer": "QEMU", "model_name": "Standard PC (Q35 + ICH9, 2009)",
+            "bios_version": "1.16.3", "cpu_model": "QEMU Virtual CPU",
+            "cpu_vendor": "AuthenticAMD", "cpu_cores": 2, "cpu_threads": 4,
+            "memory_total_bytes": 8589934592u64, "device_capacity_bytes": 128000000000u64,
+            "root_filesystem_type": "erofs", "battery_present": true
+        },
+        "power": {"batteries": [{"name": "BAT0", "capacity_percent": 64, "status": "Charging"}]},
+        "checked_at": "2026-09-24T10:00:00Z"
+    })
+}
+
+fn device_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "device.posture" => {
+            assert!(request.get("params").is_none(), "{request}");
+            Ok(fixture_device_posture(Some(true)))
+        }
+        _ => respond(request),
+    }
+}
+
+/// punard is up, but `status` fails: the identity rows drop out and the
+/// rest of `device` still answers.
+fn device_without_status_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "device.posture" => Ok(fixture_device_posture(None)),
+        "status" => Err(json!({"code": "internal", "message": "status failed", "details": {}})),
+        _ => respond(request),
+    }
+}
+
+/// What the device can prove about itself, in the posture's own words, and
+/// the same result verbatim with --json.
+#[test]
+fn device_posture_renders_every_state_and_round_trips() {
+    let socket = start_mock_with(device_respond);
+    let output = run(&socket, &["device", "posture"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let row = |label: &str| {
+        text.lines()
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label} row:\n{text}"))
+            .to_string()
+    };
+    assert!(row("ENCRYPTION").contains("LUKS2"), "{text}");
+    assert!(
+        row("ENCRYPTION").contains("every data path (/var, /home)"),
+        "{text}"
+    );
+    assert!(row("SECURE BOOT").contains("ENABLED"), "{text}");
+    assert!(row("TPM").contains("2.0"), "{text}");
+    assert!(
+        row("VIRTUAL").contains("kvm · Secure Boot and TPM here are the hypervisor's"),
+        "{text}"
+    );
+    assert!(row("FIREWALL").contains("ENABLED"), "{text}");
+    assert!(row("UPDATES").contains("UNKNOWN"), "{text}");
+    assert!(
+        text.contains("THE POSTURE A MANAGING ORGANIZATION RECEIVES"),
+        "{text}"
+    );
+
+    for args in [
+        &["--json", "device", "posture"][..],
+        &["--json", "device"][..],
+    ] {
+        let output = run(&socket, args);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let parsed: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+        assert_eq!(parsed, fixture_device_posture(Some(true)), "{args:?}");
+    }
+}
+
+/// `device`: identity and class from status, then hardware and power.
+#[test]
+fn device_renders_identity_hardware_and_power() {
+    let socket = start_mock_with(device_respond);
+    let output = run(&socket, &["device"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("DEVICE        PERSONAL")),
+        "{text}"
+    );
+    assert!(text.contains("dev_9f3k2v8q1x · not enrolled"), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("MAKER") && l.contains("QEMU")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("CPU") && l.contains("4 THREADS")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("MEMORY") && l.contains("8.0 GIB")),
+        "{text}"
+    );
+    assert!(text.contains("POWER"), "{text}");
+    let battery = text.lines().find(|l| l.starts_with("BAT0")).expect(&text);
+    assert!(
+        battery.contains("64 %") && battery.contains("Charging"),
+        "{battery}"
+    );
+}
+
+/// A failed `status` read costs only the identity rows; an unknown
+/// encryption answer says unknown, never "not encrypted".
+#[test]
+fn device_degrades_without_status_and_keeps_unknown_unknown() {
+    let socket = start_mock_with(device_without_status_respond);
+    let output = run(&socket, &["device"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(!text.lines().any(|l| l.starts_with("DEVICE ")), "{text}");
+    assert!(text.lines().any(|l| l.starts_with("MAKER")), "{text}");
+
+    let output = run(&socket, &["device", "posture"]);
+    let text = stdout(&output);
+    let encryption = text
+        .lines()
+        .find(|l| l.starts_with("ENCRYPTION"))
+        .expect(&text);
+    assert!(encryption.contains("UNKNOWN"), "{encryption}");
+    assert!(!encryption.contains("NOT ENCRYPTED"), "{encryption}");
+}

@@ -10,6 +10,9 @@ publish.workspace = true
 base64 = { workspace = true }
 clap = { workspace = true }
 punar-common = { workspace = true }
+# The workspace-name rule and the shell's workspace store, shared with the
+# shell's own writer so `punarctl workspace` cannot drift from it.
+punar-workspace = { workspace = true }
 # rustix (M9, docs/development/milestone-9.md section 4.3): inotify +
 # poll behind `punarctl approvals wait`. Waiting is a client concern —
 # the daemon answers `approval_required` immediately and must not park a

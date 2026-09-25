@@ -1128,6 +1128,11 @@ impl AuditTailParams {
 pub enum Method {
     /// `status` — daemon/device summary. Read; any connected peer.
     Status,
+    /// `device.posture` — the device's own posture, hardware and power: the
+    /// same Posture and Hardware the managed inventory sends an organization,
+    /// readable by the person at the device. Read; any connected peer, like
+    /// `status`.
+    DevicePosture,
     /// `capabilities.list` — all registry descriptors, observed live. Read.
     CapabilitiesList,
     /// `capabilities.get` — one descriptor. Read.
@@ -1267,8 +1272,9 @@ pub enum Method {
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 44] = [
+    pub const NAMES: [&'static str; 45] = [
         "status",
+        "device.posture",
         "capabilities.list",
         "capabilities.get",
         "capabilities.set",
@@ -1319,6 +1325,7 @@ impl Method {
     pub fn name(&self) -> &'static str {
         match self {
             Method::Status => "status",
+            Method::DevicePosture => "device.posture",
             Method::CapabilitiesList => "capabilities.list",
             Method::CapabilitiesGet(_) => "capabilities.get",
             Method::CapabilitiesSet(_) => "capabilities.set",
@@ -1372,6 +1379,7 @@ impl Method {
     pub fn requires_root(&self) -> bool {
         match self {
             Method::Status
+            | Method::DevicePosture
             | Method::CapabilitiesList
             | Method::CapabilitiesGet(_)
             | Method::AuditTail(_)
@@ -1452,6 +1460,7 @@ impl Method {
     pub fn params_value(&self) -> Option<Value> {
         let params = match self {
             Method::Status
+            | Method::DevicePosture
             | Method::CapabilitiesList
             | Method::Reconcile
             | Method::PolicyEffective
@@ -1507,6 +1516,9 @@ impl Method {
     pub fn from_wire(method: &str, params: Option<Value>) -> Result<Method, IpcError> {
         match method {
             "status" => Self::expect_no_params(method, params).map(|()| Method::Status),
+            "device.posture" => {
+                Self::expect_no_params(method, params).map(|()| Method::DevicePosture)
+            }
             "capabilities.list" => {
                 Self::expect_no_params(method, params).map(|()| Method::CapabilitiesList)
             }
@@ -2275,6 +2287,19 @@ pub struct StatusResult {
     pub org: Option<OrgInfo>,
 }
 
+/// `device.posture` result: what the device can prove about itself, read now.
+/// `posture` and `hardware` are the managed inventory's own types, filled by
+/// the same collector, so the person and their organization read one
+/// answer. `power` is local only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DevicePostureResult {
+    pub posture: crate::device::Posture,
+    pub hardware: crate::device::Hardware,
+    pub power: crate::device::DevicePower,
+    /// RFC 3339, when this answer was read.
+    pub checked_at: String,
+}
+
 // ---------------------------------------------------------------------------
 // M4: compliance and policy result types (contract sections 5.1, 5.6–5.8)
 // ---------------------------------------------------------------------------
@@ -2714,6 +2739,7 @@ mod tests {
     fn every_method() -> Vec<Method> {
         let methods = vec![
             Method::Status,
+            Method::DevicePosture,
             Method::CapabilitiesList,
             Method::CapabilitiesGet(CapabilitiesGetParams {
                 capability: CapabilityId::new("security.firewall").unwrap(),

@@ -63,9 +63,12 @@
 
 mod desktop;
 mod fmt;
+mod hypr;
 mod ipc;
 mod model;
 mod peer;
+mod session;
+mod theme;
 mod views;
 mod watch;
 mod webapps;
@@ -140,6 +143,64 @@ enum Command {
         /// shows every row.
         #[arg(long)]
         all: bool,
+    },
+    /// Workspaces of this session: list them, switch, name them, or open a
+    /// named project workspace.
+    Workspace {
+        #[command(subcommand)]
+        command: session::WorkspaceCommand,
+    },
+    /// Apply a tiling layout preset (balanced, columns, rows, focus, stack,
+    /// next, prev, restore), or show the current one with `status`.
+    Layout {
+        #[arg(value_parser = session::LAYOUT_ARGS)]
+        preset: String,
+    },
+    /// Windows of this session: list, show the focused one, raise, close, or
+    /// kill one exact window.
+    Window {
+        #[command(subcommand)]
+        command: session::WindowCommand,
+    },
+    /// Lock the screen, end the session, restart or shut down.
+    Session {
+        #[command(subcommand)]
+        command: session::SessionCommand,
+    },
+    /// Notifications of this session: list, dismiss, clear, invoke an
+    /// action, or do not disturb.
+    Notifications {
+        #[command(subcommand)]
+        command: session::NotificationsCommand,
+    },
+    /// Themes: list, inspect, validate, select, reset, and render the
+    /// derived terminal, compositor and wallpaper values.
+    Theme {
+        #[command(subcommand)]
+        command: theme::ThemeCommand,
+    },
+    /// The desktop wallpaper: list, select, reset or show the active one.
+    Wallpaper {
+        #[command(subcommand)]
+        command: theme::WallpaperCommand,
+    },
+    /// Connected displays.
+    Display {
+        #[command(subcommand)]
+        command: session::DisplayCommand,
+    },
+    /// Output and input volume and mute.
+    Audio {
+        #[command(subcommand)]
+        command: session::AudioCommand,
+    },
+    /// Show this device: identity, class, hardware and power. `device
+    /// posture` shows what it can prove about its own security: disk
+    /// encryption, Secure Boot, TPM, firewall and updates. Both read
+    /// `device.posture`, the same answer a managing organization receives.
+    Device {
+        #[command(subcommand)]
+        command: Option<DeviceCommand>,
     },
     /// Enroll this device with an organization, or inspect/stop the
     /// enrollment (Milestone 5 — against the dev/CI mock control plane).
@@ -463,6 +524,13 @@ enum AlertsCommand {
         /// Alert id, like `alr_7c1d9a4e`.
         alert_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum DeviceCommand {
+    /// Disk encryption, Secure Boot, TPM, virtualization, firewall and
+    /// update state, as the device can prove them.
+    Posture,
 }
 
 #[derive(Subcommand)]
@@ -4447,6 +4515,39 @@ fn main() -> ExitCode {
             }),
             Err(error) => fail(&error),
         },
+        Command::Workspace { command } => session::workspace(command, &style, json),
+        Command::Layout { preset } => session::layout(&preset, &style, json),
+        Command::Window { command } => session::window(command, &style, json),
+        Command::Session { command } => session::session(command, &style, json),
+        Command::Display { command } => session::display(command, &style, json),
+        Command::Notifications { command } => session::notifications(command, &style, json),
+        Command::Theme { command } => theme::theme(command, &style, json),
+        Command::Wallpaper { command } => theme::wallpaper(command, &style, json),
+        Command::Audio { command } => session::audio(command, &style, json),
+        Command::Device { command } => match client.call("device.posture", None) {
+            // `--json` is the device.posture result verbatim for both verbs.
+            // The human `device` view adds the identity and class rows from
+            // `status`, a second read; they are left out if it fails.
+            Ok(result) => {
+                let hostname = local_hostname();
+                match command {
+                    Some(DeviceCommand::Posture) => render_or_json(json, &result, |v| {
+                        views::device_posture(&style, v, &hostname)
+                    }),
+                    None => {
+                        let status = if json {
+                            None
+                        } else {
+                            client.call("status", None).ok()
+                        };
+                        render_or_json(json, &result, |v| {
+                            views::device(&style, v, status.as_ref(), &hostname)
+                        })
+                    }
+                }
+            }
+            Err(error) => fail(&error),
+        },
         Command::Enroll { command } => {
             let hostname = local_hostname();
             match command {
@@ -6499,6 +6600,32 @@ mod tests {
         assert_eq!(document["apps"][0]["hidden_in_launcher"], false);
         assert_eq!(document["launcher_hidden_list"], serde_json::Value::Null);
         assert_eq!(document["launcher_hidden_error"], "it could not be read");
+    }
+
+    /// Terminal parity, rule 2: every System Control view's verb in
+    /// tests/desktop/system-control-verbs.json is a command this punarctl
+    /// accepts. The desktop gate checks the table covers every view; this
+    /// checks the table names real verbs.
+    #[test]
+    fn every_system_control_view_verb_parses() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/desktop/system-control-verbs.json"
+        ))
+        .unwrap();
+        let views = table["views"].as_object().unwrap();
+        assert!(views.len() >= 20, "the table lost its views");
+        for (view, entry) in views {
+            let Some(verb) = entry.get("verb").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let mut argv = vec!["punarctl".to_string()];
+            argv.extend(verb.iter().map(|word| word.as_str().unwrap().to_string()));
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "System Control's {view} view names `{}`, which punarctl does not accept",
+                argv.join(" ")
+            );
+        }
     }
 
     /// `audit tail` defaults to 20 events (docs/api/ipc.md section 5.5).

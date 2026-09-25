@@ -206,6 +206,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | Method              | AuthZ                 | Mutating | Audited |
 |---------------------|-----------------------|----------|---------|
 | `status`            | any connected peer    | no       | no      |
+| `device.posture`    | any connected peer    | no       | no      |
 | `capabilities.list` | any connected peer    | no       | no      |
 | `capabilities.get`  | any connected peer    | no       | no      |
 | `capabilities.set`  | **root only (uid 0)** | yes      | always (allow and deny, success and failure) |
@@ -353,6 +354,49 @@ not a capability: no method can apply RAM, CPUs, a battery, or a display.
 boolean facts use `null` for an unreadable interface, distinct from measured
 absence. An incomplete observation chooses the conservative appliance path and
 keeps the unknown facts visible rather than silently inventing hardware.
+
+### 5.1a `device.posture`
+
+The device's own posture, hardware and power, readable by the person at
+the device. It is an open read, like `status`, and takes no params.
+
+```json
+{"v":1,"id":"d1","method":"device.posture"}
+{"v":1,"id":"d1","result":{
+  "posture":{"secure_boot":true,"uefi":true,"tpm_present":true,
+             "tpm_version":"2.0","is_virtual":false,"virtualization":null,
+             "disk_encryption_enabled":true,"firewall_enabled":true,
+             "firewall":"nftables","os_patch_status":"unknown",
+             "reboot_required":null},
+  "hardware":{"manufacturer":"LENOVO","model_name":"21K5CTO1WW",
+              "bios_version":"R2AET53W","cpu_model":"AMD Ryzen 7 PRO 7840U",
+              "cpu_vendor":"AuthenticAMD","cpu_cores":8,"cpu_threads":16,
+              "memory_total_bytes":33554432000,
+              "device_capacity_bytes":512000000000,
+              "root_filesystem_type":"erofs","battery_present":true},
+  "power":{"batteries":[{"name":"BAT0","capacity_percent":64,"status":"Charging"}]},
+  "checked_at":"2026-09-24T10:00:00Z"}}
+```
+
+- **`posture` and `hardware`** are the managed inventory's own types
+  (`punar_common::device`). The same collector fills them from the same
+  inputs: this read's `security.firewall` observation, and the update
+  engines' patch evidence. The person and their organization therefore
+  read one answer.
+- **The meaning of `null`:** it is "could not be established", never a
+  guessed `false`.
+- **`disk_encryption_enabled`:** true only when every data path (`/var`,
+  `/home`) is proven LUKS2 by `punar_common::storage`, the proof the Mail
+  vault also requires. It is the one encryption answer on the device, and
+  System Control shows this one.
+- **`power.batteries`:** found by the classifier's rule, meaning a
+  `power_supply` entry named `BAT…` or one whose `type` is Battery. Each
+  has `capacity_percent` (0–100) and the kernel's `status` word, and
+  either is `null` when not reported. Power is local only: the inventory
+  carries `battery_present`, never this.
+- **What it never carries:** the serial number and the application list.
+  Those belong only to an organization-owned device's inventory
+  (docs/development/smplify-enrollment.md section 3).
 
 ### 5.2 `capabilities.list`
 
@@ -1918,6 +1962,73 @@ or path other than the confirmed target device. An installed system returns
   before anything is asked. System Control's picker runs `bind` (or `use`
   on an unnamed workspace) instead of writing the file. `context status`
   prints every binding.
+- **`punarctl device` and `punarctl device posture`** (over 5.1a): `device`
+  shows identity and class (from `status`, a second read that is left out
+  if it fails), then hardware and power. `device posture` shows
+  Encryption, Secure Boot, TPM, Virtual (the SPEC section 1.22 label),
+  Firewall and Updates, and an unknown answer stays unknown. `--json` is
+  the `device.posture` result verbatim for both verbs. System Control's
+  Encryption, Secure Boot and Power panes read `punarctl device posture
+  --json` and nothing else.
+- **Session verbs (client-side, no punard method):** these act on the
+  person's own session, as their own uid.
+  - `punarctl workspace list|focus <id|name>|rename <id> [name]|new
+    <name>`: `new` is the command center's "Open <name>". It takes the
+    first id no live or stored workspace holds, then names it.
+  - `punarctl layout <preset>|status`: this runs
+    `/usr/lib/punar/punar-layout.sh`, the presets' one implementation.
+  - `punarctl window list|active|focus --class|--address|close
+    [--address]|kill --address`: kill always needs an exact address.
+  - `punarctl display list`.
+  - How they reach Hyprland: over its own request socket
+    (`$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`),
+    sending the Lua dispatcher expressions HyprlandActions.qml used to send.
+    Every value is quoted as a Lua string literal. `--json` prints
+    Hyprland's own answer.
+  - `punarctl session lock|end|restart|shutdown`: these run `loginctl
+    lock-session`, the compositor's `exit`, and `systemctl reboot|poweroff`,
+    so polkit still decides.
+  - `punarctl audio status|volume ±N%|N%|mute [on|off|toggle]`: this runs
+    `wpctl`, capped at 100% like the volume keys.
+  - Exit codes: 5 with no compositor or PipeWire, 3 when polkit refuses, 2
+    for a bad name, address or volume.
+  - The GUI runs these same verbs: the overview, the command center, the
+    workspace store, WindowActions, SessionMenu and System Control's Power
+    actions.
+- **`punarctl notifications list|dismiss <id>|clear|action <id>
+  <key>|dnd on|off|status`** (client-side, over the shell's own IPC): these
+  run `qs -p /usr/share/punar/shell ipc call notifications …`.
+  - `list` returns the records newest first, read through the notification
+    daemon's sanitising accessors, so a terminal sees exactly the words the
+    centre draws. Sender text is also printed through the terminal-safe
+    filter.
+  - Each record is `{id, source, summary, detail, urgency, sticky,
+    arrived_at, actions: [{key, label}]}`, plus `dnd`.
+  - The shell is the notification server, so the centre keeps its direct
+    binding.
+  - Exit codes: 5 when the shell is not running, 2 for an id that is not
+    the daemon's number.
+- **`punarctl theme list|show|validate|set|reset|status|render` and
+  `punarctl wallpaper list|set|reset|status`** (client-side,
+  theme-system.md §4.5).
+  - The theme gate is a port of the shell's ThemeContrast.qml (R1-R9, the
+    24 pairs, the §7.1 terminal derivation), held to every figure
+    theme-system.md publishes.
+  - `theme set` writes the §3.3 pointer (0600, with the complete receipt),
+    then calls `ipc call theme reload`.
+  - A refusal exits 6, deliberately not 3.
+  - Wallpapers are the shell's compiled catalog, asked over `ipc call
+    wallpaper`. Exit 5 when the shell is not running.
+- **The parity gate:** `tests/desktop/terminal-parity-gate-test.sh` runs in
+  CI and reads the shell's source.
+  - Every process the shell starts must be `punarctl`, a fixed helper
+    scoped to the files that may run it and given its reason, or a
+    documented funnel whose callers pass literal punarctl argv.
+  - Every System Control view must name its verb in
+    `tests/desktop/system-control-verbs.json`, and punarctl's unit tests
+    prove each verb parses.
+  - A new direct tool call fails the gate until it is routed through
+    punarctl or earns an entry with a reason.
 - **App parity (client-side, no new method):** `punarctl app list` joins
   `apps.catalog {}` for category, trust tier and catalog version, and its
   `--json` is still `apps.list` verbatim. `app list --all` adds every
