@@ -1,0 +1,465 @@
+# Punar benchmark harness (WP-08; tools/bench/README.md).
+#
+# Measures the fixture-free RELEASE image, signed in at its greeter over QMP,
+# on hosted x86_64 runners with KVM: 4 vCPU at 8 GiB and 4 GiB, a fresh
+# overlay and a cold boot per run, 10 min settle then a 5 min idle window,
+# a packet capture from power-on, a port scan from the host, and a memory-
+# pressure workload at 4 GiB. bench_report.py applies decision D1 (a claim
+# needs >= 5 valid runs per system per shape, a better median and
+# non-overlapping ranges) and prints every loss.
+#
+# It never runs on pull requests or pushes, so it cannot slow PR CI:
+#   - workflow_dispatch, with the inputs below;
+#   - a weekly schedule for the Punar lane only, which does nothing unless
+#     the repository variable BENCH_SCHEDULE_ENABLED is 'yes' (the owner's
+#     runner-budget decision).
+#
+# The Omarchy lane is present but gated twice: the dispatch input
+# omarchy_approved (default false) AND the repository variable
+# OMARCHY_LANE_APPROVED = 'yes' (unset today). Without both, no job
+# downloads, installs or runs Omarchy. The ISO URL and SHA-256 are pinned in
+# tools/bench/omarchy/omarchy.env and verified before use. What the owner
+# approves by enabling it is listed in tools/bench/README.md.
+#
+# Actions: GitHub-owned only, pinned by full commit SHA. Token scopes: none
+# at the top; each job asks for what it uses. No secrets.
+
+name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "Lanes: punar, or punar+omarchy (Omarchy also needs omarchy_approved and OMARCHY_LANE_APPROVED=yes)"
+        type: choice
+        options:
+          - punar
+          - punar+omarchy
+        default: punar
+      runs:
+        description: "Runs per VM shape (at least 5 for any claim)"
+        type: string
+        default: "5"
+      shapes:
+        description: "Guest memory shapes in MiB (2048, 4096, 8192)"
+        type: string
+        default: "8192,4096"
+      workload_shapes:
+        description: "Shapes that also run the memory-pressure workload"
+        type: string
+        default: "4096"
+      image_source:
+        description: "Where the release image comes from"
+        type: choice
+        options:
+          - ci-artifact
+          - build
+        default: ci-artifact
+      ci_run_id:
+        description: "ci.yml run whose release image to use (empty: newest main run that still has it)"
+        type: string
+        default: ""
+      omarchy_approved:
+        description: "The owner approved downloading and running the Omarchy ISO (tools/bench/README.md)"
+        type: boolean
+        default: false
+  schedule:
+    # Mondays 06:00 UTC, Punar lane only, and only with BENCH_SCHEDULE_ENABLED=yes.
+    - cron: "0 6 * * 1"
+
+permissions: {}
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: plan (inputs, self-test, randomised cells)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      omarchy: ${{ steps.plan.outputs.omarchy }}
+      seed: ${{ steps.plan.outputs.seed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Decide whether this event runs
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE_ENABLED: ${{ vars.BENCH_SCHEDULE_ENABLED }}
+        run: |
+          if [ "${EVENT}" = schedule ] && [ "${SCHEDULE_ENABLED}" != yes ]; then
+            echo "Weekly schedule not enabled (BENCH_SCHEDULE_ENABLED is not 'yes'); nothing runs."
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Self-test the harness (probe on fixture trees, parser, report rule)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          ./tests/performance/bench-probe-test.sh
+          ./tests/performance/bench-summarize-test.sh
+
+      - name: Plan the cells
+        id: plan
+        if: steps.gate.outputs.run == 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          LANES: ${{ inputs.lanes || 'punar' }}
+          RUNS: ${{ inputs.runs || '5' }}
+          SHAPES: ${{ inputs.shapes || '8192,4096' }}
+          WORKLOAD_SHAPES: ${{ inputs.workload_shapes || '4096' }}
+          OMARCHY_INPUT: ${{ inputs.omarchy_approved || false }}
+          OMARCHY_VARIABLE: ${{ vars.OMARCHY_LANE_APPROVED }}
+        run: |
+          approved=false
+          if [ "${EVENT}" = workflow_dispatch ] && [ "${OMARCHY_INPUT}" = true ] \
+              && [ "${OMARCHY_VARIABLE}" = yes ]; then
+            approved=true
+          fi
+          # The schedule is Punar-only whatever the variables say.
+          [ "${EVENT}" = schedule ] && LANES=punar
+          case "${RUNS}" in ''|*[!0-9]*) echo "::error::runs must be a number"; exit 2 ;; esac
+          python3 tools/bench/bench_plan.py --lanes "${LANES}" --runs "${RUNS}" \
+            --shapes "${SHAPES}" --workload-shapes "${WORKLOAD_SHAPES}" \
+            --seed "${GITHUB_RUN_ID}" --omarchy-approved "${approved}" \
+            --github-output "${GITHUB_OUTPUT}" > plan.json
+          python3 -c 'import json; [print("::notice::" + n) for n in json.load(open("plan.json"))["notes"]]'
+          cat plan.json
+
+  punar-image:
+    name: punar-image (release image, probe injected, first account created)
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read  # download the release image artifact from a ci.yml run
+    steps:
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghc /opt/hostedtoolcache/CodeQL /usr/share/swift \
+            /usr/local/share/powershell /usr/lib/jvm
+          df -h /
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Find the ci.yml run that built the release image
+        id: source
+        if: inputs.image_source != 'build'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID_INPUT: ${{ inputs.ci_run_id }}
+        run: |
+          artifact=punar-installer-debian-x86_64-candidate
+          if [ -n "${RUN_ID_INPUT}" ]; then
+            case "${RUN_ID_INPUT}" in *[!0-9]*) echo "::error::ci_run_id must be a number"; exit 2 ;; esac
+            run_id="${RUN_ID_INPUT}"
+          else
+            run_id="$(gh api "repos/${REPOSITORY}/actions/artifacts?name=${artifact}&per_page=100" \
+              --jq '[.artifacts[] | select(.expired == false and .workflow_run.head_branch == "main")] | sort_by(.created_at) | last | .workflow_run.id // empty')"
+          fi
+          if [ -z "${run_id}" ]; then
+            echo "::error::no unexpired ${artifact} from main (artifacts live 7 days); dispatch with image_source=build"
+            exit 1
+          fi
+          head_sha="$(gh api "repos/${REPOSITORY}/actions/runs/${run_id}" --jq .head_sha)"
+          echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
+          echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+          echo "Release image from ci.yml run ${run_id} (${head_sha})"
+
+      - name: Download the release image
+        if: inputs.image_source != 'build'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: punar-installer-debian-x86_64-candidate
+          path: bench/source
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+
+      - name: Verify the downloaded image and drop what the bench does not use
+        if: inputs.image_source != 'build'
+        run: |
+          cd bench/source
+          sha256sum -c --ignore-missing SHA256SUMS.debian-amd64
+          grep -q 'punar-release-debian-x86_64.qcow2' SHA256SUMS.debian-amd64
+          rm -f punar-installer-debian-*-x86_64.iso
+          df -h /
+
+      - name: Restore Debian amd64 package and Cargo inputs (build)
+        if: inputs.image_source == 'build'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            os/images/cache/debian-amd64
+            os/images/cache/debian-amd64-pkgs
+            os/images/cache/cargo-amd64-debian
+            os/images/cache/cargo-target-amd64-debian
+          key: punar-debian-amd64-bench-${{ github.sha }}
+          restore-keys: punar-debian-amd64-
+
+      - name: Build the release image (build)
+        if: inputs.image_source == 'build'
+        run: |
+          PUNAR_AMD64_DEBIAN_IMAGES=release ./tools/build-amd64-debian-image.sh
+          mkdir -p bench/source
+          mv os/images/out/punar-release-debian-x86_64.qcow2 bench/source/
+
+      - name: Install QEMU, OVMF and injection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf
+
+      - name: Enable KVM access for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Inject the probe and create the first account
+        env:
+          BENCH_SOURCE_RUN_ID: ${{ steps.source.outputs.run_id || github.run_id }}
+          BENCH_SOURCE_COMMIT: ${{ steps.source.outputs.head_sha || github.sha }}
+        run: ./tools/bench/prepare-punar.sh bench/source/punar-release-debian-x86_64.qcow2 bench/prepared
+
+      - name: Upload the prepared disks
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-punar-prepared
+          path: |
+            bench/prepared/prepared.qcow2
+            bench/prepared/onboarded.qcow2
+            bench/prepared/prepare.json
+            bench/prepared/injection.json
+            bench/prepared/onboarding/**
+          compression-level: 1
+          if-no-files-found: error
+          retention-days: 3
+
+  omarchy-iso:
+    name: omarchy-iso (owner-gated; pinned and verified)
+    needs: plan
+    if: needs.plan.outputs.omarchy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.pin.outputs.sha256 }}
+    steps:
+      - name: Refuse unless the owner approved (both the input and the variable)
+        env:
+          OMARCHY_INPUT: ${{ inputs.omarchy_approved }}
+          OMARCHY_VARIABLE: ${{ vars.OMARCHY_LANE_APPROVED }}
+        run: |
+          [ "${OMARCHY_INPUT}" = true ] && [ "${OMARCHY_VARIABLE}" = yes ] \
+            || { echo "::error::Omarchy lane not approved"; exit 1; }
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned ISO
+        id: pin
+        run: echo "sha256=$(awk -F= '$1 == "OMARCHY_ISO_SHA256" {print $2}' tools/bench/omarchy/omarchy.env)" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache the ISO by its SHA-256
+        id: cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench/omarchy.iso
+          key: omarchy-iso-${{ steps.pin.outputs.sha256 }}
+
+      - name: Download and verify the ISO
+        env:
+          BENCH_OMARCHY_APPROVED: "yes"
+        run: |
+          mkdir -p bench
+          ./tools/bench/omarchy/fetch-iso.sh bench/omarchy.iso
+
+  cell:
+    name: cell ${{ matrix.cell }} (${{ matrix.order }})
+    needs: [plan, punar-image, omarchy-iso]
+    if: >-
+      always() && needs.plan.outputs.run == 'true' && needs.punar-image.result == 'success'
+      && (needs.omarchy-iso.result == 'success' || needs.omarchy-iso.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      CELL: ${{ matrix.cell }}
+      SHAPE: ${{ matrix.shape }}
+      ORDER: ${{ matrix.order }}
+      WORKLOAD: ${{ matrix.workload }}
+      SEED: ${{ needs.plan.outputs.seed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Download the prepared Punar disks
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bench-punar-prepared
+          path: bench/prepared
+
+      - name: Install QEMU, OVMF and the network lane's tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf \
+            nmap tcpdump dnsmasq-base dosfstools mtools cryptsetup-bin
+
+      - name: Enable KVM access for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Bring up the benchmark network (tap, DHCP/RA, NAT)
+        run: sudo ./tools/bench/netlane.sh up "$(id -u)"
+
+      - name: Restore the pinned Omarchy ISO (owner-gated lane)
+        if: contains(matrix.order, 'omarchy')
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: bench/omarchy.iso
+          key: omarchy-iso-${{ needs.omarchy-iso.outputs.sha256 }}
+          fail-on-cache-miss: true
+
+      - name: Install Omarchy unattended and return it to stock (owner-gated lane)
+        if: contains(matrix.order, 'omarchy')
+        env:
+          BENCH_OMARCHY_APPROVED: "yes"
+        run: |
+          ./tools/bench/omarchy/fetch-iso.sh bench/omarchy.iso
+          umask 077
+          secret="${RUNNER_TEMP}/omarchy-secret"
+          python3 -c 'import secrets, string; print("".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(24)))' > "${secret}"
+          ssh-keygen -q -t ed25519 -N "" -C bench-install -f "${RUNNER_TEMP}/bench-ssh"
+          mkdir -p bench/omarchy
+          ./tools/bench/omarchy/make-cidata.sh bench/omarchy/cidata.img "${secret}" "${RUNNER_TEMP}/bench-ssh.pub"
+          python3 tools/bench/bench_run.py install-omarchy --iso bench/omarchy.iso \
+            --cidata bench/omarchy/cidata.img --secret-file "${secret}" \
+            --ssh-key "${RUNNER_TEMP}/bench-ssh" --out bench/omarchy/installed.qcow2 \
+            --logs bench/results/"${CELL}"/omarchy-install
+          rm -f bench/omarchy/cidata.img bench/omarchy.iso
+          qemu-img convert -f qcow2 -O raw bench/omarchy/installed.qcow2 bench/omarchy/installed.raw
+          rm -f bench/omarchy/installed.qcow2
+          sudo BENCH_RECORD="${PWD}/bench/results/${CELL}/omarchy-install/restore-stock.txt" \
+            ./tools/bench/inject-probe.sh --image bench/omarchy/installed.raw \
+            --partnum 2 --luks-key-file "${secret}" --os-subdir @ \
+            --then "${PWD}/tools/bench/omarchy/restore-stock.sh" \
+            --record bench/results/"${CELL}"/omarchy-install/injection.json
+
+      - name: Run the lanes in this cell's order
+        run: |
+          image_sha="$(python3 -c 'import json; print(json.load(open("bench/prepared/prepare.json"))["release_image_sha256"])')"
+          source_run="$(python3 -c 'import json; print(json.load(open("bench/prepared/prepare.json"))["source_run_id"])')"
+          workload_flag=--no-workload
+          [ "${WORKLOAD}" = true ] && workload_flag=--workload
+          # Every lane runs even if one fails; the step fails at the end so the
+          # cell is red, and the results still upload.
+          status=0
+          position=0
+          for lane in ${ORDER//,/ }; do
+            position=$((position + 1))
+            common=(--lane "${lane}" --shape "${SHAPE}" --net tap --tap benchtap0
+                    --leases /run/bench-netlane/leases "${workload_flag}"
+                    --run-id "${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.${CELL}.${lane}"
+                    --out "bench/results/${CELL}/${lane}"
+                    --meta "cell=${CELL}" --meta "order=${ORDER}" --meta "position=${position}"
+                    --meta "seed=${SEED}" --meta "workflow_run=${GITHUB_RUN_ID}")
+            case "${lane}" in
+              punar)
+                python3 tools/bench/bench_run.py run "${common[@]}" \
+                  --disk bench/prepared/onboarded.qcow2 --login punar-greeter \
+                  --disk-encryption "none (release qcow2, pre-install)" \
+                  --meta "image_sha256=${image_sha}" --meta "source_run=${source_run}" || status=1
+                ;;
+              omarchy)
+                python3 tools/bench/bench_run.py run "${common[@]}" \
+                  --disk bench/omarchy/installed.raw --login luks-autologin \
+                  --secret-file "${RUNNER_TEMP}/omarchy-secret" --disk-encryption "luks2 (installed)" \
+                  --meta "image_sha256=$(awk -F= '$1 == "OMARCHY_ISO_SHA256" {print $2}' tools/bench/omarchy/omarchy.env)" || status=1
+                ;;
+            esac
+          done
+          find bench/results -maxdepth 3 | head -50
+          exit "${status}"
+
+      - name: Take down the network and keep its DNS log
+        if: always()
+        run: |
+          mkdir -p "bench/results/${CELL}"
+          sudo cp /run/bench-netlane/dnsmasq.log "bench/results/${CELL}/dnsmasq.log" 2>/dev/null || true
+          sudo chown "$(id -u)" "bench/results/${CELL}/dnsmasq.log" 2>/dev/null || true
+          sudo ./tools/bench/netlane.sh down || true
+          rm -f "${RUNNER_TEMP}/omarchy-secret" "${RUNNER_TEMP}/bench-ssh" "${RUNNER_TEMP}/bench-ssh.pub"
+
+      - name: Upload this cell's results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-result-${{ matrix.cell }}
+          path: bench/results/${{ matrix.cell }}
+          if-no-files-found: warn
+          retention-days: 90
+
+  report:
+    name: report (medians, IQR, the D1 rule, every loss)
+    needs: [plan, cell]
+    if: always() && needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Download every cell's results
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: bench-result-*
+          path: bench/results
+
+      - name: Summarise
+        run: |
+          mkdir -p bench/report
+          python3 tools/bench/bench_report.py bench/results --subject punar \
+            --title "Punar benchmark, workflow run ${GITHUB_RUN_ID}" \
+            --md bench/report/summary.md --json bench/report/summary.json \
+            --baseline bench/report/baseline.json
+          cat bench/report/summary.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-report
+          path: bench/report
+          if-no-files-found: error
+          retention-days: 90
