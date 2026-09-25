@@ -10,6 +10,10 @@
 # (Omarchy's archinstall layout names none); with --luks-key-file it is opened
 # with cryptsetup; with --os-subdir the filesystem's top level is mounted and
 # the operating system is taken from that subdirectory (Omarchy's btrfs "@").
+# The key file holds the passphrase that was typed at the installer and is
+# typed at every boot, so trailing CR/LF is stripped before cryptsetup sees
+# it (`--key-file` would otherwise use the newline as part of the key); the
+# stripped copy lives in a private directory and is removed at once.
 #
 # What it writes into the OS tree, and nothing else:
 #   /etc/systemd/system/bench-probe.service
@@ -64,6 +68,7 @@ NBD=""
 LOOP=""
 MAPPER=""
 MNT=""
+KEY_DIR=""
 cleanup() {
     set +e
     if [ -n "${MNT}" ]; then
@@ -73,6 +78,7 @@ cleanup() {
     [ -n "${MAPPER}" ] && cryptsetup close "${MAPPER}"
     [ -n "${LOOP}" ] && losetup -d "${LOOP}"
     [ -n "${NBD}" ] && qemu-nbd --disconnect "${NBD}" >/dev/null
+    [ -n "${KEY_DIR}" ] && rm -rf -- "${KEY_DIR}"
 }
 trap cleanup EXIT
 
@@ -117,8 +123,22 @@ LOOP="$(losetup --find --show --offset "${start}" --sizelimit "${size}" "${sourc
 fs_dev="${LOOP}"
 if [ -n "${KEY_FILE}" ]; then
     command -v cryptsetup >/dev/null 2>&1 || die "--luks-key-file needs cryptsetup"
+    [ -r "${KEY_FILE}" ] || die "--luks-key-file ${KEY_FILE} is not readable"
+    KEY_DIR="$(mktemp -d /tmp/bench-inject-key.XXXXXX)"
+    chmod 0700 "${KEY_DIR}"
+    # The typed passphrase: the file's bytes without trailing CR/LF.
+    python3 - "${KEY_FILE}" "${KEY_DIR}/key" <<'PY'
+import os, sys
+data = open(sys.argv[1], "rb").read().rstrip(b"\r\n")
+if not data:
+    sys.exit("inject-probe: the key file is empty")
+fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "wb") as handle:
+    handle.write(data)
+PY
     MAPPER="bench-inject-$$"
-    cryptsetup open --key-file "${KEY_FILE}" "${LOOP}" "${MAPPER}"
+    cryptsetup open --key-file "${KEY_DIR}/key" "${LOOP}" "${MAPPER}"
+    rm -f -- "${KEY_DIR}/key"
     fs_dev="/dev/mapper/${MAPPER}"
 fi
 MNT="$(mktemp -d /tmp/bench-inject.XXXXXX)"
