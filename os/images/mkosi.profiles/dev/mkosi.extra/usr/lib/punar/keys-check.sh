@@ -10,8 +10,9 @@
 #     lock screen names it;
 #   * a layout that cannot type Latin letters (Russian, the plan's
 #     acceptance case) is loaded behind a US first group with the both-Alt
-#     switch chord, so PUNAR+Return still opens a terminal, and after the
-#     chord that terminal receives Cyrillic;
+#     switch chord, so PUNAR+Return still opens a terminal, after the chord
+#     that terminal receives Cyrillic, and a letter bind (PUNAR+M) still
+#     fires while Russian is the active group;
 #   * a workspace keeps its own layout preset, live and across sessions;
 #   * the login screen's choice, as session start adopts it, becomes the
 #     device's layout under the signed-in person's name;
@@ -333,6 +334,19 @@ if [ -n "${PROBE_B}" ] && focus_window "${PROBE_B}"; then
         note "ok   the terminal received Cyrillic: привет"
     else
         fail "the terminal received '$(cat "${PROBE_OUT_B}" 2>/dev/null)' instead of привет"
+    fi
+    # A LETTER bind while Russian is the active group: the M key types
+    # "ь" here, and PUNAR+M must still maximize, because Hyprland resolves
+    # binds against the first group (US), which is why the Latin lead exists.
+    if keymap_has Russian; then
+        press punar-m
+        if wait_for 10 field_is "${PROBE_B}" .fullscreen 1; then
+            note "ok   PUNAR+M maximized while Russian was the active layout (letter binds survive)"
+        else
+            fail "PUNAR+M did nothing while Russian was active: the letter binds do not survive a non-Latin layout"
+        fi
+        press punar-m
+        wait_for 10 field_is "${PROBE_B}" .fullscreen 0 || fail "PUNAR+M did not restore the window under Russian"
     fi
     press alts
     wait_for 10 keymap_has "English (US)" || fail "the switch chord did not return to English"

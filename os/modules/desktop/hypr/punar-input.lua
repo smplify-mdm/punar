@@ -68,6 +68,11 @@ function M.config()
         kb_variant = keyboard.kb_variant,
         kb_options = keyboard.kb_options,
         follow_mouse = 0,
+        -- Binds resolve against the FIRST layout (US when the person's own
+        -- cannot type Latin letters), whichever group is active. This is
+        -- Hyprland's default; it is pinned here because the Latin lead above
+        -- is only worth anything while it holds.
+        resolve_binds_by_sym = false,
         repeat_rate = 40,
         repeat_delay = 250,
         numlock_by_default = true,
