@@ -4,9 +4,11 @@ pragma Singleton
 // The browser daemon owns which contexts exist and which web apps use them;
 // this singleton owns only the small session preference documented by
 // schemas/browser/browser-context-state.json. The file is watched because
-// both the graphical picker and `punarctl web-apps context use` are supported
-// writers. There is no polling: a CLI write arrives through inotify, and a
-// workspace binding is applied only when Hyprland emits a workspace event.
+// punarctl is the writer for a person's choice: System Control runs
+// `punarctl web-apps context use|bind` like a terminal would. This singleton
+// writes only the automatic switch when a bound workspace is entered or left.
+// There is no polling: a CLI write arrives through inotify, and a workspace
+// binding is applied only when Hyprland emits a workspace event.
 
 import QtQuick
 import Quickshell
@@ -16,7 +18,13 @@ import Quickshell.Io
 Singleton {
     id: root
 
+    // The file punarctl writes: $XDG_STATE_HOME when it is absolute, else
+    // ~/.local/state. Reading any other path would leave a binding made in
+    // the terminal, or by System Control through punarctl, unseen here.
     readonly property string statePath: {
+        var state = Quickshell.env("XDG_STATE_HOME");
+        if (state && String(state).charAt(0) === "/")
+            return String(state) + "/punar/browser-context.json";
         var home = Quickshell.env("HOME");
         return home ? home + "/.local/state/punar/browser-context.json" : "";
     }
@@ -115,23 +123,14 @@ Singleton {
         }
     }
 
-    function use(activeId: string): bool {
-        return root.write(activeId, "manual", root.document.bindings);
-    }
-
-    function bindToFocusedWorkspace(activeId: string): bool {
+    // The focused workspace's name when it is a named one, else "". System
+    // Control binds that name through punarctl; an unnamed workspace has
+    // nothing to bind, so the choice becomes a plain `context use`.
+    function focusedWorkspaceName(): string {
         var workspace = Hyprland.focusedWorkspace;
         if (workspace === null || !WorkspaceState.isNamed(workspace))
-            return root.use(activeId);
-        var name = String(workspace.name);
-        var next = [];
-        var bindings = root.normalizedBindings(root.document.bindings);
-        for (var i = 0; i < bindings.length; ++i) {
-            if (bindings[i].workspace !== name)
-                next.push(bindings[i]);
-        }
-        next.push({workspace: name, context: activeId});
-        return root.write(activeId, "workspace:" + name, next);
+            return "";
+        return String(workspace.name);
     }
 
     function applyFocusedWorkspaceBinding(): void {

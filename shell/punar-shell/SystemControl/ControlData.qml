@@ -129,6 +129,7 @@ Scope {
     property string pendingTimeZone: ""
     property bool pendingWebAppInstall: false
     property string pendingWebAppRemoval: ""
+    property string pendingWebContext: ""
 
     // Raised when the reader asks for the full AI surface.
     signal aiPanelRequested
@@ -380,6 +381,11 @@ Scope {
                 data.pendingWebAppRemoval = "";
                 data.webAppRemoveArmed = "";
             }
+            if (data.pendingWebContext !== "") {
+                if (exitCode === 0)
+                    data.webAppContext = data.pendingWebContext;
+                data.pendingWebContext = "";
+            }
             // Disarm unconditionally. This used to sit inside the web-app
             // removal branch, so a power action that FAILED left its row
             // armed — one stray press away from trying again with no
@@ -410,6 +416,7 @@ Scope {
             data.lastActionError = "'" + argv[0] + "' could not be started on this machine.";
             data.pendingWebAppInstall = false;
             data.pendingWebAppRemoval = "";
+            data.pendingWebContext = "";
             data.webAppRemoveArmed = "";
             data.powerArmed = "";
         }
@@ -932,17 +939,20 @@ Scope {
             else
                 data.runMutation(["/usr/bin/systemctl", "poweroff"]);
         } else if (kind === "webContext") {
+            // The same write a person types: punarctl checks the context
+            // against punard's list and the workspace name against the
+            // binding grammar, and its refusal shows in the action row.
+            // BrowserContext sees the new file through its watch.
+            if (mutation.running)
+                return;
             var contextId = String(a.contextId);
-            if (BrowserContext.bindToFocusedWorkspace(contextId)) {
-                data.webAppContext = contextId;
-                data.lastActionArgv = "Browser context preference · " + contextId;
-                data.lastActionExit = 0;
-                data.lastActionError = "";
-            } else {
-                data.lastActionArgv = "Browser context preference · " + contextId;
-                data.lastActionExit = 1;
-                data.lastActionError = "The browser context preference could not be saved.";
-            }
+            var workspace = BrowserContext.focusedWorkspaceName();
+            data.pendingWebContext = contextId;
+            if (workspace !== "")
+                data.runMutation(["punarctl", "web-apps", "context", "bind", contextId,
+                    "--workspace", workspace, "--activate"]);
+            else
+                data.runMutation(["punarctl", "web-apps", "context", "use", contextId]);
         } else if (kind === "application") {
             data.applicationRequested(a.entry, "");
         } else if (kind === "catalogApplication") {

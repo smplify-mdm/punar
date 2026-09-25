@@ -643,7 +643,15 @@ on the Hyprland workspace event it already subscribes to, via `FileView` with
 `atomicWrites: true`; the CLI and shell see one another's changes through
 inotify. **Event-driven, no timer, no polling loop**
 (spec 6.3). `punarctl web-apps context use <id>` is the manual writer and sets
-`active_cause: "manual"`.
+`active_cause: "manual"`. `punarctl web-apps context bind <id> --workspace
+<name> [--activate]` and `context unbind --workspace <name>` write the
+bindings: one per workspace, at most 64, with the workspace-name grammar,
+against the contexts punard lists. Unbinding the binding that chose the active
+context returns it to `personal`, as leaving that workspace would. System
+Control runs these same verbs, so the shell writes the file itself only for
+the automatic switch on a workspace event. Both sides use
+`$XDG_STATE_HOME/punar/browser-context.json` when `XDG_STATE_HOME` is
+absolute, and `~/.local/state` otherwise.
 
 **What "brings forward" means, precisely:**
 
@@ -1063,7 +1071,9 @@ punarctl web-apps context list [--json]
 punarctl web-apps context create <id> [--name <display>]
 punarctl web-apps context delete <id> [--purge-data]
 punarctl web-apps context use <id>
-punarctl web-apps context status
+punarctl web-apps context bind <id> --workspace <name> [--activate]
+punarctl web-apps context unbind --workspace <name>
+punarctl web-apps context status                      # active context and every binding
 ```
 
 D-014 house rules apply unchanged: mono masthead, middle-dot separators,
@@ -1105,8 +1115,10 @@ in System Control's Applications pane:
   `Quickshell.execDetached(["punarctl","web-apps","install", …])` — fixed
   argv, no shell string (spec 12.2).
 - **The context picker** — the Applications list begins with contexts and
-  their isolation meta and the active row's cause. It writes
-  `browser-context.json` directly (it is the file's owner, §5.5) and, when
+  their isolation meta and the active row's cause. Choosing one runs
+  `punarctl web-apps context bind <id> --workspace <focused> --activate`, or
+  `context use <id>` on an unnamed workspace, so its checks and its refusal
+  are the terminal's (§5.5), and, when
   enrolled, renders the derived `org-acme` row with the `MANAGED` pill and
   the dashed `SIMULATED` cert-roots tag. Unenrolled: those rows do not
   exist — **not greyed out, not present-and-empty; absent** (DESIGN_LANGUAGE

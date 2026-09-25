@@ -1728,6 +1728,14 @@ or path other than the confirmed target device. An installed system returns
   a terminal it refuses with exit 2, and inside an agent scope with exit 3.
   A decision goes to `approvals.resolve`, which stays human-only
   (section 14.5); its refusal prints and the watch continues.
+- **Browser-context bindings (client-side, no new method):** `punarctl
+  web-apps context bind <id> --workspace <name> [--activate]` and `context
+  unbind --workspace <name>` edit the bindings in the user's
+  `browser-context.json` (milestone-11.md section 5.5). The context must be
+  one `webapps.list` returns, and the name must pass the workspace grammar
+  before anything is asked. System Control's picker runs `bind` (or `use`
+  on an unnamed workspace) instead of writing the file. `context status`
+  prints every binding.
 - `punarctl debug rpc <method>` (hidden) sends an empty-params request with an
   arbitrary method name — exists solely so the 74.4 "unauthorized IPC" /
   section 60 negative tests can probe the server from inside the image. The

@@ -4041,3 +4041,182 @@ fn approvals_watch_answer_needs_a_terminal_and_ignores_stdin() {
     assert!(stdout(&output).is_empty(), "{}", stdout(&output));
     assert_eq!(WATCH_RESOLVES.load(Ordering::SeqCst), 0);
 }
+
+// ---------------------------------------------------------------------------
+// `web-apps context bind|unbind` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+fn browser_context(id: &str) -> Value {
+    json!({
+        "id": id, "name": id, "derived": false, "deletable": id != "personal",
+        "isolates": ["storage"], "profile_path_rel": format!("punar/browser/contexts/{id}")
+    })
+}
+
+/// punard's `webapps.list` with two contexts and no apps.
+fn contexts_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "webapps.list" => Ok(json!({
+            "apps": [],
+            "contexts": [browser_context("personal"), browser_context("atlas")],
+            "required_web_apps": [],
+            "policy": {"managed": false, "policy_ids": ["personal-defaults"],
+                       "allow_user_install": true}
+        })),
+        _ => respond(request),
+    }
+}
+
+fn run_with_state(socket: &PathBuf, state: &PathBuf, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", socket)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
+        .env("XDG_STATE_HOME", state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl")
+}
+
+fn context_state(state: &std::path::Path) -> Value {
+    serde_json::from_str(
+        &fs::read_to_string(state.join("punar/browser-context.json")).expect("state file"),
+    )
+    .expect("state is JSON")
+}
+
+/// A terminal binds a workspace the way System Control does: one binding
+/// per workspace, optionally active now, and unbinding the binding that
+/// chose the active context returns new windows to personal.
+#[test]
+fn context_bind_and_unbind_keep_one_binding_per_workspace() {
+    let state = std::env::temp_dir().join(format!("punarctl-bind-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    let socket = start_mock_with(contexts_respond);
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "atlas",
+            "--workspace",
+            "Atlas",
+            "--activate",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("BOUND · WORKSPACE ATLAS · ATLAS"), "{text}");
+    assert!(
+        text.lines().any(|line| line.ends_with("workspace Atlas")),
+        "{text}"
+    );
+    let doc = context_state(&state);
+    assert_eq!(doc["active"], "atlas");
+    assert_eq!(doc["active_cause"], "workspace:Atlas");
+    assert_eq!(
+        doc["bindings"],
+        json!([{"workspace": "Atlas", "context": "atlas"}])
+    );
+
+    // Rebinding replaces; without --activate the active context stays.
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "--json",
+            "web-apps",
+            "context",
+            "bind",
+            "personal",
+            "--workspace",
+            "Atlas",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let printed: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(printed, context_state(&state));
+    assert_eq!(
+        printed["bindings"],
+        json!([{"workspace": "Atlas", "context": "personal"}])
+    );
+    assert_eq!(printed["active"], "atlas");
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &["web-apps", "context", "unbind", "--workspace", "Atlas"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let doc = context_state(&state);
+    assert_eq!(doc["bindings"], json!([]));
+    assert_eq!(doc["active"], "personal");
+    assert_eq!(doc["active_cause"], "default");
+    let _ = fs::remove_dir_all(&state);
+}
+
+/// Each refusal says what did not happen and changes nothing: an unknown
+/// context, a workspace name outside the binding grammar (refused before
+/// punard is asked), and a workspace that is not bound.
+#[test]
+fn context_bind_refusals_change_nothing() {
+    let state = std::env::temp_dir().join(format!("punarctl-bind-refuse-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    let socket = start_mock_with(contexts_respond);
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "nosuch",
+            "--workspace",
+            "Atlas",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("does not exist, so nothing was bound"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!state.join("punar/browser-context.json").exists());
+
+    // The default mock does not know webapps.list: the name is refused first.
+    let plain = start_mock();
+    let output = run_with_state(
+        &plain,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "atlas",
+            "--workspace",
+            "../evil",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("cannot be bound"), "{text}");
+    assert!(text.contains("Next step:"), "{text}");
+    assert!(!state.join("punar/browser-context.json").exists());
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &["web-apps", "context", "unbind", "--workspace", "Nowhere"],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("is not bound, so nothing was removed"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = fs::remove_dir_all(&state);
+}

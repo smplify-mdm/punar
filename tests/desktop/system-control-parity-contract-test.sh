@@ -18,6 +18,9 @@
 #   * Views rendered organization-supplied names as AutoText, where anything
 #     that looks like markup is read as markup.
 #   * The policy command printed for a person to copy left out --reason.
+#   * System Control wrote a workspace binding straight into the state file,
+#     with its own rules and no refusal to show. The shell also read
+#     ~/.local/state even when punarctl wrote under $XDG_STATE_HOME.
 #
 # Each rule below is mechanical: it reads the source, not a screenshot.
 set -euo pipefail
@@ -115,6 +118,23 @@ for index, line in enumerate(lines):
 printed = re.search(r'data\.lastActionArgv = "punarctl policy ".*?;', control, re.S)
 if printed is None or "--reason" not in printed.group(0):
     fail("policy argv", "the printed `punarctl policy` command leaves out --reason")
+
+# 8. A person's browser-context choice is punarctl's write, the same one a
+#    terminal makes, and the shell reads the file punarctl writes.
+browser = (shell / "Services/BrowserContext.qml").read_text()
+action = re.search(r'kind === "webContext"\) \{(.*?)\n        \} else if', control, re.S)
+if action is None:
+    fail("context", "the webContext action was not found in ControlData.qml")
+else:
+    body = action.group(1)
+    if '"web-apps", "context", "bind"' not in body or "data.runMutation(" not in body:
+        fail("context", "the workspace binding does not run `punarctl web-apps context bind`")
+    if re.search(r"BrowserContext\.(write|use|bind)", body):
+        fail("context", "the webContext action still writes the state file itself")
+if re.search(r"function (use|bindToFocusedWorkspace)\(", browser):
+    fail("context", "BrowserContext.qml still writes a person's choice itself")
+if "XDG_STATE_HOME" not in browser:
+    fail("context", "BrowserContext.qml does not read the file punarctl writes")
 
 if problems:
     for problem in problems:
