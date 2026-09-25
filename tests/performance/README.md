@@ -86,7 +86,11 @@ the canonical window fixed in
   accumulates timer-triggered reconcile and agent-discovery work even though
   their individual oneshot cgroups disappear between samples;
 - whole guest, context only: `/proc/stat` busy ratio and physical block-device
-  sectors-written delta;
+  sectors-written delta, and where those writes went, without counting a byte
+  twice: the journal (`systemd-journald.service`), every top-level cgroup
+  summed, and the kernel/filesystem metadata no cgroup was charged for (the
+  device total from the root cgroup's `io.stat`, or diskstats, minus that
+  sum);
 - memory pressure: `/sys/block/zram0` existence, size, active algorithm and
   `/proc/swaps` membership are observed on the live boot, not inferred from
   configuration;
@@ -129,6 +133,7 @@ not drift from it:
 | Smplify agent process on the unenrolled image, or its socket not active | 0 processes, socket `active` | `::error::`, job **fails**, including under TCG |
 | any required runtime fact missing | — | `::error::`, job **fails**, including under TCG |
 | whole-guest writes | informational | recorded and uploaded for diagnosis, not attributed to Punar |
+| whole-guest write attribution missing, or its remainder not the device total minus the cgroups | — | `::error::`, job **fails**, including under TCG (a remainder of root plus children counts every charged byte twice) |
 
 **TCG caveat:** when the runner has no usable `/dev/kvm`, boot-test degrades
 to TCG software emulation. Numeric performance results from such runs are labeled

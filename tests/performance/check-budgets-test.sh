@@ -11,6 +11,7 @@ OFFLINE_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-offline.
 NO_ZRAM_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-no-zram.txt"
 SHORT_WINDOW_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-short-window.txt"
 SMPLIFYD_RESIDENT_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-smplifyd-resident.txt"
+DOUBLE_COUNT_REPORT="${REPO_ROOT}/tests/performance/fixtures/stabilized-idle-double-count.txt"
 UNIT_DIR="${REPO_ROOT}/os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/system"
 
 # cpu.stat/io.stat are not portable assumptions unless accounting is explicit
@@ -103,4 +104,41 @@ if "${CHECKER}" "${WORK}/no-socket.txt" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "PASS: stabilized-idle checker gates KVM/HVF CPU+writes + connected five-minute idle + zram + the dormant Smplify agent, rejects missing facts, and TCG-downgrades numeric evidence"
+# The whole guest's writes are attributed without a double count: the
+# kernel/filesystem remainder is the device total minus the cgroups, never
+# plus them, and every attribution fact must be there. Even under TCG: this
+# is the sampler's arithmetic, not a measurement.
+if "${CHECKER}" "${DOUBLE_COUNT_REPORT}" >/dev/null 2>&1; then
+    echo "FAIL: a remainder computed as the device plus the cgroups passed" >&2
+    exit 1
+fi
+sed 's/^PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=.*/PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=5619712/' \
+    "${TCG_REPORT}" > "${WORK}/tcg-double-count.txt"
+if "${CHECKER}" "${WORK}/tcg-double-count.txt" >/dev/null 2>&1; then
+    echo "FAIL: a double-counted attribution was downgraded under TCG" >&2
+    exit 1
+fi
+for fact in DEVICE JOURNALD CGROUPS KERNEL_FS; do
+    grep -v "^PUNAR_IDLE_WRITE_${fact}_BYTES=" "${PASS_REPORT}" > "${WORK}/no-${fact}.txt"
+    if "${CHECKER}" "${WORK}/no-${fact}.txt" >/dev/null 2>&1; then
+        echo "FAIL: a report without PUNAR_IDLE_WRITE_${fact}_BYTES passed" >&2
+        exit 1
+    fi
+done
+sed 's/^PUNAR_IDLE_WRITE_DEVICE_SOURCE=.*/PUNAR_IDLE_WRITE_DEVICE_SOURCE=guessed/' \
+    "${PASS_REPORT}" > "${WORK}/bad-source.txt"
+if "${CHECKER}" "${WORK}/bad-source.txt" >/dev/null 2>&1; then
+    echo "FAIL: a device total from an unnamed source passed" >&2
+    exit 1
+fi
+# Counters flushed at different moments can put the cgroups a few pages
+# ahead of the disk: the remainder is then zero, which is consistent.
+sed -e 's/^PUNAR_IDLE_WRITE_CGROUPS_BYTES=.*/PUNAR_IDLE_WRITE_CGROUPS_BYTES=4415488/' \
+    -e 's/^PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=.*/PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=0/' \
+    "${PASS_REPORT}" > "${WORK}/cgroups-ahead.txt"
+if ! "${CHECKER}" "${WORK}/cgroups-ahead.txt" >/dev/null 2>&1; then
+    echo "FAIL: cgroup counters a page ahead of the disk were rejected" >&2
+    exit 1
+fi
+
+echo "PASS: stabilized-idle checker gates KVM/HVF CPU+writes + connected five-minute idle + zram + the dormant Smplify agent + write attribution without a double count, rejects missing facts, and TCG-downgrades numeric evidence"

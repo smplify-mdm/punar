@@ -38,4 +38,29 @@ for artifact in ram-process-memory.txt ram-meminfo-start.txt ram-meminfo-end.txt
         "CI does not retain ${artifact}"
 done
 
+# The whole guest's idle writes: the journal as its own counter, every
+# top-level cgroup summed, and the kernel/filesystem remainder as the device
+# total MINUS that sum. A remainder of root plus children counts every
+# charged byte twice (the root's io.stat is the whole disk's own counter).
+require_literal "${IDLE_RAM}" \
+    '/sys/fs/cgroup/system.slice/systemd-journald.service/io.stat' \
+    'the journal is not counted on its own'
+require_literal "${IDLE_RAM}" "\"\$(io_write_bytes /sys/fs/cgroup/io.stat)\"" \
+    'the device total is not read from the root cgroup'
+require_literal "${IDLE_RAM}" 'for cgroup in /sys/fs/cgroup/*/; do' \
+    'the top-level cgroups are not summed'
+require_literal "${IDLE_RAM}" \
+    "kernel_fs_write_bytes=\$((device_write_bytes - cgroups_write_bytes))" \
+    'the kernel/filesystem remainder is not the device total minus the cgroups'
+if grep -Eq 'device_write_bytes *\+ *cgroups_write_bytes|cgroups_write_bytes *\+ *device_write_bytes' \
+        "${IDLE_RAM}"; then
+    fail 'the device total is added to the cgroups: every charged byte counted twice'
+fi
+for fact in DEVICE_BYTES DEVICE_SOURCE JOURNALD_BYTES CGROUPS_BYTES KERNEL_FS_BYTES; do
+    require_literal "${IDLE_RAM}" "emit_fact \"PUNAR_IDLE_WRITE_${fact}=" \
+        "the sampler does not report PUNAR_IDLE_WRITE_${fact}"
+done
+require_literal "${BOOT_TEST}" "'^PUNAR_(IDLE_|" \
+    'boot-test does not carry the PUNAR_IDLE_ facts into ram-report.txt'
+
 echo 'PUNAR_MEMORY_ATTRIBUTION_CONTRACT_OK'

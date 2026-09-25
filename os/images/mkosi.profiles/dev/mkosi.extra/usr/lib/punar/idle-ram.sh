@@ -76,6 +76,77 @@ capture_cgroup_counters() {
     printf '%s %s %s\n' "${label}" "${cpu_usec}" "${write_bytes}" >> "${destination}"
 }
 
+# WHERE THE WHOLE GUEST'S WRITES GO, without counting any byte twice. The
+# first-party figure above is a small share of what the disk takes at idle,
+# and on its own it left the rest "unattributed". Three figures account for
+# the device's total over the same window:
+#   - systemd-journald.service, the durable journal, as its own counter;
+#   - every top-level cgroup (/sys/fs/cgroup/*/: system.slice, user.slice,
+#     init.scope, punar.slice, ...), summed: everything a process was charged
+#     for, the journal and Punar's services included;
+#   - the device total minus that sum: writes no cgroup was charged for,
+#     which is the kernel and filesystem metadata (btrfs commits and their
+#     writeback), reported as its own figure.
+# The device total is the root cgroup's io.stat, which is the whole disk's
+# own counter (the kernel keeps it there for the root, it is not a sum of the
+# children), or the diskstats figure when the root's is unreadable. Adding
+# the root and its children would count every charged byte twice; the
+# remainder is a subtraction and nothing else. Every figure covers the same
+# physical disks block_write_sectors counts, by MAJ:MIN, so zram and loop
+# devices are in none of them. A top-level cgroup created inside the window
+# is counted from zero; one removed inside it falls into the remainder.
+block_devices() {
+    for dev in /sys/block/vd* /sys/block/sd* /sys/block/nvme*n* /sys/block/mmcblk*; do
+        [ -r "${dev}/dev" ] || continue
+        cat "${dev}/dev"
+    done | tr '\n' ' '
+}
+
+# io_write_bytes IO_STAT — wbytes summed over BLOCK_DEVICES, or "absent".
+io_write_bytes() {
+    if [ ! -r "$1" ]; then
+        echo absent
+        return
+    fi
+    awk -v devices="${BLOCK_DEVICES}" '
+        BEGIN {
+            n = split(devices, list, " ")
+            for (i = 1; i <= n; i++) want[list[i]] = 1
+        }
+        ($1 in want) {
+            for (i = 2; i <= NF; i++) {
+                if ($i ~ /^wbytes=/) {
+                    split($i, pair, "=")
+                    total += pair[2]
+                }
+            }
+        }
+        END { printf "%.0f\n", total + 0 }
+    ' "$1"
+}
+
+# capture_write_attribution DESTINATION — one "name bytes" line for the
+# journal, the device total and each top-level cgroup.
+capture_write_attribution() {
+    destination="$1"
+    : > "${destination}"
+    printf 'journald %s\n' \
+        "$(io_write_bytes /sys/fs/cgroup/system.slice/systemd-journald.service/io.stat)" \
+        >> "${destination}"
+    printf 'device %s\n' "$(io_write_bytes /sys/fs/cgroup/io.stat)" >> "${destination}"
+    for cgroup in /sys/fs/cgroup/*/; do
+        [ -r "${cgroup}io.stat" ] || continue
+        name="${cgroup%/}"
+        printf 'cgroup:%s %s\n' "${name##*/}" "$(io_write_bytes "${cgroup}io.stat")" \
+            >> "${destination}"
+    done
+}
+
+# attribution_value FILE NAME — the recorded bytes, "absent" when not there.
+attribution_value() {
+    awk -v wanted="$2" '$1 == wanted { print $2; found = 1; exit } END { if (!found) print "absent" }' "$1"
+}
+
 system_cpu_counters() {
     awk '/^cpu / {
         total = 0
@@ -137,9 +208,13 @@ emit_fact "PUNAR_NETWORK_ONLINE=${network_online}"
 
 counter_start="${RUN_DIR}/idle-counters-start.txt"
 counter_end="${RUN_DIR}/idle-counters-end.txt"
+writes_start="${RUN_DIR}/idle-writes-start.txt"
+writes_end="${RUN_DIR}/idle-writes-end.txt"
+BLOCK_DEVICES="$(block_devices)"
 cp /proc/meminfo "${RUN_DIR}/ram-meminfo-start.txt"
 window_start_ms="$(monotonic_ms)"
 capture_service_counters "${counter_start}"
+capture_write_attribution "${writes_start}"
 system_cpu_counters > "${RUN_DIR}/idle-system-cpu-start.txt"
 block_write_sectors > "${RUN_DIR}/idle-block-write-start.txt"
 sum=0
@@ -164,6 +239,7 @@ mean=$((sum / SAMPLE_COUNT))
 
 window_end_ms="$(monotonic_ms)"
 capture_service_counters "${counter_end}"
+capture_write_attribution "${writes_end}"
 system_cpu_counters > "${RUN_DIR}/idle-system-cpu-end.txt"
 block_write_sectors > "${RUN_DIR}/idle-block-write-end.txt"
 cp /proc/meminfo "${RUN_DIR}/ram-meminfo-end.txt"
@@ -236,12 +312,64 @@ case "${block_start}:${block_end}" in
         ;;
 esac
 
+# The whole guest's writes, attributed (see capture_write_attribution): the
+# journal, every top-level cgroup together, and the kernel/filesystem
+# remainder, which with the cgroups adds up to the device total.
+write_delta() {
+    # write_delta NAME — end minus start, a name absent at the start counting
+    # from zero; "absent" when it is not there at the end.
+    end_bytes="$(attribution_value "${writes_end}" "$1")"
+    start_bytes="$(attribution_value "${writes_start}" "$1")"
+    case "${end_bytes}" in ''|*[!0-9]*) echo absent; return ;; esac
+    case "${start_bytes}" in ''|*[!0-9]*) start_bytes=0 ;; esac
+    echo $((end_bytes - start_bytes))
+}
+journald_write_bytes="$(write_delta journald)"
+device_write_source="cgroup-root"
+device_write_bytes="$(write_delta device)"
+case "${device_write_bytes}" in
+    ''|absent|-*)
+        # No root io.stat: the diskstats total over the same disks.
+        device_write_source="diskstats"
+        device_write_bytes="${block_write_bytes}"
+        ;;
+esac
+cgroups_write_bytes=0
+while read -r name _bytes; do
+    case "${name}" in cgroup:*) ;; *) continue ;; esac
+    delta="$(write_delta "${name}")"
+    case "${delta}" in
+        ''|absent|-*)
+            runtime_complete=no
+            echo "punar: idle-runtime: write counter unusable for ${name#cgroup:}" >&2
+            continue
+            ;;
+    esac
+    cgroups_write_bytes=$((cgroups_write_bytes + delta))
+done < "${writes_end}"
+kernel_fs_write_bytes=0
+if [ "${cgroups_write_bytes}" -le "${device_write_bytes}" ]; then
+    kernel_fs_write_bytes=$((device_write_bytes - cgroups_write_bytes))
+else
+    # The cgroups' counters are flushed lazily and can run a few pages
+    # ahead of the disk's; the remainder is then nothing, not negative.
+    echo "punar: idle-runtime: top-level cgroups report $((cgroups_write_bytes - device_write_bytes)) bytes more than the device" >&2
+fi
+case "${journald_write_bytes}" in
+    ''|absent|-*) runtime_complete=no ;;
+esac
+
 emit_fact "PUNAR_IDLE_RUNTIME_PRESENT=${runtime_complete}"
 emit_fact "PUNAR_IDLE_WINDOW_MS=${window_ms}"
 emit_fact "PUNAR_IDLE_CPU_MAX_BPS=${service_cpu_max_bps}"
 emit_fact "PUNAR_IDLE_SERVICE_WRITE_BYTES=${service_write_bytes}"
 emit_fact "PUNAR_IDLE_SYSTEM_CPU_BPS=${system_cpu_bps}"
 emit_fact "PUNAR_IDLE_BLOCK_WRITE_BYTES=${block_write_bytes}"
+emit_fact "PUNAR_IDLE_WRITE_DEVICE_BYTES=${device_write_bytes}"
+emit_fact "PUNAR_IDLE_WRITE_DEVICE_SOURCE=${device_write_source}"
+emit_fact "PUNAR_IDLE_WRITE_JOURNALD_BYTES=${journald_write_bytes}"
+emit_fact "PUNAR_IDLE_WRITE_CGROUPS_BYTES=${cgroups_write_bytes}"
+emit_fact "PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=${kernel_fs_write_bytes}"
 
 # The line the CI desktop test greps for (gates: fail mean > 1536 MB hard
 # ceiling, warn > 1024 MB target; TCG runs are warn-only, labeled emulated).

@@ -281,6 +281,26 @@ at the 10-minute mark, and the reported value is the mean over the window
 - Whole-guest block writes remain context only. They include the journal,
   filesystem metadata and services outside Punar's ownership, so gating that
   aggregate as though it were first-party would create false attribution.
+- **Attributed, never double-counted.** The first-party figure alone left
+  most of the guest's writes "unattributed" (98.5% in CI). The sampler now
+  splits the device's total over the same window into the journal
+  (`systemd-journald.service`, `PUNAR_IDLE_WRITE_JOURNALD_BYTES`), every
+  top-level cgroup summed (`PUNAR_IDLE_WRITE_CGROUPS_BYTES`, which includes
+  the journal and Punar's services), and the **kernel/filesystem metadata**
+  no cgroup was charged for (`PUNAR_IDLE_WRITE_KERNEL_FS_BYTES`): the device
+  total minus the cgroups, floored at zero. The device total
+  (`PUNAR_IDLE_WRITE_DEVICE_BYTES`) is the root cgroup's `io.stat`, which is
+  the whole disk's own counter and not a sum of its children, or diskstats
+  when that is unreadable (`PUNAR_IDLE_WRITE_DEVICE_SOURCE`); every figure
+  covers the same physical disks, so zram and loop devices are in none.
+  Adding the root to its children would count every charged byte twice, and
+  `check-budgets.sh` fails a report whose remainder is not the subtraction.
+  The figures are context, not a budget. One arm64 release-image window
+  (2026-09-24, greeter idle, 4 GiB, HVF; not the CI lane) split 4,411,392
+  bytes into 1,134,592 of journal, 73,728 of punard's audit, and 3,203,072
+  of btrfs metadata and writeback. The journal and the audit log stay
+  persistent: making either volatile would trade audit durability for
+  writes, which is not a trade Punar makes.
 
 ### 2.6 Boot
 

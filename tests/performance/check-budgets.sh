@@ -56,6 +56,16 @@
 #   combined Punar service writes > 98,304 bytes  ::error:: -> exit 1
 #   short/missing runtime, network or zram facts  ::error:: -> exit 1
 #
+# The whole guest's writes are attributed, context only, never gated on
+# volume: the journal (systemd-journald.service), every top-level cgroup
+# together, and the kernel/filesystem metadata no cgroup was charged for,
+# which is the device total minus the cgroups. The sampler's arithmetic is
+# checked, because a remainder computed as root PLUS children counts every
+# charged byte twice:
+#
+#   attribution facts missing or malformed      ::error:: -> exit 1
+#   kernel/fs != device - cgroups (floor 0)     ::error:: -> exit 1
+#
 # CPU is stored in hundredths of a percentage point (`bps`): 50 is 0.50%.
 # The write ceiling is the engineering interpretation recorded after two
 # native Apple-HVF windows each wrote exactly 8,192 first-party bytes and a
@@ -152,6 +162,11 @@ IDLE_CPU_MAX_BPS="$(get_field PUNAR_IDLE_CPU_MAX_BPS)"
 IDLE_SERVICE_WRITE_BYTES="$(get_field PUNAR_IDLE_SERVICE_WRITE_BYTES)"
 IDLE_SYSTEM_CPU_BPS="$(get_field PUNAR_IDLE_SYSTEM_CPU_BPS)"
 IDLE_BLOCK_WRITE_BYTES="$(get_field PUNAR_IDLE_BLOCK_WRITE_BYTES)"
+WRITE_DEVICE_BYTES="$(get_field PUNAR_IDLE_WRITE_DEVICE_BYTES)"
+WRITE_DEVICE_SOURCE="$(get_field PUNAR_IDLE_WRITE_DEVICE_SOURCE)"
+WRITE_JOURNALD_BYTES="$(get_field PUNAR_IDLE_WRITE_JOURNALD_BYTES)"
+WRITE_CGROUPS_BYTES="$(get_field PUNAR_IDLE_WRITE_CGROUPS_BYTES)"
+WRITE_KERNEL_FS_BYTES="$(get_field PUNAR_IDLE_WRITE_KERNEL_FS_BYTES)"
 NETWORK_ONLINE="$(get_field PUNAR_NETWORK_ONLINE)"
 ZRAM_PRESENT="$(get_field PUNAR_ZRAM_PRESENT)"
 ZRAM_DISKSIZE_MB="$(get_field PUNAR_ZRAM_DISKSIZE_MB)"
@@ -267,6 +282,10 @@ for field_and_value in \
     "PUNAR_IDLE_SERVICE_WRITE_BYTES:${IDLE_SERVICE_WRITE_BYTES}" \
     "PUNAR_IDLE_SYSTEM_CPU_BPS:${IDLE_SYSTEM_CPU_BPS}" \
     "PUNAR_IDLE_BLOCK_WRITE_BYTES:${IDLE_BLOCK_WRITE_BYTES}" \
+    "PUNAR_IDLE_WRITE_DEVICE_BYTES:${WRITE_DEVICE_BYTES}" \
+    "PUNAR_IDLE_WRITE_JOURNALD_BYTES:${WRITE_JOURNALD_BYTES}" \
+    "PUNAR_IDLE_WRITE_CGROUPS_BYTES:${WRITE_CGROUPS_BYTES}" \
+    "PUNAR_IDLE_WRITE_KERNEL_FS_BYTES:${WRITE_KERNEL_FS_BYTES}" \
     "PUNAR_ZRAM_DISKSIZE_MB:${ZRAM_DISKSIZE_MB}"; do
     field="${field_and_value%%:*}"
     value="${field_and_value#*:}"
@@ -277,6 +296,42 @@ for field_and_value in \
             ;;
     esac
 done
+
+case "${WRITE_DEVICE_SOURCE:-missing}" in
+    cgroup-root|diskstats) ;;
+    *)
+        annotate error "check-budgets: field PUNAR_IDLE_WRITE_DEVICE_SOURCE is '${WRITE_DEVICE_SOURCE:-missing}', not cgroup-root or diskstats"
+        fail=1
+        ;;
+esac
+
+is_number() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+if is_number "${WRITE_DEVICE_BYTES}" && is_number "${WRITE_CGROUPS_BYTES}" \
+        && is_number "${WRITE_KERNEL_FS_BYTES}" && is_number "${WRITE_JOURNALD_BYTES}"; then
+    expected_kernel_fs=0
+    if [ "${WRITE_CGROUPS_BYTES}" -le "${WRITE_DEVICE_BYTES}" ]; then
+        expected_kernel_fs=$((WRITE_DEVICE_BYTES - WRITE_CGROUPS_BYTES))
+    fi
+    if [ "${WRITE_KERNEL_FS_BYTES}" -ne "${expected_kernel_fs}" ]; then
+        annotate error "the idle-write attribution does not add up: kernel/filesystem metadata ${WRITE_KERNEL_FS_BYTES} bytes, but the device wrote ${WRITE_DEVICE_BYTES} and the top-level cgroups ${WRITE_CGROUPS_BYTES} (expected ${expected_kernel_fs}; a remainder of root plus children counts every charged byte twice)"
+        fail=1
+    fi
+    other_cgroups=$((WRITE_CGROUPS_BYTES - WRITE_JOURNALD_BYTES))
+    if is_number "${IDLE_SERVICE_WRITE_BYTES}"; then
+        other_cgroups=$((other_cgroups - IDLE_SERVICE_WRITE_BYTES))
+    fi
+    echo "    idle writes, whole guest (context only, ${WRITE_DEVICE_SOURCE:-?}): ${WRITE_DEVICE_BYTES} bytes ="
+    echo "                 ${WRITE_JOURNALD_BYTES} journal (systemd-journald.service)"
+    echo "               + ${IDLE_SERVICE_WRITE_BYTES:-?} Punar first-party services"
+    echo "               + ${other_cgroups} every other cgroup"
+    echo "               + ${WRITE_KERNEL_FS_BYTES} kernel/filesystem metadata (no cgroup charged)"
+    if [ "${other_cgroups}" -lt 0 ]; then
+        annotate warning "the journal and Punar's services together report more writes than every top-level cgroup (${other_cgroups} bytes): the counters were flushed at different moments"
+    fi
+fi
 
 if [ -n "${IDLE_WINDOW_MS}" ] && case "${IDLE_WINDOW_MS}" in *[!0-9]*) false ;; *) true ;; esac \
     && [ "${IDLE_WINDOW_MS}" -lt 300000 ]; then
