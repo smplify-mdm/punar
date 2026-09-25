@@ -4234,7 +4234,15 @@ pub fn approvals_list(style: &Style, result: &Value, hostname: &str) -> Result<S
 
 /// `app list --all`: the desktop entries the launcher offers beyond the
 /// catalog, each with the id `app open` takes.
-pub fn desktop_entries(style: &Style, entries: &[crate::desktop::DesktopEntry]) -> String {
+///
+/// An entry the launcher hides is listed too, marked `hidden` with the reason
+/// from the shipped list both surfaces read. When that list cannot be read,
+/// nothing is marked and a note says why.
+pub fn desktop_entries(
+    style: &Style,
+    entries: &[crate::desktop::DesktopEntry],
+    hidden: &Result<std::collections::BTreeMap<String, String>, String>,
+) -> String {
     let mut out = String::from("\n");
     out.push_str(&fmt::section(
         style,
@@ -4248,15 +4256,41 @@ pub fn desktop_entries(style: &Style, entries: &[crate::desktop::DesktopEntry]) 
     let rows: Vec<Row> = entries
         .iter()
         .map(|entry| {
-            Row::new(
-                &printable(&entry.id),
-                if entry.terminal { "terminal" } else { "window" },
-                Slot::Neutral,
-                &printable(&entry.name),
-            )
+            let kind = if entry.terminal { "terminal" } else { "window" };
+            let why = hidden
+                .as_ref()
+                .ok()
+                .and_then(|hidden| hidden.get(&entry.id.to_lowercase()));
+            match why {
+                Some(why) => Row::new(
+                    &printable(&entry.id),
+                    "hidden",
+                    Slot::Neutral,
+                    &format!(
+                        "{} · {kind} · not in the launcher: {}",
+                        printable(&entry.name),
+                        printable(why)
+                    ),
+                ),
+                None => Row::new(
+                    &printable(&entry.id),
+                    kind,
+                    Slot::Neutral,
+                    &printable(&entry.name),
+                ),
+            }
         })
         .collect();
     out.push_str(&fmt::rows(style, &rows));
+    if let Err(why) = hidden {
+        out.push_str(&fmt::note(
+            style,
+            &format!(
+                "The launcher's hidden list could not be read, so nothing is marked · {}",
+                printable(why)
+            ),
+        ));
+    }
     out
 }
 
@@ -5189,6 +5223,41 @@ mod tests {
             5,
             "{text}"
         );
+    }
+
+    /// A hidden entry is listed, marked, with its reason; the rest are plain.
+    #[test]
+    fn desktop_entries_mark_what_the_launcher_hides() {
+        let entry = |id: &str, terminal: bool| crate::desktop::DesktopEntry {
+            id: id.into(),
+            name: id.into(),
+            exec: vec![id.into()],
+            terminal,
+            path: None,
+        };
+        let hidden = Ok([(
+            "footclient".to_string(),
+            "Another way to reach Foot.".to_string(),
+        )]
+        .into_iter()
+        .collect());
+        let text = desktop_entries(
+            &Style::plain(),
+            &[entry("footclient", true), entry("htop", true)],
+            &hidden,
+        );
+        let foot = text.lines().find(|l| l.starts_with("FOOTCLIENT")).unwrap();
+        assert!(foot.contains("HIDDEN"), "{foot}");
+        assert!(
+            foot.contains("terminal · not in the launcher: Another way to reach Foot."),
+            "{foot}"
+        );
+        let htop = text.lines().find(|l| l.starts_with("HTOP")).unwrap();
+        assert!(
+            htop.contains("TERMINAL") && !htop.contains("HIDDEN"),
+            "{htop}"
+        );
+        assert!(!text.contains("COULD NOT BE READ"), "{text}");
     }
 
     /// No live read was made: every row of the status view's live stanza

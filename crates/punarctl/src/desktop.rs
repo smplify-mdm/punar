@@ -23,6 +23,11 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+/// The launcher's hidden desktop entries, id -> reason. Apps.qml reads the
+/// same file and hides them; `app list --all` lists them marked, so the two
+/// surfaces differ only on purpose, and visibly.
+pub const LAUNCHER_HIDDEN: &str = "/usr/share/punar/catalog/launcher-hidden-entries.json";
+
 /// The compositor's CLI, absolute for the reason ControlData.qml gives: this
 /// must not depend on whatever PATH the session handed us.
 const HYPRCTL: &str = "/usr/bin/hyprctl";
@@ -58,6 +63,36 @@ impl DesktopEntry {
             _ => None,
         }
     }
+}
+
+/// The ids the launcher hides, each with its reason, from the shipped file's
+/// text. Ids compare lower-case, as the launcher's `bareId` does.
+pub fn parse_launcher_hidden(
+    text: &str,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let document: Value =
+        serde_json::from_str(text).map_err(|error| format!("it is not JSON ({error})"))?;
+    if document.get("v").and_then(Value::as_u64) != Some(1) {
+        return Err("it is not version 1".into());
+    }
+    let entries = document
+        .get("entries")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "it has no entries object".to_string())?;
+    entries
+        .iter()
+        .map(|(id, why)| match why.as_str() {
+            Some(why) => Ok((id.to_lowercase(), why.to_string())),
+            None => Err(format!("the reason for {id} is not text")),
+        })
+        .collect()
+}
+
+/// [`parse_launcher_hidden`] over the installed file.
+pub fn launcher_hidden() -> Result<std::collections::BTreeMap<String, String>, String> {
+    let text = fs::read_to_string(LAUNCHER_HIDDEN)
+        .map_err(|error| format!("{LAUNCHER_HIDDEN} could not be read ({error})"))?;
+    parse_launcher_hidden(&text).map_err(|why| format!("{LAUNCHER_HIDDEN} is invalid: {why}"))
 }
 
 /// `$XDG_DATA_HOME` then `$XDG_DATA_DIRS`, each only when absolute, with the
@@ -522,6 +557,28 @@ mod tests {
             let text = format!("[Desktop Entry]\n{hidden}\nName=x\nExec=x\n");
             assert!(parse("x", file, &text).is_none(), "{hidden}");
         }
+    }
+
+    /// The file the image ships parses, and hides the helpers the launcher
+    /// always hid, each with a reason.
+    #[test]
+    fn the_shipped_hidden_list_parses_with_a_reason_for_each() {
+        let hidden = parse_launcher_hidden(include_str!(
+            "../../../catalog/launcher-hidden-entries.json"
+        ))
+        .unwrap();
+        for id in ["footclient", "foot-server", "chromium", "avahi-discover"] {
+            assert!(hidden.get(id).is_some_and(|why| !why.is_empty()), "{id}");
+        }
+        assert!(parse_launcher_hidden(r#"{"v": 2, "entries": {}}"#).is_err());
+        assert!(parse_launcher_hidden(r#"{"v": 1, "entries": {"x": 1}}"#).is_err());
+        assert_eq!(
+            parse_launcher_hidden(r#"{"v": 1, "entries": {"Foot-Server": "why"}}"#)
+                .unwrap()
+                .get("foot-server")
+                .map(String::as_str),
+            Some("why")
+        );
     }
 
     /// A catalog app's own launcher is recognised, so `--all` does not list

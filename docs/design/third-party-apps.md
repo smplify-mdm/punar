@@ -331,11 +331,17 @@ Exactly these. Anything else answers with D-014's usage error, exit 2.
 | `punarctl app policy` | `policy.effective` (existing) | no | no | no |
 | `punarctl app request <id> [--image\|--recheck]` | local file write | — | yes | **no** |
 
-`app list --all` adds every desktop entry the launcher shows, from the
-user's `$XDG_DATA_HOME` and `$XDG_DATA_DIRS`, with Hidden and NoDisplay
-entries left out. A catalog app's own launcher is its catalog row. With
-`--json` it prints `{apps: [{id, name, source: catalog|desktop-entry,
-terminal}]}`. `app open` takes either id and, like the launcher, first
+`app list --all` adds every visible desktop entry, from the user's
+`$XDG_DATA_HOME` and `$XDG_DATA_DIRS`, with Hidden and NoDisplay entries
+left out. A catalog app's own launcher is its catalog row. The entries the
+launcher leaves out as package helpers are still listed, marked `hidden`
+with their reason from `/usr/share/punar/catalog/launcher-hidden-entries.json`.
+That is the one file the launcher also reads, so the two surfaces differ
+only on purpose. With `--json` it prints `{apps: [{id, name, source:
+catalog|desktop-entry, terminal, hidden_in_launcher, hidden_why?}],
+launcher_hidden_list}`. `launcher_hidden_list` is null, with
+`launcher_hidden_error`, when the file cannot be read, and then nothing is
+marked. `app open` takes either id and, like the launcher, first
 raises a window the app already has (Hyprland's focus dispatcher, matched on
 the same window ids Apps.qml derives). Otherwise a catalog app launches as
 before, and a desktop entry runs its `Exec`, split into argv by the Desktop

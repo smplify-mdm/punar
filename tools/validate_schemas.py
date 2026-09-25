@@ -70,6 +70,7 @@ MANIFEST: list[tuple[str, str | None]] = [
     # --- signed-image application catalog -----------------------------------
     ("catalog/catalog.json", "schemas/catalog/app-catalog.json"),
     ("catalog/architecture-exceptions.json", "schemas/catalog/architecture-exceptions.json"),
+    ("catalog/launcher-hidden-entries.json", "schemas/catalog/launcher-hidden-entries.json"),
     # --- schemas/**/examples/ ------------------------------------------------
     ("schemas/ai-agent/examples/agent-definition*", "schemas/ai-agent/agent-definition.json"),
     ("schemas/ai-agent/examples/ledger-summary*", "schemas/ai-agent/ledger-summary.json"),

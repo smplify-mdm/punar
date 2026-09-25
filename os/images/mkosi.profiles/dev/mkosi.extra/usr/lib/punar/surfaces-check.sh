@@ -160,7 +160,9 @@ systemcontrol_models_ready() {
         && jq -e '.explains | length > 0
             and all(.[]; .stateKey == "Drift" and .compliance == "Matches")' \
             /run/punar/surfaces-systemcontrol-firewall.json >/dev/null 2>&1 \
-        && jq -e --slurpfile catalog /usr/share/punar/catalog/catalog.json '.title == "Applications"
+        && jq -e --slurpfile catalog /usr/share/punar/catalog/catalog.json \
+            --slurpfile hidden /usr/share/punar/catalog/launcher-hidden-entries.json \
+            '.title == "Applications"
             # The summary is user-facing state, not decoration. Prove each
             # advertised count against the live rows and the version against
             # the signed catalog. This intentionally follows the richer
@@ -183,13 +185,13 @@ systemcontrol_models_ready() {
                 | all($available[]; . as $name
                     | any($catalog[0].apps[]; .name == $name)))
             # Package-owned helper launchers are implementation details, not
-            # products. Prove the running image filters the exact known ids
+            # products. Prove the running image filters every id in the
+            # shipped hidden list (the file Apps.qml and punarctl both read)
             # while retaining the useful hardware viewer under a plain name.
+            and ($hidden[0].entries | keys | length > 0)
             and (all(.rows[] | select(.tag == "Installed");
                 .action.entry.id as $id
-                | (["footclient", "foot-server", "thunar-settings",
-                  "thunar-bulk-rename", "xfce4-about", "bssh", "bvnc",
-                  "avahi-discover"] | index($id)) == null))
+                | ($hidden[0].entries | has($id)) | not))
             and all(.rows[] | select(.tag == "Installed"
                 and .action.entry.id == "lstopo"
                 ); .name == "Hardware Information")

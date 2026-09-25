@@ -1227,8 +1227,15 @@ fn app_update(
 }
 
 /// `app list --all --json`: one row per thing the launcher can open, the
-/// catalog's first.
-fn app_list_all_json(list: &Value, entries: &[desktop::DesktopEntry]) -> Value {
+/// catalog's first. A desktop entry the launcher hides is still a row, with
+/// `hidden_in_launcher` and the shipped reason. `launcher_hidden_list` names
+/// the file those marks came from, or is null with the reason it could not be
+/// read, in which case nothing is marked.
+fn app_list_all_json(
+    list: &Value,
+    entries: &[desktop::DesktopEntry],
+    hidden: &Result<std::collections::BTreeMap<String, String>, String>,
+) -> Value {
     let mut rows: Vec<Value> = list
         .get("apps")
         .and_then(Value::as_array)
@@ -1240,18 +1247,35 @@ fn app_list_all_json(list: &Value, entries: &[desktop::DesktopEntry]) -> Value {
                 "name": app.get("name").cloned().unwrap_or(Value::Null),
                 "source": "catalog",
                 "terminal": false,
+                "hidden_in_launcher": false,
             })
         })
         .collect();
     rows.extend(entries.iter().map(|entry| {
-        json!({
+        let why = hidden
+            .as_ref()
+            .ok()
+            .and_then(|hidden| hidden.get(&entry.id.to_lowercase()));
+        let mut row = json!({
             "id": entry.id,
             "name": entry.name,
             "source": "desktop-entry",
             "terminal": entry.terminal,
-        })
+            "hidden_in_launcher": why.is_some(),
+        });
+        if let Some(why) = why {
+            row["hidden_why"] = json!(why);
+        }
+        row
     }));
-    json!({ "apps": rows })
+    match hidden {
+        Ok(_) => json!({ "apps": rows, "launcher_hidden_list": desktop::LAUNCHER_HIDDEN }),
+        Err(why) => json!({
+            "apps": rows,
+            "launcher_hidden_list": null,
+            "launcher_hidden_error": why,
+        }),
+    }
 }
 
 fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
@@ -4630,13 +4654,14 @@ fn main() -> ExitCode {
                                     .is_none_or(|id| !catalog_ids.contains(&id))
                             })
                             .collect();
+                        let hidden = desktop::launcher_hidden();
                         if json {
-                            return print_json(&app_list_all_json(&result, &entries));
+                            return print_json(&app_list_all_json(&result, &entries, &hidden));
                         }
                         let catalog = Some(client.call("apps.catalog", Some(json!({}))));
                         render_or_json(false, &result, |v| {
                             let mut out = views::app_list(&style, v, catalog.as_ref(), &hostname)?;
-                            out.push_str(&views::desktop_entries(&style, &entries));
+                            out.push_str(&views::desktop_entries(&style, &entries, &hidden));
                             Ok(out)
                         })
                     }
@@ -6424,6 +6449,46 @@ mod tests {
             } => assert_eq!(timeout, 300),
             _ => panic!("parsed into the wrong command"),
         }
+    }
+
+    /// `app list --all --json` keeps an entry the launcher hides as a row,
+    /// marked with the shipped reason, and when the list cannot be read it
+    /// marks nothing and says why instead of implying nothing is hidden.
+    #[test]
+    fn app_list_all_json_marks_what_the_launcher_hides() {
+        let entry = |id: &str| super::desktop::DesktopEntry {
+            id: id.into(),
+            name: id.into(),
+            exec: vec![id.into()],
+            terminal: false,
+            path: None,
+        };
+        let entries = [entry("footclient"), entry("htop")];
+        let list = serde_json::json!({"apps": []});
+        let hidden = Ok([(
+            "footclient".to_string(),
+            "Another way to reach Foot.".to_string(),
+        )]
+        .into_iter()
+        .collect());
+        let document = super::app_list_all_json(&list, &entries, &hidden);
+        assert_eq!(document["apps"][0]["hidden_in_launcher"], true);
+        assert_eq!(
+            document["apps"][0]["hidden_why"],
+            "Another way to reach Foot."
+        );
+        assert_eq!(document["apps"][1]["hidden_in_launcher"], false);
+        assert!(document["apps"][1].get("hidden_why").is_none());
+        assert_eq!(
+            document["launcher_hidden_list"],
+            super::desktop::LAUNCHER_HIDDEN
+        );
+
+        let unread = Err("it could not be read".to_string());
+        let document = super::app_list_all_json(&list, &entries, &unread);
+        assert_eq!(document["apps"][0]["hidden_in_launcher"], false);
+        assert_eq!(document["launcher_hidden_list"], serde_json::Value::Null);
+        assert_eq!(document["launcher_hidden_error"], "it could not be read");
     }
 
     /// `audit tail` defaults to 20 events (docs/api/ipc.md section 5.5).

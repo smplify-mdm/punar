@@ -1738,9 +1738,11 @@ or path other than the confirmed target device. An installed system returns
   prints every binding.
 - **App parity (client-side, no new method):** `punarctl app list` joins
   `apps.catalog {}` for category, trust tier and catalog version, and its
-  `--json` is still `apps.list` verbatim. `app list --all` adds the
-  launcher's desktop entries, and `--all --json` prints `{apps: [{id, name,
-  source, terminal}]}`. `app open <catalog-id|desktop-id>` falls back to the
+  `--json` is still `apps.list` verbatim. `app list --all` adds every
+  visible desktop entry and marks the ones the launcher hides, with the
+  reason from `/usr/share/punar/catalog/launcher-hidden-entries.json`, the
+  file Apps.qml reads. `--all --json` prints `{apps: [{id, name, source,
+  terminal, hidden_in_launcher, hidden_why?}], launcher_hidden_list}`. `app open <catalog-id|desktop-id>` falls back to the
   desktop index when `apps.catalog` answers `not_found`, or when punard is
   unreachable. It raises an open window first, as the launcher does
   (third-party-apps.md section 2.1).

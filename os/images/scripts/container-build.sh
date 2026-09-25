@@ -274,6 +274,10 @@ stage_desktop_extra() {
         "${extra}/usr/share/punar/catalog/icons"
     install -m 0644 "${REPO_ROOT}/catalog/catalog.json" \
         "${extra}/usr/share/punar/catalog/catalog.json"
+    # The launcher's hidden desktop entries: one file Apps.qml and
+    # `punarctl app list --all` both read, so they differ only on purpose.
+    install -m 0644 "${REPO_ROOT}/catalog/launcher-hidden-entries.json" \
+        "${extra}/usr/share/punar/catalog/launcher-hidden-entries.json"
     install -m 0644 "${REPO_ROOT}/catalog/remotes/flathub.flatpakrepo" \
         "${extra}/usr/share/punar/catalog/remotes/flathub.flatpakrepo"
     install -m 0644 "${REPO_ROOT}"/catalog/icons/*.svg \

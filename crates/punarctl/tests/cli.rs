@@ -4300,14 +4300,38 @@ fn app_list_all_adds_the_desktop_entries_the_launcher_offers() {
     assert_eq!(
         document["apps"],
         json!([
-            {"id": "org.gnome.Calculator", "name": "Calculator", "source": "catalog", "terminal": false},
-            {"id": "org.mozilla.firefox", "name": "Firefox", "source": "catalog", "terminal": false},
-            {"id": "htop", "name": "htop", "source": "desktop-entry", "terminal": true},
-            {"id": "kde-konsole", "name": "Konsole", "source": "desktop-entry", "terminal": false},
-            {"id": "loop", "name": "Loop", "source": "desktop-entry", "terminal": false},
-            {"id": "marker", "name": "Marker", "source": "desktop-entry", "terminal": false}
+            {"id": "org.gnome.Calculator", "name": "Calculator", "source": "catalog",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "source": "catalog",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "htop", "name": "htop", "source": "desktop-entry",
+             "terminal": true, "hidden_in_launcher": false},
+            {"id": "kde-konsole", "name": "Konsole", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "loop", "name": "Loop", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "marker", "name": "Marker", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false}
         ])
     );
+    // The marks come from the image's shipped list. Where it is absent (this
+    // container), the document says so rather than implying nothing is hidden.
+    let installed = std::path::Path::new("/usr/share/punar/catalog/launcher-hidden-entries.json");
+    if installed.exists() {
+        assert_eq!(
+            document["launcher_hidden_list"],
+            json!(installed),
+            "{document}"
+        );
+    } else {
+        assert_eq!(document["launcher_hidden_list"], Value::Null, "{document}");
+        assert!(
+            document["launcher_hidden_error"]
+                .as_str()
+                .is_some_and(|why| why.contains("could not be read")),
+            "{document}"
+        );
+    }
 
     let output = run_desktop(&socket, &home, &["app", "list", "--all"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -4319,6 +4343,12 @@ fn app_list_all_adds_the_desktop_entries_the_launcher_offers() {
         .expect(&text);
     assert!(htop.contains("TERMINAL"), "{htop}");
     assert!(!text.contains("Secret"), "{text}");
+    if !installed.exists() {
+        assert!(
+            text.contains("THE LAUNCHER'S HIDDEN LIST COULD NOT BE READ, SO NOTHING IS MARKED"),
+            "{text}"
+        );
+    }
     let _ = fs::remove_dir_all(&home);
 }
 
