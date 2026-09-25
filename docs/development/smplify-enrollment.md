@@ -117,7 +117,12 @@ budget of its own, since three round trips over a satellite or poor
 cellular link need that much, and the status POST keeps its 4 s; punard
 waits 9 s for a compliance report. A check-in that fails is not tried again
 for a minute, then two, doubling to 30 minutes, so one that cannot succeed
-does not cost every pass. Every read and
+does not cost every pass; once a status POST gets through after one that
+did not, the link is back and the next report tries it at once. The status
+POST gets its 4 s or what is left of the call's whole budget, measured from
+the call's start, whichever is less, and a name lookup is given up on at the
+request's budget, so a slow check-in never pushes a stored report past
+punard's wait. Every read and
 write, the TLS handshake's included, waits only for the time left, so a
 server that never answers costs one budget. Nothing long-polls inside a
 call.

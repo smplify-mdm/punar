@@ -16,6 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use punar_smplifyd::budget::{CALL_BUDGET, PIN_BUDGET, REGISTER_BUDGET};
@@ -62,6 +63,9 @@ pub struct Daemon {
     /// memory only: a restart costs one early check-in, not a stale schedule
     /// on disk.
     pin_retry: Mutex<Option<PinRetry>>,
+    /// Whether the last status POST failed, so that one getting through
+    /// says the link is back ([`Daemon::after_post`]).
+    post_failed: AtomicBool,
 }
 
 /// A tenant-key check-in that failed, for the identity it was made for.
@@ -85,6 +89,7 @@ impl Daemon {
             #[cfg(test)]
             pin_overrun: Duration::ZERO,
             pin_retry: Mutex::new(None),
+            post_failed: AtomicBool::new(false),
         }
     }
 
@@ -407,9 +412,12 @@ impl Daemon {
             ));
         }
         let body = compose(&record.device_id, payload);
-        self.api(left)?
-            .status(&record.device_id, &body)
-            .map_err(upstream_refusal)?;
+        let posted = self.api(left).and_then(|api| {
+            api.status(&record.device_id, &body)
+                .map_err(upstream_refusal)
+        });
+        self.after_post(posted.is_ok());
+        posted?;
         // What left, exactly as it left. punard keeps it as the person's
         // record of what their organization received (SPEC section 24.2), so
         // that record is the translation's output, never punard's guess at
@@ -473,6 +481,19 @@ impl Daemon {
             failures,
             not_before: started + wait,
         });
+    }
+
+    /// A status POST that gets through after one that did not means the link
+    /// is back. A check-in the outage backed off (doubling up to half an hour,
+    /// with nothing getting through at all) is then tried again at the next
+    /// compliance report, instead of after the wait the outage built up; the
+    /// backoff still spares a link that carries reports but not the
+    /// check-in.
+    fn after_post(&self, posted: bool) {
+        let was_down = self.post_failed.swap(!posted, Ordering::SeqCst);
+        if posted && was_down {
+            *self.pin_retry.lock().unwrap() = None;
+        }
     }
 
     /// The identity punard's `device_token` names, or `unauthorized`.
@@ -929,6 +950,64 @@ mod tests {
         // left for the POST, which is not sent.
         assert!(took < PIN + OVERRUN + BUDGET / 2, "{took:?}");
         assert_eq!(arrivals.lock().unwrap().len(), 1, "only the check-in");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An outage backs the tenant-key check-in off like any failure, but
+    /// once a status POST gets through again the link is back, and the next
+    /// compliance report tries the check-in at once instead of waiting out
+    /// what the outage built up.
+    #[test]
+    fn a_check_in_an_outage_backed_off_is_tried_once_the_link_is_back() {
+        const BUDGET: Duration = Duration::from_millis(300);
+        let (d, root) = daemon();
+        let d = d
+            .with_call_budget(BUDGET)
+            .with_pin_budget(BUDGET, Duration::from_secs(600));
+        let (port, arrivals) = silent_smplify();
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let (token, token_sha256) = identity::new_device_token().unwrap();
+        d.store
+            .save(
+                &Record {
+                    device_id: "dev-1".into(),
+                    server: format!("https://127.0.0.1:{port}"),
+                    org_id: "acme".into(),
+                    org_name: "Acme".into(),
+                    os_identifier: "punar".into(),
+                    not_after: None,
+                    tenant_public_key: None,
+                    token_sha256,
+                    enrolled_at: "2026-09-24T00:00:00Z".into(),
+                },
+                &Zeroizing::new(key.serialize_pem()),
+                &cert.pem(),
+                &cert.pem(),
+            )
+            .unwrap();
+        let d = Arc::new(d);
+        let report = || {
+            answer_apart(
+                &d,
+                json!({"v": 1, "id": "r", "method": "compliance.report",
+                       "params": {"device_token": &*token, "report": {}}}),
+                BUDGET * 20,
+            )
+        };
+        let arrived = || arrivals.lock().unwrap().len();
+        report();
+        assert_eq!(arrived(), 2, "the check-in, then the POST");
+        report();
+        assert_eq!(arrived(), 3, "the check-in waits");
+        // A POST gets through: the silent Smplify cannot answer one, so the
+        // agent is told as a report that got through would tell it.
+        d.after_post(true);
+        report();
+        assert_eq!(arrived(), 5, "the check-in is tried again at once");
         let _ = std::fs::remove_dir_all(root);
     }
 
