@@ -114,6 +114,16 @@ pub trait Capability: Send + Sync {
     fn default_desired(&self) -> Option<Value> {
         None
     }
+
+    /// What the first-boot seeding persists as the OS default of a
+    /// capability with no compiled [`Capability::default_desired`]. The live
+    /// observation, unless the backend knows a better first answer that is
+    /// only right at that moment (the installer's keyboard layout on a
+    /// device nobody has signed in to yet, SMP-1405 WP-02). Persisted once,
+    /// so it never changes under a device afterwards.
+    fn first_boot_default(&self) -> Result<Value, BackendError> {
+        self.observe()
+    }
 }
 
 impl fmt::Debug for dyn Capability {

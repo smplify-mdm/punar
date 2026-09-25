@@ -16,9 +16,18 @@
 //! and typing. It is still a typed, audited capability, still refused to an
 //! agent, and still pinnable by an organization.
 //!
-//! **The installer's choice is the first default.** When the install seed
-//! (`/var/lib/punar/install/seed.json`) names a valid layout, that is the OS
-//! default the first boot reconciles to; otherwise the first observation is.
+//! **The installer's choice is the first default, on a new device only.**
+//! When the install seed (`/var/lib/punar/install/seed.json`) names a valid
+//! layout AND nobody has created an account yet (no
+//! `/var/lib/punar/onboarding/completed.json`), that layout is the OS default
+//! the first boot persists and reconciles to, so the first-run form, every
+//! password and the desktop all start in it. On a device already in service
+//! (an account exists), the first observation is the default instead: before
+//! WP-02 every greeter, desktop and lock screen typed US English whatever the
+//! seed said, so every existing password was typed that way, and switching
+//! the login screen to the seed's layout under it could lock the person out
+//! (review finding: "updating an existing device can change the password
+//! layout"). Either answer is persisted once and never re-read.
 
 use std::fs;
 use std::path::PathBuf;
@@ -38,21 +47,33 @@ pub const CAPABILITY_ID: &str = "system.keymap";
 /// The install seed punard's installer writes onto the target's `/var`.
 pub const INSTALL_SEED: &str = "/var/lib/punar/install/seed.json";
 
+/// punar-onboard's root-owned record that the first account exists
+/// (`crates/punar-onboard/src/identity.rs`, `completed.json`).
+pub const ONBOARDING_MARKER: &str = "/var/lib/punar/onboarding/completed.json";
+
 pub struct KeymapBackend {
     /// `/etc/vconsole.conf` in the image.
     pub vconsole: PathBuf,
     /// The XKB rules list values are checked against.
     pub xkb_list: PathBuf,
-    /// The install seed whose `keymap` is the first default.
+    /// The install seed whose `keymap` is the first default on a new device.
     pub install_seed: PathBuf,
+    /// Present once an account exists: the seed is then too late to apply.
+    pub onboarding_marker: PathBuf,
 }
 
 impl KeymapBackend {
-    pub fn new(vconsole: PathBuf, xkb_list: PathBuf, install_seed: PathBuf) -> Self {
+    pub fn new(
+        vconsole: PathBuf,
+        xkb_list: PathBuf,
+        install_seed: PathBuf,
+        onboarding_marker: PathBuf,
+    ) -> Self {
         KeymapBackend {
             vconsole,
             xkb_list,
             install_seed,
+            onboarding_marker,
         }
     }
 
@@ -61,7 +82,16 @@ impl KeymapBackend {
             PathBuf::from(keymap::VCONSOLE),
             PathBuf::from(keymap::XKB_LIST),
             PathBuf::from(INSTALL_SEED),
+            PathBuf::from(ONBOARDING_MARKER),
         )
+    }
+
+    /// The installer's layout, when it left one this device can load.
+    fn seeded_layout(&self) -> Option<Value> {
+        let seed: Value = serde_json::from_slice(&fs::read(&self.install_seed).ok()?).ok()?;
+        let chosen = seed.get("keymap")?.as_str()?;
+        let layouts = self.catalog().ok()?.validate(chosen).ok()?;
+        Some(Value::String(keymap::format(&layouts)))
     }
 
     fn catalog(&self) -> Result<Catalog, String> {
@@ -145,12 +175,18 @@ impl Capability for KeymapBackend {
         })
     }
 
-    /// The installer's choice, when it left one this device can load.
-    fn default_desired(&self) -> Option<Value> {
-        let seed: Value = serde_json::from_slice(&fs::read(&self.install_seed).ok()?).ok()?;
-        let chosen = seed.get("keymap")?.as_str()?;
-        let layouts = self.catalog().ok()?.validate(chosen).ok()?;
-        Some(Value::String(keymap::format(&layouts)))
+    /// The installer's choice on a device nobody has signed in to yet;
+    /// otherwise what the device types today (module docs).
+    fn first_boot_default(&self) -> Result<Value, BackendError> {
+        let seeded = if self.onboarding_marker.exists() {
+            None
+        } else {
+            self.seeded_layout()
+        };
+        match seeded {
+            Some(layout) => Ok(layout),
+            None => self.observe(),
+        }
     }
 }
 
@@ -170,6 +206,7 @@ mod tests {
             dir.join("etc/vconsole.conf"),
             dir.join("evdev.lst"),
             dir.join("seed.json"),
+            dir.join("completed.json"),
         );
         (dir, backend)
     }
@@ -242,15 +279,42 @@ mod tests {
     }
 
     #[test]
-    fn the_install_seed_is_the_first_default_when_it_is_loadable() {
+    fn the_install_seed_is_the_first_default_on_a_new_device() {
         let (dir, backend) = fixture("seed");
-        assert_eq!(backend.default_desired(), None);
+        assert_eq!(backend.default_desired(), None, "never a compiled default");
+        assert_eq!(
+            backend.first_boot_default().unwrap(),
+            json!("us"),
+            "no seed"
+        );
         fs::write(&backend.install_seed, r#"{"v":1,"keymap":"de+nodeadkeys"}"#).unwrap();
-        assert_eq!(backend.default_desired(), Some(json!("de+nodeadkeys")));
+        assert_eq!(
+            backend.first_boot_default().unwrap(),
+            json!("de+nodeadkeys")
+        );
         fs::write(&backend.install_seed, r#"{"v":1,"keymap":"fr"}"#).unwrap();
-        assert_eq!(backend.default_desired(), None, "not installed");
+        assert_eq!(
+            backend.first_boot_default().unwrap(),
+            json!("us"),
+            "not installed"
+        );
         fs::write(&backend.install_seed, "not json").unwrap();
-        assert_eq!(backend.default_desired(), None);
+        assert_eq!(backend.first_boot_default().unwrap(), json!("us"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Review finding (regressions M2): a device already in service typed
+    /// every password in US English, whatever the installer's seed said, so
+    /// an update must not move its login screen to the seed's layout.
+    #[test]
+    fn a_device_with_an_account_keeps_what_it_types_today() {
+        let (dir, backend) = fixture("in-service");
+        fs::write(&backend.install_seed, r#"{"v":1,"keymap":"de"}"#).unwrap();
+        fs::write(&backend.onboarding_marker, r#"{"v":1}"#).unwrap();
+        assert_eq!(backend.first_boot_default().unwrap(), json!("us"));
+        // What it types today is what the console file says, if anything.
+        fs::write(&backend.vconsole, "XKBLAYOUT=ru\n").unwrap();
+        assert_eq!(backend.first_boot_default().unwrap(), json!("ru"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

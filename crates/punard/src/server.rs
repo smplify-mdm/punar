@@ -786,7 +786,7 @@ impl Daemon {
                 continue;
             }
             let seed = cap
-                .observe()
+                .first_boot_default()
                 .unwrap_or_else(|_| Value::String("unknown".to_string()));
             os_defaults.seed(&id, seed)?;
         }
