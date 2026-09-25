@@ -1041,6 +1041,13 @@ fn keys_list_is_the_compositors_bind_table() {
     let binds: Value = serde_json::from_str(&stdout(&output)).unwrap();
     assert_eq!(binds.as_array().unwrap().len(), 1);
     assert_eq!(binds[0]["key"], "Return");
+    // Every word, in any order, as the shortcut help filters.
+    let output = session.run(&["--json", "keys", "list", "--filter", "window close"]);
+    let binds: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(binds.as_array().unwrap().len(), 1, "{binds}");
+    assert_eq!(binds[0]["description"], "Close window");
+    let output = session.run(&["--json", "keys", "list", "--filter", "close terminal"]);
+    assert_eq!(stdout(&output).trim(), "[]", "one word each is not a match");
     let output = session.run(&["keys", "list"]);
     let text = stdout(&output);
     assert!(

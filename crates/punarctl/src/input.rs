@@ -105,7 +105,8 @@ pub enum LayoutCommand {
 pub enum KeysCommand {
     /// Every key bind in this session, as the shortcut help shows them.
     List {
-        /// Only binds whose description or chord contains this text.
+        /// Only binds whose description or chord contains every word of
+        /// this text, in any order, as the shortcut help filters.
         #[arg(long)]
         filter: Option<String>,
         /// Only the chords of features this person has not tried yet, as the
@@ -830,6 +831,24 @@ fn untried_families() -> Vec<String> {
         .collect()
 }
 
+/// The shortcut help's filter, so a terminal and PUNAR+/ keep the same rows:
+/// every word typed must appear in the description or the chord, in any
+/// order ("move mon" keeps "Move window to left monitor"). The help also
+/// matches its own section headings, which only the shell draws.
+pub fn filter_matches(bind: &Value, needle: &str) -> bool {
+    let haystack = format!(
+        "{} {}",
+        bind.get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        chord(bind)
+    )
+    .to_lowercase();
+    needle
+        .split_whitespace()
+        .all(|word| haystack.contains(&word.to_lowercase()))
+}
+
 pub fn keys(command: KeysCommand, style: &Style, json_output: bool) -> ExitCode {
     let KeysCommand::List { filter, untried } = command;
     let families = if untried {
@@ -845,14 +864,7 @@ pub fn keys(command: KeysCommand, style: &Style, json_output: bool) -> ExitCode 
     let needle = filter.unwrap_or_default().to_lowercase();
     let kept: Vec<Value> = binds
         .into_iter()
-        .filter(|bind| {
-            needle.is_empty()
-                || bind
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .is_some_and(|d| d.to_lowercase().contains(&needle))
-                || chord(bind).to_lowercase().contains(&needle)
-        })
+        .filter(|bind| filter_matches(bind, &needle))
         .filter(|bind| {
             !untried
                 || bind
@@ -911,6 +923,19 @@ mod tests {
             input_expression(&input),
             "hl.config({ input = { kb_layout = 'us,ru', kb_variant = '', kb_options = 'grp:alts_toggle' } })"
         );
+    }
+
+    #[test]
+    fn the_filter_needs_every_word_in_any_order_like_the_shortcut_help() {
+        let bind = json!({
+            "modmask": 65, "key": "left", "description": "Move window to left monitor"
+        });
+        assert!(filter_matches(&bind, ""));
+        assert!(filter_matches(&bind, "move mon"));
+        assert!(filter_matches(&bind, "MON move"));
+        assert!(filter_matches(&bind, "shift left"), "the chord counts");
+        assert!(!filter_matches(&bind, "move workspace"));
+        assert!(!filter_matches(&bind, "zzqq"));
     }
 
     #[test]
