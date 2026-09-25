@@ -1736,6 +1736,14 @@ or path other than the confirmed target device. An installed system returns
   before anything is asked. System Control's picker runs `bind` (or `use`
   on an unnamed workspace) instead of writing the file. `context status`
   prints every binding.
+- **App parity (client-side, no new method):** `punarctl app list` joins
+  `apps.catalog {}` for category, trust tier and catalog version, and its
+  `--json` is still `apps.list` verbatim. `app list --all` adds the
+  launcher's desktop entries, and `--all --json` prints `{apps: [{id, name,
+  source, terminal}]}`. `app open <catalog-id|desktop-id>` falls back to the
+  desktop index when `apps.catalog` answers `not_found`, or when punard is
+  unreachable. It raises an open window first, as the launcher does
+  (third-party-apps.md section 2.1).
 - `punarctl debug rpc <method>` (hidden) sends an empty-params request with an
   arbitrary method name — exists solely so the 74.4 "unauthorized IPC" /
   section 60 negative tests can probe the server from inside the image. The

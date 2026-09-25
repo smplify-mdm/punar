@@ -4220,3 +4220,137 @@ fn context_bind_refusals_change_nothing() {
     );
     let _ = fs::remove_dir_all(&state);
 }
+
+// ---------------------------------------------------------------------------
+// `app list --all` and `app open <desktop-id>` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+/// The catalog knows only `apps.list`'s two apps; any other id is not found.
+fn desktop_open_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "apps.list" => Ok(fixture_apps_list()),
+        "apps.catalog" if request["params"].get("id").is_some() => Err(json!({
+            "code": "not_found",
+            "message": format!(
+                "No app named {} is in the catalog.\nNext step: punarctl app search",
+                request["params"]["id"]
+            ),
+            "details": {}
+        })),
+        "apps.catalog" => Ok(fixture_apps_catalog()),
+        _ => respond(request),
+    }
+}
+
+/// A data home with the kinds of entry the launcher meets.
+fn desktop_home(tag: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("punarctl-desktop-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    let apps = home.join("applications");
+    fs::create_dir_all(apps.join("kde")).expect("applications dir");
+    let marker = home.join("opened");
+    let write = |name: &str, body: &str| {
+        fs::write(
+            apps.join(name),
+            format!("[Desktop Entry]\nType=Application\n{body}\n"),
+        )
+        .expect("desktop file");
+    };
+    write("htop.desktop", "Name=htop\nExec=htop\nTerminal=true");
+    write("secret.desktop", "Name=Secret\nExec=secret\nNoDisplay=true");
+    write(
+        "punar-org.gnome.Calculator.desktop",
+        "Name=Calculator\nExec=/usr/bin/punarctl app open org.gnome.Calculator %U",
+    );
+    write(
+        "marker.desktop",
+        &format!("Name=Marker\nExec=/usr/bin/touch \"{}\"", marker.display()),
+    );
+    write("loop.desktop", "Name=Loop\nExec=punarctl app open loop");
+    fs::write(
+        apps.join("kde/konsole.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Konsole\nExec=konsole\n",
+    )
+    .expect("desktop file");
+    home
+}
+
+fn run_desktop(socket: &PathBuf, home: &PathBuf, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", socket)
+        .env("XDG_DATA_HOME", home)
+        .env("XDG_DATA_DIRS", "/nonexistent-punar-data")
+        .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl")
+}
+
+/// `--all` adds what the launcher offers beyond the catalog: hidden entries
+/// stay out, a catalog app's own launcher is its catalog row, and a
+/// subdirectory entry gets its desktop-file id.
+#[test]
+fn app_list_all_adds_the_desktop_entries_the_launcher_offers() {
+    let home = desktop_home("list");
+    let socket = start_mock_with(desktop_open_respond);
+    let output = run_desktop(&socket, &home, &["--json", "app", "list", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(
+        document["apps"],
+        json!([
+            {"id": "org.gnome.Calculator", "name": "Calculator", "source": "catalog", "terminal": false},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "source": "catalog", "terminal": false},
+            {"id": "htop", "name": "htop", "source": "desktop-entry", "terminal": true},
+            {"id": "kde-konsole", "name": "Konsole", "source": "desktop-entry", "terminal": false},
+            {"id": "loop", "name": "Loop", "source": "desktop-entry", "terminal": false},
+            {"id": "marker", "name": "Marker", "source": "desktop-entry", "terminal": false}
+        ])
+    );
+
+    let output = run_desktop(&socket, &home, &["app", "list", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("DESKTOP ENTRIES"), "{text}");
+    let htop = text
+        .lines()
+        .find(|line| line.starts_with("HTOP"))
+        .expect(&text);
+    assert!(htop.contains("TERMINAL"), "{htop}");
+    assert!(!text.contains("Secret"), "{text}");
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// A desktop id opens its parsed Exec, never a shell string; an id that is
+/// neither kind says so; and an entry that hands over to a catalog id that
+/// does not exist stops instead of looping.
+#[test]
+fn app_open_runs_a_desktop_entry_and_names_what_is_missing() {
+    let home = desktop_home("open");
+    let socket = start_mock_with(desktop_open_respond);
+
+    let output = run_desktop(&socket, &home, &["app", "open", "marker"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let marker = home.join("opened");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(marker.exists(), "the entry's Exec did not run");
+
+    let output = run_desktop(&socket, &home, &["app", "open", "nosuch"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("Nothing is named nosuch"), "{text}");
+    assert!(text.contains("punarctl app list --all"), "{text}");
+
+    let output = run_desktop(&socket, &home, &["app", "open", "loop"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("No app named"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = fs::remove_dir_all(&home);
+}

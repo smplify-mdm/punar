@@ -4232,6 +4232,34 @@ pub fn approvals_list(style: &Style, result: &Value, hostname: &str) -> Result<S
     Ok(out)
 }
 
+/// `app list --all`: the desktop entries the launcher offers beyond the
+/// catalog, each with the id `app open` takes.
+pub fn desktop_entries(style: &Style, entries: &[crate::desktop::DesktopEntry]) -> String {
+    let mut out = String::from("\n");
+    out.push_str(&fmt::section(
+        style,
+        "Desktop entries",
+        "punarctl app open <id>",
+    ));
+    if entries.is_empty() {
+        out.push_str(&fmt::note(style, "No desktop entry beyond the catalog"));
+        return out;
+    }
+    let rows: Vec<Row> = entries
+        .iter()
+        .map(|entry| {
+            Row::new(
+                &printable(&entry.id),
+                if entry.terminal { "terminal" } else { "window" },
+                Slot::Neutral,
+                &printable(&entry.name),
+            )
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    out
+}
+
 /// One `approvals watch` line: the approval, its status, what it asks for
 /// and who asked. The row `approvals list` prints, one at a time.
 pub fn approval_event(style: &Style, result: &Value) -> Result<String, String> {

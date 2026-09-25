@@ -61,6 +61,7 @@
 
 #![forbid(unsafe_code)]
 
+mod desktop;
 mod fmt;
 mod ipc;
 mod model;
@@ -288,7 +289,11 @@ enum AppCommand {
         id: String,
     },
     /// List catalog apps and native installation state.
-    List,
+    List {
+        /// Also list every desktop entry the launcher offers.
+        #[arg(long)]
+        all: bool,
+    },
     /// Install the pinned native package for this architecture.
     Install {
         /// Catalog id, such as `spotify`.
@@ -310,9 +315,11 @@ enum AppCommand {
         #[arg(long)]
         acknowledge_host_access: bool,
     },
-    /// Open an installed native app, or its curated web-app fallback.
+    /// Open an app: a catalog id, or any desktop entry the launcher shows.
+    /// An open window of the app is raised instead of starting another.
     Open {
-        /// Catalog id, such as `spotify`.
+        /// Catalog id, such as `spotify`, or a desktop-entry id, such as
+        /// `org.gnome.Calculator`.
         id: String,
         /// Custom URI delivered by the desktop handler. Ordinary users do
         /// not type this; browsers supply it for flows such as OAuth.
@@ -1219,16 +1226,85 @@ fn app_update(
     }
 }
 
+/// `app list --all --json`: one row per thing the launcher can open, the
+/// catalog's first.
+fn app_list_all_json(list: &Value, entries: &[desktop::DesktopEntry]) -> Value {
+    let mut rows: Vec<Value> = list
+        .get("apps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|app| {
+            json!({
+                "id": app.get("id").cloned().unwrap_or(Value::Null),
+                "name": app.get("name").cloned().unwrap_or(Value::Null),
+                "source": "catalog",
+                "terminal": false,
+            })
+        })
+        .collect();
+    rows.extend(entries.iter().map(|entry| {
+        json!({
+            "id": entry.id,
+            "name": entry.name,
+            "source": "desktop-entry",
+            "terminal": entry.terminal,
+        })
+    }));
+    json!({ "apps": rows })
+}
+
 fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
+    app_open_from(client, id, uris, true)
+}
+
+/// Say, at a terminal, that nothing new started.
+fn announce_focus(id: &str) {
+    if std::io::stdout().is_terminal() {
+        println!("FOCUSED · {id} · its open window was raised; nothing new started");
+    }
+}
+
+/// `app open` by catalog id first; a desktop-entry id when the catalog has
+/// no such app (or punard is not answering, since the launcher works without
+/// it). `desktop` is false when a desktop entry has already handed over to
+/// its catalog id, so two entries naming each other cannot loop.
+fn app_open_from(client: &Client, id: &str, uris: &[String], desktop: bool) -> ExitCode {
     let detail = match inspect_app(client, id) {
         Ok(value) => value,
-        Err(error) => return fail(&error),
+        Err(error) => {
+            let fallback = desktop
+                && (matches!(error, CallError::Unreachable { .. })
+                    || error.server().is_some_and(|wire| wire.code == "not_found"));
+            if !fallback {
+                return fail(&error);
+            }
+            return match desktop::index().into_iter().find(|entry| entry.id == id) {
+                Some(entry) => open_desktop_entry(client, &entry, uris),
+                None if error.server().is_some() => {
+                    eprintln!(
+                        "Nothing is named {}: it is neither a catalog app nor a desktop entry \
+                         the launcher shows.\n\
+                         Next step: `punarctl app list --all` lists both.",
+                        term_safe_name(id)
+                    );
+                    ExitCode::FAILURE
+                }
+                None => fail(&error),
+            };
+        }
     };
     let Some(app) = detail.get("app") else {
         return fail(&CallError::Protocol {
             why: "apps.catalog returned no app object".to_string(),
         });
     };
+    // Like the launcher: raise the window it already has. A callback URI
+    // must still reach the app, so it always goes through the launch path.
+    if uris.is_empty() && desktop::focus_existing(&desktop::catalog_candidates(app)) {
+        announce_focus(id);
+        return ExitCode::SUCCESS;
+    }
     let mut command = match app.get("source").and_then(Value::as_str) {
         Some("web") => {
             if !uris.is_empty() {
@@ -1305,6 +1381,59 @@ fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
         Err(error) => {
             eprintln!(
                 "The application could not start.\nWhy: {error}.\nNext step: inspect it with `punarctl app show {id}`."
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Open a desktop entry the way the launcher does: raise its window if one
+/// is open, else run its parsed `Exec` (never a shell string), through
+/// Punar's terminal adapter when it asks for a terminal.
+fn open_desktop_entry(client: &Client, entry: &desktop::DesktopEntry, uris: &[String]) -> ExitCode {
+    if let Some(catalog_id) = entry.catalog_id() {
+        return app_open_from(client, catalog_id, uris, false);
+    }
+    let name = term_safe_name(&entry.name);
+    if !uris.is_empty() {
+        eprintln!(
+            "{name} was not opened.\nWhy: a desktop entry is opened here without files or \
+             URIs.\nNext step: `punarctl app open {}` with no URI.",
+            entry.id
+        );
+        return ExitCode::from(2);
+    }
+    if desktop::focus_existing(&desktop::entry_candidates(entry)) {
+        announce_focus(&entry.id);
+        return ExitCode::SUCCESS;
+    }
+    let mut argv: Vec<String> = Vec::new();
+    if entry.terminal {
+        argv.push("/usr/lib/punar/punar-terminal-app.sh".to_string());
+        if let Some(path) = &entry.path {
+            argv.push("--working-directory".to_string());
+            argv.push(path.clone());
+        }
+        argv.push("--".to_string());
+    }
+    argv.extend(entry.exec.iter().cloned());
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    if let (false, Some(path)) = (entry.terminal, &entry.path) {
+        command.current_dir(path);
+    }
+    match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "{name} could not start.\nWhy: {error}.\n\
+                 Next step: check its desktop entry, `{}.desktop`.",
+                entry.id
             );
             ExitCode::FAILURE
         }
@@ -4480,7 +4609,41 @@ fn main() -> ExitCode {
                     Err(error) => fail(&error),
                 }
             }
-            AppCommand::List => {
+            AppCommand::List { all: true } => {
+                let hostname = local_hostname();
+                match client.call("apps.list", None) {
+                    Ok(result) => {
+                        // A catalog app's own launcher is its catalog row
+                        // already; one naming an id the catalog lacks is not.
+                        let catalog_ids: Vec<&str> = result
+                            .get("apps")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|app| app.get("id").and_then(Value::as_str))
+                            .collect();
+                        let entries: Vec<desktop::DesktopEntry> = desktop::index()
+                            .into_iter()
+                            .filter(|entry| {
+                                entry
+                                    .catalog_id()
+                                    .is_none_or(|id| !catalog_ids.contains(&id))
+                            })
+                            .collect();
+                        if json {
+                            return print_json(&app_list_all_json(&result, &entries));
+                        }
+                        let catalog = Some(client.call("apps.catalog", Some(json!({}))));
+                        render_or_json(false, &result, |v| {
+                            let mut out = views::app_list(&style, v, catalog.as_ref(), &hostname)?;
+                            out.push_str(&views::desktop_entries(&style, &entries));
+                            Ok(out)
+                        })
+                    }
+                    Err(error) => fail(&error),
+                }
+            }
+            AppCommand::List { all: false } => {
                 let hostname = local_hostname();
                 match client.call("apps.list", None) {
                     Ok(result) => {
