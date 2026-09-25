@@ -24,6 +24,11 @@
 #   * Encryption, Secure Boot and Power read sysfs themselves. Encryption
 #     looked at dm-0 alone, a second LUKS2 answer that could disagree with
 #     the one punard reports to an organization and the Mail vault requires.
+#   * Network, Displays, Connections and Relay were hard-coded sentences that
+#     went stale the day their subject shipped: Connections and Relay said
+#     punar-netd "arrives in Milestone 12" after it had, Network promised Wi-Fi
+#     from the same milestone, and Displays listed three registry backends
+#     when there were six.
 #
 # Each rule below is mechanical: it reads the source, not a screenshot.
 set -euo pipefail
@@ -150,6 +155,35 @@ for needle, what in [
 ]:
     if needle in control:
         fail("posture", f"ControlData.qml reads {what} itself instead of device.posture")
+
+# 10. A view that has a verb draws what the verb said. The sentences that
+#     went stale are named so they cannot return, and each view must ask its
+#     own verb with the exact argv a terminal types.
+for stale, why in [
+    ("Milestone 12", "punar-netd shipped in Milestone 12; nothing may still say it is coming"),
+    ("three backends", "the registry's size is read from punarctl capabilities, not written down"),
+    ("arrives in Milestone", "a view says what exists now, from the verb that knows"),
+]:
+    if stale in control:
+        fail("stale copy", f"ControlData.qml still says {stale!r}: {why}")
+for view, argv in [
+    ("network", '["punarctl", "network", "status", "--json"]'),
+    ("connections", '["punarctl", "privacy", "connections", "--json"]'),
+    ("relay", '["punarctl", "relay", "status", "--json"]'),
+]:
+    if argv not in control:
+        fail("view verbs", f"the {view} view does not ask {argv}")
+for function, probe in [
+    ("viewConnections", "connectionsProbe.payload"),
+    ("viewRelay", "relayProbe.payload"),
+    ("viewNetwork", "networkProbe.payload"),
+    ("displaysNote", "data.capabilityList"),
+]:
+    body = re.search(r"function " + function + r"\(.*?\n    }\n", control, re.S)
+    if body is None:
+        fail("view verbs", f"{function}() not found in ControlData.qml")
+    elif probe not in body.group(0):
+        fail("view verbs", f"{function}() does not draw from {probe}")
 
 if problems:
     for problem in problems:
