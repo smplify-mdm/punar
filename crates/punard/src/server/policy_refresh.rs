@@ -347,6 +347,14 @@ impl Inner {
                 outcome.detail = Some(why);
                 outcome
             }
+            // The agent itself: the sync's liveness check records it as
+            // management interrupted; for the policy it is one more fetch
+            // that did not get through.
+            Err(error @ UpstreamError::AgentUnavailable(_)) => {
+                let mut outcome = Outcome::new(RefreshResult::Unreachable, None);
+                outcome.detail = Some(error.to_string());
+                outcome
+            }
             Err(UpstreamError::Refused { code, message }) => {
                 let mut outcome = Outcome::new(RefreshResult::Refused, Some(refused_reason(&code)));
                 outcome.detail = Some(format!("{code}: {message}"));

@@ -77,6 +77,20 @@ pub const REGISTER_CALL_TIMEOUT: Duration = Duration::from_secs(14);
 /// that pins it, with a budget of its own, and then posts the report.
 pub const COMPLIANCE_REPORT_CALL_TIMEOUT: Duration = Duration::from_secs(9);
 
+/// `identity.status`'s timeout: punard's liveness call on every pass while
+/// enrolled. The agent answers it from one file read and asks Smplify
+/// nothing (`punar_smplifyd::budget::LOCAL_METHODS`), so an answer that does
+/// not come in this long is an agent that is not answering: frozen, or
+/// stopped with its socket held. Room for the agent's own start when the
+/// socket has to start it first, which takes tens of milliseconds.
+pub const IDENTITY_STATUS_CALL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The calls the built-in agent answers from this device alone, asking
+/// Smplify nothing (`punar_smplifyd::budget::LOCAL_METHODS`, which a test
+/// holds this to). No answer in time to one of these is the agent not
+/// answering, never the network ([`AgentFault::NotAnswering`]).
+pub const AGENT_LOCAL_METHODS: [&str; 2] = ["identity.status", "enroll.unregister"];
+
 /// How long punard waits for the answer to one call of `method`: at least a
 /// second longer than the built-in agent may spend on the organization's
 /// server for it (`punar_smplifyd::budget`), so an answer that exists
@@ -86,6 +100,7 @@ pub fn call_timeout(method: &str) -> Duration {
     match method {
         "enroll.register" => REGISTER_CALL_TIMEOUT,
         "compliance.report" => COMPLIANCE_REPORT_CALL_TIMEOUT,
+        "identity.status" => IDENTITY_STATUS_CALL_TIMEOUT,
         _ => CONTROL_PLANE_CALL_TIMEOUT,
     }
 }
@@ -158,8 +173,7 @@ impl AgentQueue {
         let free = due.iter().map(|(_, at)| *at).max().unwrap_or(now).max(now);
         let deadline = free + own;
         fits(deadline - now)?;
-        let stream = UnixStream::connect(socket)
-            .map_err(|e| UpstreamError::transport("connect failed", &e))?;
+        let stream = UnixStream::connect(socket).map_err(|e| UpstreamError::connect(&e))?;
         let id = self
             .tickets
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -212,14 +226,82 @@ pub const MAX_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
 // Control-plane client (NDJSON RPC, the ipc.md section 3 envelope verbatim)
 // ---------------------------------------------------------------------------
 
+/// Why the built-in agent could not be used, as punard sees it on the
+/// agent's own local socket (docs/api/ipc.md section 6, `enroll.agent`).
+/// None of these is the network: the agent is on this device, and it answers
+/// a network outage itself, with an error, inside its budget. While the
+/// device is enrolled every one of them means management is interrupted, and
+/// several are what an administrator's way of stopping the agent looks like
+/// from here: a masked, stopped socket (`socket_missing` or
+/// `connection_refused`), an agent killed mid-call (`connection_reset`,
+/// `closed_without_answer`), a frozen one (`not_answering`), a deleted
+/// identity (`identity_missing`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFault {
+    /// No socket at the path (`ENOENT`).
+    SocketMissing,
+    /// A socket nobody listens on (`ECONNREFUSED`): its unit stopped or
+    /// failed.
+    ConnectionRefused,
+    /// punard may not connect (`EACCES`, `EPERM`).
+    PermissionDenied,
+    /// Any other failure to connect.
+    ConnectFailed,
+    /// The connection broke during the call (`ECONNRESET`, `EPIPE`).
+    ConnectionReset,
+    /// The agent closed the connection without answering.
+    ClosedWithoutAnswer,
+    /// No answer in time to a call the agent answers without the network
+    /// (`punar_smplifyd::budget::LOCAL_METHODS`).
+    NotAnswering,
+    /// The agent says it holds no identity while this device is enrolled.
+    IdentityMissing,
+    /// The agent holds an identity this device's token is not for.
+    IdentityMismatch,
+    /// The agent cannot read its identity.
+    IdentityUnreadable,
+}
+
+impl AgentFault {
+    /// The closed code `enroll.status`, `status.json`'s neighbour
+    /// `punarctl enroll status` and the `enroll.agent` audit resource carry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentFault::SocketMissing => "socket_missing",
+            AgentFault::ConnectionRefused => "connection_refused",
+            AgentFault::PermissionDenied => "permission_denied",
+            AgentFault::ConnectFailed => "connect_failed",
+            AgentFault::ConnectionReset => "connection_reset",
+            AgentFault::ClosedWithoutAnswer => "closed_without_answer",
+            AgentFault::NotAnswering => "not_answering",
+            AgentFault::IdentityMissing => "identity_missing",
+            AgentFault::IdentityMismatch => "identity_mismatch",
+            AgentFault::IdentityUnreadable => "identity_unreadable",
+        }
+    }
+
+    fn of_connect(error: &io::Error) -> AgentFault {
+        match error.kind() {
+            io::ErrorKind::NotFound => AgentFault::SocketMissing,
+            io::ErrorKind::ConnectionRefused => AgentFault::ConnectionRefused,
+            io::ErrorKind::PermissionDenied => AgentFault::PermissionDenied,
+            _ => AgentFault::ConnectFailed,
+        }
+    }
+}
+
 /// A control-plane call failure, already split the way the enrollment
 /// pipeline needs it: transport trouble (→ `upstream_unreachable`) vs. a
 /// structured refusal from the mock (`not_found`, `unauthorized`, …).
 #[derive(Debug)]
 pub enum UpstreamError {
-    /// Connect/send/receive failed or timed out, or the answer was not a
-    /// valid protocol frame. The message never contains payload bytes.
+    /// No answer in time to a call that may wait on the organization's
+    /// server, a call not sent because it did not fit its budget, or an
+    /// answer that was not a valid protocol frame. The message never
+    /// contains payload bytes.
     Unreachable(String),
+    /// The agent's own socket failed: see [`AgentFault`]. Never the network.
+    AgentUnavailable(AgentFault),
     /// The control plane answered with a structured error.
     Refused { code: String, message: String },
     /// The control plane answered with more than [`MAX_ANSWER_BYTES`]. It is
@@ -258,9 +340,50 @@ pub struct RecoveryEscrowOutcome {
 }
 
 impl UpstreamError {
-    fn transport(what: &str, err: &io::Error) -> UpstreamError {
-        UpstreamError::Unreachable(format!("{what} ({})", err.kind()))
+    /// A failure to connect to the agent's socket: always the agent's.
+    fn connect(err: &io::Error) -> UpstreamError {
+        UpstreamError::AgentUnavailable(AgentFault::of_connect(err))
     }
+
+    /// A failure once connected. A timeout is the agent not answering when
+    /// the call needs no network, and may be the organization's server
+    /// otherwise; anything else broke the connection, which only the agent
+    /// can do.
+    fn exchange(method: &str, what: &str, err: &io::Error) -> UpstreamError {
+        match err.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+                if AGENT_LOCAL_METHODS.contains(&method) {
+                    UpstreamError::AgentUnavailable(AgentFault::NotAnswering)
+                } else {
+                    UpstreamError::Unreachable(format!("{what} ({})", err.kind()))
+                }
+            }
+            _ => UpstreamError::AgentUnavailable(AgentFault::ConnectionReset),
+        }
+    }
+}
+
+impl std::fmt::Display for UpstreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpstreamError::Unreachable(why) => write!(f, "{why}"),
+            UpstreamError::AgentUnavailable(fault) => {
+                write!(f, "the built-in agent is unavailable ({})", fault.as_str())
+            }
+            UpstreamError::Refused { code, message } => write!(f, "{code}: {message}"),
+            UpstreamError::TooLarge => write!(f, "the answer was larger than this device reads"),
+        }
+    }
+}
+
+/// What `identity.status` said, as far as punard's liveness check reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentIdentity {
+    /// Whether the agent holds an identity at all.
+    pub enrolled: bool,
+    /// Whether it is the one this device's token names; `None` when no token
+    /// was presented or the agent does not say.
+    pub token_matches: Option<bool>,
 }
 
 /// One-call-per-connection NDJSON client for the (mock) control plane.
@@ -321,8 +444,8 @@ impl ControlPlaneClient {
             }
             None => {
                 fits(own)?;
-                let stream = UnixStream::connect(&self.socket)
-                    .map_err(|e| UpstreamError::transport("connect failed", &e))?;
+                let stream =
+                    UnixStream::connect(&self.socket).map_err(|e| UpstreamError::connect(&e))?;
                 (stream, Instant::now() + own, None)
             }
         };
@@ -345,7 +468,7 @@ impl ControlPlaneClient {
         let mut writer = &stream;
         writer
             .write_all(line.as_bytes())
-            .map_err(|e| UpstreamError::transport("send failed", &e))?;
+            .map_err(|e| UpstreamError::exchange(method, "send failed", &e))?;
 
         // One byte past the bound is read, so an answer that reaches it is
         // told apart from one that ends exactly there.
@@ -353,10 +476,12 @@ impl ControlPlaneClient {
         let mut response = String::new();
         let read = reader
             .read_line(&mut response)
-            .map_err(|e| UpstreamError::transport("no answer", &e))?;
+            .map_err(|e| UpstreamError::exchange(method, "no answer", &e))?;
         if read == 0 {
-            return Err(UpstreamError::Unreachable(
-                "the control plane closed the connection without answering".to_string(),
+            // The agent answers every call from root, so a connection closed
+            // before the answer is an agent that stopped mid-call.
+            return Err(UpstreamError::AgentUnavailable(
+                AgentFault::ClosedWithoutAnswer,
             ));
         }
         if read as u64 > MAX_ANSWER_BYTES {
@@ -442,10 +567,37 @@ impl ControlPlaneClient {
         Ok((Redacted::new(token.to_string()), attestation))
     }
 
-    /// `enroll.unregister {device_token}`: ask the control plane to forget
-    /// this device's identity. Best effort by contract — unenrollment is a
-    /// local restore that must succeed offline (SPEC section 55), so the
-    /// caller logs a failure and continues.
+    /// `identity.status {device_token?}`: punard's liveness call. The agent
+    /// answers it locally, from one file read; with the token, it also says
+    /// whether the identity it holds is this device's.
+    pub fn identity_status(
+        &self,
+        token: Option<&Redacted<String>>,
+    ) -> Result<AgentIdentity, UpstreamError> {
+        let params = match token {
+            Some(token) => json!({ "device_token": token.expose_secret() }),
+            None => json!({}),
+        };
+        let result = self.call("identity.status", params)?;
+        let enrolled = result
+            .get("enrolled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                UpstreamError::Unreachable(
+                    "identity.status answered without saying whether it is enrolled".into(),
+                )
+            })?;
+        Ok(AgentIdentity {
+            enrolled,
+            token_matches: result.get("token_matches").and_then(Value::as_bool),
+        })
+    }
+
+    /// `enroll.unregister {device_token}`: ask the agent to wipe this
+    /// device's identity. Local on the agent's side (it asks Smplify
+    /// nothing), so it works offline; until it is confirmed punard keeps the
+    /// device token and asks again on every pass (docs/api/ipc.md section
+    /// 5.11), so no key is ever left on disk with no way to finish.
     pub fn unregister(&self, token: &Redacted<String>) -> Result<(), UpstreamError> {
         self.call(
             "enroll.unregister",
@@ -813,6 +965,21 @@ pub struct Enrollment {
     /// on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_pending: Option<PendingPolicyChange>,
+    /// Management interrupted: the built-in agent could not be used when
+    /// the last pass checked it, since when, and why. Kept here so the
+    /// audit trail's pair of `enroll.agent` events survives a restart: an
+    /// episode that began before it ends with its recovery event after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_unavailable: Option<AgentUnavailableRecord>,
+}
+
+/// An episode of management interrupted ([`Enrollment::agent_unavailable`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUnavailableRecord {
+    /// [`AgentFault::as_str`] as the last pass found it.
+    pub reason: String,
+    /// When the episode began.
+    pub since: String,
 }
 
 /// A policy change that has begun and not yet been recorded as done
@@ -1334,6 +1501,11 @@ pub struct StatusSummary {
     /// without this the shell offered apps that only exist for another CPU
     /// and the refusal arrived after the person had chosen one.
     pub architecture: String,
+    /// Whether the organization can manage this device right now: `active`,
+    /// `interrupted` while the built-in agent cannot be used, `null` on a
+    /// personal device. The reason is in `enroll.status`; this file is
+    /// world-readable and says only what the shell draws.
+    pub management: Option<String>,
     pub ts: String,
 }
 
@@ -1529,6 +1701,7 @@ mod tests {
             policy_changed_at: None,
             policy_refresh: None,
             policy_pending: None,
+            agent_unavailable: None,
         }
     }
 
@@ -2212,6 +2385,7 @@ mod tests {
                 device_class: "laptop".into(),
                 device_class_source: "observed".into(),
                 architecture: "aarch64".into(),
+                management: Some("interrupted".into()),
                 ts: "2026-08-26T09:02:00Z".into(),
             },
         )
@@ -2238,12 +2412,16 @@ mod tests {
                 "device_class",
                 "device_class_source",
                 "enrolled",
+                "management",
                 "org_name",
                 "ts",
                 "v"
             ]
         );
         assert_eq!(raw["org_name"], "Acme Engineering");
+        // Whether the organization can manage the device now, and nothing of
+        // why: the reason is for the device's own users, in enroll.status.
+        assert_eq!(raw["management"], "interrupted");
         // The shell decides whether to OFFER an application on this value, so
         // an empty or absent one has to be readable as "not known yet" rather
         // than as an architecture nothing matches.
@@ -2415,6 +2593,7 @@ mod tests {
             "org.discover",
             "enroll.register",
             "enroll.unregister",
+            "identity.status",
             "policy.fetch",
             "compliance.report",
             "inventory.report",
@@ -2430,6 +2609,13 @@ mod tests {
                 call_timeout(method)
             );
         }
+    }
+
+    /// punard reads a call that goes unanswered as the agent not answering
+    /// only for the calls the agent itself says it answers locally.
+    #[test]
+    fn the_local_calls_are_the_agents() {
+        assert_eq!(AGENT_LOCAL_METHODS, punar_smplifyd::budget::LOCAL_METHODS);
     }
 
     /// The calls one reconcile pass makes, waited out in full, fit its
@@ -2475,14 +2661,14 @@ mod tests {
         assert!(ENROLL_START_PROCESS_TIMEOUT < ENROLL_START_CLIENT_TIMEOUT);
     }
 
+    /// The agent is on this device: a socket that is not there is the
+    /// agent unavailable, never the network.
     #[test]
-    fn client_maps_a_missing_socket_to_unreachable() {
+    fn client_maps_a_missing_socket_to_the_agent_unavailable() {
         let client = ControlPlaneClient::new("/nonexistent/punar-mock/api.sock");
         match client.org_discover("acme.com") {
-            Err(UpstreamError::Unreachable(why)) => {
-                assert!(why.contains("connect failed"), "{why}");
-            }
-            other => panic!("expected Unreachable, got {other:?}"),
+            Err(UpstreamError::AgentUnavailable(AgentFault::SocketMissing)) => {}
+            other => panic!("expected socket_missing, got {other:?}"),
         }
     }
 

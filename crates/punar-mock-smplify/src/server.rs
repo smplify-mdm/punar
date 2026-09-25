@@ -390,6 +390,19 @@ struct PolicyFetchParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct IdentityStatusParams {
+    #[serde(default)]
+    device_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnrollUnregisterParams {
+    device_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ComplianceReportParams {
     device_token: String,
     report: Value,
@@ -501,6 +514,12 @@ fn dispatch(inner: &Inner, method: &str, params: Option<Value>) -> Result<Value,
     match method {
         "org.discover" => org_discover(inner, params),
         "enroll.register" => enroll_register(inner, params),
+        // The two calls the built-in agent answers from the device alone,
+        // which punard makes as they are: `identity.status` on every pass
+        // while enrolled (its liveness check), `enroll.unregister` when it
+        // unenrolls, asked again until confirmed.
+        "identity.status" => identity_status(inner, params),
+        "enroll.unregister" => enroll_unregister(inner, params),
         "policy.fetch" => policy_fetch(inner, params),
         "compliance.report" => compliance_report(inner, params),
         "inventory.report" => inventory_report(inner, params),
@@ -593,6 +612,41 @@ fn enroll_register(inner: &Inner, params: Option<Value>) -> Result<Value, MockEr
 /// Serve the published set — the default until `admin.policy_publish` names
 /// another — with the marker saying what the list is (docs/api/ipc.md
 /// section 5.9), so an empty one is never read as more than it says.
+/// Whether this control plane holds an identity for the device the token
+/// names: `{"enrolled": true, "token_matches": true}` for a token it issued,
+/// `{"enrolled": false}` otherwise. One device's view of a fleet: without a
+/// token there is no device to answer for.
+fn identity_status(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: IdentityStatusParams = parse_params("identity.status", params)?;
+    let state = inner.state.lock().unwrap();
+    let known = p
+        .device_token
+        .as_deref()
+        .is_some_and(|token| state.device_for_token(token).is_some());
+    Ok(if known {
+        json!({"enrolled": true, "token_matches": true})
+    } else {
+        json!({"enrolled": false})
+    })
+}
+
+/// The agent wipes its identity locally; this control plane keeps its device
+/// record and everything the device reported (unenrollment cannot retract
+/// what the organization received), so there is nothing to change, and the
+/// answer confirms the wipe for any token, as the agent does once nothing is
+/// left.
+fn enroll_unregister(_inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: EnrollUnregisterParams = parse_params("enroll.unregister", params)?;
+    if p.device_token.is_empty() {
+        return Err(MockError::with_details(
+            ErrorCode::InvalidParams,
+            "The device_token must be a non-empty string.".to_string(),
+            json!({"param": "device_token", "reason": "empty"}),
+        ));
+    }
+    Ok(json!({"wiped": true}))
+}
+
 fn policy_fetch(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
     let p: PolicyFetchParams = parse_params("policy.fetch", params)?;
     let state = inner.state.lock().unwrap();

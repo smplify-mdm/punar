@@ -42,14 +42,15 @@ use punar_common::ipc::{
     CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
     ENROLLMENT_TERMS_NOT_ACCEPTED, EnrollPolicyStatus, EnrollStartParams, EnrollStartResult,
     EnrollStatusResult, EnrollStopParams, EnrollStopResult, EnrollmentTerm, ErrorCode, FirstSync,
-    IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo,
-    PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams,
-    PolicyExplainResult, PolicyRefresh, PolicySetParams, PolicySetResult, PolicySourceRef,
-    PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult,
-    ReconcileEntry, ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response,
-    SERVER_READ_TIMEOUT, StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams,
-    WebAppsGetParams, WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams,
-    organization_name, term_safe_name,
+    IdentityRelease, IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES,
+    ManagementStatus, Method, Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry,
+    PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult, PolicyRefresh,
+    PolicySetParams, PolicySetResult, PolicySourceRef, PrivilegeRequestParams,
+    PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry,
+    ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT,
+    StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams, WebAppsGetParams,
+    WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams, organization_name,
+    term_safe_name,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
@@ -72,13 +73,14 @@ use crate::browser_policy::persist_rendered_browser_policy;
 use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
-    AgentQueue, Assignment, CallBudget, ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET,
-    ENROLL_CONTROL_PLANE_BUDGET, Enrollment, INVENTORY_RETRY_BASE, InventoryRetry,
-    InventorySources, LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE, OrgRecord,
-    OrganizationViewRecord, PolicyRefreshRecord, RECONCILE_CONTROL_PLANE_BUDGET, StatusSummary,
-    UpstreamError, compliance_report_body, inventory_body, inventory_resend_due, load_device_token,
-    load_enrollment, load_organization_view, organization_view_summary, save_device_token,
-    save_enrollment, save_enrollment_durable, save_organization_view, write_status_summary,
+    AgentFault, AgentIdentity, AgentQueue, AgentUnavailableRecord, Assignment, CallBudget,
+    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, ENROLL_CONTROL_PLANE_BUDGET, Enrollment,
+    INVENTORY_RETRY_BASE, InventoryRetry, InventorySources, LastQueryRecord, LastSyncRecord,
+    ORGANIZATION_VIEW_FILE, OrgRecord, OrganizationViewRecord, PolicyRefreshRecord,
+    RECONCILE_CONTROL_PLANE_BUDGET, StatusSummary, UpstreamError, compliance_report_body,
+    inventory_body, inventory_resend_due, load_device_token, load_enrollment,
+    load_organization_view, organization_view_summary, save_device_token, save_enrollment,
+    save_enrollment_durable, save_organization_view, write_status_summary,
 };
 use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
@@ -123,31 +125,79 @@ pub const RESOURCE_ENROLLMENT: &str = "enrollment";
 /// fetch the server answers badly, an envelope the loader rejects, a store
 /// that will not write) used to leave the agent holding that identity while
 /// punard reported the device unenrolled — so the next attempt met a stale
-/// one. Dropping this releases it, best effort and exactly like
-/// `enroll.stop`'s release: the local rollback never waits on the network.
-struct UncommittedRegistration {
+/// one. Dropping this releases it, exactly like `enroll.stop`'s release: the
+/// agent wipes it locally, and when it does not confirm that, its token is
+/// kept as the device's identity still to be released and asked about again
+/// on every pass ([`Inner::release_pending_identity`]). The registration
+/// replaced any identity the agent held before, so a release still pending
+/// from an earlier unenrollment is settled either way.
+struct UncommittedRegistration<'a> {
     client: ControlPlaneClient,
     token: Option<Redacted<String>>,
+    /// punard's device token slot, and the file behind it.
+    held: &'a Mutex<Option<Redacted<String>>>,
+    token_path: PathBuf,
+    release_failure: &'a Mutex<Option<String>>,
 }
 
-impl UncommittedRegistration {
+impl UncommittedRegistration<'_> {
     /// The enrollment is committed: keep the identity.
     fn commit(mut self) {
         self.token = None;
     }
 }
 
-impl Drop for UncommittedRegistration {
+impl Drop for UncommittedRegistration<'_> {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() {
-            if let Err(e) = self.client.unregister(&token) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        match self.client.unregister(&token) {
+            Ok(()) => {
+                // Nothing of any identity is left with the agent.
+                if self.held.lock().unwrap().take().is_some() {
+                    if let Err(e) = remove_synced(&self.token_path) {
+                        eprintln!("punard: could not remove the released device token: {e}");
+                    }
+                }
+                *self.release_failure.lock().unwrap() = None;
+            }
+            Err(e) => {
                 eprintln!(
                     "punard: enroll.start could not release the uncommitted registration \
-                     ({e:?}); the agent may still hold it"
+                     ({e}); it is released on a later pass"
                 );
+                if let Err(e) = save_device_token(&self.token_path, &token) {
+                    eprintln!(
+                        "punard: could not keep the device token of the identity still to be \
+                         released ({e})"
+                    );
+                }
+                *self.held.lock().unwrap() = Some(token);
+                *self.release_failure.lock().unwrap() = Some(release_failure_reason(&e));
             }
         }
     }
+}
+
+/// Why an identity release was not confirmed: the agent's fault, or
+/// `refused` when it answered with an error.
+fn release_failure_reason(error: &UpstreamError) -> String {
+    match error {
+        UpstreamError::AgentUnavailable(fault) => fault.as_str().to_string(),
+        UpstreamError::Refused { .. } | UpstreamError::TooLarge => "refused".to_string(),
+        UpstreamError::Unreachable(_) => "not_sent".to_string(),
+    }
+}
+
+/// What punard's liveness call found ([`Inner::agent_liveness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    Available,
+    Unavailable(AgentFault),
+    /// This pass cannot tell (the call did not fit what was left of its
+    /// budget, or its answer was garbled); nothing changes.
+    Unknown,
 }
 
 /// How the enrollment gate names the change it is guarding, in its messages.
@@ -527,8 +577,13 @@ struct Inner {
     /// same `org.id` and `enrolled_at`; they never carry the same epoch.
     enrollment_epoch: AtomicU64,
     /// M5: the device token, [`Redacted`] the moment it exists in memory —
-    /// no formatter or serializer can print it (SPEC section 53).
+    /// no formatter or serializer can print it (SPEC section 53). Kept past
+    /// an unenrollment until the agent confirms it wiped the identity the
+    /// token names: while no enrollment is held, a token here is an identity
+    /// still to be released ([`Inner::release_pending_identity`]).
     device_token: Mutex<Option<Redacted<String>>>,
+    /// Why the last attempt to release that identity did not confirm it.
+    release_failure: Mutex<Option<String>>,
     /// M5 offline queue (SPEC section 55): bounded latest-wins — two
     /// booleans, not a spool. Compliance/inventory are state snapshots; a
     /// missed intermediate report carries nothing the next snapshot does
@@ -826,6 +881,12 @@ impl Daemon {
                  compliance/inventory sync will fail until re-enrollment"
             );
         }
+        if enrollment.is_none() && device_token.is_some() {
+            eprintln!(
+                "punard: an unenrollment has not yet been confirmed by the Smplify agent; \
+                 its identity is released on the next pass"
+            );
+        }
 
         // M9: the approval store and the AI authority document. A store
         // that will not open is fatal — a daemon that cannot record an
@@ -859,6 +920,7 @@ impl Daemon {
                 enrollment: Mutex::new(enrollment),
                 enrollment_epoch: AtomicU64::new(0),
                 device_token: Mutex::new(device_token),
+                release_failure: Mutex::new(None),
                 pending_compliance: AtomicBool::new(false),
                 pending_inventory: AtomicBool::new(false),
                 inventory_retry: Mutex::new(None),
@@ -4827,6 +4889,19 @@ impl Inner {
                 ),
                 json!({ "stage": stage }),
             ),
+            UpstreamError::AgentUnavailable(fault) => IpcError::with_details(
+                ErrorCode::UpstreamUnreachable,
+                format!(
+                    "The built-in Smplify agent at {} could not be used during the {stage} step \
+                     ({}).\n\
+                     Policy: os default — enrollment is all-or-nothing; nothing was changed.\n\
+                     Next step: `systemctl status punar-smplifyd.socket punar-smplifyd` shows \
+                     whether the agent can start.",
+                    self.cfg.control_plane_socket.display(),
+                    fault.as_str()
+                ),
+                json!({ "stage": stage, "reason": "agent_unavailable", "agent": fault.as_str() }),
+            ),
             // It answered, with more than this device reads: asking again
             // gets the same answer, so it is not reported as unreachable.
             UpstreamError::TooLarge => IpcError::with_details(
@@ -5304,6 +5379,9 @@ impl Inner {
             // however long enrolling took.
             client: self.control_plane(),
             token: Some(token.clone()),
+            held: &self.device_token,
+            token_path: self.cfg.state_dir.join("device-token"),
+            release_failure: &self.release_failure,
         };
         // The attestation step is SIMULATED (milestone-5.md section 5.2):
         // the label is stored and surfaced verbatim; nothing was measured.
@@ -5371,6 +5449,7 @@ impl Inner {
                 offered_hash: None,
             }),
             policy_pending: None,
+            agent_unavailable: None,
         };
         let installed = self
             .install_enrollment(&enrollment, &token, &prepared)
@@ -5381,7 +5460,10 @@ impl Inner {
         let org_result = org_info(&enrollment.org);
         let attestation_label = enrollment.attestation.clone();
         registration.commit();
+        // The registration replaced whatever identity the agent held, one an
+        // earlier unenrollment was still releasing included.
         *self.device_token.lock().unwrap() = Some(token);
+        *self.release_failure.lock().unwrap() = None;
         {
             let mut slot = self.enrollment.lock().unwrap();
             *slot = Some(enrollment);
@@ -5571,6 +5653,8 @@ impl Inner {
                 organization_owned: None,
                 organization_view: None,
                 policy: None,
+                management: None,
+                identity_release: self.pending_release(),
             },
             Some(e) => EnrollStatusResult {
                 enrolled: true,
@@ -5620,8 +5704,34 @@ impl Inner {
                         reason: r.reason.clone(),
                     }),
                 }),
+                management: Some(match &e.agent_unavailable {
+                    None => ManagementStatus {
+                        state: "active".to_string(),
+                        reason: None,
+                        since: None,
+                    },
+                    Some(record) => ManagementStatus {
+                        state: "interrupted".to_string(),
+                        reason: Some(record.reason.clone()),
+                        since: Some(record.since.clone()),
+                    },
+                }),
+                identity_release: None,
             },
         }
+    }
+
+    /// An identity an unenrollment asked the agent to wipe and the agent
+    /// has not confirmed wiped, for `enroll.status`.
+    fn pending_release(&self) -> Option<IdentityRelease> {
+        self.device_token
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|_| IdentityRelease {
+                state: "pending".to_string(),
+                reason: self.release_failure.lock().unwrap().clone(),
+            })
     }
 
     /// `enroll.stop` (contract section 5.11): local restore — remove exactly
@@ -5736,29 +5846,56 @@ impl Inner {
                 }
             }
         }
-        // Ask the control plane to forget the device identity — best effort:
-        // unenrollment is a local restore that must succeed offline (SPEC
-        // section 55), so a failure here is logged and never blocks it.
-        if let Some(token) = self.device_token.lock().unwrap().as_ref() {
-            let client = self.control_plane();
-            if let Err(e) = client.unregister(token) {
-                eprintln!(
-                    "punard: enroll.stop could not release the upstream identity ({e:?}); \
-                     local unenrollment continues"
-                );
-            }
-        }
+        // Ask the agent to wipe the device identity. The wipe is local on
+        // the agent's side, so it works offline; unenrollment is a local
+        // restore that must succeed however it goes (SPEC section 55), and it
+        // never waits on it. What it may not do is forget the identity: until
+        // the agent confirms the wipe, the device token stays (and says an
+        // identity is still to be released, docs/api/ipc.md section 5.11), so
+        // a key is never left on disk with no way to finish, and every pass
+        // asks again (Inner::release_pending_identity).
+        let token = self.device_token.lock().unwrap().clone();
+        let released = match &token {
+            Some(token) => self.control_plane().unregister(token),
+            None => Ok(()),
+        };
         if let Err(e) = crate::enroll::remove_terms(&self.cfg.state_dir.join("enrollment.json")) {
             eprintln!("punard: enroll.stop could not remove the enrollment terms: {e}");
         }
-        for name in ["enrollment.json", "device-token"] {
-            if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join(name)) {
-                if e.kind() != io::ErrorKind::NotFound {
-                    eprintln!("punard: enroll.stop could not remove {name}: {e}");
-                }
+        if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join("enrollment.json")) {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("punard: enroll.stop could not remove enrollment.json: {e}");
             }
         }
-        *self.device_token.lock().unwrap() = None;
+        let identity_release = match released {
+            Ok(()) => {
+                if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join("device-token")) {
+                    if e.kind() != io::ErrorKind::NotFound {
+                        eprintln!("punard: enroll.stop could not remove device-token: {e}");
+                    }
+                }
+                *self.device_token.lock().unwrap() = None;
+                *self.release_failure.lock().unwrap() = None;
+                "released"
+            }
+            Err(e) => {
+                let reason = release_failure_reason(&e);
+                eprintln!(
+                    "punard: enroll.stop: the Smplify agent did not confirm it wiped this \
+                     device's identity ({e}); the device token is kept and the wipe is asked \
+                     for again on every pass"
+                );
+                self.log_audit(self.enroll_event(
+                    &actor,
+                    "enroll.release",
+                    &format!("agent.{reason}"),
+                    "pending",
+                    enrollment.policy_ids(),
+                ));
+                *self.release_failure.lock().unwrap() = Some(reason);
+                "pending"
+            }
+        };
         self.org_layers.lock().unwrap().clear();
         *self.org_policy_loaded.lock().unwrap() = None;
         self.application_policy.lock().unwrap().clear();
@@ -5803,6 +5940,7 @@ impl Inner {
         Ok(to_value(EnrollStopResult {
             enrolled: false,
             removed_policy_ids,
+            identity_release: Some(identity_release.to_string()),
         }))
     }
 
@@ -5879,11 +6017,14 @@ impl Inner {
             // enroll.start commits under: one committed since this pass
             // looked has its own first sync coming, whose outcome this must
             // not erase.
-            let slot = self.enrollment.lock().unwrap();
-            if slot.is_none() {
-                *self.last_sync_outcome.lock().unwrap() = None;
-                self.applications_withheld.store(false, Ordering::SeqCst);
+            {
+                let slot = self.enrollment.lock().unwrap();
+                if slot.is_none() {
+                    *self.last_sync_outcome.lock().unwrap() = None;
+                    self.applications_withheld.store(false, Ordering::SeqCst);
+                }
             }
+            self.release_pending_identity(actor, budget);
             return;
         };
         let token = self.device_token.lock().unwrap().clone();
@@ -5891,6 +6032,16 @@ impl Inner {
         // Whether the last pass got nothing through: then a report that
         // gets through now means the link is back.
         let link_was_down = self.pending_compliance.load(Ordering::SeqCst);
+
+        // The agent first, with one local call that asks Smplify nothing: an
+        // agent that is frozen, stopped, or holds no identity is noticed on
+        // every pass, not only when a report happens to fail, and is told
+        // apart from the network. While it cannot be used nothing more is
+        // sent this pass (every call would fail the same way, a frozen agent
+        // only after its whole timeout): the reports stay pending.
+        let liveness = self.agent_liveness(&client, token.as_ref());
+        self.note_agent(actor, epoch, liveness);
+        let agent_down = matches!(liveness, Liveness::Unavailable(_));
 
         // Compliance: overall + per-category states. Nothing else — no
         // values, no hostnames, no events (SPEC sections 24, 54).
@@ -5905,8 +6056,8 @@ impl Inner {
             }),
         );
         let compliance_ok = match &token {
-            Some(token) => client.compliance_report(token, &report).is_ok(),
-            None => false,
+            Some(token) if !agent_down => client.compliance_report(token, &report).is_ok(),
+            _ => false,
         };
         // The link is back. The waits an inventory and the policy refresh
         // built up while nothing got through say nothing about either, and
@@ -5982,8 +6133,8 @@ impl Inner {
             "unchanged"
         } else {
             let answer = match &token {
-                Some(token) => client.inventory_report(token, &inventory).ok(),
-                None => None,
+                Some(token) if !agent_down => client.inventory_report(token, &inventory).ok(),
+                _ => None,
             };
             match answer {
                 Some(sent) => {
@@ -6007,8 +6158,8 @@ impl Inner {
         // obligations, and answering questions is a courtesy that must not
         // delay them.
         let last_query = match &token {
-            Some(token) => self.drain_pending_queries(&client, token),
-            None => None,
+            Some(token) if !agent_down => self.drain_pending_queries(&client, token),
+            _ => None,
         };
 
         // Everything this pass learned is written back only while the
@@ -6116,6 +6267,178 @@ impl Inner {
         }
     }
 
+    /// punard's liveness check of the built-in agent: `identity.status`,
+    /// which the agent answers locally. An answer that it holds no identity,
+    /// or not the one this device's token names, is management interrupted
+    /// as surely as a socket that is gone: the reports would all be refused.
+    fn agent_liveness(
+        &self,
+        client: &ControlPlaneClient,
+        token: Option<&Redacted<String>>,
+    ) -> Liveness {
+        match client.identity_status(token) {
+            Ok(AgentIdentity {
+                enrolled: false, ..
+            }) => Liveness::Unavailable(AgentFault::IdentityMissing),
+            Ok(AgentIdentity {
+                token_matches: Some(false),
+                ..
+            }) => Liveness::Unavailable(AgentFault::IdentityMismatch),
+            Ok(_) => Liveness::Available,
+            Err(UpstreamError::AgentUnavailable(fault)) => Liveness::Unavailable(fault),
+            // It answered, and could not read its own identity.
+            Err(UpstreamError::Refused { code, .. }) if code == "internal" => {
+                Liveness::Unavailable(AgentFault::IdentityUnreadable)
+            }
+            // It answered: a control plane without this call (an older
+            // development mock) is there, and the reports say the rest.
+            Err(UpstreamError::Refused { .. }) => Liveness::Available,
+            Err(UpstreamError::Unreachable(_) | UpstreamError::TooLarge) => Liveness::Unknown,
+        }
+    }
+
+    /// Record what the liveness check found, for the enrollment this pass
+    /// began with only: an episode of management interrupted starts with
+    /// one `enroll.agent` `agent_unavailable` event and ends with one
+    /// `success`, whatever happens in between (docs/api/ipc.md section 6);
+    /// the reason `enroll.status` shows follows the latest pass. The record
+    /// is saved at once, so the pair survives a restart.
+    fn note_agent(&self, actor: &AuditActor, epoch: u64, liveness: Liveness) {
+        let fault = match liveness {
+            Liveness::Available => None,
+            Liveness::Unavailable(fault) => Some(fault),
+            Liveness::Unknown => return,
+        };
+        let mut slot = self.enrollment.lock().unwrap();
+        let Some(current) = slot
+            .as_mut()
+            .filter(|_| self.enrollment_epoch.load(Ordering::SeqCst) == epoch)
+        else {
+            return;
+        };
+        match (fault, current.agent_unavailable.clone()) {
+            (Some(fault), None) => {
+                eprintln!(
+                    "punard: management interrupted: the built-in Smplify agent cannot be used \
+                     ({}); reports are held until it answers",
+                    fault.as_str()
+                );
+                self.log_audit(self.enroll_event(
+                    actor,
+                    "enroll.agent",
+                    &format!("agent.{}", fault.as_str()),
+                    "agent_unavailable",
+                    current.policy_ids(),
+                ));
+                current.agent_unavailable = Some(AgentUnavailableRecord {
+                    reason: fault.as_str().to_string(),
+                    since: utc_now_rfc3339(),
+                });
+            }
+            (Some(fault), Some(record)) if record.reason != fault.as_str() => {
+                eprintln!(
+                    "punard: management still interrupted: the built-in Smplify agent is now \
+                     {} (was {} since {})",
+                    fault.as_str(),
+                    record.reason,
+                    record.since
+                );
+                current.agent_unavailable = Some(AgentUnavailableRecord {
+                    reason: fault.as_str().to_string(),
+                    since: record.since,
+                });
+            }
+            (None, Some(record)) => {
+                eprintln!(
+                    "punard: management restored: the built-in Smplify agent answers again \
+                     (unavailable since {}, {})",
+                    record.since, record.reason
+                );
+                self.log_audit(self.enroll_event(
+                    actor,
+                    "enroll.agent",
+                    &format!("agent.{}", record.reason),
+                    AuditOutcome::Success.as_str(),
+                    current.policy_ids(),
+                ));
+                current.agent_unavailable = None;
+            }
+            _ => return,
+        }
+        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
+            eprintln!("punard: could not persist the agent's state: {e}");
+        }
+    }
+
+    /// An identity an unenrollment asked the agent to wipe and the agent did
+    /// not confirm wiped (docs/api/ipc.md section 5.11): asked again on every
+    /// pass until it is, then the device token goes and the release is
+    /// audited. The call holds no lock; the result is committed under the
+    /// enrollment guard, which an `enroll.start` holds from before it
+    /// registers until its own token is in place, so a new enrollment's
+    /// token is never the one removed.
+    fn release_pending_identity(&self, actor: &AuditActor, budget: &CallBudget) {
+        // Not while an enrollment change is running: `enroll.stop` has just
+        // asked, and `enroll.start` replaces the identity anyway.
+        if self.enrollment.lock().unwrap().is_some()
+            || self.enroll_in_progress.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let Some(token) = self.device_token.lock().unwrap().clone() else {
+            return;
+        };
+        let released = self
+            .control_plane()
+            .within(budget.clone())
+            .unregister(&token);
+        let Some(_guard) = EnrollGuard::acquire(&self.enroll_in_progress) else {
+            return;
+        };
+        if self.enrollment.lock().unwrap().is_some() {
+            return;
+        }
+        let mut held = self.device_token.lock().unwrap();
+        if held.as_ref().map(|held| held.expose_secret()) != Some(token.expose_secret()) {
+            return;
+        }
+        match released {
+            Ok(()) => {
+                if let Err(e) = remove_synced(&self.cfg.state_dir.join("device-token")) {
+                    eprintln!(
+                        "punard: the Smplify agent wiped this device's identity, and the device \
+                         token could not be removed ({e}); retried on the next pass"
+                    );
+                    return;
+                }
+                *held = None;
+                *self.release_failure.lock().unwrap() = None;
+                eprintln!(
+                    "punard: the Smplify agent confirmed it wiped this device's identity; the \
+                     unenrollment is complete"
+                );
+                self.log_audit(self.enroll_event(
+                    actor,
+                    "enroll.release",
+                    "agent",
+                    AuditOutcome::Success.as_str(),
+                    Vec::new(),
+                ));
+            }
+            Err(e) => {
+                let reason = release_failure_reason(&e);
+                let mut last = self.release_failure.lock().unwrap();
+                if last.as_deref() != Some(reason.as_str()) {
+                    eprintln!(
+                        "punard: the Smplify agent has still not confirmed it wiped this \
+                         device's identity ({e}); asked again on the next pass"
+                    );
+                }
+                *last = Some(reason);
+            }
+        }
+    }
+
     /// A control-plane client whose calls wait behind every other call this
     /// daemon has in flight ([`AgentQueue`]).
     fn control_plane(&self) -> ControlPlaneClient {
@@ -6166,7 +6489,7 @@ impl Inner {
     ) -> Option<LastQueryRecord> {
         let pending = match client.queries_pending(token) {
             Ok(pending) => pending,
-            Err(UpstreamError::Unreachable(_)) => return None,
+            Err(UpstreamError::Unreachable(_) | UpstreamError::AgentUnavailable(_)) => return None,
             Err(UpstreamError::TooLarge) => {
                 eprintln!(
                     "punard: queries.pending answered with more than this device reads; \
@@ -6211,6 +6534,9 @@ impl Inner {
             if let Err(e) = client.queries_answer(token, &query.query_id, &answer) {
                 let why = match e {
                     UpstreamError::Unreachable(why) => why,
+                    UpstreamError::AgentUnavailable(fault) => {
+                        format!("the built-in agent is unavailable ({})", fault.as_str())
+                    }
                     UpstreamError::Refused { code, message } => format!("{code}: {message}"),
                     UpstreamError::TooLarge => "its answer was too large".to_string(),
                 };
@@ -6241,9 +6567,20 @@ impl Inner {
     /// (atomic tmp+rename, 0644). Best-effort: a write failure is logged,
     /// never fatal — the file is non-authoritative display data.
     fn publish_status_summary(&self) {
-        let (enrolled, org_name) = match &*self.enrollment.lock().unwrap() {
-            Some(e) => (true, Some(e.org.display_name.clone())),
-            None => (false, None),
+        let (enrolled, org_name, management) = match &*self.enrollment.lock().unwrap() {
+            Some(e) => (
+                true,
+                Some(e.org.display_name.clone()),
+                Some(
+                    if e.agent_unavailable.is_some() {
+                        "interrupted"
+                    } else {
+                        "active"
+                    }
+                    .to_string(),
+                ),
+            ),
+            None => (false, None, None),
         };
         let overall = self
             .tracker
@@ -6265,12 +6602,14 @@ impl Inner {
             }
             .to_string(),
             architecture: self.apps.architecture().to_string(),
+            management,
             ts: utc_now_rfc3339(),
         };
         let mut written = self.status_written.lock().unwrap();
         let unchanged = written.as_ref().is_some_and(|w| {
             w.enrolled == summary.enrolled
                 && w.org_name == summary.org_name
+                && w.management == summary.management
                 && w.compliance_overall == summary.compliance_overall
                 && w.device_class == summary.device_class
                 && w.device_class_source == summary.device_class_source

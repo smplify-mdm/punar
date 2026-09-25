@@ -1816,15 +1816,16 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let status: model::EnrollStatus = parse(result)?;
     let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, status.enrolled));
     if !status.enrolled {
-        out.push_str(&fmt::rows(
-            style,
-            &[Row::new(
-                "Enrollment",
-                "None",
-                Slot::Neutral,
-                "personal device",
-            )],
-        ));
+        let mut rows = vec![Row::new(
+            "Enrollment",
+            "None",
+            Slot::Neutral,
+            "personal device",
+        )];
+        if let Some(release) = &status.identity_release {
+            rows.push(identity_release_row(release.reason.as_deref()));
+        }
+        out.push_str(&fmt::rows(style, &rows));
         out.push_str(&fmt::note(
             style,
             "Personal mode is local-only · nothing leaves this machine",
@@ -1853,6 +1854,9 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let policy_ids = status.policy_ids.clone().unwrap_or_default();
     let attestation = status.attestation.as_deref().unwrap_or("unknown");
     let mut rows = enrollment_rows(org, &policy_ids, attestation, status.enrolled_at.as_deref());
+    if let Some(management) = &status.management {
+        rows.push(management_row(management));
+    }
     if let Some(row) = removability_row(status.removable) {
         rows.push(row);
     }
@@ -1981,19 +1985,73 @@ fn printable(text: &str) -> String {
     punar_common::ipc::term_safe_name(text)
 }
 
+/// Whether the organization can manage the device now. The same words the
+/// shell's Enrollment pane draws ("Management interrupted"), so the terminal
+/// and the panel cannot tell two stories. Fixed text around the daemon's
+/// closed reason code.
+fn management_row(management: &model::Management) -> Row {
+    match management.state.as_str() {
+        "interrupted" => {
+            let reason = management
+                .reason
+                .as_deref()
+                .map(|reason| printable(reason).replace('_', " "))
+                .unwrap_or_else(|| "no reason given".to_string());
+            let since = management
+                .since
+                .as_deref()
+                .map(|at| format!(" since {}", fmt::timestamp(&printable(at))))
+                .unwrap_or_default();
+            Row::new(
+                "Management",
+                "Interrupted",
+                Slot::Bad,
+                &format!(
+                    "the Smplify agent cannot be used ({reason}){since} · reports wait until it \
+                     answers · audited as enroll.agent"
+                ),
+            )
+        }
+        _ => Row::new(
+            "Management",
+            "Active",
+            Slot::Ok,
+            "the Smplify agent answers · checked on every sync",
+        ),
+    }
+}
+
+/// An unenrollment the agent has not confirmed: its identity (key and
+/// certificate) is still to be wiped, and punard asks again on every pass.
+fn identity_release_row(reason: Option<&str>) -> Row {
+    let why = reason
+        .map(|reason| format!(" ({})", printable(reason).replace('_', " ")))
+        .unwrap_or_default();
+    Row::new(
+        "Smplify identity",
+        "Release pending",
+        Slot::Warn,
+        &format!(
+            "the agent has not yet confirmed it wiped this device's key{why} · asked again on \
+             every reconcile pass"
+        ),
+    )
+}
+
 /// `punarctl enroll stop`.
 pub fn enroll_stop(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let outcome: model::EnrollStop = parse(result)?;
     let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, false));
-    out.push_str(&fmt::rows(
-        style,
-        &[Row::new(
-            "Removed",
-            "",
-            Slot::Neutral,
-            &outcome.removed_policy_ids.join(" · "),
-        )],
-    ));
+    let mut rows = vec![Row::new(
+        "Removed",
+        "",
+        Slot::Neutral,
+        &outcome.removed_policy_ids.join(" · "),
+    )];
+    if outcome.identity_release.as_deref() == Some("pending") {
+        rows.push(identity_release_row(None));
+    }
+    out.push_str(&fmt::rows(style, &rows));
     out.push_str(&fmt::verdict(
         style,
         Slot::Ok,
@@ -6157,6 +6215,66 @@ mod tests {
         assert!(text.contains("UNREACHABLE"), "{text}");
         assert!(text.contains("report queued"), "{text}");
         assert!(!text.to_lowercase().contains("tok_"), "{text}");
+    }
+
+    /// Management interrupted reads the same words the shell's Enrollment
+    /// pane draws, with the daemon's reason and since when; an active agent
+    /// says so; an unenrollment the agent has not confirmed says the key is
+    /// still to be wiped, on the personal view and in enroll stop's verdict.
+    #[test]
+    fn enroll_views_say_when_management_is_interrupted_or_a_release_pending() {
+        let style = Style::plain();
+        let enrolled = |management: Value| {
+            json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": ["eng-baseline-v12"],
+                "enrolled_at": "2026-08-26T09:00:00Z",
+                "attestation": "none",
+                "management": management,
+            })
+        };
+        let text = enroll_status(
+            &style,
+            &enrolled(json!({"state": "interrupted", "reason": "socket_missing",
+                             "since": "2026-09-24T10:00:00Z"})),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("MANAGEMENT"), "{text}");
+        assert!(text.contains("INTERRUPTED"), "{text}");
+        assert!(text.contains("socket missing"), "{text}");
+        assert!(text.contains("enroll.agent"), "{text}");
+        let text =
+            enroll_status(&style, &enrolled(json!({"state": "active"})), "punar-m5").unwrap();
+        assert!(text.contains("ACTIVE"), "{text}");
+        assert!(!text.contains("INTERRUPTED"), "{text}");
+
+        let text = enroll_status(
+            &style,
+            &json!({"enrolled": false,
+                    "identity_release": {"state": "pending", "reason": "not_answering"}}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("RELEASE PENDING"), "{text}");
+        assert!(text.contains("not answering"), "{text}");
+        let text = enroll_stop(
+            &style,
+            &json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],
+                    "identity_release": "pending"}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("RELEASE PENDING"), "{text}");
+        let text = enroll_stop(
+            &style,
+            &json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],
+                    "identity_release": "released"}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(!text.contains("RELEASE PENDING"), "{text}");
     }
 
     /// The organization chooses its display name, and a terminal obeys what

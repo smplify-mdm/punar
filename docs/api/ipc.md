@@ -109,8 +109,17 @@ each direction. No length prefixes, no binary framing.
   (5 + 14 + 5 = 24 s, and room to wait behind one report of a pass already
   in flight), its reconcile pass 25 s more: 70 s with its local work. The
   agent serves one call at a time, so each call's wait starts behind every
-  call punard already has in flight, never from when it was sent. Every
-  other method keeps the 10 s/15 s bounds unchanged.
+  call punard already has in flight, never from when it was sent. The agent
+  is dormant until enrolled (docs/development/smplify-enrollment.md §3.4):
+  systemd holds its socket, and the first call after it went dormant (the
+  first `org.discover` of an `enroll.start`, the boot reconcile's first call
+  on an enrolled device) includes starting it, tens of milliseconds, inside
+  the second each wait keeps above the agent's own budget. While enrolled,
+  every pass first makes the liveness call `identity.status`, which the agent
+  answers locally and punard waits 2 s for: it either answers at once or ends
+  the pass's calls to the agent (section 6, `enroll.agent`), so it never adds
+  a full wait to the four above. Every other method keeps the 10 s/15 s
+  bounds unchanged.
   **Application amendment:** `apps.catalog` may spend 30 s verifying remote
   metadata (`punarctl`: 45 s), while `apps.install`, `apps.update`, and
   `apps.remove` have bounded 30-minute/30-minute/10-minute per-app backend
@@ -849,7 +858,11 @@ checks run in this order:
 5. Only then the guard and the already-enrolled `conflict`, so every event
    from here on names a caller who proved who they are. punarctl reads
    `enroll.status` first and does not ask for a code or a password on a
-   device that is already enrolled.
+   device that is already enrolled. The next step's `org.discover` is the
+   first call to the built-in agent a device that never enrolled makes, and
+   its socket starts the agent (section 2); an agent that cannot be used is
+   `upstream_unreachable` with `details: {"stage": …, "reason":
+   "agent_unavailable", "agent": <section 6 reason>}`.
 6. **The organization's enrollment terms**, read from the document
    `org.discover` returned and before `enroll.register`, so an organization
    never learns of a device that did not enroll
@@ -1085,6 +1098,14 @@ for all users. `enroll.start`'s result carries both.
 `last_sync.result` ∈ `"success" | "unreachable" | null`; `pending` is true
 while a report is queued (bounded latest-wins queue, spec section 55;
 milestone-5.md section 7). The device token appears in no field.
+`management` (present exactly when enrolled) is `{"state": "active"}`, or
+`{"state": "interrupted", "reason": …, "since": …}` while the built-in agent
+cannot be used: `reason` is the section 6 `enroll.agent` reason the last pass
+found, `since` when the episode began. While it is interrupted no report is
+sent and `last_sync.pending` is true. `identity_release`, absent when there
+is none, is `{"state": "pending", "reason": …}` while an unenrollment's
+Smplify identity is still to be wiped (section 5.11); it can appear on an
+unenrolled device, and `reason` is an agent reason or `refused`.
 
 ### 5.11 `enroll.stop` (M5)
 
@@ -1102,16 +1123,29 @@ already says it to anyone. Only erasing and reinstalling the device ends
 such an enrollment; a signed release from the organization is not built.
 punarctl reads `enroll.status` first and asks for neither a yes nor a
 password in that case. Guard: not enrolled → `conflict`. Removes exactly the policy.d files the enrollment currently owns (the last refresh's set; a root drop stays),
-deletes `enrollment.json` and the device token, recomputes the merge, runs
+asks the built-in agent to wipe the device's Smplify identity
+(`enroll.unregister`), deletes `enrollment.json`, recomputes the merge, runs
 one reconcile pass (recorded user preferences resurface as the winning
 layer per spec section 39), rewrites the section 9 status file. Result:
-`{"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"]}`.
+`{"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],
+"identity_release": "released"}`.
 
-**Local-only (documented limit):** M5 has no unregister RPC; the mock
-control plane keeps its device record and received-report history.
-Unenrollment stops all future sync and restores local state; it does not
-(and could not honestly claim to) retract what the org already received.
-Works with the control plane unreachable — it touches only local files.
+**The identity is released, or kept until it is.** The wipe is local on the
+agent's side (it asks Smplify nothing), so unenrolling works offline, and the
+agent goes dormant once it has answered. Unenrollment never waits on it, and
+never forgets the identity either: when the agent does not confirm the wipe
+(its socket is gone, it does not answer, it refuses), the result says
+`"identity_release": "pending"`, punard keeps the device token, audits
+`enroll.release` `pending` (section 6), and asks again on every reconcile
+pass; once the agent confirms, the token goes and `enroll.release` `success`
+is audited. `enroll.status.identity_release` shows it meanwhile. So no key is
+ever left on disk with no way to finish. A registration `enroll.start` could
+not commit is released the same way.
+
+**What unenrolling does not do:** the organization keeps its device record
+and every report it received. Unenrollment stops all future sync and
+restores local state; it does not (and could not honestly claim to) retract
+what the organization already received.
 
 ### 5.12 `apps.catalog`
 
@@ -1861,6 +1895,25 @@ or path other than the confirmed target device. An installed system returns
   before the swap and kept with the pending change, so a change that landed
   before a crash is audited exactly once: by the refresh, or at the next
   start (actor `daemon`) when the log does not hold it yet.
+- **The built-in agent:** `enroll.agent` (resource `agent.<reason>`, decision
+  `allow`, the pass's actor) — not an IPC method, like `enroll.sync`. While
+  enrolled, every pass first makes the liveness call `identity.status`, and
+  an agent that cannot be used starts an episode of management interrupted:
+  one event with `result: "agent_unavailable"` when it starts, one with
+  `result: "success"` when it ends, never one per pass; the episode is kept in
+  `enrollment.json`, so a restart neither repeats nor loses it. The reason is
+  the resource's suffix, since the schema has no free-text field:
+  `socket_missing` (no socket at the path: masked and stopped),
+  `connection_refused` (nobody listens: the socket unit stopped or failed),
+  `permission_denied`, `connect_failed`, `connection_reset` (the connection
+  broke mid-call), `closed_without_answer` (killed mid-call),
+  `not_answering` (no answer to a call it answers without the network:
+  frozen), `identity_missing` (it holds no identity while this device is
+  enrolled), `identity_mismatch` (not this device's), `identity_unreadable`.
+  None of these is the network: the agent is on this device and answers an
+  outage itself, inside its budget. `enroll.release` (resource
+  `agent.<reason>` or `agent`): `pending` once when an unenrollment's
+  identity wipe is not confirmed, `success` once when it is (section 5.11).
 - **Installer planning addition:** `install.plan` is audited even though it
   is read-only, because it is the first attributable step of a destructive
   workflow. Its resource is `system_disk`; success is `success`, a safety or
@@ -2093,10 +2146,13 @@ render enrollment/compliance chrome without a socket connection or polling
   {"v": 1, "enrolled": true, "org_name": "Acme Engineering",
    "compliance_overall": "compliant", "device_class": "laptop",
    "device_class_source": "observed", "architecture": "aarch64",
-   "ts": "2026-08-26T09:02:00Z"}
+   "management": "active", "ts": "2026-08-26T09:02:00Z"}
   ```
 
-  (`org_name` is `null` and `enrolled` is `false` on a personal device.)
+  (`org_name` and `management` are `null` and `enrolled` is `false` on a
+  personal device.) `management` is `"interrupted"` while the built-in agent
+  cannot be used (section 6, `enroll.agent`); the reason is in
+  `enroll.status`, not here. Consumers read anything else as `"active"`.
   No raw hardware facts, per-capability rows, policy ids, device id, or
   hostname: the file is world-readable and carries
   only what the shell renders or uses for its resident-cost decision. A

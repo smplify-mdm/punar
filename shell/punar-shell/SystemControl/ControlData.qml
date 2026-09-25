@@ -2144,9 +2144,18 @@ Scope {
                     k: "Compliance",
                     v: Status.label.toUpperCase(),
                     tone: Status.state
+                },
+                {
+                    // The words punarctl enroll status prints for the same
+                    // state, which also says why.
+                    k: "Management",
+                    v: Status.managementInterrupted ? "INTERRUPTED" : "ACTIVE",
+                    tone: Status.managementInterrupted ? "bad" : "ok"
                 }
             ],
-            note: "Enrollment adds chrome; it never redraws the machine. Every section of this panel looked the same before it and looks the same after, with the organization's answers annotated on top."
+            note: Status.managementInterrupted
+                ? "Management interrupted: this device cannot reach its organization's agent, so reports wait until it answers. The organization keeps what it already received, and the policy it set is still enforced. punarctl enroll status says why."
+                : "Enrollment adds chrome; it never redraws the machine. Every section of this panel looked the same before it and looks the same after, with the organization's answers annotated on top."
         };
     }
 

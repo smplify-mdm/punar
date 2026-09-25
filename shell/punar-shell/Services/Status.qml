@@ -52,6 +52,13 @@ Singleton {
     /// means "not known yet", never "no architecture".
     property string architecture: ""
 
+    // True while an enrolled device's organization cannot manage it: punard
+    // could not use the built-in Smplify agent on its last pass (status.json
+    // `management: "interrupted"`). The reason is not in the world-readable
+    // file; `punarctl enroll status` says it, in the same words the
+    // Enrollment pane draws. Never true on a personal device.
+    property bool managementInterrupted: false
+
     // "ok" | "warn" | "bad" — maps 1:1 to spec §52 decision states.
     readonly property string state: {
         switch (root.complianceState) {
@@ -150,6 +157,7 @@ Singleton {
         root.deviceClass = "appliance";
         root.deviceClassSource = "unknown";
         root.architecture = "";
+        root.managementInterrupted = false;
     }
 
     function loadStatus(): void {
@@ -174,6 +182,7 @@ Singleton {
                ? j.compliance_overall : "unknown")
             : "";
         root.architecture = typeof j.architecture === "string" ? j.architecture : "";
+        root.managementInterrupted = root.enrolled && j.management === "interrupted";
         var deviceClass = typeof j.device_class === "string" ? j.device_class : "";
         root.deviceClass = ["workstation", "laptop", "appliance"].indexOf(deviceClass) >= 0
             ? deviceClass : "appliance";

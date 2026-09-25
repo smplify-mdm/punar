@@ -5,7 +5,7 @@
 > not negotiable, and ease of use is primary. This document records the
 > decision, the evidence it rests on, and the plan. It is staged into the
 > image at `/usr/share/doc/punar/smplify-enrollment.md` because
-> `punar-smplifyd.service` cites it.
+> `punar-smplifyd.service` and `punar-smplifyd.socket` cite it.
 
 ## 1. Decision
 
@@ -61,8 +61,8 @@ performs the same `/os-identifiers/resolve` → `/enroll` (token + CSR) →
 
 | Process | Runs as | May do | May not do | Transport | Hardening |
 |---|---|---|---|---|---|
-| **punard** | root | Enroll/unenroll, fetch and load policy through the M4 loader, reconcile, collect and build the compliance body (category states only) and the inventory body (the tier's device facts, §3.2), keep the record of what was sent (§3.3), write audit and `status.json` | Hold the device key; speak TCP | Serves `/run/punard/punard.sock`; dials `/run/punar-smplifyd/api.sock` (compiled default, `PUNAR_CONTROL_PLANE_SOCKET` overrides) | unchanged; `After=punar-smplifyd.service`, never `Requires` (SPEC §55: cached policy enforces with the agent down) |
-| **punar-smplifyd** | `punar-smplifyd`, no capabilities | Generate key + CSR, redeem the code, hold cert/CA/pinned tenant key, translate the bodies punard hands it through a fixed allowlist (§3.3) and answer with exactly what it sent | Mutate the OS; call any punard method; act on a server command; gather anything | Serves NDJSON on `/run/punar-smplifyd/api.sock` 0600, `SO_PEERCRED` uid 0 only; outbound HTTPS with platform roots, TLS ≥ 1.2, client cert | `punar-pimd@`'s set: `CapabilityBoundingSet=`, `ProtectSystem=strict`, `StateDirectory` 0700, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `SystemCallFilter=@system-service` |
+| **punard** | root | Enroll/unenroll, fetch and load policy through the M4 loader, reconcile, collect and build the compliance body (category states only) and the inventory body (the tier's device facts, §3.2), keep the record of what was sent (§3.3), check that the agent answers on every pass while enrolled (§3.4), write audit and `status.json` | Hold the device key; speak TCP; start, stop or enable a unit | Serves `/run/punard/punard.sock`; dials `/run/punar-smplifyd/api.sock` (compiled default, `PUNAR_CONTROL_PLANE_SOCKET` overrides) | unchanged; `Wants=` and `After=punar-smplifyd.socket` (and `After=` the service, so it stops first at shutdown), never `Requires` (SPEC §55: cached policy enforces with the agent down) |
+| **punar-smplifyd** | `punar-smplifyd`, no capabilities | Generate key + CSR, redeem the code, hold cert/CA/pinned tenant key, translate the bodies punard hands it through a fixed allowlist (§3.3) and answer with exactly what it sent | Mutate the OS; call any punard method; act on a server command; gather anything; run on a device that never enrolled | Serves NDJSON on the listener `punar-smplifyd.socket` passes it (`/run/punar-smplifyd/api.sock`, root 0600 in a 0700 directory), `SO_PEERCRED` uid 0 only; outbound HTTPS with platform roots, TLS ≥ 1.2, client cert | `punar-pimd@`'s set: `CapabilityBoundingSet=`, `ProtectSystem=strict`, `StateDirectory` 0700, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `SystemCallFilter=@system-service`; started by its socket, never enabled, resident only while it holds an identity, a manual stop refused (§3.4) |
 | **punarctl** | the device's administrator (a `punar` group member), or root | `enroll start <domain> [--code-stdin] [--accept-non-removable] [--accept-organization-owned]` (asks for the code, then the person's password, relayed to `punar-authd` for a single-use ticket; the organization's terms — not removable, §3.1; owned by the organization, §3.2 — are shown together in one prompt and must be accepted), `enroll status`, `enroll stop` (the same password confirmation; refused for a non-removable enrollment, §3.1) | Put the code or the password on argv; decide authorization itself | punard socket; `punar-auth --admin` over a pipe | fixed argv |
 | **System Control › Organization** (slice 2) | session | Domain, visibility panel, code entry, re-auth, then fixed-argv `punarctl … --code-stdin` | Be a second control plane | `status.json` over inotify | ticket path, like `policy.set` |
 
@@ -94,7 +94,11 @@ the rule that a payload which fails its signature check is an **error**
 translated key by key into `systemInfo` (§3.3) — nothing else. Both answer
 punard `{sent: <the body posted>}`. `queries.*` → empty until the backend has
 `punar-query`. `recovery.*` → `out_of_scope`. `enroll.unregister` → wipes the
-identity; punard's `enroll.stop` calls it best-effort and continues offline.
+identity locally (it asks Smplify nothing, so it works offline) and the agent
+goes dormant; `enroll.stop` never waits on it, and punard keeps the device
+token until the agent confirms the wipe, asking again on every pass (§3.4).
+`identity.status` → local as well: punard's liveness call on every pass while
+enrolled (§3.4).
 
 **Error mapping.** 401/403 on `/enroll` → `unauthorized` ("the enrollment
 code was not accepted"); 409 → `denied`; 404 on a device path →
@@ -496,6 +500,98 @@ and no capability value), and the person is shown exactly that.
   as exact key sets; the caps; the record of what was sent holds exactly
   the body Smplify received, and the summary exactly its non-null fields.
 
+### 3.4 Dormant until enrolled — decided 2026-09-24
+
+Punar is independent of Smplify: a personal device that never enrolls runs
+no Smplify code. An enrolled device's agent is hard to stop, and every way
+root can stop it is noticed and audited. Design and its adversarial review:
+option D of the activation design, with the review's corrections.
+
+**Lifecycle.**
+
+- **Never enrolled.** systemd holds `punar-smplifyd.socket` (root 0600 in a
+  0700 directory, `Accept=no`, `FileDescriptorName=api`, a manual stop
+  refused, no `[Install]`); `punard.service` `Wants=` it. No agent process
+  exists: punard calls the agent only for `enroll.start` and while enrolled.
+  The CI image proves it at stabilized idle: `PUNAR_SMPLIFYD_PROCS=0` with
+  the socket active is a release gate (`tests/performance/check-budgets.sh`).
+- **`enroll.start`.** Its first call starts the agent through the socket. An
+  enrollment that fails or is declined leaves nothing of an identity, and the
+  agent exits with status 75 (`DORMANT_EXIT_STATUS`) after 30 s without a
+  call. The unit treats 75 as a clean exit it does not restart
+  (`SuccessExitStatus=`, `RestartPreventExitStatus=`), and the socket starts
+  the agent again on the next call. A call queued while it exits is answered
+  by the next instance.
+- **Enrolled.** The agent stays resident while anything of an identity is in
+  its state directory (the record, the key, a certificate, a file a crash left
+  half written). It waits for calls with no timeout of its own, so it adds no
+  wakeup. On an enrolled boot, punard's boot reconcile makes the first call.
+- **Crash or kill.** `Restart=always`, `RestartSec=10s`,
+  `StartLimitIntervalSec=0`: restarted forever, and sooner by the next call.
+  The socket's `TriggerLimitIntervalSec=10s`, `TriggerLimitBurst=20` stop an
+  agent that cannot start at all from being started in a loop; the socket
+  then fails, which punard reports as `connection_refused`, and root recovers
+  it once the cause is fixed with `systemctl start punar-smplifyd.socket`, or a
+  reboot does.
+- **Unenroll.** `enroll.stop` asks the agent to wipe the identity
+  (`enroll.unregister`, local, works offline); the agent answers and exits 75
+  at once. Unenrollment never waits on it, and never forgets the identity
+  either: until the agent confirms the wipe, punard keeps the device token,
+  `enroll.status` says `identity_release: pending`, and every pass asks again;
+  the confirmation is audited as `enroll.release` `success`
+  (docs/api/ipc.md §5.11). The same holds for a registration `enroll.start`
+  could not commit.
+
+**Who can stop it, and how each path is noticed.** No person is root and
+nobody holds a manage-units grant (onboarding.md §1.6; the Punar polkit rules
+grant only power actions), and an AI agent is refused by punard at any uid.
+What is left is another root process:
+
+| Path (as root) | What happens | What punard sees on its next pass |
+|---|---|---|
+| `systemctl stop` or `restart` of the service or the socket, `disable --now` | refused (`RefuseManualStop=yes`); nothing is enabled to disable | nothing: the agent keeps running |
+| `kill -TERM`, `kill -KILL`, `systemctl kill` | restarted after 10 s, or at once by the next call | a call in flight: `connection_reset` or `closed_without_answer`; then the agent again |
+| `kill -STOP` | stays `active`, never answers | `not_answering` (the liveness call gets no answer in 2 s) |
+| `mask`, then `stop`; a runtime drop-in lifting `RefuseManualStop=` | stopped | `socket_missing`, `connection_refused` or `connection_reset` |
+| a target with `Conflicts=` on it | stopped until the next call starts it again | the agent back, or `socket_missing` if the socket went too |
+| delete `device.json` and leave the key | the agent keeps running | `identity_missing` |
+| delete every identity file | the agent goes dormant 30 s later | `identity_missing`: the next call starts it, and it holds none |
+| an identity punard did not register | the agent answers for it | `identity_mismatch` |
+| an agent that cannot start (a missing or broken binary) | the socket fails after 20 starts in 10 s | `connection_refused` |
+
+**How it is noticed.** Every reconcile pass while enrolled first calls
+`identity.status`, which the agent answers from one file read. Any failure of
+the agent's own socket (a connect error of any kind, a reset, a connection
+closed before the answer, no answer to a call that needs no network) is
+`AgentUnavailable`, never the network, and so is an agent that answers that
+it holds no identity, or not this device's. While it lasts nothing more is
+sent that pass and the reports stay pending. One `enroll.agent` audit event
+with result `agent_unavailable` and resource `agent.<reason>` starts an
+episode and one `success` event ends it; the episode is kept in
+`enrollment.json`, so a restart neither repeats nor loses it. `status.json`
+says `management: "interrupted"`, `enroll.status.management` gives the reason
+and since when, `punarctl enroll status` prints "Management: Interrupted",
+and the shell's Enrollment pane shows the same line. Refused stops leave no
+journal line of their own (measured); what is audited is their effect.
+
+**What it is not.** Tamper-evident against root, not tamper-proof: root can
+still stop the agent (and punard). Root can also put its own listener on the
+agent's socket path that answers `identity.status` as the agent would, which
+punard cannot tell apart (credentials on a socket-activated connection name
+PID 1). The organization's backstop is the device ceasing to check in; no
+alert for missed check-ins exists on the Smplify side yet (§6).
+
+**Measured, and not.** In a systemd 261 container with a stand-in and the
+real unit: stops refused as root, kills restarted, `mask` then `stop`
+succeeds, a frozen agent produces only timeouts, and a `RuntimeDirectory=` on
+the service deletes the socket node when it stops (hence none). The agent's
+resident cost while enrolled, and its activation latency under real socket
+activation on the release image, are **unmeasured** until measured on an
+enrolled device; the container's figures (about 1 MiB PSS idle, about 46 ms
+from start to answer, measured outside socket activation) are not budget
+numbers. `tests/images/smplifyd-activation-contract-test.sh` holds the units
+to all of the above.
+
 ## 4. Smplify backend — Phase 0 (gating) and later
 
 Verified by reading `manager-smp-1214/multi-module-mdm-project`. B0 and B3
@@ -560,3 +656,6 @@ running backend except where it says so.
    agent uses P-256; RSA-2048 is the known-good path).
 4. The exact rendered `/etc/os-release` of each lane (whether `VERSION_ID`
    is present on Arch and sid).
+5. Whether Smplify alerts an administrator when a device stops checking in:
+   the organization's only signal that root stopped the agent on a device
+   (§3.4).

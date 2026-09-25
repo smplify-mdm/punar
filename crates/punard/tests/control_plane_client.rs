@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use punar_common::Redacted;
 use punard::enroll::{
-    AgentQueue, Assignment, CallBudget, ControlPlaneClient, FetchedPolicy, MAX_ANSWER_BYTES,
-    UpstreamError,
+    AgentFault, AgentQueue, Assignment, CallBudget, ControlPlaneClient, FetchedPolicy,
+    MAX_ANSWER_BYTES, UpstreamError,
 };
 use serde_json::{Value, json};
 
@@ -226,4 +226,109 @@ fn a_call_that_does_not_fit_its_budget_is_not_sent() {
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert_eq!(accepted.load(Ordering::SeqCst), 0, "nothing reached it");
     assert!(budget.left() > std::time::Duration::from_millis(3900));
+}
+
+/// A socket served on a thread of its own, each connection handed to
+/// `serve`: the path, and the thread.
+fn serving(
+    calls: usize,
+    serve: impl Fn(std::os::unix::net::UnixStream) + Send + 'static,
+) -> (PathBuf, std::thread::JoinHandle<()>) {
+    let dir = std::env::temp_dir().join(format!(
+        "punard-cp-fault-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("control-plane.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let served = std::thread::spawn(move || {
+        for _ in 0..calls {
+            let (stream, _) = listener.accept().unwrap();
+            serve(stream);
+        }
+    });
+    (socket, served)
+}
+
+fn agent_fault(result: Result<punard::enroll::AgentIdentity, UpstreamError>) -> AgentFault {
+    match result {
+        Err(UpstreamError::AgentUnavailable(fault)) => fault,
+        other => panic!("expected the agent unavailable, got {other:?}"),
+    }
+}
+
+/// The agent's socket is on this device, so every way it fails is the agent
+/// unavailable, each with its own reason, and never the network: a socket
+/// node nobody listens on, an agent that closes the connection having read
+/// the call, one that resets it, and one that does not answer a call it
+/// answers without the network. A call that may wait on the organization's
+/// server and goes unanswered is still the network's.
+#[test]
+fn every_failure_of_the_agents_own_socket_is_the_agent_unavailable() {
+    let token = Redacted::new("tok_x".to_string());
+
+    let (socket, served) = serving(0, |_| {});
+    served.join().unwrap();
+    std::fs::remove_file(&socket).unwrap();
+    drop(UnixListener::bind(&socket).unwrap());
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+        AgentFault::ConnectionRefused
+    );
+
+    let (socket, served) = serving(1, |stream| {
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+    });
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+        AgentFault::ClosedWithoutAnswer
+    );
+    served.join().unwrap();
+
+    let (socket, served) = serving(1, |stream| {
+        // Give the call time to arrive, then close without reading it.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(stream);
+    });
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+        AgentFault::ConnectionReset
+    );
+    served.join().unwrap();
+
+    let (socket, served) = serving(2, |stream| {
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        drop(stream);
+    });
+    let started = std::time::Instant::now();
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+        AgentFault::NotAnswering
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    match ControlPlaneClient::new(&socket).policy_fetch(&token) {
+        Err(UpstreamError::Unreachable(why)) => assert!(why.starts_with("no answer"), "{why}"),
+        other => panic!("a fetch that may wait on the network is not the agent's: {other:?}"),
+    }
+    served.join().unwrap();
+}
+
+/// punard may not connect: the agent unavailable, as `permission_denied`.
+/// Root is never refused a connection, so this runs only unprivileged.
+#[test]
+fn a_socket_punard_may_not_open_is_the_agent_unavailable() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let (socket, served) = serving(0, |_| {});
+    served.join().unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        agent_fault(ControlPlaneClient::new(&socket).identity_status(None)),
+        AgentFault::PermissionDenied
+    );
 }

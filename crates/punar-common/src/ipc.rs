@@ -2177,6 +2177,46 @@ pub struct EnrollStatusResult {
     /// enrolled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<EnrollPolicyStatus>,
+    /// Whether the organization can manage this device right now: `active`,
+    /// or `interrupted` while the built-in agent cannot be used, with why and
+    /// since when (docs/api/ipc.md section 5.10). Present exactly when
+    /// enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management: Option<ManagementStatus>,
+    /// A Smplify identity an `enroll.stop` asked the agent to wipe and the
+    /// agent has not confirmed wiped: punard keeps the device token and asks
+    /// again on every pass (docs/api/ipc.md section 5.11). Absent when there
+    /// is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_release: Option<IdentityRelease>,
+}
+
+/// `enroll.status.management`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagementStatus {
+    /// `active` | `interrupted`.
+    pub state: String,
+    /// While interrupted: why, a closed code (`socket_missing`,
+    /// `connection_refused`, `permission_denied`, `connect_failed`,
+    /// `connection_reset`, `closed_without_answer`, `not_answering`,
+    /// `identity_missing`, `identity_mismatch`, `identity_unreadable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// While interrupted: since when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// `enroll.status.identity_release`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityRelease {
+    /// `pending`.
+    pub state: String,
+    /// Why the last attempt did not confirm it: an agent fault code (as in
+    /// [`ManagementStatus::reason`]), or `refused` when the agent answered
+    /// with an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `enroll.status.policy`. Every reconcile pass asks the control plane for
@@ -2250,6 +2290,12 @@ pub struct LastQuery {
 pub struct EnrollStopResult {
     pub enrolled: bool,
     pub removed_policy_ids: Vec<String>,
+    /// Whether the agent confirmed it wiped the device's Smplify identity
+    /// (`released`), or has not yet (`pending`: punard keeps the device
+    /// token and asks again on every pass, docs/api/ipc.md section 5.11).
+    /// Absent from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_release: Option<String>,
 }
 
 /// `status` result (contract section 5.1).
@@ -3862,6 +3908,8 @@ mod tests {
             organization_owned: None,
             organization_view: None,
             policy: None,
+            management: None,
+            identity_release: None,
         };
         assert_eq!(
             serde_json::to_string(&result).unwrap(),
