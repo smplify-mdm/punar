@@ -31,28 +31,113 @@ Scope {
     property string deviceName: "Punar"
     readonly property bool reducedMotion: Quickshell.env("PUNAR_REDUCED_MOTION") === "1"
 
-    readonly property var keyboardLayouts: [
-        {
-            "code": "us",
-            "label": "US"
-        },
-        {
-            "code": "gb",
-            "label": "UK"
-        },
-        {
-            "code": "de",
-            "label": "DE"
-        },
-        {
-            "code": "fr",
-            "label": "FR"
-        },
-        {
-            "code": "es",
-            "label": "ES"
-        }
+    // ---- keyboard layout (SMP-1405 WP-02) -----------------------------
+    //
+    // The login screen types in the DEVICE's layout: greeter-session.sh ran
+    // `punarctl keyboard layout render`, and punar-greeter.lua read the result
+    // as data before this surface existed. `deviceLayout` is the first layout
+    // /etc/vconsole.conf names, for the label; `deviceInput` is the rendered
+    // file, so choosing the device's own layout again restores it exactly,
+    // variants and all.
+    //
+    // A choice made here changes only what this screen types with. It reaches
+    // the device only through a successful sign-in: punar-greet carries it
+    // into the session as PUNAR_KEYMAP, and the signed-in person's session
+    // adopts it through punard's audited system.keymap capability. Nobody who
+    // has not signed in can change the device. `chosenLayout` stays empty
+    // until someone picks, so an untouched picker never rewrites a device
+    // whose layout has variants or a second layout this list cannot show.
+    property string deviceLayout: "us"
+    property var deviceInput: null
+    property string chosenLayout: ""
+    readonly property string activeLayout: root.chosenLayout !== "" ? root.chosenLayout : root.deviceLayout
+
+    // `latin: false` marks a layout that cannot type Latin letters. It gets a
+    // US first group and the both-Alt-keys switch chord, the same rule
+    // punar_common::keymap applies everywhere else, so a Latin username and
+    // the letter binds keep working.
+    readonly property var baseLayouts: [
+        {"code": "us", "label": "US", "latin": true},
+        {"code": "gb", "label": "UK", "latin": true},
+        {"code": "de", "label": "DE", "latin": true},
+        {"code": "fr", "label": "FR", "latin": true},
+        {"code": "es", "label": "ES", "latin": true},
+        {"code": "it", "label": "IT", "latin": true},
+        {"code": "pt", "label": "PT", "latin": true},
+        {"code": "br", "label": "BR", "latin": true},
+        {"code": "nl", "label": "NL", "latin": true},
+        {"code": "se", "label": "SE", "latin": true},
+        {"code": "pl", "label": "PL", "latin": true},
+        {"code": "cz", "label": "CZ", "latin": true},
+        {"code": "tr", "label": "TR", "latin": true},
+        {"code": "jp", "label": "JP", "latin": true},
+        {"code": "ru", "label": "RU", "latin": false},
+        {"code": "ua", "label": "UA", "latin": false}
     ]
+
+    // The list, plus the device's own layout when the list does not have it:
+    // the label must never name a layout the screen is not typing in.
+    readonly property var keyboardLayouts: {
+        var out = root.baseLayouts.slice();
+        if (root.layoutIndexIn(out, root.deviceLayout) < 0)
+            out.unshift({"code": root.deviceLayout, "label": root.deviceLayout.toUpperCase(), "latin": true});
+        return out;
+    }
+
+    function layoutIndexIn(list: var, code: string): int {
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].code === code)
+                return i;
+        }
+        return -1;
+    }
+
+    readonly property int activeLayoutIndex: Math.max(0, root.layoutIndexIn(root.keyboardLayouts, root.activeLayout))
+
+    function luaQuote(value: string): string {
+        return "'" + String(value).replace(/[^A-Za-z0-9_,:-]/g, "") + "'";
+    }
+
+    function inputExpression(layout: string, variant: string, options: string): string {
+        return "hl.config({ input = { kb_layout = " + root.luaQuote(layout) + ", kb_variant = "
+            + root.luaQuote(variant) + ", kb_options = " + root.luaQuote(options) + " } })";
+    }
+
+    // What this screen's compositor should load for one list entry.
+    function expressionFor(entry: var): string {
+        if (entry.code === root.deviceLayout && root.deviceInput !== null)
+            return root.inputExpression(root.deviceInput.kb_layout, root.deviceInput.kb_variant, root.deviceInput.kb_options);
+        if (entry.latin === false)
+            return root.inputExpression("us," + entry.code, "", "grp:alts_toggle");
+        return root.inputExpression(entry.code, "", "");
+    }
+
+    // `--keymap <layout>` for punar-greet, only when someone chose here.
+    function keymapArgs(): var {
+        return root.chosenLayout !== "" ? ["--keymap", root.chosenLayout] : [];
+    }
+
+    function parseVconsole(body: string): void {
+        var lines = String(body).split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var m = /^\s*XKBLAYOUT=["']?([A-Za-z0-9_-]+)/.exec(lines[i]);
+            if (m !== null)
+                root.deviceLayout = m[1];
+        }
+    }
+
+    function parseSessionInput(body: string): void {
+        var found = {};
+        var lines = String(body).split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var m = /^\s*(kb_layout|kb_variant|kb_options)\s*=\s*"([A-Za-z0-9_,:-]*)",\s*$/.exec(lines[i]);
+            if (m !== null)
+                found[m[1]] = m[2];
+        }
+        if (typeof found.kb_layout === "string" && found.kb_layout !== ""
+                && typeof found.kb_variant === "string" && typeof found.kb_options === "string")
+            root.deviceInput = found;
+    }
 
     function parseState(body: string): void {
         try {
@@ -548,6 +633,20 @@ Scope {
     }
 
     FileView {
+        id: vconsoleFile
+        path: "/etc/vconsole.conf"
+        printErrors: false
+        onLoaded: root.parseVconsole(vconsoleFile.text())
+    }
+
+    FileView {
+        id: renderedInput
+        path: Quickshell.env("XDG_RUNTIME_DIR") !== "" ? Quickshell.env("XDG_RUNTIME_DIR") + "/punar/session/input.lua" : ""
+        printErrors: false
+        onLoaded: root.parseSessionInput(renderedInput.text())
+    }
+
+    FileView {
         id: accountProjection
         path: "/run/punar/greeter.json"
         blockLoading: true
@@ -661,7 +760,6 @@ Scope {
             property string usernameBackendError: ""
             property string passwordBackendError: ""
             property string deviceBackendError: ""
-            property int layoutIndex: 0
             property bool layoutsOpen: false
             property bool usernameTouched: false
             property bool passwordTouched: false
@@ -774,7 +872,7 @@ Scope {
                 if (firstSession.running)
                     return;
                 panel.formFailure = "";
-                firstSession.command = ["/usr/bin/punar-greet", "first", panel.createdUsername];
+                firstSession.command = ["/usr/bin/punar-greet", "first", panel.createdUsername].concat(root.keymapArgs());
                 firstSession.running = true;
             }
 
@@ -946,9 +1044,9 @@ Scope {
                 }
             }
 
+            // This screen's own compositor only; see the note at deviceLayout.
             Process {
                 id: layoutProcess
-                command: ["hyprctl", "keyword", "input:kb_layout", root.keyboardLayouts[panel.layoutIndex].code]
             }
 
             Process {
@@ -1004,7 +1102,7 @@ Scope {
 
             Process {
                 id: loginProcess
-                command: ["/usr/bin/punar-greet", "login"]
+                command: ["/usr/bin/punar-greet", "login"].concat(root.keymapArgs())
                 stdinEnabled: true
                 stdout: StdioCollector {
                     id: loginOutput
@@ -1120,12 +1218,12 @@ Scope {
                     height: 38
                     activeFocusOnTab: true
                     Accessible.role: Accessible.Button
-                    Accessible.name: "Keyboard layout " + root.keyboardLayouts[panel.layoutIndex].label
+                    Accessible.name: "Keyboard layout " + root.keyboardLayouts[root.activeLayoutIndex].label
                     Accessible.description: "Change the layout used to enter your password"
 
                     Meta {
                         anchors.centerIn: parent
-                        text: "Keyboard · " + root.keyboardLayouts[panel.layoutIndex].label
+                        text: "Keyboard · " + root.keyboardLayouts[root.activeLayoutIndex].label
                         color: Theme.ink
                         z: 1
                     }
@@ -1177,9 +1275,10 @@ Scope {
                     border.color: Theme.inputBorder
                     z: 20
 
-                    Row {
+                    Grid {
                         id: layoutChoices
                         anchors.centerIn: parent
+                        columns: 8
                         spacing: 4
 
                         Repeater {
@@ -1192,8 +1291,8 @@ Scope {
                                 width: 34
                                 height: 28
                                 radius: Theme.radiusTag
-                                color: panel.layoutIndex === layoutChoice.index ? Theme.raise2 : Theme.paperSurface
-                                border.width: panel.layoutIndex === layoutChoice.index ? Theme.hairline : 0
+                                color: root.activeLayoutIndex === layoutChoice.index ? Theme.raise2 : Theme.paperSurface
+                                border.width: root.activeLayoutIndex === layoutChoice.index ? Theme.hairline : 0
                                 border.color: Theme.inputBorder
                                 activeFocusOnTab: layoutMenu.visible
                                 Accessible.role: Accessible.Button
@@ -1214,8 +1313,11 @@ Scope {
                                     border.color: Theme.ink
                                 }
                                 function select(): void {
-                                    panel.layoutIndex = layoutChoice.index;
-                                    layoutProcess.command = ["hyprctl", "keyword", "input:kb_layout", layoutChoice.modelData.code];
+                                    var code = String(layoutChoice.modelData.code);
+                                    root.chosenLayout = code === root.deviceLayout ? "" : code;
+                                    // Hyprland 0.56's Lua provider applies input through
+                                    // eval, as punar-layout.sh does for presets.
+                                    layoutProcess.command = ["hyprctl", "eval", root.expressionFor(layoutChoice.modelData)];
                                     layoutProcess.running = true;
                                     panel.layoutsOpen = false;
                                 }

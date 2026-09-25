@@ -67,6 +67,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 
@@ -185,6 +186,64 @@ Scope {
         onLoadFailed: root.hostName = ""
     }
 
+    // ---- keyboard layout (SMP-1405 WP-02) ---------------------------------
+    //
+    // The lock screen says which layout the password field is typing in, and
+    // how to switch: a password that fails only because the layout moved is
+    // the one lock-screen failure the surface can prevent by saying so. Read
+    // once per lock from `punarctl keyboard layout status` (the verb a terminal
+    // uses) and followed through Hyprland's own `activelayout` event, which
+    // the shell already receives on socket2. Nothing polls.
+    property string keyboardName: ""
+    property bool keyboardSwitchable: false
+    readonly property string keyboardText: root.keyboardName === "" ? ""
+        : "Keyboard " + root.keyboardName + (root.keyboardSwitchable ? " · Alt + Alt switches" : "")
+
+    function parseKeyboard(body: string): void {
+        var status = null;
+        try {
+            status = JSON.parse(body);
+        } catch (e) {
+            status = null;
+        }
+        if (status === null || typeof status !== "object")
+            return;
+        root.keyboardSwitchable = typeof status.switch_chord === "string" && status.switch_chord !== "";
+        var live = status.live;
+        if (live !== null && typeof live === "object" && typeof live.active_keymap === "string" && live.active_keymap !== "") {
+            root.keyboardName = live.active_keymap;
+            return;
+        }
+        if (Array.isArray(status.layouts) && status.layouts.length > 0 && typeof status.layouts[0].description === "string")
+            root.keyboardName = status.layouts[0].description;
+    }
+
+    Process {
+        id: keyboardProbe
+        command: ["punarctl", "--json", "keyboard", "layout", "status"]
+        stdout: StdioCollector {
+            id: keyboardOut
+            waitForEnd: true
+            onStreamFinished: root.parseKeyboard(keyboardOut.text)
+        }
+    }
+
+    Connections {
+        target: Hyprland
+
+        function onRawEvent(event: HyprlandEvent): void {
+            // activelayout>>KEYBOARD,LAYOUT — the layout name is everything
+            // after the first comma (a keyboard's name has no comma).
+            if (event.name !== "activelayout")
+                return;
+            var data = String(event.data);
+            var comma = data.indexOf(",");
+            var name = comma >= 0 ? data.substring(comma + 1) : data;
+            if (name !== "")
+                root.keyboardName = name;
+        }
+    }
+
     // ---- PAM stack selection ---------------------------------------------
 
 
@@ -279,6 +338,8 @@ Scope {
         root.busy = false;
         root.now = new Date();
         root.locked = true;
+        if (!keyboardProbe.running)
+            keyboardProbe.running = true;
     }
 
     // NOTE: no `unlock` verb. See the header — an IPC unlock is a bypass.
@@ -292,6 +353,10 @@ Scope {
             if (!root.locked)
                 return "unlocked";
             return sessionLock.secure ? "locked" : "locking";
+        }
+        /// The layout line the lock surface shows ("" before the first lock).
+        function keyboard(): string {
+            return root.keyboardText;
         }
 
         /// Submit a candidate passphrase through the ordinary PAM path.
@@ -476,6 +541,7 @@ Scope {
             timeText: root.timeText
             dateText: root.dateText
             monthYear: root.monthYear
+            keyboardText: root.keyboardText
             attempts: root.attempts
             busy: root.busy
             failure: root.failure

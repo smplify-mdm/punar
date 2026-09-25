@@ -21,6 +21,15 @@ case "${LANG:-}" in
 esac
 export LANG
 
+# The login screen types in the device's keyboard layout (SMP-1405 WP-02):
+# the same renderer the desktop uses writes the greeter user's own runtime
+# file, which punar-greeter.lua reads as data. Nothing here can change the
+# device's layout; only a person who signs in can (see session.sh).
+if command -v punarctl >/dev/null 2>&1; then
+    timeout 10 punarctl keyboard layout render \
+        || printf '%s\n' 'punar-greeter: the keyboard layout could not be rendered; typing US English' >&2
+fi
+
 # Aquamarine reads these before Hyprland parses its config. A real GPU stays
 # accelerated; QEMU/virtio without virgl uses the measured software fallback.
 # shellcheck disable=SC1091

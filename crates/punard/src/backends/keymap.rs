@@ -30,7 +30,10 @@ use serde_json::{Value, json};
 use crate::capability::{BackendError, Capability, DescriptorMeta};
 use crate::util::write_atomic;
 
-pub const CAPABILITY_ID: &str = keymap::CAPABILITY_ID;
+/// A literal, so tests/desktop/system-control-parity-contract-test.sh finds
+/// it and holds the shell to a label for it; the test below holds it to the
+/// shared grammar's constant.
+pub const CAPABILITY_ID: &str = "system.keymap";
 
 /// The install seed punard's installer writes onto the target's `/var`.
 pub const INSTALL_SEED: &str = "/var/lib/punar/install/seed.json";
@@ -169,6 +172,11 @@ mod tests {
             dir.join("seed.json"),
         );
         (dir, backend)
+    }
+
+    #[test]
+    fn the_id_is_the_shared_grammars() {
+        assert_eq!(CAPABILITY_ID, keymap::CAPABILITY_ID);
     }
 
     #[test]
