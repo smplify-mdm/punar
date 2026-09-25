@@ -1967,6 +1967,19 @@ check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state 
 # appears, which fails below; release gate A21 checks the PAM lines as well.
 # A mistyped password goes through the stack first and must change nothing.
 #
+# AN ACCOUNT WITH NO LOGIN KEYRING YET, OR A FAIL. The negative leg proves
+# something only where no login keyring exists: a wrong password cannot
+# unlock one that does, so it changes nothing whether or not it reached the
+# daemon, and the leg would pass under the old `required` stack. So a login
+# keyring already here fails the group rather than letting it pass without
+# proving anything: a second run of this check in one boot does (the first
+# run's sign-in made it), and so would anything that made one before the
+# sign-in. Setting the file aside does not help: the daemon keeps the
+# collection it loaded, so, measured in a container, neither the typo nor the
+# correct password then wrote anything. With none before, and none after the
+# typo, the encrypted login keyring checked below is the one this run's
+# correct password created.
+#
 # WAITING FOR THE WRITE, NOT FOR THE NAME. gnome-keyring reserves a new
 # keyring's name by creating the file EMPTY (O_CREAT|O_EXCL, mode 600), then
 # writes the keyring to a temporary file and renames it over the name. A file
@@ -2042,19 +2055,20 @@ elif [ ! -x "${signin_probe}" ]; then
     FAILED=1
 else
     keyring_bus="unix:path=${XDG_RUNTIME_DIR}/bus"
-    login_before="$(keyring_format "${login_keyring}")"
     # The session's daemon, running and locked, as D-Bus activation leaves
     # it; the stack's auth line finds it and unlocks the login keyring, or
     # creates it under the password.
     DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
         timeout 20 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 || true
-    # NEGATIVE LEG FIRST: a mistyped password is refused, and leaves the
-    # login keyring exactly as it was. Under `auth required pam_unix.so` the
-    # stack ran on into pam_gnome_keyring with the typo, which created a login
-    # keyring that did not exist yet under whatever had been typed, and a
-    # check of the format alone would have passed that keyring. The daemon
-    # answers the stack before the stack returns, so a keyring the typo made
-    # is on disk by the time the probe exits.
+    login_before="$(keyring_format "${login_keyring}")"
+    check_eq "no login keyring before the sign-in, so a mistyped password can show whether it makes one (a second run in one boot fails here)" \
+        "absent" "${login_before}"
+    # NEGATIVE LEG FIRST: a mistyped password is refused, and creates no
+    # login keyring. Under `auth required pam_unix.so` the stack ran on into
+    # pam_gnome_keyring with the typo, which created one under whatever had
+    # been typed, and a check of the format alone would have passed it. The
+    # daemon answers the stack before the stack returns, so a keyring the typo
+    # made is on disk by the time the probe exits.
     login_sum_before="$(sha256sum "${login_keyring}" 2>/dev/null | awk '{print $1}')"
     typo_result=0
     printf '%s\n' "${lock_wrong}" \
@@ -2063,7 +2077,7 @@ else
         || typo_result=$?
     check_eq "the greetd sign-in stack refuses a mistyped password (sign-in probe exit)" \
         "1" "${typo_result}"
-    check_eq "a mistyped password leaves the login keyring as it was (format, digest)" \
+    check_eq "a mistyped password creates no login keyring and changes none (format, digest)" \
         "${login_before} ${login_sum_before:-none}" \
         "$(keyring_format "${login_keyring}") $(sha256sum "${login_keyring}" 2>/dev/null | awk '{print $1}' | grep . || echo none)"
     signin_result=0
@@ -2083,9 +2097,9 @@ else
     done
     login_format="$(keyring_format "${login_keyring}")"
     if [ "${login_format}" = encrypted ]; then
-        note "ok   after a password sign-in through the greetd stack the login keyring on disk is encrypted (it was ${login_before} before; written within ${keyring_waited}s)"
+        note "ok   the password sign-in through the greetd stack left the login keyring encrypted (it was ${login_before} before; written within ${keyring_waited}s)"
     else
-        note "FAIL after a password sign-in through the greetd stack the login keyring on disk is not encrypted (expected 'encrypted', got '${login_format}'; it was ${login_before} before; waited ${keyring_waited}s; $(keyring_evidence "${login_keyring}"))"
+        note "FAIL the password sign-in through the greetd stack did not leave an encrypted login keyring (expected 'encrypted', got '${login_format}'; it was ${login_before} before; waited ${keyring_waited}s; $(keyring_evidence "${login_keyring}"))"
         FAILED=1
     fi
     if [ -f "${login_keyring}" ]; then

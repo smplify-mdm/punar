@@ -96,5 +96,12 @@ grep -Fq 'timeout 30 "${signin_probe}" greetd "$(id -un)"' "${SURFACES}" \
 if grep -Eq '^[^#]*gnome-keyring-daemon --unlock' "${SURFACES}"; then
     fail "group 8k stands in for the sign-in with the daemon's own --unlock again"
 fi
+# A login keyring already on disk makes the wrong-password leg prove nothing:
+# a typo cannot unlock it, so it changes nothing whether or not it reached
+# the daemon. The gate requires none before its sign-in rather than
+# comparing against whatever was there.
+# shellcheck disable=SC2016
+grep -Fq '"absent" "${login_before}"' "${SURFACES}" \
+    || fail "group 8k no longer requires an account with no login keyring before its sign-in"
 
 echo "PUNAR_KEYRING_FORMAT_CONTRACT_OK"

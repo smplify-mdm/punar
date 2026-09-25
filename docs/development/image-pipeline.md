@@ -371,6 +371,11 @@ that sign-in wrote to the encrypted format and mode 600. It replaced
 `pamtester` on the Debian lanes, which Arch does not package, so every lane
 runs the same stack.
 
+Group 8k requires that no login keyring exists before its sign-in: a wrong
+password cannot unlock one that does, so against an existing keyring the
+wrong-password leg would pass whether or not the typo reached the daemon. A
+second run of the check in one boot therefore fails there, by design.
+
 ## The M6 punar-env base image (Milestone 6)
 
 Full decisions in [milestone-6.md](milestone-6.md) §6. `punar-env up`
