@@ -1958,14 +1958,33 @@ check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state 
 # skips the whole auth stack, so no sign-in ever ran a password through PAM.
 # The gate signs this account in itself with punar-signin-probe, a harness the
 # development image carries and release-image policy A5 refuses anywhere else:
-# the whole of etc/pam.d/greetd, authenticate through session close, as this
-# user, with the password on stdin and the session's keyring daemon already
-# running, as it is at a real sign-in. Every lane runs that same stack. None
-# stands in for it with the daemon's own `--unlock` any more, which proved the
-# daemon rather than the sign-in, and a lane without the probe fails instead
-# of falling back. Remove the pam_gnome_keyring auth line and no keyring
-# appears, which fails below; release gate A21 checks the PAM lines as well.
-# A mistyped password goes through the stack first and must change nothing.
+# the whole of etc/pam.d/greetd, authenticate through session close, with the
+# password on stdin and the session's keyring daemon already running. Every
+# lane runs that same stack. None stands in for it with the daemon's own
+# `--unlock` any more, which proved the daemon rather than the sign-in, and a
+# lane without the probe fails instead of falling back. Remove the
+# pam_gnome_keyring auth line and no keyring appears, which fails below;
+# release gate A21 checks the PAM lines as well. A mistyped password goes
+# through the stack first and must create no keyring.
+#
+# WHAT IT DOES NOT PROVE. The probe runs the stack as this user, from inside
+# the session; greetd runs it as root, before the session exists. So here
+# pam_unix checks the password through the setuid helper unix_chkpwd, which
+# works only because this account's hash is in /etc/shadow (a userdb account
+# would fail, as the lock screen once did), and pam_gnome_keyring finds the
+# session's daemon at auth, through XDG_RUNTIME_DIR, and unlocks there. Under
+# greetd its auth line finds no daemon and only keeps the password, and its
+# session line hands it over once pam_systemd has named the runtime
+# directory. Both end in the daemon's one login unlock, which is what decides
+# the keyring's format and mode, and that is what this group proves. What it
+# cannot see is greetd's own hand-over at session open: a sign-in whose
+# password never reached the daemon would leave no login keyring, and this
+# probe would still make one. Proving that needs a root sign-in with logind,
+# which this user-session check cannot start. Measured in a container: run as
+# root without a runtime directory, as greetd's worker is, a mistyped
+# password reaches no daemon even under `auth required pam_unix.so`; run as
+# the user, it did, and created a login keyring under the typo, which is
+# what the negative leg below catches.
 #
 # AN ACCOUNT WITH NO LOGIN KEYRING YET, OR A FAIL. The negative leg proves
 # something only where no login keyring exists: a wrong password cannot

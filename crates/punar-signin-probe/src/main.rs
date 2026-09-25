@@ -16,10 +16,20 @@
 //! the daemon rather than the sign-in. This runs the same stack on every lane.
 //!
 //! It holds no privilege: it runs as the account it signs in, so `pam_unix`
-//! verifies that account's own password through `unix_chkpwd`, exactly as the
-//! lock screen's stack would for an unprivileged caller, and a module that
-//! needs root fails as it would for any user. Staged only into the
+//! verifies that account's own password through `unix_chkpwd`, and a module
+//! that needs root fails as it would for any user. Staged only into the
 //! development image; release-image policy A5 refuses it anywhere else.
+//!
+//! WHAT IT DOES NOT REPRODUCE. greetd runs the same stack as root, before the
+//! session exists. Run from inside the session as the user, as here,
+//! `pam_unix` succeeds only because the account's hash is in `/etc/shadow`
+//! (`unix_chkpwd` cannot read a userdb account's credential), and
+//! `pam_gnome_keyring` finds the session's keyring daemon at `authenticate`,
+//! through `XDG_RUNTIME_DIR`, and unlocks there. Under greetd its `auth` line
+//! finds no daemon and only keeps the password, and its `session` line hands
+//! it over after `pam_systemd` has named the runtime directory. Both end in
+//! the daemon's one login unlock, so the keyring this writes is the one a
+//! sign-in writes; greetd's own hand-over at session open is not exercised.
 //!
 //! Exit status: 0 when every stage succeeded, 1 naming the stage that failed
 //! on stderr, 2 for a usage error.

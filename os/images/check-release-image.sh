@@ -843,8 +843,9 @@ fi
 # secret to disk in plaintext, which is where Omarchy's default keyring is.
 # The auth line must follow pam_unix, which is what obtains the password, and
 # pam_unix must be `requisite`: under `required` a WRONG password still reaches
-# the keyring line, which creates a login keyring that does not exist yet
-# under whatever was typed.
+# the keyring line, which, wherever it can reach the person's keyring daemon
+# at auth time, creates a login keyring that does not exist yet under
+# whatever was typed.
 GREETD_PAM="${ROOT}/etc/pam.d/greetd"
 if [ ! -f "${GREETD_PAM}" ]; then
     fail A21 'the sign-in PAM stack is missing: etc/pam.d/greetd'

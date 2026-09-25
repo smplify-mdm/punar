@@ -371,6 +371,17 @@ that sign-in wrote to the encrypted format and mode 600. It replaced
 `pamtester` on the Debian lanes, which Arch does not package, so every lane
 runs the same stack.
 
+It runs that stack as the dev user, from inside the session, where greetd
+runs it as root before the session exists. So `pam_unix` checks the password
+through the `unix_chkpwd` helper, which works for this account only because
+its hash is in `/etc/shadow`, and `pam_gnome_keyring` unlocks the session's
+running daemon at `authenticate`; under greetd it keeps the password there
+and hands it over at session open, after `pam_systemd` has set
+`XDG_RUNTIME_DIR`. Both paths end in the daemon's one login unlock, which is
+what decides the keyring's format and mode. greetd's own hand-over at session
+open is not exercised: proving it needs a root sign-in with logind, which the
+user-session gate cannot start.
+
 Group 8k requires that no login keyring exists before its sign-in: a wrong
 password cannot unlock one that does, so against an existing keyring the
 wrong-password leg would pass whether or not the typo reached the daemon. A
