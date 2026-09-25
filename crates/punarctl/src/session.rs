@@ -386,11 +386,10 @@ pub fn workspace(command: WorkspaceCommand, style: &Style, json_output: bool) ->
 
 fn bad_name(raw: &str) -> String {
     format!(
-        "{:?} is not a workspace name, so nothing was changed.\n\
+        "{raw:?} is not a workspace name, so nothing was changed.\n\
          Why: a name is 1 to 32 letters, digits, spaces, `_` or `-`, starts with a \
          letter or digit, and does not start with `special`.\n\
-         Next step: choose a name like `atlas`.",
-        raw
+         Next step: choose a name like `atlas`."
     )
 }
 
