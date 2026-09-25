@@ -19,6 +19,13 @@ This reads it with the standard library only and reports:
 
 QUIC's server name is encrypted in the Initial packet and is not decoded
 here; QUIC flows are listed by address with any DNS name that resolved to it.
+
+Names can only be counted where they are visible, so every flow that could
+carry a name the capture cannot read is counted too (opaque_name_flows):
+QUIC (UDP 443), DNS over TLS or QUIC (port 853), DNS over HTTPS to the
+well-known resolvers, and TLS without SNI or with Encrypted Client Hello.
+When there is any, distinct_name_count is only a lower bound, and the
+report never lets a system win on names that way.
 """
 
 from __future__ import annotations
@@ -32,6 +39,20 @@ from collections import defaultdict
 from pathlib import Path
 
 ETH_IPV4, ETH_IPV6, ETH_VLAN, ETH_ARP = 0x0800, 0x86DD, 0x8100, 0x0806
+TLS_EXT_SNI, TLS_EXT_ECH = 0x0000, 0xFE0D
+# Public DNS-over-HTTPS endpoints (names in SNI, addresses without it).
+DOH_NAMES = frozenset({
+    "dns.google", "dns.google.com", "cloudflare-dns.com", "mozilla.cloudflare-dns.com",
+    "chrome.cloudflare-dns.com", "one.one.one.one", "1dot1dot1dot1.cloudflare-dns.com",
+    "security.cloudflare-dns.com", "family.cloudflare-dns.com", "dns.quad9.net", "dns9.quad9.net",
+    "dns10.quad9.net", "dns11.quad9.net", "doh.opendns.com", "dns.nextdns.io", "dns.adguard-dns.com",
+    "doh.cleanbrowsing.org", "doh.mullvad.net", "dns.mullvad.net", "freedns.controld.com",
+})
+DOH_ADDRESSES = frozenset({
+    "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112", "208.67.222.222",
+    "208.67.220.220", "94.140.14.14", "94.140.15.15", "2606:4700:4700::1111", "2606:4700:4700::1001",
+    "2001:4860:4860::8888", "2001:4860:4860::8844", "2620:fe::fe", "2620:fe::9",
+})
 
 
 def read_pcap(path: Path):
@@ -164,6 +185,12 @@ def fqdn_from_wire(raw: bytes) -> str:
 
 def tls_sni(buffer: bytes):
     """SNI from a (possibly multi-segment) TLS ClientHello, or None."""
+    hello = client_hello(buffer)
+    return hello if hello in (None, "incomplete") else hello["sni"]
+
+
+def client_hello(buffer: bytes):
+    """{"sni": name or "", "ech": bool} from a TLS ClientHello; "incomplete"; or None."""
     if len(buffer) < 5 or buffer[0] != 0x16 or buffer[1] != 0x03:
         return None
     record_len = struct.unpack(">H", buffer[3:5])[0]
@@ -191,16 +218,19 @@ def tls_sni(buffer: bytes):
         ext_total = struct.unpack(">H", hello[pos:pos + 2])[0]
         pos += 2
         end = pos + ext_total
+        found = {"sni": "", "ech": False}
         while pos + 4 <= end:
             ext_type, ext_len = struct.unpack(">HH", hello[pos:pos + 4])
             ext = hello[pos + 4:pos + 4 + ext_len]
             pos += 4 + ext_len
-            if ext_type == 0 and len(ext) >= 5:
+            if ext_type == TLS_EXT_SNI and len(ext) >= 5:
                 name_len = struct.unpack(">H", ext[3:5])[0]
-                return ext[5:5 + name_len].decode("ascii", errors="replace").lower()
+                found["sni"] = ext[5:5 + name_len].decode("ascii", errors="replace").lower()
+            elif ext_type == TLS_EXT_ECH:
+                found["ech"] = True
     except (IndexError, struct.error):
         return None
-    return ""
+    return found
 
 
 def scope(ip: str) -> str:
@@ -244,6 +274,7 @@ def summarize(path: Path, guest_mac: str | None) -> dict:
                    "dhcp_client_id": set(), "dhcpv6_fqdn": set(), "dhcpv6_duid": set(),
                    "mdns_names": set(), "link_local_name_queries": set(), "http_user_agents": set()}
     ntp = set()
+    opaque = set()
     tcp_buffers: dict = {}
     first_ts = parsed[0][0] if parsed else 0.0
     last_ts = parsed[-1][0] if parsed else 0.0
@@ -320,6 +351,14 @@ def summarize(path: Path, guest_mac: str | None) -> dict:
                         identifiers["dhcpv6_duid"].add(options[1].hex())
             elif outbound and dport == 123:
                 ntp.add(remote_ip)
+            if outbound and dport == 443:
+                opaque.add(("quic", remote_ip, 443))
+            elif outbound and dport == 853:
+                opaque.add(("dns-over-quic", remote_ip, 853))
+        if p.get("tcp") and outbound and p["dport"] == 853:
+            opaque.add(("dns-over-tls", remote_ip, 853))
+        if p.get("tcp") and outbound and p["dport"] == 443 and remote_ip in DOH_ADDRESSES:
+            opaque.add(("dns-over-https", remote_ip, 443))
         if p.get("tcp") and outbound and p["payload"]:
             key = (p["src"], p["sport"], p["dst"], p["dport"])
             buffer = tcp_buffers.get(key)
@@ -328,12 +367,19 @@ def summarize(path: Path, guest_mac: str | None) -> dict:
             if not buffer["done"] and len(buffer["data"]) < 65536:
                 buffer["data"] += p["payload"]
                 if buffer["data"][:1] == b"\x16":
-                    name = tls_sni(buffer["data"])
-                    if name not in (None, "incomplete"):
+                    hello = client_hello(buffer["data"])
+                    if hello not in (None, "incomplete"):
                         buffer["done"] = True
+                        name = hello["sni"]
                         if name:
                             sni[(name, p["dst"])] += 1
-                    elif name is None:
+                        if name in DOH_NAMES:
+                            opaque.add(("dns-over-https", remote_ip, p["dport"]))
+                        if hello["ech"]:
+                            opaque.add(("tls-encrypted-client-hello", remote_ip, p["dport"]))
+                        elif not name:
+                            opaque.add(("tls-without-sni", remote_ip, p["dport"]))
+                    elif hello is None:
                         buffer["done"] = True
                 elif buffer["data"][:4] in (b"GET ", b"POST", b"HEAD", b"PUT "):
                     head = buffer["data"].split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")
@@ -360,6 +406,8 @@ def summarize(path: Path, guest_mac: str | None) -> dict:
     internet = [r for r in rows if r["scope"] == "internet"]
     names = sorted({name for (name, _t) in dns_queries} | {name for (name, _d) in sni})
     found = {k: sorted(v) for k, v in identifiers.items()}
+    opaque_rows = [{"kind": kind, "ip": ip, "port": port} for kind, ip, port in sorted(opaque)
+                   if scope(ip) == "internet"]
     return {
         "schema": "punar-bench-privacy/1",
         "packets": len(parsed),
@@ -377,6 +425,9 @@ def summarize(path: Path, guest_mac: str | None) -> dict:
         "http": http,
         "distinct_names": names,
         "distinct_name_count": len(names),
+        "opaque_name_flows": opaque_rows,
+        "opaque_name_flow_count": len(opaque_rows),
+        "names_are_lower_bound": bool(opaque_rows),
         "ntp_servers": sorted(ntp),
         "identifiers": found,
         "identifier_kinds_sent": sorted(k for k, v in found.items() if v and k != "dhcp_client_id"),
