@@ -2129,6 +2129,44 @@ pub struct EnrollStatusResult {
     /// empty until the first inventory is sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization_view: Option<OrganizationView>,
+    /// The organization's policy as this device enforces it, and how the last
+    /// refresh of it went (docs/api/ipc.md section 5.10). Present exactly when
+    /// enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<EnrollPolicyStatus>,
+}
+
+/// `enroll.status.policy`. Every reconcile pass asks the control plane for
+/// the organization's policy; whatever it answers, the device enforces the
+/// last set that passed every check until a newer one does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollPolicyStatus {
+    /// `sha256:…` of the enforced set, or `null` until the device has derived
+    /// it (an enrollment made by a build before the refresh).
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// When the device last fetched the answer it is enforcing. A fetch that
+    /// was refused, rejected, held or failed does not move it, so it says how
+    /// fresh the enforced policy is.
+    pub fetched_at: String,
+    /// When the enforced set last changed.
+    pub changed_at: String,
+    /// The most recent refresh, or `null` before the first.
+    #[serde(default)]
+    pub last_refresh: Option<PolicyRefresh>,
+}
+
+/// `enroll.status.policy.last_refresh`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyRefresh {
+    pub at: String,
+    /// `unchanged` | `applied` | `withdrawn` (the device enforces what the
+    /// organization serves) | `rejected` | `held` | `unreachable` |
+    /// `refused` | `failed` (it enforces the last good policy instead).
+    pub result: String,
+    /// A closed snake_case code saying why, for the last five.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `enroll.status.organization_view`: read from the body that actually left
@@ -3739,6 +3777,7 @@ mod tests {
             removable: None,
             organization_owned: None,
             organization_view: None,
+            policy: None,
         };
         assert_eq!(
             serde_json::to_string(&result).unwrap(),
@@ -3765,6 +3804,51 @@ mod tests {
         assert_eq!(sync.result.as_deref(), Some("success"));
         assert!(!sync.pending);
         assert_eq!(result.attestation.as_deref(), Some("simulated"));
+    }
+
+    /// Section 5.10's policy block: an unknown revision and a refresh not yet
+    /// run are `null`, never absent, and a result that needs no reason
+    /// carries none.
+    #[test]
+    fn the_policy_block_round_trips_with_its_nulls() {
+        let result: EnrollStatusResult = serde_json::from_value(json!({
+            "enrolled": true,
+            "policy": {
+                "revision": "sha256:ab",
+                "fetched_at": "2026-09-24T10:00:00Z",
+                "changed_at": "2026-09-24T09:00:00Z",
+                "last_refresh": {"at": "2026-09-24T10:02:00Z", "result": "rejected",
+                                  "reason": "duplicate_policy_id"}
+            }
+        }))
+        .unwrap();
+        let policy = result.policy.as_ref().unwrap();
+        assert_eq!(policy.revision.as_deref(), Some("sha256:ab"));
+        let refresh = policy.last_refresh.as_ref().unwrap();
+        assert_eq!(refresh.reason.as_deref(), Some("duplicate_policy_id"));
+
+        let fresh = EnrollPolicyStatus {
+            revision: None,
+            fetched_at: "2026-09-24T09:00:00Z".into(),
+            changed_at: "2026-09-24T09:00:00Z".into(),
+            last_refresh: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&fresh).unwrap(),
+            json!({"revision": null, "fetched_at": "2026-09-24T09:00:00Z",
+                   "changed_at": "2026-09-24T09:00:00Z", "last_refresh": null})
+        );
+        let unchanged = PolicyRefresh {
+            at: "2026-09-24T10:02:00Z".into(),
+            result: "unchanged".into(),
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&unchanged).unwrap(),
+            json!({"at": "2026-09-24T10:02:00Z", "result": "unchanged"})
+        );
+        let older: EnrollStatusResult = serde_json::from_value(json!({"enrolled": true})).unwrap();
+        assert_eq!(older.policy, None, "a daemon that predates the block");
     }
 
     /// Section 5.10's organization view: names and counts, never values;

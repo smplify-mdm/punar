@@ -3401,3 +3401,51 @@ fn an_interrupted_policy_change_settles_at_startup() {
     daemon.result("enroll.stop", None);
     assert!(policy_d_files(&daemon).is_empty());
 }
+
+/// The revision of the files in policy.d that `names` lists, computed from
+/// disk alone: what enroll.status must say the device enforces.
+fn revision_on_disk(daemon: &TestDaemon, names: &[&str]) -> String {
+    let mut framed = Vec::new();
+    for name in names {
+        let bytes = fs::read(daemon.state_path("policy.d").join(name)).unwrap();
+        framed.extend_from_slice(name.as_bytes());
+        framed.push(0);
+        framed.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        framed.extend_from_slice(&bytes);
+    }
+    format!("sha256:{}", punard::util::sha256_hex(&framed))
+}
+
+/// enroll.status says which policy the device enforces, derived from the
+/// files themselves, and since when; an enrollment recorded before any of it
+/// existed reads as enforcing its policy since it enrolled.
+#[test]
+fn enroll_status_says_which_policy_is_enforced_and_since_when() {
+    let dir = test_dir("policy-status");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let status = daemon.result("enroll.status", None);
+    let policy = &status["policy"];
+    assert_eq!(
+        policy["revision"],
+        revision_on_disk(&daemon, &["eng-baseline-v12.json"]),
+        "{status}"
+    );
+    assert_eq!(policy["fetched_at"], status["enrolled_at"]);
+    assert_eq!(policy["changed_at"], status["enrolled_at"]);
+    assert_eq!(policy["last_refresh"], Value::Null);
+    daemon.stop();
+
+    // What a build before the refresh wrote.
+    let record_path = dir.join("state/enrollment.json");
+    let mut record = read_json(&record_path);
+    for field in ["policy_hash", "policy_fetched_at", "policy_changed_at"] {
+        record.as_object_mut().unwrap().remove(field);
+    }
+    fs::write(&record_path, record.to_string()).unwrap();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["policy"]["revision"], Value::Null, "{status}");
+    assert_eq!(status["policy"]["fetched_at"], status["enrolled_at"]);
+    assert_eq!(status["policy"]["changed_at"], status["enrolled_at"]);
+}

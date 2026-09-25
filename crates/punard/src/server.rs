@@ -40,16 +40,16 @@ use punar_common::ipc::{
     ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams,
     AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
     CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
-    ENROLLMENT_TERMS_NOT_ACCEPTED, EnrollStartParams, EnrollStartResult, EnrollStatusResult,
-    EnrollStopParams, EnrollStopResult, EnrollmentTerm, ErrorCode, FirstSync, IpcError, LastQuery,
-    LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo, PROTOCOL_VERSION,
-    PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams, PolicyExplainResult,
-    PolicySetParams, PolicySetResult, PolicySourceRef, PrivilegeRequestParams,
-    PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult, ReconcileEntry,
-    ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response, SERVER_READ_TIMEOUT,
-    StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams, WebAppsGetParams,
-    WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams, organization_name,
-    term_safe_name,
+    ENROLLMENT_TERMS_NOT_ACCEPTED, EnrollPolicyStatus, EnrollStartParams, EnrollStartResult,
+    EnrollStatusResult, EnrollStopParams, EnrollStopResult, EnrollmentTerm, ErrorCode, FirstSync,
+    IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES, Method, Mode, OrgInfo,
+    PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams,
+    PolicyExplainResult, PolicyRefresh, PolicySetParams, PolicySetResult, PolicySourceRef,
+    PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult,
+    ReconcileEntry, ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response,
+    SERVER_READ_TIMEOUT, StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams,
+    WebAppsGetParams, WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams,
+    organization_name, term_safe_name,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
 use punar_common::time::utc_now_rfc3339;
@@ -5351,6 +5351,7 @@ impl Inner {
                 removable: None,
                 organization_owned: None,
                 organization_view: None,
+                policy: None,
             },
             Some(e) => EnrollStatusResult {
                 enrolled: true,
@@ -5382,6 +5383,24 @@ impl Inner {
                     load_organization_view(&self.cfg.state_dir.join(ORGANIZATION_VIEW_FILE), e)
                         .as_ref(),
                 )),
+                // An enrollment made before these were recorded has enforced
+                // the policy it enrolled with since it enrolled.
+                policy: Some(EnrollPolicyStatus {
+                    revision: e.policy_hash.clone(),
+                    fetched_at: e
+                        .policy_fetched_at
+                        .clone()
+                        .unwrap_or_else(|| e.enrolled_at.clone()),
+                    changed_at: e
+                        .policy_changed_at
+                        .clone()
+                        .unwrap_or_else(|| e.enrolled_at.clone()),
+                    last_refresh: e.policy_refresh.as_ref().map(|r| PolicyRefresh {
+                        at: r.at.clone(),
+                        result: r.result.clone(),
+                        reason: r.reason.clone(),
+                    }),
+                }),
             },
         }
     }
