@@ -3978,6 +3978,32 @@ fn an_answer_too_large_to_read_is_refused_by_name_and_not_backed_off() {
     assert!(!daemon.state_path("enrollment.json").exists());
 }
 
+/// A set this device cannot install backs off like a fetch that failed:
+/// retrying at once would only repeat the same local failure, staging and
+/// syncing the whole set each time on a device that may be short of space.
+#[test]
+fn a_set_the_device_cannot_install_backs_off_like_a_failed_fetch() {
+    let dir = test_dir("refresh-local-backoff");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = &control_plane.state;
+    // Nothing can be staged: the staging path is a file.
+    write_file(&daemon.state_path(".policy.d.next"), "not a directory");
+    *state.firewall_enabled.lock().unwrap() = Some(false);
+    let fetched_before = fetch_count(state);
+    for _ in 0..8 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(
+        fetch_count(state) - fetched_before,
+        4,
+        "passes 1, 2, 4 and 8 asked"
+    );
+    let refresh = last_refresh(&daemon);
+    assert_eq!(refresh["result"], "failed", "{refresh}");
+    assert_eq!(refresh["reason"], "io", "{refresh}");
+}
+
 /// The common case costs one request and nothing else: no file in policy.d
 /// is rewritten or replaced, the browser document is untouched, nothing is
 /// audited, and the time the enforced policy was fetched moves.

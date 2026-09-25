@@ -530,6 +530,12 @@ the reconcile result's shape.
 - **Backoff.** After the n-th consecutive failed fetch, the next
   `2^(n-1) - 1` passes (at most 15) do not fetch: 0, 1, 3, 7, 15, 15, …
   passes. Any answer, a refused set included, resets it; so does a restart.
+  A set this device could not install (`failed`) counts as a failure too.
+  A refusal that depended on this device's own files as well as the set
+  (`foreign_file_collision`, `unsupported_entry`,
+  `conflicts_with_local_policy`, `swap_unsupported`) is not staged again
+  until the offer or `policy.d` changes; the first two are found by reading
+  `policy.d`, before anything is written.
 - **Terms are fixed.** A refresh never reads the organization document
   again and changes no enrollment term (`removable`, `organization_owned`,
   `remote_query_scopes`).

@@ -117,7 +117,8 @@ const MAX_REFRESH_SKIP: u32 = 15;
 /// restart tries at once. After the n-th consecutive failure the next
 /// `2^(n-1) - 1` opportunities are skipped, at most [`MAX_REFRESH_SKIP`]:
 /// 0, 1, 3, 7, 15, 15, … Any answer resets it, a refused set included —
-/// the control plane is up, and the set is what failed.
+/// the control plane is up, and the set is what failed — except one this
+/// device could not install (`failed`), which counts as a failure too.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RefreshBackoff {
     failures: u32,
@@ -211,6 +212,33 @@ fn offered_list_hash(policies: &[Value]) -> String {
     format!("sha256:{:x}", digest.0.finalize())
 }
 
+/// A refusal that depended on this device's own files as well as on the
+/// set offered ([`Inner`]'s `policy_local_refusal`), and what it depended on:
+/// the enrollment, the offer, and `policy.d` itself
+/// ([`policy_set::local_fingerprint`]).
+#[derive(Debug, Clone)]
+pub(super) struct LocalRefusal {
+    epoch: u64,
+    offered: String,
+    local: String,
+    result: RefreshResult,
+    reason: &'static str,
+}
+
+/// Whether a local failure follows from what policy.d holds and the set
+/// offered alone, so that trying again before either changes can only fail
+/// the same way. An I/O error may clear by itself, and a file changed during
+/// the swap is gone by the next pass; those are retried, under the backoff.
+fn depends_on_local_files(failure: &policy_set::LocalFailure) -> bool {
+    use policy_set::LocalFailure;
+    matches!(
+        failure,
+        LocalFailure::UnsupportedEntry(_)
+            | LocalFailure::ConflictsWithLocalPolicy(_)
+            | LocalFailure::SwapUnsupported
+    )
+}
+
 /// What a committed set changed, for the journal and the in-memory swap.
 struct Committed {
     result: RefreshResult,
@@ -253,15 +281,24 @@ impl Inner {
         let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
         let failed = match client.policy_fetch(&token) {
             Ok(fetched) => {
-                self.policy_refresh_backoff.lock().unwrap().answered();
                 // Checking and committing hold the enrollment guard, and
                 // never wait for it: an enroll.start or enroll.stop in
                 // progress will leave nothing this answer is for, and the
                 // next pass asks again.
                 let Some(_guard) = EnrollGuard::acquire(&self.enroll_in_progress) else {
+                    self.policy_refresh_backoff.lock().unwrap().answered();
                     return;
                 };
-                self.refresh_under_guard(actor, epoch, fetched);
+                let result = self.refresh_under_guard(actor, epoch, fetched);
+                // A set this device could not install backs off like a
+                // failed fetch: the next pass would only repeat the same
+                // local failure, on a device that may be short of space.
+                let mut backoff = self.policy_refresh_backoff.lock().unwrap();
+                if result == Some(RefreshResult::Failed) {
+                    backoff.failed();
+                } else {
+                    backoff.answered();
+                }
                 return;
             }
             // An answer, and the organization's to fix: recorded once, like
@@ -297,7 +334,14 @@ impl Inner {
         self.record_refresh(actor, epoch, outcome);
     }
 
-    fn refresh_under_guard(&self, actor: &AuditActor, epoch: u64, fetched: FetchedPolicy) {
+    /// Check and, when it differs, commit a fetched set. The result it
+    /// recorded, or `None` when the enrollment changed first.
+    fn refresh_under_guard(
+        &self,
+        actor: &AuditActor,
+        epoch: u64,
+        fetched: FetchedPolicy,
+    ) -> Option<RefreshResult> {
         // The enrollment the fetch was made for, still the one in the slot.
         let owned_files = {
             let slot = self.enrollment.lock().unwrap();
@@ -305,7 +349,7 @@ impl Inner {
                 Some(current) if self.enrollment_epoch.load(Ordering::SeqCst) == epoch => {
                     current.policy_files.clone()
                 }
-                _ => return,
+                _ => return None,
             }
         };
 
@@ -319,12 +363,11 @@ impl Inner {
                 Assignment::Policies => Some(REASON_EMPTY_POLICIES),
             };
             if let Some(reason) = held {
-                self.record_refresh(
+                return self.recorded(
                     actor,
                     epoch,
                     Outcome::new(RefreshResult::Held, Some(reason)),
                 );
-                return;
             }
         }
         let set = match CanonicalSet::from_envelopes(&fetched.policies, fetched.assignment) {
@@ -333,8 +376,7 @@ impl Inner {
                 let mut outcome = Outcome::new(RefreshResult::Rejected, Some(rejection.reason()));
                 outcome.offered_hash = Some(offered_list_hash(&fetched.policies));
                 outcome.detail = Some(rejection.describe());
-                self.record_refresh(actor, epoch, outcome);
-                return;
+                return self.recorded(actor, epoch, outcome);
             }
         };
 
@@ -347,8 +389,7 @@ impl Inner {
             Err(e) => {
                 let mut outcome = Outcome::new(RefreshResult::Failed, Some("io"));
                 outcome.detail = Some(format!("reading policy.d: {e}"));
-                self.record_refresh(actor, epoch, outcome);
-                return;
+                return self.recorded(actor, epoch, outcome);
             }
         };
         self.settle_revision(epoch, &owned_now);
@@ -365,8 +406,7 @@ impl Inner {
         let memory_agrees =
             self.org_policy_loaded.lock().unwrap().as_deref() == Some(offered.as_str());
         if set == owned_now && record_agrees && memory_agrees {
-            self.record_refresh(actor, epoch, Outcome::new(RefreshResult::Unchanged, None));
-            return;
+            return self.recorded(actor, epoch, Outcome::new(RefreshResult::Unchanged, None));
         }
 
         // The very set this daemon already refused, for a reason that cannot
@@ -376,10 +416,38 @@ impl Inner {
             if memo_epoch == epoch && memo_offer == offered {
                 let mut outcome = Outcome::new(RefreshResult::Rejected, Some(reason));
                 outcome.offered_hash = Some(offered);
-                self.record_refresh(actor, epoch, outcome);
-                return;
+                return self.recorded(actor, epoch, outcome);
             }
         }
+
+        // A refusal that also depended on this device's own files — a set
+        // that names a root drop, or that cannot be carried, loaded or
+        // installed beside what policy.d holds — is not staged again, file
+        // by file and fsync by fsync, while neither the offer nor policy.d
+        // has changed: only root can clear it, and an SD card would
+        // otherwise pay for it every two minutes.
+        let local = policy_set::local_fingerprint(&self.cfg.state_dir, &owned_files).ok();
+        let refusal = self.policy_local_refusal.lock().unwrap().clone();
+        if let (Some(refusal), Some(local)) = (refusal, local.as_deref()) {
+            if refusal.epoch == epoch && refusal.offered == offered && refusal.local == local {
+                let mut outcome = Outcome::new(refusal.result, Some(refusal.reason));
+                if refusal.result == RefreshResult::Rejected {
+                    outcome.offered_hash = Some(offered);
+                }
+                return self.recorded(actor, epoch, outcome);
+            }
+        }
+        let remember = |result: RefreshResult, reason: &'static str| {
+            if let Some(local) = &local {
+                *self.policy_local_refusal.lock().unwrap() = Some(LocalRefusal {
+                    epoch,
+                    offered: offered.clone(),
+                    local: local.clone(),
+                    result,
+                    reason,
+                });
+            }
+        };
 
         let prepared = match policy_set::prepare(&self.cfg.state_dir, &set, &owned_files) {
             Ok(prepared) => prepared,
@@ -388,8 +456,11 @@ impl Inner {
                 let outcome = match error {
                     PrepareError::Rejected(rejection) => {
                         // A collision depends on this device's own files,
-                        // which root may change at any time: checked again.
-                        if !matches!(rejection, Rejection::ForeignFileCollision(_)) {
+                        // which root may change at any time: remembered
+                        // with them, not with the offer alone.
+                        if matches!(rejection, Rejection::ForeignFileCollision(_)) {
+                            remember(RefreshResult::Rejected, rejection.reason());
+                        } else {
                             *self.policy_rejected_offer.lock().unwrap() =
                                 Some((epoch, offered.clone(), rejection.reason()));
                         }
@@ -403,14 +474,16 @@ impl Inner {
                         outcome
                     }
                     PrepareError::Local(failure) => {
+                        if depends_on_local_files(&failure) {
+                            remember(RefreshResult::Failed, failure.reason());
+                        }
                         let mut outcome =
                             Outcome::new(RefreshResult::Failed, Some(failure.reason()));
                         outcome.detail = Some(failure.to_string());
                         outcome
                     }
                 };
-                self.record_refresh(actor, epoch, outcome);
-                return;
+                return self.recorded(actor, epoch, outcome);
             }
         };
 
@@ -419,13 +492,15 @@ impl Inner {
             // The enrollment ended or changed while the set was checked.
             Commit::Abandoned => {
                 policy_set::discard_staging(&self.cfg.state_dir);
-                return;
+                return None;
             }
             Commit::Failed(failure) => {
+                if depends_on_local_files(&failure) {
+                    remember(RefreshResult::Failed, failure.reason());
+                }
                 let mut outcome = Outcome::new(RefreshResult::Failed, Some(failure.reason()));
                 outcome.detail = Some(failure.to_string());
-                self.record_refresh(actor, epoch, outcome);
-                return;
+                return self.recorded(actor, epoch, outcome);
             }
             Commit::Stuck(failure) => {
                 // policy.d may hold the new set, which passed every check:
@@ -441,8 +516,7 @@ impl Inner {
                 self.recompute_effective();
                 let mut outcome = Outcome::new(RefreshResult::Failed, Some(failure.reason()));
                 outcome.detail = Some(failure.to_string());
-                self.record_refresh(actor, epoch, outcome);
-                return;
+                return self.recorded(actor, epoch, outcome);
             }
         };
 
@@ -475,6 +549,7 @@ impl Inner {
                 .remove(BROWSER_POLICY_CAPABILITY);
         }
         *self.policy_rejected_offer.lock().unwrap() = None;
+        *self.policy_local_refusal.lock().unwrap() = None;
 
         eprintln!(
             "punard: the organization's policy was {} ({offered}): {}",
@@ -485,6 +560,19 @@ impl Inner {
                 committed.ids.join(", ")
             }
         );
+        Some(committed.result)
+    }
+
+    /// [`Inner::record_refresh`], answering what was recorded.
+    fn recorded(
+        &self,
+        actor: &AuditActor,
+        epoch: u64,
+        outcome: Outcome<'_>,
+    ) -> Option<RefreshResult> {
+        let result = outcome.result;
+        self.record_refresh(actor, epoch, outcome);
+        Some(result)
     }
 
     /// Make a prepared set the enforced one, on disk. In order, each step
@@ -1077,6 +1165,100 @@ mod tests {
         assert_eq!(enforced_firewall(&daemon), json!("disabled"));
         refresh(&daemon, vec![baseline(false)]);
         assert_eq!(applied(&root), 1, "then unchanged");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn last_result(daemon: &Daemon) -> (String, Option<String>) {
+        let refresh = daemon
+            .inner
+            .enrollment
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap()
+            .policy_refresh
+            .unwrap();
+        (refresh.result, refresh.reason)
+    }
+
+    /// A refusal that depends on this device's own files as well as on the
+    /// set offered is staged once, not on every pass: a conflict with a root
+    /// drop that only shows once the set is loaded beside it is remembered
+    /// with the offer and what policy.d holds, and staged again only when
+    /// either changes; a collision with a root drop's name and an entry that
+    /// cannot be carried are found by reading the directory, before anything
+    /// is written.
+    #[test]
+    fn a_local_refusal_is_not_staged_again_until_policy_d_or_the_offer_changes() {
+        let root = root("local-refusal");
+        enrolled_on_disk(&root, &[baseline(true)]);
+        let daemon = start(&root);
+        let policy_d = root.join("state/policy.d");
+        let staged = Rc::new(RefCell::new(0));
+        let _hook = {
+            let staged = Rc::clone(&staged);
+            faults::install(move |step| {
+                if step == Step::Stage {
+                    *staged.borrow_mut() += 1;
+                }
+                Ok(())
+            })
+        };
+        let clash = |name: &str| {
+            json!({"policy_id": "eng-baseline-v12", "source_kind": "organization_role_policy",
+                   "precedence_rank": 3, "source_name": name})
+            .to_string()
+        };
+        std::fs::write(policy_d.join("clash.json"), clash("first")).unwrap();
+
+        refresh(&daemon, vec![baseline(false)]);
+        let conflict = (
+            "failed".to_string(),
+            Some("conflicts_with_local_policy".to_string()),
+        );
+        assert_eq!(last_result(&daemon), conflict);
+        assert_eq!(*staged.borrow(), 1);
+        refresh(&daemon, vec![baseline(false)]);
+        refresh(&daemon, vec![baseline(false)]);
+        assert_eq!(last_result(&daemon), conflict);
+        assert_eq!(
+            *staged.borrow(),
+            1,
+            "the same offer and files: not staged again"
+        );
+
+        // Root edits the drop: staged again.
+        std::fs::write(
+            policy_d.join("clash.json"),
+            clash("second, edited in place"),
+        )
+        .unwrap();
+        refresh(&daemon, vec![baseline(false)]);
+        assert_eq!(*staged.borrow(), 2);
+        // The organization changes its offer: staged again.
+        let mut other = baseline(false);
+        other["source_name"] = json!("Engineering baseline, revised");
+        refresh(&daemon, vec![other]);
+        assert_eq!(*staged.borrow(), 3);
+        std::fs::remove_file(policy_d.join("clash.json")).unwrap();
+
+        // Found before anything is staged.
+        std::fs::write(policy_d.join("eng-role-sre.json"), clash("root's")).unwrap();
+        let mut named_like_it = baseline(false);
+        named_like_it["policy_id"] = json!("eng-role-sre");
+        named_like_it["source_kind"] = json!("organization_role_policy");
+        named_like_it["precedence_rank"] = json!(3);
+        refresh(&daemon, vec![baseline(false), named_like_it]);
+        assert_eq!(
+            last_result(&daemon).1.as_deref(),
+            Some("foreign_file_collision")
+        );
+        std::fs::remove_file(policy_d.join("eng-role-sre.json")).unwrap();
+        std::fs::create_dir_all(policy_d.join("ai")).unwrap();
+        std::fs::write(policy_d.join("ai/stale.yaml"), b"x").unwrap();
+        refresh(&daemon, vec![baseline(false)]);
+        assert_eq!(last_result(&daemon).1.as_deref(), Some("unsupported_entry"));
+        assert_eq!(*staged.borrow(), 3, "neither was staged");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -560,6 +560,11 @@ struct Inner {
     /// and why: the same set is not checked again on every pass. In memory,
     /// so a new build, whose checks may differ, looks at it once more.
     policy_rejected_offer: Mutex<Option<(u64, String, &'static str)>>,
+    /// The last refusal that depended on this device's own files as well as
+    /// on the set offered (a set that names a root drop, or cannot be loaded
+    /// or installed beside what policy.d holds), and what it depended on: not
+    /// staged again until the offer or policy.d changes.
+    policy_local_refusal: Mutex<Option<policy_refresh::LocalRefusal>>,
     /// The revision of the organization's files the in-memory layers and the
     /// rendered browser document were made from. `None` when they may not
     /// match `policy.d` (a change that could not be undone): the next
@@ -840,6 +845,7 @@ impl Daemon {
                 enroll_in_progress: AtomicBool::new(false),
                 policy_refresh_backoff: Mutex::new(RefreshBackoff::default()),
                 policy_rejected_offer: Mutex::new(None),
+                policy_local_refusal: Mutex::new(None),
                 org_policy_loaded: Mutex::new(org_policy_loaded),
                 install_in_progress: AtomicBool::new(false),
                 shutdown: AtomicBool::new(false),

@@ -629,6 +629,38 @@ fn read_entries(dir: &Path) -> io::Result<Vec<(OsString, fs::Metadata)>> {
     Ok(named)
 }
 
+/// A digest of what `policy.d` holds, as far as a local refusal depends on
+/// it: which files the record owns, and every entry's name, inode, mode,
+/// size and modification time. Any file a root administrator adds, removes,
+/// replaces or edits changes it; a refusal that depends only on these and on
+/// the set offered is not worth staging again until one of them changes.
+/// Not the inode change time: carrying a file into the staged directory is a
+/// new link to it, which moves that time on every attempt.
+pub fn local_fingerprint(state_dir: &Path, owned: &[String]) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for name in owned {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+    }
+    digest.update([1]);
+    for (name, meta) in read_entries(&state_dir.join(POLICY_DIR))? {
+        digest.update(name.as_encoded_bytes());
+        digest.update([0]);
+        for number in [
+            meta.dev(),
+            meta.ino(),
+            u64::from(meta.mode()),
+            meta.len(),
+            meta.mtime() as u64,
+            meta.mtime_nsec() as u64,
+        ] {
+            digest.update(number.to_be_bytes());
+        }
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 fn dir_is_empty(dir: &Path) -> io::Result<bool> {
     Ok(fs::read_dir(dir)?.next().is_none())
 }
