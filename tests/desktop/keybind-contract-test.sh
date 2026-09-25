@@ -69,7 +69,12 @@ hl.bind = function(keys, dispatcher, opts)
         submap,
         keys,
         opts.description or "",
-        (opts.release and "release" or "") .. (opts.mouse and "mouse" or ""),
+        table.concat({
+            opts.release and "release" or "",
+            opts.mouse and "mouse" or "",
+            opts.non_consuming and "nonconsuming" or "",
+            opts.transparent and "transparent" or "",
+        }, " "),
     })
     return {}
 end
@@ -170,6 +175,22 @@ for description in ("Toggle floating", "Center floating window"):
     keys = {r["keys"] for r in modes["mac"] if r["description"] == description}
     if not keys or not all("ALT" in k for k in keys):
         problems.append(f"Mac-style grammar did not move {description!r} to PUNAR+ALT: {keys}")
+
+# A release bind on a modifier key (Alt+Tab's Alt release) must be
+# non-consuming, or it eats every bare Alt release that opens an app's menu
+# bar, and transparent, or Hyprland shadows it the moment another bind takes
+# a key while the modifier is held: after ALT + Tab took the Tab, the release
+# never fired, and every Alt+Tab ended on the switcher's five-second fallback
+# (found in the VM on Hyprland 0.56.2, SMP-1405 WP-02).
+MODIFIER_KEYS = {"alt_l", "alt_r", "super_l", "super_r", "control_l", "control_r", "shift_l", "shift_r"}
+for mode, rows in modes.items():
+    for row in rows:
+        flags = row["flags"].split()
+        if "release" not in flags or chord(row["keys"])[0] not in MODIFIER_KEYS:
+            continue
+        for needed in ("nonconsuming", "transparent"):
+            if needed not in flags:
+                problems.append(f"{mode}: the modifier release bind {row['keys']!r} is not {needed}")
 
 # The number row is bound by key code, 1..9 then 0 (code:10..code:19), in all
 # three workspace families: the tenth workspace is on the 0 key.

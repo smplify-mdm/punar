@@ -232,10 +232,19 @@ return function(ctx)
     -- A consuming release bind would eat EVERY Alt release, switching or not,
     -- and Firefox, Thunderbird and every GTK or Qt app with a menu bar opens
     -- it on a bare Alt release. The bind only listens; it never takes the key.
-    bind("ALT + Alt_L", switch_done, "Choose the window on Alt release", { release = true, non_consuming = true })
-    bind("ALT + Alt_R", switch_done, "Choose the window on right Alt release", { release = true, non_consuming = true })
-    bind("ALT + SHIFT + Alt_L", switch_done, "Choose the window on Shift+Alt release", { release = true, non_consuming = true })
-    bind("ALT + SHIFT + Alt_R", switch_done, "Choose the window on Shift+right Alt release", { release = true, non_consuming = true })
+    -- TRANSPARENT: when ALT + Tab takes the Tab press, Hyprland shadows every
+    -- bind on a key that is still held, and Alt is still held, so without
+    -- this the release bind never fires after a Tab. It fired only on a bare
+    -- Alt tap, and every Alt+Tab ended on the shell's five-second fallback
+    -- (measured in the VM on Hyprland 0.56.2: 5.4 s for a quick switch).
+    -- (A fresh table per bind: `bind` writes the description into it.)
+    local function on_release()
+        return { release = true, non_consuming = true, transparent = true }
+    end
+    bind("ALT + Alt_L", switch_done, "Choose the window on Alt release", on_release())
+    bind("ALT + Alt_R", switch_done, "Choose the window on right Alt release", on_release())
+    bind("ALT + SHIFT + Alt_L", switch_done, "Choose the window on Shift+Alt release", on_release())
+    bind("ALT + SHIFT + Alt_R", switch_done, "Choose the window on Shift+right Alt release", on_release())
     bind("CTRL + ALT + Tab", hl.dsp.focus({ monitor = "+1" }), "Focus next monitor")
     bind("CTRL + ALT + SHIFT + Tab", hl.dsp.focus({ monitor = "-1" }), "Focus previous monitor")
 

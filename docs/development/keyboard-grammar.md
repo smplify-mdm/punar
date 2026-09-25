@@ -316,11 +316,17 @@ quick tap and a held Alt could choose different windows. keys-check.sh
 records how long a quick switch takes, in ms, so the difference is measured
 rather than assumed; J14 is not called better until it is.
 
-**Alt+Tab's release never swallows Alt.** The Alt-release binds that end a
-switch are non-consuming, so an application still sees every Alt release (a
-bare Alt opens the menu bar in Firefox and most GTK and Qt apps). This is
-held by `--verify-config` only as far as it goes: it ignores bind options it
-does not know, so the option's effect is not yet shown by a check.
+**Alt+Tab's release never swallows Alt, and is never lost.** The
+Alt-release binds that end a switch are non-consuming, so an application
+still sees every Alt release (a bare Alt opens the menu bar in Firefox and
+most GTK and Qt apps), and transparent: when ALT + Tab takes the Tab press,
+Hyprland shadows every bind on a key that is still held, so without it the
+release fired only on a bare Alt tap and never after a Tab. Every Alt+Tab
+then ended on the switcher's five-second fallback (5.4 s for a quick switch,
+measured in the VM on Hyprland 0.56.2; the same bind with `transparent =
+true` fired after Alt+Tab and after Alt+Tab+Tab). `keybind-contract-test.sh`
+now refuses a release bind on a modifier key that is not both, and
+keys-check.sh fails a quick switch that takes four seconds or more.
 
 
 Not bound, on purpose: Omarchy's "file manager in the focused terminal's
