@@ -560,6 +560,11 @@ struct Inner {
     /// and why: the same set is not checked again on every pass. In memory,
     /// so a new build, whose checks may differ, looks at it once more.
     policy_rejected_offer: Mutex<Option<(u64, String, &'static str)>>,
+    /// The revision of the organization's files the in-memory layers and the
+    /// rendered browser document were made from. `None` when they may not
+    /// match `policy.d` (a change that could not be undone): the next
+    /// refresh then commits again, whatever it fetches.
+    org_policy_loaded: Mutex<Option<String>>,
     /// One destructive install per live boot. This is a compare-exchange
     /// guard rather than a blocking mutex so a duplicate Apply receives an
     /// immediate, truthful conflict while status and recovery acknowledgement
@@ -718,25 +723,71 @@ impl Daemon {
         // unenroll.
         let mut enrollment = load_enrollment(&cfg.state_dir.join("enrollment.json"))?;
         // An enroll.start or policy refresh that was interrupted leaves its
-        // staging directory beside policy.d, and a refresh may leave a record
-        // naming files the directory it left live does not hold. Both are
-        // settled before anything reads them (policy_set::settle).
-        match policy_set::settle(&cfg.state_dir, enrollment.as_mut()) {
-            Ok(true) => {
-                if let Some(settled) = &enrollment {
-                    if let Err(e) =
-                        save_enrollment_durable(&cfg.state_dir.join("enrollment.json"), settled)
-                    {
-                        eprintln!(
-                            "punard: could not save the settled policy record ({e}); \
-                             it is saved again by the next sync"
-                        );
-                    }
+        // staging directory beside policy.d, and a refresh leaves a record
+        // naming both sets' files, its change pending. Both are settled from
+        // what policy.d holds before anything reads them (policy_set::settle).
+        let settled = match policy_set::settle(&cfg.state_dir, enrollment.as_mut()) {
+            Ok(settled) => settled,
+            Err(e) => {
+                eprintln!("punard: could not clear an interrupted policy change: {e}");
+                policy_set::Settled::default()
+            }
+        };
+        let mut saved = true;
+        if settled.changed {
+            if let Some(record) = &enrollment {
+                if let Err(e) =
+                    save_enrollment_durable(&cfg.state_dir.join("enrollment.json"), record)
+                {
+                    saved = false;
+                    eprintln!(
+                        "punard: could not save the settled policy record ({e}); \
+                         it is settled again at the next start"
+                    );
                 }
             }
-            Ok(false) => {}
-            Err(e) => eprintln!("punard: could not clear an interrupted policy change: {e}"),
         }
+        // A change that landed before the crash is audited as the refresh
+        // would have, under the event id it fixed before the swap: once,
+        // whether the refresh got as far as writing it or not. Only once the
+        // settled record is saved, or the next start settles it again.
+        if let (Some(change), true) = (&settled.landed, saved) {
+            if audit_log_holds(&cfg.audit_path, &change.event_id) {
+                eprintln!(
+                    "punard: the organization's policy was {} ({}) before the last stop",
+                    change.result, change.revision
+                );
+            } else {
+                let mut event = enrollment_event(
+                    &device_id,
+                    &AuditActor::daemon(),
+                    "enroll.policy",
+                    RESOURCE_CONTROL_PLANE,
+                    &change.result,
+                    change.policy_ids.clone(),
+                );
+                event.event_id = change.event_id.clone();
+                match audit.append(&event) {
+                    Ok(()) => {
+                        audit_events += 1;
+                        eprintln!(
+                            "punard: the organization's policy was {} ({}) before the last \
+                             stop; recorded now",
+                            change.result, change.revision
+                        );
+                    }
+                    Err(e) => eprintln!("punard: FAILED to append enroll.policy audit event: {e}"),
+                }
+            }
+        }
+        // What the in-memory layers below were loaded from, as far as the
+        // organization's files go: a refresh that finds the same set commits
+        // nothing only while this still names it.
+        let org_policy_loaded = enrollment.as_ref().and_then(|record| {
+            CanonicalSet::read_owned(&cfg.state_dir.join("policy.d"), &record.policy_files)
+                .ok()
+                .map(|owned| owned.revision())
+        });
         let device_token = load_device_token(&cfg.state_dir.join("device-token"))?;
         if enrollment.is_some() && device_token.is_none() {
             eprintln!(
@@ -789,6 +840,7 @@ impl Daemon {
                 enroll_in_progress: AtomicBool::new(false),
                 policy_refresh_backoff: Mutex::new(RefreshBackoff::default()),
                 policy_rejected_offer: Mutex::new(None),
+                org_policy_loaded: Mutex::new(org_policy_loaded),
                 install_in_progress: AtomicBool::new(false),
                 shutdown: AtomicBool::new(false),
                 active: Mutex::new(0),
@@ -4674,24 +4726,7 @@ impl Inner {
         result: &str,
         policy_ids: Vec<String>,
     ) -> AuditEvent {
-        AuditEvent {
-            event_id: next_event_id(),
-            timestamp: utc_now_rfc3339(),
-            device_id: self.device_id.clone(),
-            user_id: Some(actor.user_id.clone()),
-            agent_session_id: Some(AGENT_SESSION_NONE.to_string()),
-            project_id: Some(PROJECT_ID_SYSTEM.to_string()),
-            source: actor.source,
-            action: action.to_string(),
-            resource: Some(resource.to_string()),
-            decision: Decision::Allow,
-            policy_ids: if policy_ids.is_empty() {
-                vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()]
-            } else {
-                policy_ids
-            },
-            result: result.to_string(),
-        }
+        enrollment_event(&self.device_id, actor, action, resource, result, policy_ids)
     }
 
     /// Map a control-plane failure during `enroll.start` to the contract
@@ -5237,9 +5272,7 @@ impl Inner {
                 }));
             }
         };
-        let staging = prepared.staging().to_path_buf();
-        let loaded = prepared.loaded;
-        for unmapped in &loaded.unmapped {
+        for unmapped in &prepared.loaded.unmapped {
             eprintln!(
                 "punard: enrollment policy: no registered capability for {}; \
                  ignored (its capability lands in a later milestone)",
@@ -5247,10 +5280,8 @@ impl Inner {
             );
         }
 
-        // Commit point. The record goes first, durably, so no crash can leave
-        // the organization's files enforced on a device whose record says it
-        // is personal or owns none of them; then policy.d is swapped in whole;
-        // then the browser document. Each step undoes the ones before it.
+        // Commit point (install_enrollment): the record first, durably, then
+        // policy.d swapped in whole, then the browser document.
         let enrolled_at = utc_now_rfc3339();
         let enrollment = Enrollment {
             version: 1,
@@ -5274,56 +5305,12 @@ impl Inner {
                 reason: Some(REASON_UNUSABLE_ASSIGNMENT.to_string()),
                 offered_hash: None,
             }),
+            policy_pending: None,
         };
-        let enrollment_path = self.cfg.state_dir.join("enrollment.json");
-        let token_path = self.cfg.state_dir.join("device-token");
-        let unwind_stores = || {
-            let _ = remove_synced(&token_path);
-            let _ = crate::enroll::remove_terms(&enrollment_path);
-            let _ = remove_synced(&enrollment_path);
-        };
-        if let Err(e) = save_device_token(&token_path, &token) {
-            policy_set::discard_staging(&self.cfg.state_dir);
-            return Err(fail_audit(
-                self.internal(&format!("device token store: {e}")),
-            ));
-        }
-        if let Err(e) = save_enrollment_durable(&enrollment_path, &enrollment) {
-            unwind_stores();
-            policy_set::discard_staging(&self.cfg.state_dir);
-            return Err(fail_audit(self.internal(&format!("enrollment store: {e}"))));
-        }
-        let policy_dir = self.cfg.state_dir.join(policy_set::POLICY_DIR);
-        let swapped = match policy_set::swap_in(&staging, &policy_dir) {
-            Ok(swapped) => swapped,
-            Err(failure) => {
-                unwind_stores();
-                policy_set::discard_staging(&self.cfg.state_dir);
-                return Err(fail_audit(
-                    self.internal(&format!("policy.d swap: {failure}")),
-                ));
-            }
-        };
-        let previous_rendered = read_if_present(&self.cfg.browser_policy_source);
-        if let Err(e) = persist_rendered_browser_policy(
-            &self.cfg.browser_policy_source,
-            &loaded.applications,
-            &loaded.browsers,
-        ) {
-            if let Err(undo) = swapped.roll_back() {
-                eprintln!("punard: enroll.start could not restore policy.d: {undo}");
-            }
-            restore_rendered(&self.cfg.browser_policy_source, previous_rendered);
-            unwind_stores();
-            return Err(fail_audit(
-                self.internal(&format!("rendered browser policy store: {e}")),
-            ));
-        }
-        if let Err(e) = swapped.finish() {
-            // The previous directory is left beside policy.d, where the next
-            // start removes it (policy_set::settle).
-            eprintln!("punard: enroll.start could not remove the replaced policy.d: {e}");
-        }
+        let installed = self
+            .install_enrollment(&enrollment, &token, &prepared)
+            .map_err(fail_audit)?;
+        let loaded = prepared.loaded;
 
         let policy_ids = enrollment.policy_ids();
         let org_result = org_info(&enrollment.org);
@@ -5339,10 +5326,17 @@ impl Inner {
         // failures.
         *self.policy_refresh_backoff.lock().unwrap() = RefreshBackoff::default();
         // What startup would load from the new policy.d: the organization's
-        // set with every root drop beside it, not the set alone.
+        // set with every root drop beside it, not the set alone. When the
+        // browser document could not be written, and the directory could not
+        // be put back either, nothing names what was loaded, and the first
+        // refresh commits the set again, document included.
         *self.org_layers.lock().unwrap() = loaded.layers;
         *self.local_admin.lock().unwrap() = loaded.local_admin;
         *self.application_policy.lock().unwrap() = loaded.applications;
+        *self.org_policy_loaded.lock().unwrap() = match installed {
+            Installed::Whole => Some(set.revision()),
+            Installed::WithoutBrowserDocument => None,
+        };
         self.reload_ai_authority();
         self.recompute_effective();
 
@@ -5387,6 +5381,103 @@ impl Inner {
             removable: Some(removable),
             organization_owned: Some(organization_owned),
         }))
+    }
+
+    /// Put an enrollment on disk: the token, then the record, durably, so no
+    /// crash can leave the organization's files enforced on a device whose
+    /// record says it is personal or owns none of them; then policy.d,
+    /// swapped in whole; then the browser document. Each step undoes the ones
+    /// before it, and `Err` means nothing of the enrollment is left. The one
+    /// exception is a directory that could not be verifiably put back: then
+    /// the organization's files may be live, so the enrollment stands, record
+    /// and token included, and the caller commits it without the browser
+    /// document ([`Installed::WithoutBrowserDocument`]).
+    fn install_enrollment(
+        &self,
+        enrollment: &Enrollment,
+        token: &Redacted<String>,
+        prepared: &policy_set::Prepared,
+    ) -> Result<Installed, IpcError> {
+        let enrollment_path = self.cfg.state_dir.join("enrollment.json");
+        let token_path = self.cfg.state_dir.join("device-token");
+        let policy_dir = self.cfg.state_dir.join(policy_set::POLICY_DIR);
+        let unwind_stores = || {
+            let _ = remove_synced(&token_path);
+            let _ = crate::enroll::remove_terms(&enrollment_path);
+            let _ = remove_synced(&enrollment_path);
+        };
+        let refuse = |detail: String| {
+            policy_set::discard_staging(&self.cfg.state_dir);
+            self.internal(&detail)
+        };
+        if let Err(e) = save_device_token(&token_path, token) {
+            return Err(refuse(format!("device token store: {e}")));
+        }
+        if let Err(e) = policy_set::step(policy_set::Step::RecordBoth)
+            .and_then(|()| save_enrollment_durable(&enrollment_path, enrollment))
+        {
+            unwind_stores();
+            return Err(refuse(format!("enrollment store: {e}")));
+        }
+        // A root drop added, replaced or removed since the set was staged
+        // would be lost with the directory it was changed in.
+        if let Err(failure) = prepared.still_current(&policy_dir, &[]) {
+            unwind_stores();
+            return Err(refuse(format!("policy.d swap: {failure}")));
+        }
+        let swapped = match policy_set::step(policy_set::Step::Swap)
+            .map_err(policy_set::LocalFailure::Io)
+            .and_then(|()| policy_set::swap_in(prepared.staging(), &policy_dir))
+        {
+            Ok(swapped) => swapped,
+            Err(failure) => {
+                unwind_stores();
+                return Err(refuse(format!("policy.d swap: {failure}")));
+            }
+        };
+        let previous_rendered = read_if_present(&self.cfg.browser_policy_source);
+        let failed = match swapped.replaced_only_what_was_carried(prepared, &[]) {
+            Err(failure) => Some(failure.to_string()),
+            Ok(()) => policy_set::step(policy_set::Step::Render)
+                .and_then(|()| {
+                    persist_rendered_browser_policy(
+                        &self.cfg.browser_policy_source,
+                        &prepared.loaded.applications,
+                        &prepared.loaded.browsers,
+                    )
+                })
+                .err()
+                .map(|e| format!("rendered browser policy store: {e}")),
+        };
+        if let Some(detail) = failed {
+            return match swapped.roll_back() {
+                Ok(()) => {
+                    restore_rendered(&self.cfg.browser_policy_source, previous_rendered);
+                    unwind_stores();
+                    Err(self.internal(&detail))
+                }
+                Err(stuck) => {
+                    // policy.d may hold the organization's files, which the
+                    // durable record owns: unwinding it now would leave them
+                    // enforced on a device that reads as personal after the
+                    // next start. The enrollment stands; the previous
+                    // directory stays where the exchange left it, for the
+                    // next start or change to remove.
+                    eprintln!(
+                        "punard: enroll.start could not put policy.d back after {detail} \
+                         ({stuck}); the enrollment stands, and its first policy refresh \
+                         writes the browser document"
+                    );
+                    Ok(Installed::WithoutBrowserDocument)
+                }
+            };
+        }
+        if let Err(e) = swapped.finish() {
+            // The previous directory is left beside policy.d, where the next
+            // start removes it (policy_set::settle).
+            eprintln!("punard: enroll.start could not remove the replaced policy.d: {e}");
+        }
+        Ok(Installed::Whole)
     }
 
     /// `enroll.status` (contract section 5.10): read-only, any connected
@@ -5601,6 +5692,7 @@ impl Inner {
         }
         *self.device_token.lock().unwrap() = None;
         self.org_layers.lock().unwrap().clear();
+        *self.org_policy_loaded.lock().unwrap() = None;
         self.application_policy.lock().unwrap().clear();
         // AND THE LOCAL-ADMIN VETO, which is the one that would otherwise
         // outlive the organization that set it. An org document may turn local
@@ -6172,6 +6264,61 @@ fn enroll_policy_refusal(rejection: &Rejection) -> IpcError {
     }
 }
 
+/// An enrollment audit event ([`Inner::enroll_event`]), for a caller that has
+/// no daemon yet: startup, recording a policy change that landed before a
+/// crash.
+fn enrollment_event(
+    device_id: &str,
+    actor: &AuditActor,
+    action: &str,
+    resource: &str,
+    result: &str,
+    policy_ids: Vec<String>,
+) -> AuditEvent {
+    AuditEvent {
+        event_id: next_event_id(),
+        timestamp: utc_now_rfc3339(),
+        device_id: device_id.to_string(),
+        user_id: Some(actor.user_id.clone()),
+        agent_session_id: Some(AGENT_SESSION_NONE.to_string()),
+        project_id: Some(PROJECT_ID_SYSTEM.to_string()),
+        source: actor.source,
+        action: action.to_string(),
+        resource: Some(resource.to_string()),
+        decision: Decision::Allow,
+        policy_ids: if policy_ids.is_empty() {
+            vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()]
+        } else {
+            policy_ids
+        },
+        result: result.to_string(),
+    }
+}
+
+/// Whether the audit log holds an event with this id. Read line by line,
+/// and only at a start that found a policy change landed.
+fn audit_log_holds(path: &Path, event_id: &str) -> bool {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .any(|line| {
+            serde_json::from_str::<Value>(&line)
+                .is_ok_and(|event| event.get("event_id").and_then(Value::as_str) == Some(event_id))
+        })
+}
+
+/// How far [`Inner::install_enrollment`] got.
+enum Installed {
+    Whole,
+    /// Everything but the browser document, which could not be written, and
+    /// the directory could not be verifiably put back.
+    WithoutBrowserDocument,
+}
+
 /// The longest control-plane or loader text the journal repeats.
 const JOURNAL_DETAIL_CHARS: usize = 512;
 
@@ -6405,6 +6552,96 @@ mod tests {
     use std::fs::{self, OpenOptions};
 
     use punar_common::audit::AUDIT_ROTATE_BYTES;
+
+    /// enroll.start is all-or-nothing up to the swap, and after it too while
+    /// the directory can be put back: a browser document that cannot be
+    /// written leaves no record, token or file of the enrollment. When the
+    /// directory cannot be verifiably put back, the organization's files may
+    /// be live, and then the enrollment stands whole (record, token and
+    /// files together): never its files on a device that reads as personal
+    /// after the next start.
+    #[test]
+    fn an_enrollment_whose_directory_cannot_be_put_back_stands_whole() {
+        use crate::policy_set::{Step, faults};
+        const ACME_ENVELOPE: &str = include_str!(
+            "../../../fixtures/organizations/acme/policy-source-eng-baseline-v12.json"
+        );
+        let root = std::env::temp_dir().join(format!(
+            "punard-install-enrollment-{}-{}",
+            std::process::id(),
+            next_event_id()
+        ));
+        let state = root.join("state");
+        fs::create_dir_all(state.join("policy.d")).unwrap();
+        fs::write(state.join("policy.d/local.note"), b"root's own").unwrap();
+        let config = DaemonConfig::new(
+            root.join("punard.sock"),
+            state.clone(),
+            root.join("audit.jsonl"),
+        );
+        let daemon = Daemon::new(config, Registry::new(Vec::new())).unwrap();
+        let envelope: Value = serde_json::from_str(ACME_ENVELOPE).unwrap();
+        let set =
+            CanonicalSet::from_envelopes(&[envelope], crate::enroll::Assignment::Policies).unwrap();
+        let enrollment: Enrollment = serde_json::from_value(json!({
+            "version": 1,
+            "org": {"id": "acme", "name": "Acme", "display_name": "Acme", "domain": "acme.com"},
+            "enrolled_at": "2026-09-24T00:00:00Z",
+            "attestation": "simulated",
+            "policy_files": set.names(),
+            "last_sync": {"at": null, "result": null},
+            "last_inventory_hash": null,
+            "policy_hash": set.revision(),
+        }))
+        .unwrap();
+        let token = Redacted::new("tok_install".to_string());
+        let org_file = state.join("policy.d/eng-baseline-v12.json");
+
+        let prepared = policy_set::prepare(&state, &set, &[]).unwrap();
+        {
+            let _hook = faults::install(|step| match step {
+                Step::Render => Err(io::Error::other("no space left on device")),
+                _ => Ok(()),
+            });
+            assert!(
+                daemon
+                    .inner
+                    .install_enrollment(&enrollment, &token, &prepared)
+                    .is_err()
+            );
+        }
+        assert!(!state.join("enrollment.json").exists());
+        assert!(!state.join("device-token").exists());
+        assert!(!org_file.exists());
+        assert!(!state.join(policy_set::STAGING_DIR).exists());
+        assert_eq!(
+            fs::read(state.join("policy.d/local.note")).unwrap(),
+            b"root's own"
+        );
+
+        let prepared = policy_set::prepare(&state, &set, &[]).unwrap();
+        let installed = {
+            let _hook = faults::install(|step| match step {
+                Step::Render | Step::RollBack => Err(io::Error::other("no space left on device")),
+                _ => Ok(()),
+            });
+            daemon
+                .inner
+                .install_enrollment(&enrollment, &token, &prepared)
+        };
+        assert!(matches!(installed, Ok(Installed::WithoutBrowserDocument)));
+        assert!(org_file.exists(), "the organization's files are live");
+        let saved = load_enrollment(&state.join("enrollment.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.policy_files, ["eng-baseline-v12.json"], "and owned");
+        assert!(state.join("device-token").exists());
+        assert_eq!(
+            fs::read(state.join("policy.d/local.note")).unwrap(),
+            b"root's own"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn update_status_channel_uses_only_the_closed_effective_value() {

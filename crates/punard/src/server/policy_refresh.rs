@@ -29,7 +29,9 @@
 //! writer are the daemon's private state.
 
 use crate::browser_policy::CAPABILITY_ID as BROWSER_POLICY_CAPABILITY;
-use crate::enroll::{Assignment, FetchedPolicy, PolicyFields, apply_policy_fields};
+use crate::enroll::{
+    Assignment, FetchedPolicy, PendingPolicyChange, PolicyFields, apply_policy_fields,
+};
 
 use super::*;
 
@@ -209,11 +211,24 @@ fn offered_list_hash(policies: &[Value]) -> String {
     format!("sha256:{:x}", digest.0.finalize())
 }
 
-/// What a committed set changed, for the audit and the in-memory swap.
+/// What a committed set changed, for the journal and the in-memory swap.
 struct Committed {
     result: RefreshResult,
     ids: Vec<String>,
     rendered_changed: bool,
+}
+
+/// How [`Inner::commit_set`] ended.
+enum Commit {
+    /// Enforced on disk: directory, browser document, record, audit.
+    Done(Committed),
+    /// The enrollment ended or changed first; nothing was touched.
+    Abandoned,
+    /// Undone: disk, record and memory are as they were.
+    Failed(policy_set::LocalFailure),
+    /// Could not be undone: the rollback was not verified, so policy.d may
+    /// hold the new set. Nothing more was removed or shrunk.
+    Stuck(policy_set::LocalFailure),
 }
 
 impl Inner {
@@ -336,12 +351,23 @@ impl Inner {
                 return;
             }
         };
-        self.backfill_revision(epoch, &owned_now);
-        if set == owned_now {
+        self.settle_revision(epoch, &owned_now);
+        let offered = set.revision();
+        // Unchanged only when all three agree with the set: the files, the
+        // record that owns them (a file it names can be gone, and then an
+        // empty set would compare equal to what is left while its layers
+        // stayed enforced), and what the in-memory layers and the browser
+        // document were made from. Anything else goes through the commit,
+        // which rewrites all three.
+        let recorded: BTreeSet<&String> = owned_files.iter().collect();
+        let record_agrees =
+            recorded.len() == owned_files.len() && recorded.into_iter().eq(set.files().keys());
+        let memory_agrees =
+            self.org_policy_loaded.lock().unwrap().as_deref() == Some(offered.as_str());
+        if set == owned_now && record_agrees && memory_agrees {
             self.record_refresh(actor, epoch, Outcome::new(RefreshResult::Unchanged, None));
             return;
         }
-        let offered = set.revision();
 
         // The very set this daemon already refused, for a reason that cannot
         // have changed since: not checked again.
@@ -387,18 +413,32 @@ impl Inner {
                 return;
             }
         };
-        let staging = prepared.staging().to_path_buf();
-        let loaded = prepared.loaded;
 
-        let committed = match self.commit_set(epoch, &set, &staging, &loaded) {
-            Ok(Some(committed)) => committed,
-            Ok(None) => {
-                // The enrollment ended or changed while the set was checked.
+        let committed = match self.commit_set(actor, epoch, &set, &prepared) {
+            Commit::Done(committed) => committed,
+            // The enrollment ended or changed while the set was checked.
+            Commit::Abandoned => {
                 policy_set::discard_staging(&self.cfg.state_dir);
                 return;
             }
-            Err(failure) => {
-                policy_set::discard_staging(&self.cfg.state_dir);
+            Commit::Failed(failure) => {
+                let mut outcome = Outcome::new(RefreshResult::Failed, Some(failure.reason()));
+                outcome.detail = Some(failure.to_string());
+                self.record_refresh(actor, epoch, outcome);
+                return;
+            }
+            Commit::Stuck(failure) => {
+                // policy.d may hold the new set, which passed every check:
+                // this daemon enforces it as the next start would find it,
+                // and names nothing as loaded, so the next pass commits
+                // again from what policy.d holds then.
+                let loaded = prepared.loaded;
+                *self.org_layers.lock().unwrap() = loaded.layers;
+                *self.local_admin.lock().unwrap() = loaded.local_admin;
+                *self.application_policy.lock().unwrap() = loaded.applications;
+                *self.org_policy_loaded.lock().unwrap() = None;
+                self.reload_ai_authority();
+                self.recompute_effective();
                 let mut outcome = Outcome::new(RefreshResult::Failed, Some(failure.reason()));
                 outcome.detail = Some(failure.to_string());
                 self.record_refresh(actor, epoch, outcome);
@@ -413,6 +453,7 @@ impl Inner {
         // it is released here.
         // The paths are the organization's own keys: escaped, like every
         // other string from it that reaches the journal.
+        let loaded = prepared.loaded;
         for unmapped in &loaded.unmapped {
             eprintln!(
                 "punard: organization policy {offered}: no registered capability for \
@@ -423,6 +464,7 @@ impl Inner {
         *self.org_layers.lock().unwrap() = loaded.layers;
         *self.local_admin.lock().unwrap() = loaded.local_admin;
         *self.application_policy.lock().unwrap() = loaded.applications;
+        *self.org_policy_loaded.lock().unwrap() = Some(offered.clone());
         self.reload_ai_authority();
         self.recompute_effective();
         if committed.rendered_changed {
@@ -443,83 +485,49 @@ impl Inner {
                 committed.ids.join(", ")
             }
         );
-        self.log_audit(self.enroll_event(
-            actor,
-            "enroll.policy",
-            RESOURCE_CONTROL_PLANE,
-            committed.result.as_str(),
-            committed.ids,
-        ));
     }
 
-    /// Make a prepared set the enforced one, on disk. The record is written
-    /// first with the old and new files together, so a crash never leaves a
-    /// file in policy.d that no record owns ([`policy_set::settle`] trims it
-    /// at the next start); then policy.d is swapped whole; then the browser
-    /// document; then the record says what is enforced. A failure undoes
-    /// every step before it. `None`: the enrollment is no longer the one the
-    /// set was fetched for, and nothing was touched.
+    /// Make a prepared set the enforced one, on disk. In order, each step
+    /// undoing the ones before it on failure:
+    ///
+    /// 1. the record, durably, owning the old and new files together with
+    ///    the change pending, so a crash never leaves a file in policy.d that
+    ///    no record owns, and the next start can tell whether the change
+    ///    landed ([`policy_set::settle`]);
+    /// 2. policy.d still holds what was carried out of it;
+    /// 3. the swap, then the directory it replaced holds nothing that was
+    ///    not carried;
+    /// 4. the browser document;
+    /// 5. the `enroll.policy` audit event, under the id the pending change
+    ///    fixed, so a start that finds the change landed writes it only if
+    ///    this did not;
+    /// 6. the record that says what is enforced;
+    /// 7. the replaced directory removed.
+    ///
+    /// A rollback that cannot be verified undoes nothing more
+    /// ([`Commit::Stuck`]).
     fn commit_set(
         &self,
+        actor: &AuditActor,
         epoch: u64,
         set: &CanonicalSet,
-        staging: &Path,
-        loaded: &crate::policy::LoadedPolicies,
-    ) -> Result<Option<Committed>, policy_set::LocalFailure> {
-        use policy_set::LocalFailure;
+        prepared: &policy_set::Prepared,
+    ) -> Commit {
+        use policy_set::{LocalFailure, Step, step};
         let record_path = self.cfg.state_dir.join("enrollment.json");
         let policy_dir = self.cfg.state_dir.join(policy_set::POLICY_DIR);
         let now = utc_now_rfc3339();
 
-        // Only file work under this lock, and no other lock taken inside it.
+        // Only file work and the audit writer under this lock, which is the
+        // order record_refresh takes them in too.
         let mut slot = self.enrollment.lock().unwrap();
         let Some(current) = slot
             .as_mut()
             .filter(|_| self.enrollment_epoch.load(Ordering::SeqCst) == epoch)
         else {
-            return Ok(None);
+            return Commit::Abandoned;
         };
         let before = current.policy_fields();
-        let undo_record = |current: &mut Enrollment| {
-            apply_policy_fields(current, before.clone());
-            if let Err(e) = save_enrollment_durable(&record_path, current) {
-                eprintln!("punard: could not restore the policy record ({e}); settled at start");
-            }
-        };
-
-        let mut both: BTreeSet<String> = before.files.iter().cloned().collect();
-        both.extend(set.names());
-        let mut union = before.clone();
-        union.files = both.into_iter().collect();
-        apply_policy_fields(current, union);
-        if let Err(e) = save_enrollment_durable(&record_path, current) {
-            apply_policy_fields(current, before.clone());
-            return Err(LocalFailure::Io(e));
-        }
-
-        let previous_rendered = read_if_present(&self.cfg.browser_policy_source);
-        let swapped = match policy_set::swap_in(staging, &policy_dir) {
-            Ok(swapped) => swapped,
-            Err(failure) => {
-                undo_record(current);
-                return Err(failure);
-            }
-        };
-        if let Err(e) = persist_rendered_browser_policy(
-            &self.cfg.browser_policy_source,
-            &loaded.applications,
-            &loaded.browsers,
-        ) {
-            if let Err(undo) = swapped.roll_back() {
-                eprintln!("punard: could not restore policy.d after a failed refresh: {undo}");
-            }
-            restore_rendered(&self.cfg.browser_policy_source, previous_rendered);
-            undo_record(current);
-            return Err(LocalFailure::Io(e));
-        }
-        let rendered_changed =
-            read_if_present(&self.cfg.browser_policy_source) != previous_rendered;
-
         let withdrawn = set.is_empty();
         let result = if withdrawn {
             RefreshResult::Withdrawn
@@ -536,6 +544,106 @@ impl Inner {
         } else {
             set.ids()
         };
+        let pending = PendingPolicyChange {
+            revision: set.revision(),
+            result: result.as_str().to_string(),
+            policy_ids: ids.clone(),
+            at: now.clone(),
+            event_id: next_event_id(),
+        };
+        let undo_record = |current: &mut Enrollment| {
+            apply_policy_fields(current, before.clone());
+            if let Err(e) = save_enrollment_durable(&record_path, current) {
+                eprintln!(
+                    "punard: could not restore the policy record ({e}); the next start \
+                     settles it from policy.d"
+                );
+            }
+        };
+
+        let mut both = before.clone();
+        both.files = before
+            .files
+            .iter()
+            .cloned()
+            .chain(set.names())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        both.pending = Some(pending.clone());
+        apply_policy_fields(current, both);
+        if let Err(e) =
+            step(Step::RecordBoth).and_then(|()| save_enrollment_durable(&record_path, current))
+        {
+            apply_policy_fields(current, before.clone());
+            policy_set::discard_staging(&self.cfg.state_dir);
+            return Commit::Failed(LocalFailure::Io(e));
+        }
+
+        if let Err(failure) = prepared.still_current(&policy_dir, &before.files) {
+            undo_record(current);
+            policy_set::discard_staging(&self.cfg.state_dir);
+            return Commit::Failed(failure);
+        }
+        let previous_rendered = read_if_present(&self.cfg.browser_policy_source);
+        let swapped = match step(Step::Swap)
+            .map_err(LocalFailure::Io)
+            .and_then(|()| policy_set::swap_in(prepared.staging(), &policy_dir))
+        {
+            Ok(swapped) => swapped,
+            Err(failure) => {
+                undo_record(current);
+                policy_set::discard_staging(&self.cfg.state_dir);
+                return Commit::Failed(failure);
+            }
+        };
+        let failed = match swapped.replaced_only_what_was_carried(prepared, &before.files) {
+            Err(failure) => Some(failure),
+            Ok(()) => step(Step::Render)
+                .and_then(|()| {
+                    persist_rendered_browser_policy(
+                        &self.cfg.browser_policy_source,
+                        &prepared.loaded.applications,
+                        &prepared.loaded.browsers,
+                    )
+                })
+                .err()
+                .map(LocalFailure::Io),
+        };
+        if let Some(failure) = failed {
+            return match swapped.roll_back() {
+                Ok(()) => {
+                    restore_rendered(&self.cfg.browser_policy_source, previous_rendered);
+                    undo_record(current);
+                    Commit::Failed(failure)
+                }
+                Err(stuck) => {
+                    // Neither the previous directory nor the record is
+                    // touched: the record owns both sets' files with the
+                    // change pending, and the next start settles it from
+                    // whichever policy.d holds.
+                    eprintln!(
+                        "punard: could not put policy.d back after a failed refresh \
+                         ({failure}; {stuck}); both sets stay owned and the previous one \
+                         stays beside it until the change is settled"
+                    );
+                    Commit::Stuck(failure)
+                }
+            };
+        }
+        let rendered_changed =
+            read_if_present(&self.cfg.browser_policy_source) != previous_rendered;
+
+        let mut event = self.enroll_event(
+            actor,
+            "enroll.policy",
+            RESOURCE_CONTROL_PLANE,
+            result.as_str(),
+            ids.clone(),
+        );
+        event.event_id = pending.event_id;
+        self.log_audit(event);
+
         apply_policy_fields(
             current,
             PolicyFields {
@@ -549,28 +657,33 @@ impl Inner {
                     reason: None,
                     offered_hash: None,
                 }),
+                pending: None,
             },
         );
-        if let Err(e) = save_enrollment_durable(&record_path, current) {
-            // The record on disk still owns both sets' files, which is safe:
-            // the next start trims it to what policy.d holds.
+        if let Err(e) =
+            step(Step::RecordFinal).and_then(|()| save_enrollment_durable(&record_path, current))
+        {
+            // The record on disk still owns both sets' files with the change
+            // pending, which is safe: the next start finds it landed, and
+            // audited under its id already.
             eprintln!("punard: could not save the refreshed policy record: {e}");
         }
         drop(slot);
         if let Err(e) = swapped.finish() {
             eprintln!("punard: could not remove the replaced policy.d ({e}); removed at start");
         }
-        Ok(Some(Committed {
+        Commit::Done(Committed {
             result,
             ids,
             rendered_changed,
-        }))
+        })
     }
 
-    /// An enrollment recorded before revisions existed learns the one it
-    /// enforces, derived from its files, whatever this refresh ends in: for
-    /// `enroll.status` only, in memory until the next save.
-    fn backfill_revision(&self, epoch: u64, owned_now: &CanonicalSet) {
+    /// The recorded revision is what the owned files hash to, whatever this
+    /// refresh ends in: an enrollment recorded before revisions existed
+    /// learns the one it enforces, and one a crash left stale is corrected.
+    /// For `enroll.status` only, in memory until the next save.
+    fn settle_revision(&self, epoch: u64, owned_now: &CanonicalSet) {
         let mut slot = self.enrollment.lock().unwrap();
         let Some(current) = slot
             .as_mut()
@@ -578,9 +691,10 @@ impl Inner {
         else {
             return;
         };
-        if current.policy_hash.is_none() {
+        let revision = owned_now.revision();
+        if current.policy_hash.as_deref() != Some(revision.as_str()) {
             let mut fields = current.policy_fields();
-            fields.hash = Some(owned_now.revision());
+            fields.hash = Some(revision);
             apply_policy_fields(current, fields);
         }
     }
@@ -653,7 +767,385 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
+    use crate::capability::mock::MockCapability;
+    use crate::policy_set::{Step, faults};
+
+    const ACME_ENVELOPE: &str =
+        include_str!("../../../../fixtures/organizations/acme/policy-source-eng-baseline-v12.json");
+    const ACME_DESIRED: &str =
+        include_str!("../../../../fixtures/organizations/acme/desired-state-eng-baseline-v12.json");
+    const BASELINE: &str = "eng-baseline-v12.json";
+
+    fn root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "punard-refresh-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The Acme baseline with its firewall rule set to `enabled`.
+    fn baseline(enabled: bool) -> Value {
+        let mut envelope: Value = serde_json::from_str(ACME_ENVELOPE).unwrap();
+        let mut desired: Value = serde_json::from_str(ACME_DESIRED).unwrap();
+        desired["spec"]["security"]["firewall"]["enabled"] = json!(enabled);
+        envelope["policy"] = desired;
+        envelope
+    }
+
+    fn canonical(envelopes: &[Value]) -> CanonicalSet {
+        CanonicalSet::from_envelopes(envelopes, Assignment::Policies).unwrap()
+    }
+
+    /// What enroll.start leaves on disk for `envelopes`, and nothing else.
+    fn enrolled_on_disk(root: &Path, envelopes: &[Value]) {
+        let set = canonical(envelopes);
+        let policy_d = root.join("state").join(policy_set::POLICY_DIR);
+        std::fs::create_dir_all(&policy_d).unwrap();
+        for (name, bytes) in set.files() {
+            std::fs::write(policy_d.join(name), bytes).unwrap();
+        }
+        let record = json!({
+            "version": 1,
+            "org": {"id": "acme", "name": "Acme", "display_name": "Acme", "domain": "acme.com"},
+            "enrolled_at": "2026-09-24T00:00:00Z",
+            "attestation": "simulated",
+            "policy_files": set.names(),
+            "last_sync": {"at": null, "result": null},
+            "last_inventory_hash": null,
+            "policy_hash": set.revision(),
+        });
+        std::fs::write(
+            root.join("state/enrollment.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn start(root: &Path) -> Daemon {
+        let cfg = DaemonConfig::new(
+            root.join("punard.sock"),
+            root.join("state"),
+            root.join("audit.jsonl"),
+        );
+        let firewall = MockCapability::new("security.firewall", json!("enabled"));
+        Daemon::new(cfg, Registry::new(vec![Box::new(firewall)])).unwrap()
+    }
+
+    fn refresh(daemon: &Daemon, envelopes: Vec<Value>) {
+        daemon.inner.refresh_under_guard(
+            &AuditActor::daemon(),
+            0,
+            FetchedPolicy {
+                policies: envelopes,
+                assignment: Assignment::Policies,
+            },
+        );
+    }
+
+    fn saved(root: &Path) -> Value {
+        serde_json::from_slice(&std::fs::read(root.join("state/enrollment.json")).unwrap()).unwrap()
+    }
+
+    fn policy_events(root: &Path) -> Vec<Value> {
+        std::fs::read_to_string(root.join("audit.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|event| event["action"] == "enroll.policy")
+            .collect()
+    }
+
+    fn enforced_firewall(daemon: &Daemon) -> Value {
+        daemon.inner.effective.lock().unwrap().entries["security.firewall"]
+            .value
+            .clone()
+    }
+
+    fn live_baseline(root: &Path) -> Vec<u8> {
+        std::fs::read(root.join("state/policy.d").join(BASELINE)).unwrap()
+    }
+
+    fn staging(root: &Path) -> PathBuf {
+        root.join("state").join(policy_set::STAGING_DIR)
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+            if meta.is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else if meta.file_type().is_symlink() {
+                std::os::unix::fs::symlink(std::fs::read_link(entry.path()).unwrap(), target)
+                    .unwrap();
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// The state directory and audit log exactly as they are now, at `to`:
+    /// what a crash at this moment would leave for the next start.
+    fn crash_copy(root: &Path, to: &Path) {
+        let _ = std::fs::remove_dir_all(to);
+        copy_tree(&root.join("state"), &to.join("state"));
+        if root.join("audit.jsonl").exists() {
+            std::fs::copy(root.join("audit.jsonl"), to.join("audit.jsonl")).unwrap();
+        }
+    }
+
+    /// A crash at any step of a refresh leaves a device that the next start
+    /// settles to one whole set: the old one up to the swap, the new one from
+    /// it on. The record then owns exactly that set's files and names its
+    /// revision, nothing is left pending or beside policy.d, the set is what
+    /// is enforced, and a change that landed is audited exactly once —
+    /// whether the refresh wrote its event before the crash or not, and
+    /// however often the device restarts.
+    #[test]
+    fn a_crash_at_any_step_of_a_refresh_settles_to_one_set_audited_once() {
+        let root = root("crash");
+        enrolled_on_disk(&root, &[baseline(true)]);
+        let old = canonical(&[baseline(true)]);
+        let new = canonical(&[baseline(false)]);
+        let daemon = start(&root);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        {
+            let seen = Rc::clone(&seen);
+            let at = root.clone();
+            let _hook = faults::install(move |step| {
+                crash_copy(&at, &at.join(format!("crash-{step:?}")));
+                seen.borrow_mut().push(step);
+                Ok(())
+            });
+            refresh(&daemon, vec![baseline(false)]);
+        }
+        assert_eq!(
+            *seen.borrow(),
+            [
+                Step::Stage,
+                Step::RecordBoth,
+                Step::Swap,
+                Step::Render,
+                Step::RecordFinal,
+                Step::Finish
+            ]
+        );
+        assert_eq!(policy_events(&root).len(), 1);
+        assert_eq!(enforced_firewall(&daemon), json!("disabled"));
+        crash_copy(&root, &root.join("crash-after"));
+
+        let landed_from = [Step::Render, Step::RecordFinal, Step::Finish];
+        for (name, landed) in seen
+            .borrow()
+            .iter()
+            .map(|step| (format!("crash-{step:?}"), landed_from.contains(step)))
+            .chain([("crash-after".to_string(), true)])
+        {
+            let crashed = root.join(&name);
+            let (expected, firewall) = if landed {
+                (&new, "disabled")
+            } else {
+                (&old, "enabled")
+            };
+            for _restart in 0..2 {
+                let restarted = start(&crashed);
+                assert_eq!(
+                    live_baseline(&crashed),
+                    expected.files()[BASELINE],
+                    "{name}"
+                );
+                let written = saved(&crashed);
+                assert_eq!(written["policy_files"], json!([BASELINE]), "{name}");
+                assert_eq!(written["policy_hash"], expected.revision(), "{name}");
+                assert!(written.get("policy_pending").is_none(), "{name}: {written}");
+                assert!(!staging(&crashed).exists(), "{name}");
+                assert_eq!(enforced_firewall(&restarted), json!(firewall), "{name}");
+                let events = policy_events(&crashed);
+                assert_eq!(events.len(), usize::from(landed), "{name}: {events:?}");
+                if landed {
+                    assert_eq!(events[0]["result"], "applied", "{name}");
+                    assert_eq!(written["policy_refresh"]["result"], "applied", "{name}");
+                    assert!(written["policy_changed_at"].is_string(), "{name}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A browser document that cannot be written undoes the change, and a
+    /// rollback that then cannot be verified undoes nothing more: policy.d
+    /// keeps whichever set it holds, the last good one stays beside it, the
+    /// record keeps owning both sets' files with the change pending, and the
+    /// daemon enforces the set policy.d holds. Both a restart and the next
+    /// pass settle it to the new set, audited once.
+    #[test]
+    fn a_rollback_that_fails_deletes_nothing_and_leaves_nothing_unowned() {
+        let root = root("stuck");
+        enrolled_on_disk(&root, &[baseline(true)]);
+        let old = canonical(&[baseline(true)]);
+        let new = canonical(&[baseline(false)]);
+        let daemon = start(&root);
+
+        // Undone: exactly as it was.
+        {
+            let _hook = faults::install(|step| match step {
+                Step::Render => Err(io::Error::other("no space left on device")),
+                _ => Ok(()),
+            });
+            refresh(&daemon, vec![baseline(false)]);
+        }
+        assert_eq!(live_baseline(&root), old.files()[BASELINE]);
+        assert!(!staging(&root).exists());
+        assert_eq!(saved(&root)["policy_hash"], old.revision());
+        assert!(saved(&root).get("policy_pending").is_none());
+        assert_eq!(enforced_firewall(&daemon), json!("enabled"));
+        assert!(
+            policy_events(&root)
+                .iter()
+                .all(|e| e["result"] != "applied")
+        );
+
+        // Not undone.
+        {
+            let _hook = faults::install(|step| match step {
+                Step::Render => Err(io::Error::other("no space left on device")),
+                Step::RollBack => Err(io::Error::other("no space left on device")),
+                _ => Ok(()),
+            });
+            refresh(&daemon, vec![baseline(false)]);
+        }
+        assert_eq!(live_baseline(&root), new.files()[BASELINE]);
+        assert_eq!(
+            std::fs::read(staging(&root).join(BASELINE)).unwrap(),
+            old.files()[BASELINE],
+            "the last good set is not deleted"
+        );
+        let written = saved(&root);
+        assert_eq!(written["policy_files"], json!([BASELINE]));
+        assert_eq!(written["policy_pending"]["revision"], new.revision());
+        assert_eq!(enforced_firewall(&daemon), json!("disabled"));
+        let refresh_record = daemon
+            .inner
+            .enrollment
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap()
+            .policy_refresh
+            .unwrap();
+        assert_eq!(refresh_record.result, "failed");
+        assert!(
+            policy_events(&root)
+                .iter()
+                .all(|e| e["result"] != "applied")
+        );
+
+        // A start from here settles it.
+        crash_copy(&root, &root.join("restarted"));
+        let restarted = start(&root.join("restarted"));
+        let written = saved(&root.join("restarted"));
+        assert_eq!(written["policy_hash"], new.revision());
+        assert!(written.get("policy_pending").is_none());
+        assert!(!staging(&root.join("restarted")).exists());
+        assert_eq!(enforced_firewall(&restarted), json!("disabled"));
+        let applied = |at: &Path| {
+            policy_events(at)
+                .into_iter()
+                .filter(|e| e["result"] == "applied")
+                .count()
+        };
+        assert_eq!(applied(&root.join("restarted")), 1);
+
+        // So does the next pass, without one: the set commits again.
+        refresh(&daemon, vec![baseline(false)]);
+        let written = saved(&root);
+        assert_eq!(written["policy_hash"], new.revision());
+        assert!(written.get("policy_pending").is_none());
+        assert_eq!(written["policy_refresh"]["result"], "applied");
+        assert!(!staging(&root).exists());
+        assert_eq!(applied(&root), 1);
+        assert_eq!(enforced_firewall(&daemon), json!("disabled"));
+        refresh(&daemon, vec![baseline(false)]);
+        assert_eq!(applied(&root), 1, "then unchanged");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A root administrator's file written into policy.d while a set is
+    /// being installed — before the record is saved, or just before the
+    /// exchange — stops the change instead of being deleted with the
+    /// directory it went into; the next pass carries it.
+    #[test]
+    fn a_root_drop_written_during_a_refresh_is_never_lost() {
+        use std::os::unix::fs::MetadataExt;
+        for at in [Step::RecordBoth, Step::Swap] {
+            let root = root(&format!("drop-{at:?}"));
+            enrolled_on_disk(&root, &[baseline(true)]);
+            let policy_d = root.join("state/policy.d");
+            std::fs::write(policy_d.join("local.note"), b"kept").unwrap();
+            let old = canonical(&[baseline(true)]);
+            let daemon = start(&root);
+            {
+                let policy_d = policy_d.clone();
+                let _hook = faults::install(move |step| {
+                    if step == at {
+                        std::fs::write(policy_d.join("added.note"), b"added").unwrap();
+                        // An editor's save: renamed over the old name.
+                        std::fs::write(policy_d.join(".local.note.tmp"), b"edited").unwrap();
+                        std::fs::rename(
+                            policy_d.join(".local.note.tmp"),
+                            policy_d.join("local.note"),
+                        )
+                        .unwrap();
+                    }
+                    Ok(())
+                });
+                refresh(&daemon, vec![baseline(false)]);
+            }
+            let last = daemon
+                .inner
+                .enrollment
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .policy_refresh
+                .unwrap();
+            assert_eq!(last.result, "failed", "{at:?}");
+            assert_eq!(
+                last.reason.as_deref(),
+                Some("local_files_changed"),
+                "{at:?}"
+            );
+            assert_eq!(live_baseline(&root), old.files()[BASELINE], "{at:?}");
+            assert_eq!(
+                std::fs::read(policy_d.join("added.note")).unwrap(),
+                b"added"
+            );
+            assert_eq!(
+                std::fs::read(policy_d.join("local.note")).unwrap(),
+                b"edited"
+            );
+            assert!(!staging(&root).exists(), "{at:?}");
+            assert!(saved(&root).get("policy_pending").is_none(), "{at:?}");
+
+            let inode = |name: &str| std::fs::metadata(policy_d.join(name)).unwrap().ino();
+            let before = (inode("added.note"), inode("local.note"));
+            refresh(&daemon, vec![baseline(false)]);
+            assert_eq!(saved(&root)["policy_refresh"]["result"], "applied");
+            assert_eq!((inode("added.note"), inode("local.note")), before, "{at:?}");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
 
     #[test]
     fn a_failing_fetch_waits_longer_each_time_up_to_a_cap() {

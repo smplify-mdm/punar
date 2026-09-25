@@ -652,6 +652,32 @@ pub struct Enrollment {
     /// 5.10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_refresh: Option<PolicyRefreshRecord>,
+    /// A policy change on its way into `policy.d`: written with both sets'
+    /// files before the swap, gone from the record that says what is
+    /// enforced. A start that finds it reads from `policy.d` which set is
+    /// live (`crate::policy_set::settle`), and when it is this one, records
+    /// the change as made and audits it, once. Private to this file; never
+    /// on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_pending: Option<PendingPolicyChange>,
+}
+
+/// A policy change that has begun and not yet been recorded as done
+/// ([`Enrollment::policy_pending`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPolicyChange {
+    /// The revision of the set being installed.
+    pub revision: String,
+    /// What the change is once it lands: `applied` or `withdrawn`.
+    pub result: String,
+    /// The policy ids its `enroll.policy` audit event names.
+    pub policy_ids: Vec<String>,
+    /// When it began, which is when the set changed if it lands.
+    pub at: String,
+    /// The id of its `enroll.policy` audit event, fixed before the swap, so
+    /// the event is written once whether the change finished before a crash
+    /// or is found landed at the next start.
+    pub event_id: String,
 }
 
 /// The last policy refresh, as `enroll.status` shows it. Tolerant of fields
@@ -687,6 +713,7 @@ pub struct PolicyFields {
     pub fetched_at: Option<String>,
     pub changed_at: Option<String>,
     pub refresh: Option<PolicyRefreshRecord>,
+    pub pending: Option<PendingPolicyChange>,
 }
 
 /// The one way a policy refresh writes to an enrollment. See [`PolicyFields`].
@@ -696,6 +723,7 @@ pub fn apply_policy_fields(enrollment: &mut Enrollment, fields: PolicyFields) {
     enrollment.policy_fetched_at = fields.fetched_at;
     enrollment.policy_changed_at = fields.changed_at;
     enrollment.policy_refresh = fields.refresh;
+    enrollment.policy_pending = fields.pending;
 }
 
 fn removable_by_default() -> bool {
@@ -841,6 +869,7 @@ impl Enrollment {
             fetched_at: self.policy_fetched_at.clone(),
             changed_at: self.policy_changed_at.clone(),
             refresh: self.policy_refresh.clone(),
+            pending: self.policy_pending.clone(),
         }
     }
 }
@@ -1346,6 +1375,7 @@ mod tests {
             policy_fetched_at: None,
             policy_changed_at: None,
             policy_refresh: None,
+            policy_pending: None,
         }
     }
 
@@ -2272,6 +2302,7 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("policy_hash"), "{raw}");
         assert!(!raw.contains("policy_refresh"), "{raw}");
+        assert!(!raw.contains("policy_pending"), "{raw}");
         let loaded = load_enrollment(&path).unwrap().unwrap();
         assert_eq!(loaded.policy_fields().hash, None);
         assert_eq!(loaded.policy_fields().refresh, None);
@@ -2289,6 +2320,13 @@ mod tests {
                     result: "rejected".into(),
                     reason: Some("duplicate_policy_id".into()),
                     offered_hash: Some("sha256:cd".into()),
+                }),
+                pending: Some(PendingPolicyChange {
+                    revision: "sha256:ef".into(),
+                    result: "applied".into(),
+                    policy_ids: vec!["eng-role-sre".into()],
+                    at: "2026-09-24T10:02:00Z".into(),
+                    event_id: "evt_1x2".into(),
                 }),
             },
         );
@@ -2324,6 +2362,7 @@ mod tests {
                     reason: None,
                     offered_hash: None,
                 }),
+                pending: None,
             },
         );
         assert_ne!(after, before);

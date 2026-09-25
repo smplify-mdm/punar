@@ -3737,6 +3737,53 @@ fn assigning_nothing_withdraws_policy_but_the_device_stays_enrolled() {
     assert_eq!(policy_events(&daemon).len(), 1);
 }
 
+/// "Unchanged" means the files, the record that owns them and what the
+/// daemon enforces all agree with what the organization serves. A policy
+/// file the record owns can be gone from policy.d (root removed it) while
+/// its layers stay enforced; when the organization then assigns nothing,
+/// the empty set equals what is left on disk, and it is still a withdrawal:
+/// the record is rewritten, the veto it carried is lifted, and it is
+/// audited.
+#[test]
+fn a_withdrawal_is_not_unchanged_while_the_record_or_memory_disagree() {
+    let dir = test_dir("refresh-record-disagrees");
+    let control_plane = ControlPlane::start(&dir);
+    let state = &control_plane.state;
+    state.deny_local_admin.store(true, Ordering::SeqCst);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    assert_eq!(
+        daemon.result("policy.effective", None)["local_admin"]["allowed"],
+        false
+    );
+
+    fs::remove_file(daemon.state_path("policy.d/eng-baseline-v12.json")).unwrap();
+    state.serve_no_policy.store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(
+        status["policy"]["last_refresh"]["result"], "withdrawn",
+        "{status}"
+    );
+    assert_eq!(status["policy_ids"], json!([]));
+    assert_eq!(
+        daemon.result("policy.effective", None)["local_admin"]["allowed"],
+        true,
+        "the withdrawn policy's veto is lifted"
+    );
+    assert_eq!(
+        read_json(&daemon.state_path("enrollment.json"))["policy_files"],
+        json!([])
+    );
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["result"], "withdrawn");
+    assert_eq!(events[0]["policy_ids"], json!(["eng-baseline-v12"]));
+
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["result"], "unchanged");
+    assert_eq!(policy_events(&daemon).len(), 1);
+}
+
 /// An empty list the control plane does not vouch for — no marker, or a
 /// bundle it could not use — takes nothing away, and is recorded once.
 #[test]

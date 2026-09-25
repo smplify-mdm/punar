@@ -514,8 +514,19 @@ the reconcile result's shape.
   `unusable`, marked `policies`, or not marked at all is `held`: the last
   good policy stays enforced.
 - **Unchanged costs one call.** The fetched set is compared byte for byte
-  with the files the enrollment owns; if they match (`unchanged`), nothing
-  is written or audited.
+  with the files the enrollment owns, the record's list of them, and the
+  set the in-memory layers and the browser document were made from; if all
+  three match (`unchanged`), nothing is written or audited. A file the
+  record owns that is gone from `policy.d`, or layers a change could not
+  undo, make the pass commit again, so a withdrawn policy's layers never
+  outlive it.
+- **Crash-safe.** The record owns both sets' files, with the change marked
+  pending, before the swap, and says what is enforced only after it; the
+  directory the swap replaced is kept until then. A rollback that cannot be
+  verified from `policy.d` itself removes nothing and shrinks no record: the
+  daemon enforces the set `policy.d` holds and the next pass commits again.
+  A start after a crash decides from `policy.d` which set is live, records a
+  change that landed as made (`changed_at` its start) and audits it once.
 - **Backoff.** After the n-th consecutive failed fetch, the next
   `2^(n-1) - 1` passes (at most 15) do not fetch: 0, 1, 3, 7, 15, 15, …
   passes. Any answer, a refused set included, resets it; so does a restart.
@@ -897,9 +908,16 @@ organization's (`internal`). Only then does it replace `policy.d` in one
 `renameat2(RENAME_EXCHANGE)`: there is no moment, crash included, when
 `policy.d` holds part of two sets or a set that does not load (punard
 refuses to start on one). A filesystem that cannot exchange directories
-fails the change; there is no non-atomic fallback. At the next start, a
-staging directory left by a crash is removed and the enrollment's record
-trimmed to the files `policy.d` holds.
+fails the change; there is no non-atomic fallback. The carried files are
+checked on both sides of the exchange: one a root administrator added,
+replaced or removed after staging stops the change (the exchange is undone)
+rather than being lost with the directory it was put in. The record is
+written durably before the exchange and a failure after it is undone, but
+only once `policy.d` itself shows the previous directory back: when that
+cannot be verified, the enrollment stands, record and token included, since
+its files may be live. At the next start, a staging directory left by a
+crash is removed and the enrollment's record trimmed to the files
+`policy.d` holds.
 
 ```json
 {"v":1,"id":"1","result":{
@@ -978,8 +996,10 @@ unreachable | refused | failed` (enforcing the last good set), and `reason`,
 absent for the first three, is a closed code: a rule of section 5.9 for
 `rejected`; `unusable_assignment | unstated_empty | empty_policies` for
 `held`; `unauthorized | not_found | internal | other` for `refused`;
-`io | unsupported_entry | conflicts_with_local_policy | swap_unsupported`
-for `failed`. The control plane's and the loader's own words never appear
+`io | unsupported_entry | conflicts_with_local_policy | swap_unsupported |
+local_files_changed` for `failed` (`local_files_changed`: a root
+administrator added, replaced or removed a file in `policy.d` while the set
+was being installed; the next pass prepares again). The control plane's and the loader's own words never appear
 here; they go to the journal, escaped and cut to 512 characters.
 `organization_view` is what the organization can see of this device (SPEC
 section 24.2), read from the inventory body that last left it
@@ -1776,7 +1796,10 @@ or path other than the confirmed target device. An installed system returns
   that was refused, which are the control plane's untrusted strings. An
   empty list becomes `personal-defaults`, as for the other enrollment
   events. The reason is in `enroll.status`, not here: the audit schema has
-  no free-text field, and none is added.
+  no free-text field, and none is added. A commit's `event_id` is fixed
+  before the swap and kept with the pending change, so a change that landed
+  before a crash is audited exactly once: by the refresh, or at the next
+  start (actor `daemon`) when the log does not hold it yet.
 - **Installer planning addition:** `install.plan` is audited even though it
   is read-only, because it is the first attributable step of a destructive
   workflow. Its resource is `system_disk`; success is `success`, a safety or

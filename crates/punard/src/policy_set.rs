@@ -12,27 +12,42 @@
 //! is no moment, crash included, at which the directory holds part of an old
 //! set and part of a new one, and nothing a failed check touched is live.
 //!
+//! A change is recorded before it is made and verified after: the
+//! enrollment's record owns the files of both sets, with the change marked
+//! pending, before the swap; the directory the swap replaced is kept until
+//! the record says what is enforced; and whether a rollback put it back is
+//! read from `policy.d` itself, never inferred from what the exchange
+//! returned. So a record never owns less than `policy.d` holds of the
+//! organization, the last good set is never deleted while it may still be
+//! the one to go back to, and a start after a crash ([`settle`]) decides
+//! from the directory alone which set is live.
+//!
 //! What stays with the device, whatever the organization serves:
 //!
 //! - files a root administrator dropped into `policy.d` (an AI authority
 //!   `.yaml`, a local envelope): carried into the new directory as hard links
 //!   to the same inode, never overwritten, never taken over. A set that names
-//!   one of them is refused.
+//!   one of them is refused, and one added, replaced or removed while a set
+//!   was being installed stops the change (it is checked again on both sides
+//!   of the swap) rather than being lost with the directory it was put in.
 //! - the ladder's non-organizational rungs. The organization may publish only
 //!   organization kinds, so a control plane cannot label its layer a hard OS
 //!   safety constraint, a person's own preference or the OS default.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use punar_common::ipc::{MAX_ORGANIZATION_TEXT_CHARS, organization_text};
 use serde_json::Value;
 
 use crate::browser_policy::{render_effective_browser_policy, validate_rendered_policy};
-use crate::enroll::{Assignment, Enrollment, apply_policy_fields};
+use crate::enroll::{
+    Assignment, Enrollment, PendingPolicyChange, PolicyRefreshRecord, apply_policy_fields,
+};
 use crate::policy::{LoadedPolicies, load_policy_dir};
 use crate::util::{sha256_hex, write_atomic_synced};
 
@@ -201,6 +216,11 @@ pub enum LocalFailure {
     /// non-atomic fallback: a half-replaced `policy.d` is the one outcome
     /// this module exists to prevent.
     SwapUnsupported,
+    /// A root administrator added, replaced or removed this entry of
+    /// `policy.d` after the set was prepared. Installing it anyway would
+    /// lose the change with the directory it was made in, so the next pass
+    /// prepares again from what is there then.
+    LocalFilesChanged(String),
 }
 
 impl LocalFailure {
@@ -211,6 +231,7 @@ impl LocalFailure {
             LocalFailure::UnsupportedEntry(_) => "unsupported_entry",
             LocalFailure::ConflictsWithLocalPolicy(_) => "conflicts_with_local_policy",
             LocalFailure::SwapUnsupported => "swap_unsupported",
+            LocalFailure::LocalFilesChanged(_) => "local_files_changed",
         }
     }
 }
@@ -228,6 +249,11 @@ impl std::fmt::Display for LocalFailure {
             LocalFailure::SwapUnsupported => {
                 write!(f, "this filesystem cannot exchange directories atomically")
             }
+            LocalFailure::LocalFilesChanged(name) => write!(
+                f,
+                "policy.d/{name:?} changed while the new set was being installed; it is \
+                 prepared again from what policy.d holds then"
+            ),
         }
     }
 }
@@ -459,13 +485,24 @@ fn owned_name_ok(name: &str) -> bool {
 }
 
 /// A set staged beside `policy.d` that loads and renders, alone and together
-/// with what a root administrator dropped there. After [`prepare`] only I/O
-/// can fail.
+/// with what a root administrator dropped there. After [`prepare`] only I/O,
+/// or a root administrator changing `policy.d` meanwhile, can fail.
 #[derive(Debug)]
 pub struct Prepared {
     /// Exactly what the next boot would load from the new `policy.d`.
     pub loaded: LoadedPolicies,
     staging: PathBuf,
+    /// Every entry of `policy.d` the set does not own, as it was carried.
+    carried: BTreeMap<OsString, Carried>,
+}
+
+/// One entry of `policy.d` carried into the staged directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carried {
+    /// A file or a symlink, hard-linked: the same inode on both sides.
+    Linked { dev: u64, ino: u64 },
+    /// An empty directory, made again empty.
+    EmptyDir,
 }
 
 impl Prepared {
@@ -479,13 +516,43 @@ impl Prepared {
 /// the browser-policy renderer (a failure is a [`Rejection`]), then with
 /// every file of `policy.d` that `owned_now` does not name carried over
 /// (a failure is the device's, [`LocalFailure`]). The live directory is only
-/// read. The caller removes the staging directory on an error
-/// ([`discard_staging`]).
+/// read. What only the live directory decides — a set that names a root
+/// drop, an entry that cannot be carried — is found by one read of it,
+/// before anything is written. The caller removes the staging directory on
+/// an error ([`discard_staging`]).
 pub fn prepare(
     state_dir: &Path,
     set: &CanonicalSet,
     owned_now: &[String],
 ) -> Result<Prepared, PrepareError> {
+    let live = state_dir.join(POLICY_DIR);
+    let mut foreign = Vec::new();
+    for (name, meta) in read_entries(&live)? {
+        let text = name.to_str();
+        if text.is_some_and(|text| owned_now.iter().any(|owned| owned == text)) {
+            continue;
+        }
+        if let Some(text) = text.filter(|text| set.files.contains_key(*text)) {
+            return Err(PrepareError::Rejected(Rejection::ForeignFileCollision(
+                text.to_string(),
+            )));
+        }
+        let carried = if meta.is_file() || meta.file_type().is_symlink() {
+            Carried::Linked {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            }
+        } else if meta.is_dir() && dir_is_empty(&live.join(&name))? {
+            Carried::EmptyDir
+        } else {
+            return Err(PrepareError::Local(LocalFailure::UnsupportedEntry(
+                name.to_string_lossy().into_owned(),
+            )));
+        };
+        foreign.push((name, meta, carried));
+    }
+
+    step(Step::Stage)?;
     let staging = state_dir.join(STAGING_DIR);
     remove_dir_if_present(&staging)?;
     fs::DirBuilder::new().mode(0o700).create(&staging)?;
@@ -500,44 +567,37 @@ pub fn prepare(
     render_checked(&organization_only)
         .map_err(|e| PrepareError::Rejected(Rejection::BrowserPolicyRefused(cleaned(&e))))?;
 
-    // Everything else in policy.d comes along untouched.
-    let live = state_dir.join(POLICY_DIR);
-    let entries = match fs::read_dir(&live) {
-        Ok(entries) => entries.collect::<Result<Vec<_>, _>>()?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e.into()),
-    };
-    let mut carried = false;
-    for entry in entries {
-        let name = entry.file_name();
-        let text = name.to_str();
-        if text.is_some_and(|text| owned_now.iter().any(|owned| owned == text)) {
-            continue;
-        }
-        if let Some(text) = text.filter(|text| set.files.contains_key(*text)) {
-            return Err(PrepareError::Rejected(Rejection::ForeignFileCollision(
-                text.to_string(),
-            )));
-        }
-        let meta = fs::symlink_metadata(entry.path())?;
+    // Everything else in policy.d comes along untouched. What is recorded is
+    // what the staged directory holds, read after linking: a file replaced
+    // since the listing above is then told apart from the one carried.
+    let mut carried = BTreeMap::new();
+    for (name, meta, kind) in foreign {
         let target = staging.join(&name);
-        if meta.is_file() || meta.file_type().is_symlink() {
-            // Same inode, mode and owner; a symlink is linked, not followed.
-            fs::hard_link(entry.path(), &target)?;
-        } else if meta.is_dir() && fs::read_dir(entry.path())?.next().is_none() {
-            let mode = meta.permissions().mode() & 0o7777;
-            fs::DirBuilder::new().mode(mode).create(&target)?;
-            fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
-        } else {
-            return Err(PrepareError::Local(LocalFailure::UnsupportedEntry(
-                name.to_string_lossy().into_owned(),
-            )));
-        }
-        carried = true;
+        let kind = match kind {
+            Carried::Linked { .. } => {
+                // Same inode, mode and owner; a symlink is linked, not
+                // followed.
+                fs::hard_link(live.join(&name), &target)?;
+                let linked = fs::symlink_metadata(&target)?;
+                Carried::Linked {
+                    dev: linked.dev(),
+                    ino: linked.ino(),
+                }
+            }
+            Carried::EmptyDir => {
+                let mode = meta.permissions().mode() & 0o7777;
+                fs::DirBuilder::new().mode(mode).create(&target)?;
+                fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+                Carried::EmptyDir
+            }
+        };
+        carried.insert(name, kind);
     }
     sync_dir(&staging);
 
-    let loaded = if carried {
+    let loaded = if carried.is_empty() {
+        organization_only
+    } else {
         let combined = load_policy_dir(&staging).map_err(|e| {
             PrepareError::Local(LocalFailure::ConflictsWithLocalPolicy(cleaned(&e)))
         })?;
@@ -545,10 +605,81 @@ pub fn prepare(
             PrepareError::Local(LocalFailure::ConflictsWithLocalPolicy(cleaned(&e)))
         })?;
         combined
-    } else {
-        organization_only
     };
-    Ok(Prepared { loaded, staging })
+    Ok(Prepared {
+        loaded,
+        staging,
+        carried,
+    })
+}
+
+/// Every entry of `dir` by name, as `lstat` sees it; none when it is absent.
+fn read_entries(dir: &Path) -> io::Result<Vec<(OsString, fs::Metadata)>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut named = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        named.push((entry.file_name(), fs::symlink_metadata(entry.path())?));
+    }
+    named.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(named)
+}
+
+fn dir_is_empty(dir: &Path) -> io::Result<bool> {
+    Ok(fs::read_dir(dir)?.next().is_none())
+}
+
+/// Whether `dir` holds, beside the organization files `owned` names, exactly
+/// the entries [`prepare`] carried: the same files and symlinks (same inode),
+/// the same directories, still empty. `Err` names the first that differs. A
+/// file edited in place is the carried inode and needs nothing.
+fn holds_what_was_carried(
+    dir: &Path,
+    owned: &[String],
+    carried: &BTreeMap<OsString, Carried>,
+) -> Result<(), LocalFailure> {
+    let changed = |name: &OsString| LocalFailure::LocalFilesChanged(name.to_string_lossy().into());
+    let mut found = BTreeMap::new();
+    for (name, meta) in read_entries(dir).map_err(LocalFailure::Io)? {
+        if name
+            .to_str()
+            .is_some_and(|text| owned.iter().any(|owned| owned == text))
+        {
+            continue;
+        }
+        let kind = if meta.is_dir() {
+            if !dir_is_empty(&dir.join(&name)).map_err(LocalFailure::Io)? {
+                return Err(changed(&name));
+            }
+            Carried::EmptyDir
+        } else {
+            Carried::Linked {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            }
+        };
+        found.insert(name, kind);
+    }
+    let differs = found
+        .iter()
+        .find(|(name, kind)| carried.get(*name) != Some(*kind))
+        .or_else(|| carried.iter().find(|(name, _)| !found.contains_key(*name)));
+    match differs {
+        Some((name, _)) => Err(changed(name)),
+        None => Ok(()),
+    }
+}
+
+impl Prepared {
+    /// Before the swap: `policy.d` still holds exactly what was carried out
+    /// of it, beside the organization files `owned` names.
+    pub fn still_current(&self, live: &Path, owned: &[String]) -> Result<(), LocalFailure> {
+        holds_what_was_carried(live, owned, &self.carried)
+    }
 }
 
 /// The loader's or the renderer's words about a set. They quote the
@@ -570,15 +701,19 @@ fn render_checked(loaded: &LoadedPolicies) -> io::Result<()> {
     Ok(())
 }
 
-/// Remove the staging directory, whatever state it is in.
+/// Remove a staged set that was never swapped in, whatever state it is in.
+/// Once [`swap_in`] succeeded, the staging path may hold the previous
+/// `policy.d`, and only [`Swapped`] removes it.
 pub fn discard_staging(state_dir: &Path) {
     if let Err(e) = remove_dir_if_present(&state_dir.join(STAGING_DIR)) {
         eprintln!("punard: could not remove {STAGING_DIR}: {e}");
     }
 }
 
-/// A staged set now live. Until [`Swapped::finish`], the staging path holds
-/// the directory it replaced, and [`Swapped::roll_back`] puts it back.
+/// A staged set now live. Until [`Swapped::finish`] or
+/// [`Swapped::roll_back`], the staging path holds the directory it replaced,
+/// and only these two remove anything: [`discard_staging`] is for a set that
+/// was never swapped in.
 #[derive(Debug)]
 #[must_use = "a swapped policy.d is finished or rolled back"]
 pub struct Swapped {
@@ -586,6 +721,20 @@ pub struct Swapped {
     live: PathBuf,
     /// Whether a previous `policy.d` was exchanged (else there was none).
     exchanged: bool,
+    /// The new directory's device and inode: how `policy.d` is told to hold
+    /// it or not, whatever an exchange returned.
+    new_dir: (u64, u64),
+}
+
+/// A rollback that could not be verified: `policy.d` may still hold the new
+/// set, and nothing was removed.
+#[derive(Debug)]
+pub struct RollBackFailed(pub io::Error);
+
+impl std::fmt::Display for RollBackFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 /// Make `staging` the live `policy.d` in one step: an atomic exchange with
@@ -593,6 +742,9 @@ pub struct Swapped {
 /// replace one that appeared meanwhile.
 pub fn swap_in(staging: &Path, live: &Path) -> Result<Swapped, LocalFailure> {
     use rustix::fs::RenameFlags;
+    let new_dir = fs::symlink_metadata(staging)
+        .map(|meta| (meta.dev(), meta.ino()))
+        .map_err(LocalFailure::Io)?;
     let exchanged = match fs::symlink_metadata(live) {
         Ok(_) => true,
         Err(e) if e.kind() == io::ErrorKind::NotFound => false,
@@ -610,6 +762,7 @@ pub fn swap_in(staging: &Path, live: &Path) -> Result<Swapped, LocalFailure> {
         staging: staging.to_path_buf(),
         live: live.to_path_buf(),
         exchanged,
+        new_dir,
     })
 }
 
@@ -622,53 +775,202 @@ fn swap_error(errno: rustix::io::Errno) -> LocalFailure {
 }
 
 impl Swapped {
-    /// Put the previous directory back and discard the new one.
-    pub fn roll_back(self) -> io::Result<()> {
+    /// After the swap: the directory it replaced holds, beside the
+    /// organization files `owned` names, exactly what `prepared` carried out
+    /// of it. Anything else a root administrator put there before the
+    /// exchange would be lost with it.
+    pub fn replaced_only_what_was_carried(
+        &self,
+        prepared: &Prepared,
+        owned: &[String],
+    ) -> Result<(), LocalFailure> {
+        if !self.exchanged {
+            return Ok(());
+        }
+        holds_what_was_carried(&self.staging, owned, &prepared.carried)
+    }
+
+    /// Put the previous directory back and remove the new one. Which one is
+    /// live afterwards is read from `policy.d` itself, not inferred from what
+    /// the exchange returned, and only a verified return removes anything:
+    /// on `Err` the new set may still be live, both directories are where
+    /// they were, and the caller must keep owning both sets' files.
+    pub fn roll_back(self) -> Result<(), RollBackFailed> {
         use rustix::fs::RenameFlags;
         let (from, to, flags) = if self.exchanged {
             (&self.staging, &self.live, RenameFlags::EXCHANGE)
         } else {
             (&self.live, &self.staging, RenameFlags::NOREPLACE)
         };
-        rustix::fs::renameat_with(rustix::fs::CWD, from, rustix::fs::CWD, to, flags)?;
-        sync_parent(&self.live);
-        remove_dir_if_present(&self.staging)
+        let renamed = step(Step::RollBack).and_then(|()| {
+            rustix::fs::renameat_with(rustix::fs::CWD, from, rustix::fs::CWD, to, flags)
+                .map_err(io::Error::from)
+        });
+        match self.live_is_new() {
+            Ok(false) => {
+                sync_parent(&self.live);
+                if let Err(e) = remove_dir_if_present(&self.staging) {
+                    eprintln!(
+                        "punard: could not remove the set that was rolled back ({e}); \
+                         removed at start"
+                    );
+                }
+                Ok(())
+            }
+            Ok(true) => Err(RollBackFailed(renamed.err().unwrap_or_else(|| {
+                io::Error::other("the exchange back left the new set in policy.d")
+            }))),
+            Err(e) => Err(RollBackFailed(e)),
+        }
     }
 
-    /// Keep the new directory; remove the one it replaced.
+    /// Whether `policy.d` is the new directory.
+    fn live_is_new(&self) -> io::Result<bool> {
+        match fs::symlink_metadata(&self.live) {
+            Ok(meta) => Ok((meta.dev(), meta.ino()) == self.new_dir),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !self.exchanged => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Keep the new directory; remove the one it replaced. For after the
+    /// record says what is enforced.
     pub fn finish(self) -> io::Result<()> {
+        step(Step::Finish)?;
         remove_dir_if_present(&self.staging)
     }
 }
 
+/// What [`settle`] found.
+#[derive(Debug, Default)]
+pub struct Settled {
+    /// The record changed, for the caller to save.
+    pub changed: bool,
+    /// A change the record said was under way, which `policy.d` shows
+    /// landed. The caller audits it by its event id, unless the audit log
+    /// already holds that event: once, whether the change finished before
+    /// the crash or not.
+    pub landed: Option<PendingPolicyChange>,
+}
+
 /// At startup, before anything reads the enrollment: remove what an
 /// interrupted `enroll.start` or refresh left beside `policy.d`, and make the
-/// record own exactly the files `policy.d` holds of it. A refresh records the
-/// old and new names together before it swaps (so a crash never leaves a file
+/// record agree with the directory. A change records the old and new names
+/// together, marked pending, before it swaps (so a crash never leaves a file
 /// no record owns); whichever directory the crash left live, its files are
-/// the ones kept. Returns whether the record changed, for the caller to save.
-/// Running it twice changes nothing the second time.
-pub fn settle(state_dir: &Path, enrollment: Option<&mut Enrollment>) -> io::Result<bool> {
+/// the ones kept, and when that is the pending set the change landed and is
+/// recorded as made. A recorded revision that is not what the owned files
+/// hash to is replaced by theirs (one recorded before revisions existed stays
+/// absent until the first refresh). Running it twice changes nothing the
+/// second time.
+pub fn settle(state_dir: &Path, enrollment: Option<&mut Enrollment>) -> io::Result<Settled> {
     for leftover in [STAGING_DIR, LEGACY_STAGING_DIR] {
         remove_dir_if_present(&state_dir.join(leftover))?;
     }
     let Some(enrollment) = enrollment else {
-        return Ok(false);
+        return Ok(Settled::default());
     };
     let live = state_dir.join(POLICY_DIR);
-    let mut fields = enrollment.policy_fields();
-    let before = fields.files.len();
+    let before = enrollment.policy_fields();
+    let mut fields = before.clone();
     fields.files.retain(|name| {
         owned_name_ok(name) && fs::symlink_metadata(live.join(name)).is_ok_and(|m| m.is_file())
     });
-    if fields.files.len() == before {
-        return Ok(false);
+    let on_disk = CanonicalSet::read_owned(&live, &fields.files)?.revision();
+    let mut landed = None;
+    if let Some(pending) = fields.pending.take() {
+        if on_disk == pending.revision {
+            fields.hash = Some(on_disk.clone());
+            fields.fetched_at = Some(pending.at.clone());
+            fields.changed_at = Some(pending.at.clone());
+            fields.refresh = Some(PolicyRefreshRecord {
+                at: pending.at.clone(),
+                result: pending.result.clone(),
+                reason: None,
+                offered_hash: None,
+            });
+            landed = Some(pending);
+        }
     }
-    // The revision described a set that is no longer what policy.d holds;
-    // the next refresh derives it again from the files.
-    fields.hash = None;
-    apply_policy_fields(enrollment, fields);
-    Ok(true)
+    if fields.hash.as_ref().is_some_and(|hash| *hash != on_disk) {
+        fields.hash = Some(on_disk);
+    }
+    let changed = fields != before;
+    if changed {
+        apply_policy_fields(enrollment, fields);
+    }
+    Ok(Settled { changed, landed })
+}
+
+/// The steps of a policy change on disk that a failure or a crash can come
+/// between, named for the tests that fail or stop one there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// Writing the staged set ([`prepare`]).
+    Stage,
+    /// Saving the record that owns both sets' files, the change pending.
+    RecordBoth,
+    /// Exchanging the staged directory with `policy.d`.
+    Swap,
+    /// Writing the rendered browser document.
+    Render,
+    /// Exchanging the previous directory back.
+    RollBack,
+    /// Saving the record that says what is enforced.
+    RecordFinal,
+    /// Removing the directory the swap replaced.
+    Finish,
+}
+
+/// Each step of a change passes here first. Production never fails one.
+#[cfg(not(test))]
+#[inline]
+pub(crate) fn step(_step: Step) -> io::Result<()> {
+    Ok(())
+}
+
+/// Each step of a change passes here first: a test's hook may fail it, or
+/// copy the state directory as a crash just before it would leave it.
+#[cfg(test)]
+pub(crate) fn step(step: Step) -> io::Result<()> {
+    faults::at(step)
+}
+
+/// A hook, per test thread, called at every [`Step`] of a change.
+#[cfg(test)]
+pub(crate) mod faults {
+    use std::cell::RefCell;
+    use std::io;
+
+    use super::Step;
+
+    type Hook = Box<dyn FnMut(Step) -> io::Result<()>>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Removes the hook when dropped.
+    pub(crate) struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            HOOK.with(|hook| *hook.borrow_mut() = None);
+        }
+    }
+
+    /// Call `hook` at every step on this thread until the guard drops.
+    pub(crate) fn install(hook: impl FnMut(Step) -> io::Result<()> + 'static) -> Installed {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Installed
+    }
+
+    pub(super) fn at(step: Step) -> io::Result<()> {
+        HOOK.with(|hook| match hook.borrow_mut().as_mut() {
+            Some(hook) => hook(step),
+            None => Ok(()),
+        })
+    }
 }
 
 fn remove_dir_if_present(path: &Path) -> io::Result<()> {
@@ -1129,6 +1431,112 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A root drop added, replaced or removed after the set was prepared is
+    /// found on either side of the swap, never lost with the directory it
+    /// was changed in; one edited in place is the carried file itself.
+    #[test]
+    fn a_root_drop_changed_after_prepare_stops_the_change() {
+        let dir = tmp("carried");
+        let live = dir.join(POLICY_DIR);
+        write(&live.join("eng-baseline-v12.json"), b"the old org file");
+        write(&live.join("local.note"), b"kept");
+        fs::create_dir_all(live.join("ai")).unwrap();
+        let owned = vec!["eng-baseline-v12.json".to_string()];
+        let changed = |failure: LocalFailure| match failure {
+            LocalFailure::LocalFilesChanged(name) => name,
+            other => panic!("expected a local change, got {other:?}"),
+        };
+
+        let prepared = prepare(&dir, &set(&[acme()]), &owned).unwrap();
+        assert!(prepared.still_current(&live, &owned).is_ok());
+        write(&live.join("local.note"), b"edited in place");
+        assert!(prepared.still_current(&live, &owned).is_ok());
+        write(&live.join("added.note"), b"added");
+        assert_eq!(
+            changed(prepared.still_current(&live, &owned).unwrap_err()),
+            "added.note"
+        );
+        fs::remove_file(live.join("added.note")).unwrap();
+        // An editor's save: a new file renamed over the old name.
+        write(&dir.join("replacement"), b"replaced");
+        fs::rename(dir.join("replacement"), live.join("local.note")).unwrap();
+        assert_eq!(
+            changed(prepared.still_current(&live, &owned).unwrap_err()),
+            "local.note"
+        );
+        fs::remove_file(live.join("local.note")).unwrap();
+        assert_eq!(
+            changed(prepared.still_current(&live, &owned).unwrap_err()),
+            "local.note"
+        );
+        write(&live.join("local.note"), b"kept");
+        // An empty directory that is no longer empty.
+        let prepared = prepare(&dir, &set(&[acme()]), &owned).unwrap();
+        write(&live.join("ai/stale.yaml"), b"x");
+        assert_eq!(
+            changed(prepared.still_current(&live, &owned).unwrap_err()),
+            "ai"
+        );
+        fs::remove_file(live.join("ai/stale.yaml")).unwrap();
+
+        // Written just before the exchange: found in the directory it
+        // replaced, and the rollback puts it back live.
+        let swapped = swap_in(prepared.staging(), &live).unwrap();
+        assert!(
+            swapped
+                .replaced_only_what_was_carried(&prepared, &owned)
+                .is_ok()
+        );
+        swapped.roll_back().unwrap();
+        let prepared = prepare(&dir, &set(&[acme()]), &owned).unwrap();
+        write(&live.join("late.note"), b"late");
+        let swapped = swap_in(prepared.staging(), &live).unwrap();
+        assert_eq!(
+            changed(
+                swapped
+                    .replaced_only_what_was_carried(&prepared, &owned)
+                    .unwrap_err()
+            ),
+            "late.note"
+        );
+        swapped.roll_back().unwrap();
+        assert_eq!(fs::read(live.join("late.note")).unwrap(), b"late");
+        assert_eq!(
+            fs::read(live.join("eng-baseline-v12.json")).unwrap(),
+            b"the old org file"
+        );
+        assert!(!dir.join(STAGING_DIR).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Whether a rollback put the previous directory back is read from
+    /// policy.d: one whose exchange failed leaves both directories where
+    /// they are, the previous one included, and says so.
+    #[test]
+    fn a_rollback_is_verified_and_a_failed_one_removes_nothing() {
+        let dir = tmp("rollback");
+        let live = dir.join(POLICY_DIR);
+        let staging = dir.join(STAGING_DIR);
+        write(&live.join("old.json"), b"old");
+        write(&staging.join("new.json"), b"new");
+        let swapped = swap_in(&staging, &live).unwrap();
+        let failed = {
+            let _hook = faults::install(|step| match step {
+                Step::RollBack => Err(io::Error::other("the exchange was refused")),
+                _ => Ok(()),
+            });
+            swapped.roll_back().unwrap_err()
+        };
+        assert!(failed.to_string().contains("refused"), "{failed}");
+        assert_eq!(fs::read(live.join("new.json")).unwrap(), b"new");
+        assert_eq!(
+            fs::read(staging.join("old.json")).unwrap(),
+            b"old",
+            "the last good set is still there"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn enrollment(files: &[&str]) -> Enrollment {
         serde_json::from_value(json!({
             "version": 1,
@@ -1143,6 +1551,13 @@ mod tests {
         .unwrap()
     }
 
+    fn revision_of(dir: &Path, names: &[&str]) -> String {
+        let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+        CanonicalSet::read_owned(&dir.join(POLICY_DIR), &names)
+            .unwrap()
+            .revision()
+    }
+
     #[test]
     fn settle_removes_leftovers_and_owns_exactly_what_policy_d_holds() {
         let dir = tmp("settle");
@@ -1154,20 +1569,109 @@ mod tests {
 
         // A crash after the union was recorded and the new set swapped in.
         let mut record = enrollment(&["kept.json", "new.json", "old.json"]);
-        assert!(settle(&dir, Some(&mut record)).unwrap());
+        let settled = settle(&dir, Some(&mut record)).unwrap();
+        assert!(settled.changed);
+        assert!(settled.landed.is_none(), "nothing was pending");
         assert_eq!(record.policy_files, ["kept.json", "new.json"]);
-        assert_eq!(record.policy_hash, None, "derived again from the files");
+        assert_eq!(
+            record.policy_hash,
+            Some(revision_of(&dir, &["kept.json", "new.json"])),
+            "derived again from the files"
+        );
         assert!(!dir.join(STAGING_DIR).exists());
         assert!(!dir.join(LEGACY_STAGING_DIR).exists());
         assert_eq!(record.removable, enrollment(&[]).removable, "no term moves");
 
         let settled = record.clone();
-        assert!(!settle(&dir, Some(&mut record)).unwrap(), "idempotent");
+        assert!(
+            !settle(&dir, Some(&mut record)).unwrap().changed,
+            "idempotent"
+        );
         assert_eq!(record, settled);
+        // A record that agrees with the directory is left alone; one whose
+        // revision a crash left behind the files is corrected.
         let mut untouched = enrollment(&["kept.json", "new.json"]);
-        assert!(!settle(&dir, Some(&mut untouched)).unwrap());
-        assert_eq!(untouched.policy_hash.as_deref(), Some("sha256:old"));
-        assert!(!settle(&dir, None).unwrap());
+        untouched.policy_hash = Some(revision_of(&dir, &["kept.json", "new.json"]));
+        assert!(!settle(&dir, Some(&mut untouched)).unwrap().changed);
+        let mut stale = enrollment(&["kept.json", "new.json"]);
+        assert!(settle(&dir, Some(&mut stale)).unwrap().changed);
+        assert_eq!(stale.policy_hash, untouched.policy_hash);
+        // One recorded before revisions existed learns it at its first
+        // refresh, as enroll.status says.
+        let mut older = enrollment(&["kept.json", "new.json"]);
+        older.policy_hash = None;
+        assert!(!settle(&dir, Some(&mut older)).unwrap().changed);
+        assert!(!settle(&dir, None).unwrap().changed);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn pending(revision: String, result: &str) -> PendingPolicyChange {
+        PendingPolicyChange {
+            revision,
+            result: result.to_string(),
+            policy_ids: vec!["new".to_string()],
+            at: "2026-09-24T12:00:00Z".to_string(),
+            event_id: "evt_1x1".to_string(),
+        }
+    }
+
+    /// A change recorded as pending is found landed exactly when policy.d
+    /// holds its set: then the record says it was made, when, and hands it
+    /// back to be audited; otherwise the record keeps what was enforced.
+    /// Either way nothing stays pending.
+    #[test]
+    fn settle_decides_from_the_directory_whether_a_pending_change_landed() {
+        let dir = tmp("settle-pending");
+        let live = dir.join(POLICY_DIR);
+        write(&live.join("old.json"), b"old");
+        let old = revision_of(&dir, &["old.json"]);
+        write(&live.join("new.json"), b"new");
+        let both = revision_of(&dir, &["new.json", "old.json"]);
+        fs::remove_file(live.join("new.json")).unwrap();
+
+        // The swap never happened: the old set is live.
+        let mut record = enrollment(&["new.json", "old.json"]);
+        record.policy_hash = Some(old.clone());
+        record.policy_pending = Some(pending(both.clone(), "applied"));
+        let settled = settle(&dir, Some(&mut record)).unwrap();
+        assert!(settled.changed && settled.landed.is_none());
+        assert_eq!(record.policy_files, ["old.json"]);
+        assert_eq!(record.policy_hash.as_deref(), Some(old.as_str()));
+        assert_eq!(record.policy_pending, None);
+        assert_eq!(record.policy_changed_at, None, "unchanged");
+
+        // It did: the new set (both files) is live.
+        write(&live.join("new.json"), b"new");
+        let mut record = enrollment(&["new.json", "old.json"]);
+        record.policy_hash = Some(old.clone());
+        record.policy_pending = Some(pending(both.clone(), "applied"));
+        let settled = settle(&dir, Some(&mut record)).unwrap();
+        assert!(settled.changed);
+        assert_eq!(settled.landed, Some(pending(both.clone(), "applied")));
+        assert_eq!(record.policy_files, ["new.json", "old.json"]);
+        assert_eq!(record.policy_hash.as_deref(), Some(both.as_str()));
+        assert_eq!(
+            record.policy_changed_at.as_deref(),
+            Some("2026-09-24T12:00:00Z")
+        );
+        let refresh = record.policy_refresh.clone().unwrap();
+        assert_eq!(refresh.result, "applied");
+        assert_eq!(record.policy_pending, None);
+        assert!(settle(&dir, Some(&mut record)).unwrap().landed.is_none());
+
+        // A withdrawal lands when none of the old files is left.
+        let empty = CanonicalSet::default().revision();
+        let mut record = enrollment(&["new.json", "old.json"]);
+        record.policy_pending = Some(pending(empty.clone(), "withdrawn"));
+        assert!(settle(&dir, Some(&mut record)).unwrap().landed.is_none());
+        fs::remove_file(live.join("new.json")).unwrap();
+        fs::remove_file(live.join("old.json")).unwrap();
+        let mut record = enrollment(&["new.json", "old.json"]);
+        record.policy_pending = Some(pending(empty.clone(), "withdrawn"));
+        let settled = settle(&dir, Some(&mut record)).unwrap();
+        assert_eq!(settled.landed.unwrap().result, "withdrawn");
+        assert!(record.policy_files.is_empty());
+        assert_eq!(record.policy_hash, Some(empty));
         let _ = fs::remove_dir_all(&dir);
     }
 }
