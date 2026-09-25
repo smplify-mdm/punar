@@ -96,6 +96,19 @@ assert_rule 'hl.workspace_rule({ workspace = "3", layout = "dwindle" })' --works
 [ "$(store_value 5)" = stack ] || { echo "FAIL default forgot another workspace" >&2; exit 1; }
 printf 'ok   default hands a workspace back to the session preset and forgets it\n'
 
+# A workspace that never had its own preset already follows the session, so
+# `default` (which the command center sends after every session preset it
+# sets) adds no rule: live rules cannot be deleted in 0.56 and only pile up.
+rm -f "${PUNAR_TEST_HYPRCTL_LOG}"
+"${HELPER}" --workspace 8 default
+[ ! -e "${PUNAR_TEST_HYPRCTL_LOG}" ] || {
+    printf 'FAIL default on a workspace with no preset sent %s\n' "$(cat "${PUNAR_TEST_HYPRCTL_LOG}")" >&2
+    exit 1
+}
+grep -qx 8 "${XDG_RUNTIME_DIR}/punar/workspace-layout-followers" 2>/dev/null && {
+    echo "FAIL default on a workspace with no preset made it a follower" >&2; exit 1; }
+printf 'ok   default on a workspace that follows the session already adds nothing\n'
+
 # A workspace given back follows every LATER session preset too: a live rule
 # cannot be deleted, so the script re-applies the new preset to it.
 rm -f "${PUNAR_TEST_HYPRCTL_LOG}"
@@ -141,3 +154,27 @@ expected='eval hl.workspace_rule({ workspace = "3", layout = "monocle" }); hl.wo
 [ ! -e "${XDG_RUNTIME_DIR}/punar/workspace-layout-followers" ] || {
     echo "FAIL restore kept followers whose rules a reload removed" >&2; exit 1; }
 printf 'ok   restore re-applies every valid stored workspace preset, and only those\n'
+
+# A restore right after another, or while one runs, does nothing: should an
+# eval ever raise config.reloaded, the handler and the script must not chase
+# each other forever.
+rm -f "${PUNAR_TEST_HYPRCTL_LOG}"
+"${HELPER}" restore
+[ ! -e "${PUNAR_TEST_HYPRCTL_LOG}" ] || {
+    echo "FAIL a second restore within a second ran again" >&2; exit 1; }
+rm -f "${XDG_RUNTIME_DIR}/punar/layout-restored"
+mkdir "${XDG_RUNTIME_DIR}/punar/layout-restore.lock"
+sleep 30 &
+holder=$!
+printf '%s\n' "${holder}" > "${XDG_RUNTIME_DIR}/punar/layout-restore.lock/pid"
+"${HELPER}" restore
+[ ! -e "${PUNAR_TEST_HYPRCTL_LOG}" ] || {
+    kill "${holder}" 2>/dev/null; echo "FAIL a restore ran while another held the lock" >&2; exit 1; }
+kill "${holder}" 2>/dev/null || true
+wait "${holder}" 2>/dev/null || true
+"${HELPER}" restore
+[ -s "${PUNAR_TEST_HYPRCTL_LOG}" ] || {
+    echo "FAIL a lock left by a restore that died blocked every later restore" >&2; exit 1; }
+[ ! -e "${XDG_RUNTIME_DIR}/punar/layout-restore.lock" ] || {
+    echo "FAIL restore left its lock behind" >&2; exit 1; }
+printf 'ok   restore runs once at a time, never twice in a second, and survives a dead holder\n'

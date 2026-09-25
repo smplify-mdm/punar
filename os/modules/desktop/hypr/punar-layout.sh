@@ -23,9 +23,16 @@
 #   to the global preset.
 #
 # Consumers: the compositor binds (PUNAR+comma/period → the active
-# workspace's prev/next), the command center (exec, by preset name), session
-# start and every config reload (restore), CI (m2-exercise.sh), and
-# `punarctl layout`.
+# workspace's prev/next), the command center (by preset name: the SESSION's
+# preset, and the focused workspace given back to it, so the choice is seen
+# where it was made), session start and every config reload (restore), CI
+# (m2-exercise.sh), and `punarctl layout`.
+#
+# Rule growth, bounded: Hyprland 0.56 cannot delete a live workspace rule,
+# so every per-workspace change adds one small rule until the next reload or
+# session end, which clears them all (restore then adds one per stored
+# workspace). `default` on a workspace that never had its own preset adds
+# nothing: it already follows the session.
 #
 # State:
 #   cache  ${XDG_RUNTIME_DIR:-/run/user/$uid}/punar/layout-preset — one
@@ -243,6 +250,9 @@ apply_workspace() {
         *) preset="${verb}" ;;
     esac
     if [ -z "${preset}" ]; then
+        # A workspace with no preset of its own already follows the session
+        # (it has no live rule, or it is already a follower): nothing to add.
+        [ -n "$(workspace_preset "${ws}")" ] || return 0
         # Back to the session's preset: a rule naming the global algorithm
         # (a live rule cannot be deleted), forget the workspace, and make it
         # follow every later global preset.
@@ -270,6 +280,51 @@ stored_rules() {
                 printf '; '
             fi
         done
+}
+
+# ONE RESTORE AT A TIME, AND NOT TWICE IN A SECOND. hyprland.lua runs
+# restore on every `config.reloaded`, and restore itself sends `hyprctl eval`.
+# Should an eval ever raise `config.reloaded`, the two would chase each other
+# for as long as the session lives, at full CPU, and only the idle gate
+# would notice. So a restore that finds another running, or one that ended
+# under a second ago, does nothing: a reload the person caused is never
+# that close to the last one.
+RESTORE_LOCK="${RUN_DIR}/layout-restore.lock"
+RESTORE_STAMP="${RUN_DIR}/layout-restored"
+now_ms() {
+    ms="$(date +%s%3N 2>/dev/null)"
+    case "${ms}" in
+        ''|*[!0-9]*) echo "$(( $(date +%s) * 1000 ))" ;;
+        *) echo "${ms}" ;;
+    esac
+}
+restore_guarded() {
+    mkdir -p "${RUN_DIR}"
+    last="$(cat "${RESTORE_STAMP}" 2>/dev/null || true)"
+    case "${last}" in
+        ''|*[!0-9]*) last=0 ;;
+    esac
+    if [ $(( $(now_ms) - last )) -lt 1000 ]; then
+        return 0
+    fi
+    if ! mkdir "${RESTORE_LOCK}" 2>/dev/null; then
+        # Held by a restore that is still running: leave it to that one. A
+        # holder that was killed left its pid behind; take the lock over.
+        holder="$(cat "${RESTORE_LOCK}/pid" 2>/dev/null || true)"
+        case "${holder}" in
+            ''|*[!0-9]*) return 0 ;;
+        esac
+        if kill -0 "${holder}" 2>/dev/null; then
+            return 0
+        fi
+        rm -rf "${RESTORE_LOCK}"
+        mkdir "${RESTORE_LOCK}" 2>/dev/null || return 0
+    fi
+    printf '%s\n' "$$" > "${RESTORE_LOCK}/pid"
+    # shellcheck disable=SC2064 # the path is fixed now, on purpose
+    trap "rm -rf '${RESTORE_LOCK}'" EXIT
+    restore
+    now_ms > "${RESTORE_STAMP}"
 }
 
 restore() {
@@ -311,6 +366,6 @@ case "${1-}" in
     balanced|columns|rows|focus|stack) apply "$1" ;;
     next) apply "$(next_of "$(current_preset)")" ;;
     prev) apply "$(prev_of "$(current_preset)")" ;;
-    restore) restore ;;
+    restore) restore_guarded ;;
     *) usage ;;
 esac
