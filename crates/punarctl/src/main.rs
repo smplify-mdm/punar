@@ -537,6 +537,51 @@ impl Confirm {
     fn named(&self) -> bool {
         self.password_fd.is_some() || self.ticket_fd.is_some() || self.ticket_from_parent
     }
+
+    /// The refusal for a source punarctl no longer accepts, when the caller
+    /// named one.
+    fn removed_source(&self) -> Option<&'static str> {
+        if self.ticket_stdin || self.password_stdin {
+            Some(STDIN_SECRET_REMOVED)
+        } else if self.password_from_parent {
+            Some(PASSWORD_FROM_PARENT_REMOVED)
+        } else {
+            None
+        }
+    }
+}
+
+impl Command {
+    /// The confirmation source this verb takes, for the verbs that take one.
+    fn confirm(&self) -> Option<&Confirm> {
+        match self {
+            Command::App {
+                command:
+                    AppCommand::Install { confirm, .. }
+                    | AppCommand::Remove { confirm, .. }
+                    | AppCommand::Update { confirm, .. },
+            }
+            | Command::Policy {
+                command: PolicyCommand::Set { confirm, .. } | PolicyCommand::Clear { confirm, .. },
+            }
+            | Command::Approvals {
+                command: ApprovalsCommand::Resolve { confirm, .. },
+            }
+            | Command::Admins {
+                command: AdminsCommand::Add { confirm, .. } | AdminsCommand::Remove { confirm, .. },
+            }
+            | Command::Update {
+                command:
+                    UpdateCommand::Check { confirm, .. }
+                    | UpdateCommand::Apply { confirm, .. }
+                    | UpdateCommand::Rollback { confirm, .. },
+            }
+            | Command::Enroll {
+                command: EnrollCommand::Start { confirm, .. } | EnrollCommand::Stop { confirm, .. },
+            } => Some(confirm),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -1027,12 +1072,10 @@ fn confirmation(
     purpose: &str,
     action: &str,
 ) -> Result<Option<punar_reauth::Ticket>, ExitCode> {
-    if confirm.ticket_stdin || confirm.password_stdin {
-        eprintln!("{STDIN_SECRET_REMOVED}");
-        return Err(ExitCode::from(2));
-    }
-    if confirm.password_from_parent {
-        eprintln!("{PASSWORD_FROM_PARENT_REMOVED}");
+    // main refuses these first; checked again here so no secret is ever
+    // read from a removed source, whatever path reaches this function.
+    if let Some(refusal) = confirm.removed_source() {
+        eprintln!("{refusal}");
         return Err(ExitCode::from(2));
     }
     if rustix::process::geteuid().is_root() {
@@ -1181,8 +1224,8 @@ fn resolve_approval(
     decision: &str,
     confirm: &Confirm,
 ) -> Result<Result<Value, CallError>, ExitCode> {
-    if confirm.ticket_stdin || confirm.password_stdin {
-        eprintln!("{STDIN_SECRET_REMOVED}");
+    if let Some(refusal) = confirm.removed_source() {
+        eprintln!("{refusal}");
         return Err(ExitCode::from(2));
     }
     let mut params = json!({ "approval_id": id, "decision": decision });
@@ -4675,6 +4718,14 @@ fn run_installer_unattended(socket: Option<&Path>) -> Result<Value, String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // A removed secret source is refused before anything else the verb does,
+    // for every caller. A person without the administrator role is never
+    // asked for a password (`caller_may_administer`), so without this they
+    // heard only punard's role refusal and a script kept the flag.
+    if let Some(refusal) = cli.command.confirm().and_then(Confirm::removed_source) {
+        eprintln!("{refusal}");
+        return ExitCode::from(2);
+    }
     let style = Style::detect();
     // Two daemons, one CLI: `agents.*` speaks to punar-agentd (contract
     // section 10.5), everything else to punard. An explicit --socket wins
@@ -5905,11 +5956,11 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        Cli, EnrollmentTerm, STDIN_SECRET_REMOVED, append_filtered_session_bus_mount,
-        append_resolver_mount, append_vendor_open_bridge, enrollment_terms_prompt,
-        filtered_bus_proxy_command, password_refused_message, read_vendor_callback_payload,
-        unaccepted_terms, validated_vendor_callback_uris, vendor_runtime_tmp,
-        vendor_supervisor_command,
+        Cli, Confirm, EnrollmentTerm, PASSWORD_FROM_PARENT_REMOVED, STDIN_SECRET_REMOVED,
+        append_filtered_session_bus_mount, append_resolver_mount, append_vendor_open_bridge,
+        enrollment_terms_prompt, filtered_bus_proxy_command, password_refused_message,
+        read_vendor_callback_payload, unaccepted_terms, validated_vendor_callback_uris,
+        vendor_runtime_tmp, vendor_supervisor_command,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -5994,6 +6045,96 @@ mod tests {
         assert!(!help.contains("--password-stdin"), "{help}");
         assert!(STDIN_SECRET_REMOVED.contains("/proc/<pid>/fd"));
         assert!(STDIN_SECRET_REMOVED.contains("--password-fd"));
+    }
+
+    /// Every verb that takes a confirmation refuses a removed source before
+    /// it does anything else, whoever runs it: main checks
+    /// `Command::confirm` first. Found on a booted image, where a person
+    /// without the role who passed --password-stdin heard only punard's role
+    /// refusal, because punarctl never reads a password from them.
+    #[test]
+    fn a_removed_secret_source_is_refused_on_every_verb_that_takes_one() {
+        let verbs: [&[&str]; 15] = [
+            &["punarctl", "app", "install", "spotify"],
+            &["punarctl", "app", "remove", "spotify"],
+            &["punarctl", "app", "update", "--all"],
+            &[
+                "punarctl",
+                "policy",
+                "set",
+                "security.firewall",
+                "enabled",
+                "--reason",
+                "r",
+            ],
+            &[
+                "punarctl",
+                "policy",
+                "clear",
+                "security.firewall",
+                "--reason",
+                "r",
+            ],
+            &[
+                "punarctl",
+                "approvals",
+                "resolve",
+                "apr_1",
+                "--decision",
+                "approved",
+            ],
+            &[
+                "punarctl",
+                "approvals",
+                "resolve",
+                "apr_1",
+                "--decision",
+                "denied",
+            ],
+            &["punarctl", "admins", "add", "bob"],
+            &["punarctl", "admins", "remove", "bob"],
+            &["punarctl", "update", "check"],
+            &["punarctl", "update", "apply", "2026.08.27.1"],
+            &["punarctl", "update", "rollback"],
+            &["punarctl", "enroll", "start", "acme.com"],
+            &["punarctl", "enroll", "stop"],
+            &["punarctl", "enroll", "stop", "--yes"],
+        ];
+        for argv in verbs {
+            for (flag, refusal) in [
+                (None, None),
+                (Some("--password-fd=3"), None),
+                (Some("--ticket-fd=4"), None),
+                (Some("--ticket-from-parent"), None),
+                (Some("--password-stdin"), Some(STDIN_SECRET_REMOVED)),
+                (Some("--ticket-stdin"), Some(STDIN_SECRET_REMOVED)),
+                (
+                    Some("--password-from-parent"),
+                    Some(PASSWORD_FROM_PARENT_REMOVED),
+                ),
+            ] {
+                let mut full = argv.to_vec();
+                full.extend(flag);
+                let cli = Cli::try_parse_from(&full).unwrap();
+                let confirm = cli.command.confirm();
+                assert!(confirm.is_some(), "{full:?} takes a confirmation");
+                assert_eq!(
+                    confirm.and_then(Confirm::removed_source),
+                    refusal,
+                    "{full:?}"
+                );
+            }
+        }
+        for argv in [
+            &["punarctl", "admins", "list"][..],
+            &["punarctl", "audit", "tail"],
+            &["punarctl", "enroll", "status"],
+            &["punarctl", "policy", "effective"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert!(cli.command.confirm().is_none(), "{argv:?}");
+        }
+        assert!(PASSWORD_FROM_PARENT_REMOVED.contains("--ticket-from-parent"));
     }
 
     /// A refusal names the terms the request left unaccepted; punarctl asks

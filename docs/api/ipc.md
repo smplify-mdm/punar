@@ -818,9 +818,10 @@ the controlling terminal with echo off and send it straight to `punar-authd`'s
 socket, exactly as `enroll`, `update`, `approvals resolve` and `admins` do
 (§23.5). Scripts hand a password or a ticket over **a socket** —
 `--password-fd N` or `--ticket-fd N` — and System Control uses
-`--password-from-parent`. `--ticket-stdin` is gone: a pipe on stdin can be
-read by any program running as the person before punarctl reads it, and the
-flag is refused with a message naming its replacements. A `denied` or
+`--ticket-from-parent`. `--ticket-stdin` and `--password-stdin` are gone: a
+pipe on stdin can be read by any program running as the person before
+punarctl reads it, and either flag is refused with a message naming its
+replacements, whoever passes it (§23.5). A `denied` or
 malformed ticket is refused by punarctl before anything is sent. With neither
 a terminal nor a source, the request goes without a ticket and the refusal
 (`reauthentication_required`) names the terminal command.
@@ -4623,7 +4624,11 @@ password, and Yama (F0-S2) keeps other programs from attaching to it.
   `/usr/bin/punarctl` by its absolute path — a `punarctl` earlier on PATH
   would be the process the ticket is bound to;
 - `--password-from-parent`, `--ticket-stdin` and `--password-stdin` are
-  refused with exit 2 and a message naming the replacements.
+  refused with exit 2 and a message naming the replacements, before anything
+  else the verb does and whoever runs it. A person without the administrator
+  role is never asked for a password, so a check on the password path alone
+  would have answered them with punard's role refusal and left the flag
+  unmentioned (found on a booted image, F0 boot proof).
 
 **Why the relay carries a ticket and never the password.** Another program of
 the same person can replace the rendezvous socket (a rename in the person's
