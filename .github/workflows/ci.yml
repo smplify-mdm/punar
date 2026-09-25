@@ -305,6 +305,19 @@ jobs:
       - name: Enforce Hyprland 0.56 dispatcher API
         run: ./tools/check-hyprland-dispatchers.sh
 
+      # SMP-1405 WP-02. A Hyprland Lua error is not a build failure: it shows
+      # up at login as a desktop with no key binds. The pinned Hyprland's own
+      # --verify-config evaluates every configuration file (four sessions),
+      # the data-only keyboard reader's contract, and foot.ini.
+      - name: Verify the Hyprland Lua configuration and foot.ini (pinned Hyprland)
+        run: ./tools/hyprland-verify.sh
+
+      - name: Test the key grammar contract (described, no chord twice, Omarchy families)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends lua5.4
+          ./tests/desktop/keybind-contract-test.sh
+
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
@@ -371,6 +384,10 @@ jobs:
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
             tests/desktop/terminal-app-test.sh \
+            tests/desktop/keybind-contract-test.sh \
+            tools/hyprland-verify.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/greeter-session.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/vendor-sandbox-bin/xdg-open \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-policy-set.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \

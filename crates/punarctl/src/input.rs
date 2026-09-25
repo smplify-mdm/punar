@@ -108,6 +108,11 @@ pub enum KeysCommand {
         /// Only binds whose description or chord contains this text.
         #[arg(long)]
         filter: Option<String>,
+        /// Only the chords of features this person has not tried yet, as the
+        /// shortcut help's hint shows them (kept on this machine only, in
+        /// ~/.local/state/punar/shortcuts-tried.json).
+        #[arg(long)]
+        untried: bool,
     },
 }
 
@@ -782,8 +787,45 @@ pub fn chord(bind: &Value) -> String {
     parts.join(" + ")
 }
 
+/// The families the shell has not seen tried, from its own state file: the
+/// file names every family it tracks, so this list cannot drift from the
+/// shell's. No file: nothing is known, so nothing is suggested.
+fn untried_families() -> Vec<String> {
+    let path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".local/state/punar/shortcuts-tried.json"));
+    let Some(doc) = path
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(|doc| doc.get("version").and_then(Value::as_u64) == Some(1))
+    else {
+        return Vec::new();
+    };
+    let list = |key: &str| -> Vec<String> {
+        doc.get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|family| !family.is_empty() && family.len() <= 64)
+            .map(str::to_string)
+            .collect()
+    };
+    let tried = list("tried");
+    list("families")
+        .into_iter()
+        .filter(|family| !tried.contains(family))
+        .collect()
+}
+
 pub fn keys(command: KeysCommand, style: &Style, json_output: bool) -> ExitCode {
-    let KeysCommand::List { filter } = command;
+    let KeysCommand::List { filter, untried } = command;
+    let families = if untried {
+        untried_families()
+    } else {
+        Vec::new()
+    };
     let binds = match hypr::json("binds") {
         Ok(Value::Array(binds)) => binds,
         Ok(_) => return refuse("The compositor's bind table was not a list.", 1),
@@ -799,6 +841,13 @@ pub fn keys(command: KeysCommand, style: &Style, json_output: bool) -> ExitCode 
                     .and_then(Value::as_str)
                     .is_some_and(|d| d.to_lowercase().contains(&needle))
                 || chord(bind).to_lowercase().contains(&needle)
+        })
+        .filter(|bind| {
+            !untried
+                || bind
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| families.iter().any(|f| d.starts_with(f.as_str())))
         })
         .collect();
     if json_output {

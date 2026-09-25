@@ -1042,6 +1042,22 @@ fn keys_list_is_the_compositors_bind_table() {
         !text.to_lowercase().contains("mouse:272"),
         "undescribed binds stay out: {text}"
     );
+
+    // The shortcut help's "not tried yet" hint, from the shell's own file.
+    let output = session.run(&["--json", "keys", "list", "--untried"]);
+    assert_eq!(stdout(&output).trim(), "[]", "no file: nothing suggested");
+    fs::create_dir_all(session.root.join("home/.local/state/punar")).unwrap();
+    fs::write(
+        session
+            .root
+            .join("home/.local/state/punar/shortcuts-tried.json"),
+        r#"{"version":1,"families":["Open terminal","Close window"],"tried":["Close window"]}"#,
+    )
+    .unwrap();
+    let output = session.run(&["--json", "keys", "list", "--untried"]);
+    let binds: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(binds.as_array().unwrap().len(), 1);
+    assert_eq!(binds[0]["description"], "Open terminal");
 }
 
 /// A per-workspace preset needs a workspace, and names only real ones; the
@@ -1126,4 +1142,39 @@ fn clipboard_keys_write_the_preference_and_reload_the_binds() {
     )
     .unwrap();
     assert_eq!(saved["clipboardKeys"], "standard");
+}
+
+/// PUNAR+O: `window pop` reads the focused window and pops it out at 60% of
+/// the focused display, in the order Hyprland needs.
+#[test]
+fn window_pop_floats_sizes_centres_and_pins_the_focused_window() {
+    let session = Session::start(desktop);
+    let output = session.run(&["--json", "window", "pop"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&output)).unwrap(),
+        json!({"result": "popped out"})
+    );
+    let dispatched: Vec<String> = session
+        .requests()
+        .into_iter()
+        .filter(|r| r.starts_with("dispatch "))
+        .collect();
+    assert_eq!(
+        dispatched,
+        [
+            "dispatch hl.dsp.window.float({ window = 'address:0x55d1c3a0', action = 'toggle' })",
+            "dispatch hl.dsp.window.resize({ window = 'address:0x55d1c3a0', x = 1152, y = 648 })",
+            "dispatch hl.dsp.window.center({ window = 'address:0x55d1c3a0' })",
+            "dispatch hl.dsp.window.pin({ window = 'address:0x55d1c3a0', action = 'toggle' })",
+            "dispatch hl.dsp.window.alter_zorder({ window = 'address:0x55d1c3a0', mode = 'top' })",
+        ]
+    );
+    assert_eq!(
+        session
+            .run(&["window", "pop", "--address", "0x1' })"])
+            .status
+            .code(),
+        Some(2)
+    );
 }

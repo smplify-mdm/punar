@@ -69,6 +69,13 @@ pub enum WindowCommand {
         #[arg(long)]
         address: String,
     },
+    /// Pop a window out: float it at 60% of its display, centre it and pin
+    /// it over every workspace; or put a popped-out window back in the
+    /// layout. Without --address, the focused window.
+    Pop {
+        #[arg(long)]
+        address: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -764,7 +771,115 @@ pub fn window(command: WindowCommand, style: &Style, json_output: bool) -> ExitC
             );
             window_result(hypr::dispatch(&expression), style, json_output, "killed")
         }
+        WindowCommand::Pop { address } => pop_window(address, style, json_output),
     }
+}
+
+/// The dispatchers that pop a window out or put it back, in order. Pinning
+/// needs a floating window and tiling needs an unpinned one, so the order
+/// depends on which way the window is going.
+pub fn pop_expressions(
+    address: &str,
+    floating: bool,
+    pinned: bool,
+    display: Option<(f64, f64)>,
+) -> (Vec<String>, &'static str) {
+    let window = hypr::lua_string(&format!("address:{address}"));
+    if floating && pinned {
+        return (
+            vec![
+                format!("hl.dsp.window.pin({{ window = {window}, action = 'toggle' }})"),
+                format!("hl.dsp.window.float({{ window = {window}, action = 'toggle' }})"),
+            ],
+            "back in the layout",
+        );
+    }
+    let mut out = Vec::new();
+    if !floating {
+        out.push(format!(
+            "hl.dsp.window.float({{ window = {window}, action = 'toggle' }})"
+        ));
+    }
+    if let Some((width, height)) = display {
+        out.push(format!(
+            "hl.dsp.window.resize({{ window = {window}, x = {}, y = {} }})",
+            (width * 0.6).round() as i64,
+            (height * 0.6).round() as i64
+        ));
+    }
+    out.push(format!("hl.dsp.window.center({{ window = {window} }})"));
+    if !pinned {
+        out.push(format!(
+            "hl.dsp.window.pin({{ window = {window}, action = 'toggle' }})"
+        ));
+    }
+    out.push(format!(
+        "hl.dsp.window.alter_zorder({{ window = {window}, mode = 'top' }})"
+    ));
+    (out, "popped out")
+}
+
+/// The focused display's logical size, for a pop-out's 60%.
+fn focused_display() -> Option<(f64, f64)> {
+    let monitors = hypr::json("monitors").ok()?;
+    let monitor = monitors
+        .as_array()?
+        .iter()
+        .find(|m| m.get("focused").and_then(Value::as_bool) == Some(true))?;
+    let scale = monitor
+        .get("scale")
+        .and_then(Value::as_f64)
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1.0);
+    let width = monitor.get("width").and_then(Value::as_f64)? / scale;
+    let height = monitor.get("height").and_then(Value::as_f64)? / scale;
+    (width > 0.0 && height > 0.0).then_some((width, height))
+}
+
+fn pop_window(address: Option<String>, style: &Style, json_output: bool) -> ExitCode {
+    let window = match address {
+        Some(address) if !valid_address(&address) => return bad_address(&address),
+        Some(address) => match hypr::json("clients") {
+            Ok(Value::Array(windows)) => match windows
+                .into_iter()
+                .find(|w| text(w, "address") == address)
+            {
+                Some(window) => window,
+                None => {
+                    return refuse(
+                        &format!("No window has the address {address}, so nothing was changed."),
+                        1,
+                    );
+                }
+            },
+            Ok(_) => return hypr_fail(HyprError::Refused("the window list was not a list".into())),
+            Err(error) => return hypr_fail(error),
+        },
+        None => match hypr::json("activewindow") {
+            Ok(active) if valid_address(text(&active, "address")) => active,
+            Ok(_) => {
+                return refuse(
+                    "No application window is focused, so nothing was popped out.",
+                    1,
+                );
+            }
+            Err(error) => return hypr_fail(error),
+        },
+    };
+    let address = text(&window, "address").to_string();
+    let flag = |key: &str| window.get(key).and_then(Value::as_bool) == Some(true);
+    let (expressions, what) = pop_expressions(
+        &address,
+        flag("floating"),
+        flag("pinned"),
+        focused_display(),
+    );
+    for expression in &expressions {
+        if let Err(error) = hypr::dispatch(expression) {
+            return hypr_fail(error);
+        }
+    }
+    window_result(Ok(()), style, json_output, what)
 }
 
 fn window_result(
@@ -1285,6 +1400,32 @@ mod tests {
             Some(["/usr/bin/loginctl", "lock-session"])
         );
         assert_eq!(session_argv(&SessionCommand::End), None);
+    }
+
+    /// Pop out floats, sizes, centres, pins and raises; putting it back
+    /// unpins before it tiles, because a pinned window cannot tile.
+    #[test]
+    fn pop_out_and_back_send_the_dispatchers_in_order() {
+        let (out, what) = pop_expressions("0x1a", false, false, Some((1920.0, 1080.0)));
+        assert_eq!(what, "popped out");
+        assert_eq!(
+            out,
+            [
+                "hl.dsp.window.float({ window = 'address:0x1a', action = 'toggle' })",
+                "hl.dsp.window.resize({ window = 'address:0x1a', x = 1152, y = 648 })",
+                "hl.dsp.window.center({ window = 'address:0x1a' })",
+                "hl.dsp.window.pin({ window = 'address:0x1a', action = 'toggle' })",
+                "hl.dsp.window.alter_zorder({ window = 'address:0x1a', mode = 'top' })",
+            ]
+        );
+        // Already floating: no float toggle, which would tile it.
+        let (out, _) = pop_expressions("0x1a", true, false, None);
+        assert!(!out.iter().any(|e| e.contains("float")), "{out:?}");
+        let (out, what) = pop_expressions("0x1a", true, true, None);
+        assert_eq!(what, "back in the layout");
+        assert!(
+            out[0].starts_with("hl.dsp.window.pin(") && out[1].starts_with("hl.dsp.window.float(")
+        );
     }
 
     #[test]
