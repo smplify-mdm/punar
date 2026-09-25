@@ -12,6 +12,7 @@
 #     acceptance case) is loaded behind a US first group with the both-Alt
 #     switch chord, so PUNAR+Return still opens a terminal, and after the
 #     chord that terminal receives Cyrillic;
+#   * a workspace keeps its own layout preset, live and across sessions;
 #   * the keys do what the grammar says, pressed as REAL KEYS: Alt+Tab, the
 #     tenth workspace, a quiet move, maximize, pop-out, and pointer move and
 #     resize with PUNAR held.
@@ -181,6 +182,7 @@ resized_from() {
     [ "${rf_w}" != "$2" ] || [ "${rf_h}" != "$3" ]
 }
 abs() { printf '%s %s\n' "$1" "$2" | awk '{printf "%d", $1 * 32767 / $2}'; }
+tiled_is() { [ "$(hyprctl -j activeworkspace 2>/dev/null | jq -r '.tiledLayout // ""')" = "$1" ]; }
 
 # --- 1. the device's layout, set by the person at the machine ----------------
 ORIGINAL="$("${CTL}" --json keyboard layout status 2>/dev/null | jq -r '.device // ""')"
@@ -215,6 +217,31 @@ else
 fi
 check_eq "live input:kb_layout (Latin first)" "us,ru" "$(option input:kb_layout)"
 check_eq "live input:kb_options (the switch chord)" "grp:alts_toggle" "$(option input:kb_options)"
+
+# --- 1b. a workspace keeps its own layout preset -----------------------------
+# The rule is applied live with one hl.workspace_rule; the compositor's own
+# activeworkspace answer (tiledLayout) is the proof it took.
+tiled() { hyprctl -j activeworkspace 2>/dev/null | jq -r '.tiledLayout // ""'; }
+if "${CTL}" layout columns --workspace active >/dev/null 2>&1 && wait_for 5 tiled_is scrolling; then
+    note "ok   the focused workspace took its own preset (tiledLayout scrolling)"
+else
+    fail "the per-workspace preset did not reach the compositor (tiledLayout '$(tiled)')"
+fi
+stored="$(jq -r --arg ws "$(active_workspace)" '.workspaces[$ws] // ""' \
+    "${HOME}/.local/state/punar/workspace-layouts.json" 2>/dev/null)"
+check_eq "the workspace's preset is kept for the next session" "columns" "${stored}"
+case "$("${CTL}" --json layout status 2>/dev/null | jq -r '.preset // ""')" in
+    columns) session_algorithm=scrolling ;;
+    rows|focus) session_algorithm=master ;;
+    stack) session_algorithm=monocle ;;
+    *) session_algorithm=dwindle ;;
+esac
+"${CTL}" layout default --workspace active >/dev/null 2>&1
+if wait_for 5 tiled_is "${session_algorithm}"; then
+    note "ok   default gave the workspace back to the session preset (${session_algorithm})"
+else
+    fail "default left tiledLayout '$(tiled)', not the session's ${session_algorithm}"
+fi
 
 # --- 2. the lock screen names the layout -------------------------------------
 lock_password="punar"

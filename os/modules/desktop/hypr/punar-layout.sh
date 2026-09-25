@@ -37,6 +37,14 @@
 #          jq, atomically. Every id and preset is validated when read, so a
 #          hand edit can name nothing but a workspace number and one of the
 #          five presets.
+#   followers ${XDG_RUNTIME_DIR}/punar/workspace-layout-followers — the
+#          workspaces given BACK to the session preset this session. A live
+#          workspace rule cannot be deleted in Hyprland 0.56 (rules
+#          accumulate), so `default` pins the session's current algorithm and
+#          records the workspace here; every later global preset re-applies
+#          itself to these workspaces, so they keep following the session
+#          preset instead of freezing on the one that was current at reset.
+#          A reload clears every live rule, and restore clears this list.
 #   restore reads layoutPreset from ~/.local/state/punar/workspaces.json
 #          (written by punar-shell only — milestone-2.md §6) via jq
 #          (in the image package set); missing/invalid → balanced. Then it
@@ -52,6 +60,7 @@ CACHE="${RUN_DIR}/layout-preset"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/punar"
 STATE_FILE="${STATE_DIR}/workspaces.json"
 WS_STORE="${STATE_DIR}/workspace-layouts.json"
+FOLLOWERS="${RUN_DIR}/workspace-layout-followers"
 
 usage() {
     echo "usage: punar-layout.sh <balanced|columns|rows|focus|stack|next|prev|restore>" >&2
@@ -149,6 +158,36 @@ apply() {
     hyprctl eval "${config}" >/dev/null
     mkdir -p "${RUN_DIR}"
     printf '%s\n' "${preset}" >"${CACHE}"
+    # Workspaces handed back to the session preset follow it.
+    rules="$(follower_rules "${preset}")"
+    if [ -n "${rules}" ]; then
+        hyprctl eval "${rules}" >/dev/null
+    fi
+}
+
+# One line of rules giving every follower workspace this preset.
+follower_rules() {
+    [ -r "${FOLLOWERS}" ] || return 0
+    while read -r ws; do
+        if is_workspace_id "${ws}"; then
+            rule_for "${ws}" "$1"
+            printf '; '
+        fi
+    done < "${FOLLOWERS}"
+}
+
+follow_global() {
+    mkdir -p "${RUN_DIR}"
+    # `|| true`: under set -e a missing list would end the left side of the
+    # pipe before the new id is printed.
+    { cat "${FOLLOWERS}" 2>/dev/null || true; printf '%s\n' "$1"; } | sort -u > "${FOLLOWERS}.$$"
+    mv -f "${FOLLOWERS}.$$" "${FOLLOWERS}"
+}
+
+stop_following() {
+    [ -r "${FOLLOWERS}" ] || return 0
+    grep -vx -- "$1" "${FOLLOWERS}" > "${FOLLOWERS}.$$" || true
+    mv -f "${FOLLOWERS}.$$" "${FOLLOWERS}"
 }
 
 # ---- per workspace ---------------------------------------------------------
@@ -205,16 +244,19 @@ apply_workspace() {
     esac
     if [ -z "${preset}" ]; then
         # Back to the session's preset: a rule naming the global algorithm
-        # (a live rule cannot be deleted), then forget the workspace.
+        # (a live rule cannot be deleted), forget the workspace, and make it
+        # follow every later global preset.
         rule="$(rule_for "${ws}" "$(current_preset)")"
         hyprctl eval "${rule}" >/dev/null
         store_workspace "${ws}" ""
+        follow_global "${ws}"
         return 0
     fi
     is_preset "${preset}" || usage
     rule="$(rule_for "${ws}" "${preset}")"
     hyprctl eval "${rule}" >/dev/null
     store_workspace "${ws}" "${preset}"
+    stop_following "${ws}"
 }
 
 # Every stored workspace preset as one line of Lua statements ("" when
@@ -244,6 +286,9 @@ restore() {
     if is_preset "${cached}"; then
         preset="${cached}"
     fi
+    # Session start or a reload: no live workspace rule survives either, so
+    # nothing is left to follow the session preset.
+    rm -f "${FOLLOWERS}"
     apply "${preset}"
     rules="$(stored_rules)"
     if [ -n "${rules}" ]; then

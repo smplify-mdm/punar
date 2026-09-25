@@ -96,6 +96,25 @@ assert_rule 'hl.workspace_rule({ workspace = "3", layout = "dwindle" })' --works
 [ "$(store_value 5)" = stack ] || { echo "FAIL default forgot another workspace" >&2; exit 1; }
 printf 'ok   default hands a workspace back to the session preset and forgets it\n'
 
+# A workspace given back follows every LATER session preset too: a live rule
+# cannot be deleted, so the script re-applies the new preset to it.
+rm -f "${PUNAR_TEST_HYPRCTL_LOG}"
+"${HELPER}" stack
+actual="$(cat "${PUNAR_TEST_HYPRCTL_LOG}")"
+[ "${actual}" = 'eval hl.workspace_rule({ workspace = "3", layout = "monocle" }); ' ] || {
+    printf 'FAIL a workspace given back did not follow the new session preset: %s\n' "${actual}" >&2
+    exit 1
+}
+"${HELPER}" --workspace 3 columns
+rm -f "${PUNAR_TEST_HYPRCTL_LOG}"
+"${HELPER}" balanced
+case "$(cat "${PUNAR_TEST_HYPRCTL_LOG}")" in
+    'eval hl.config('*) ;;
+    *) printf 'FAIL a workspace with its own preset was pulled back to the session preset\n' >&2; exit 1 ;;
+esac
+"${HELPER}" --workspace 3 default
+printf 'ok   a workspace given back follows later session presets; one with its own does not\n'
+
 for bad in "--workspace 0 columns" "--workspace x columns" "--workspace 3 restore" \
             "--workspace 3" "--workspace 12345 columns" "--workspace -3 columns"; do
     # shellcheck disable=SC2086 # the words are the argv under test
@@ -108,6 +127,8 @@ printf 'ok   only a workspace number or active, and only a preset, are accepted\
 
 # A hand-edited store names nothing but numbers and presets, and restore puts
 # every valid one back in one eval after the session preset.
+[ -s "${XDG_RUNTIME_DIR}/punar/workspace-layout-followers" ] || {
+    echo "FAIL the follower list is empty before restore" >&2; exit 1; }
 printf '%s\n' '{"version":1,"workspaces":{"3":"stack","5":"rows","x":"stack","7":"evil"}}' > "${STORE}"
 rm -f "${PUNAR_TEST_HYPRCTL_LOG}"
 "${HELPER}" restore
@@ -117,4 +138,6 @@ expected='eval hl.workspace_rule({ workspace = "3", layout = "monocle" }); hl.wo
     printf 'FAIL restore re-applied %s\n' "${actual}" >&2
     exit 1
 }
+[ ! -e "${XDG_RUNTIME_DIR}/punar/workspace-layout-followers" ] || {
+    echo "FAIL restore kept followers whose rules a reload removed" >&2; exit 1; }
 printf 'ok   restore re-applies every valid stored workspace preset, and only those\n'
