@@ -1,0 +1,7 @@
+# Punar security contact (RFC 9116). Punar has no release yet: until it does,
+# the only supported version is the main branch (see Policy).
+Contact: https://github.com/smplify-mdm/punar/security/advisories/new
+Contact: mailto:security@smplify.com
+Expires: 2027-09-25T00:00:00.000Z
+Preferred-Languages: en
+Policy: https://github.com/smplify-mdm/punar/blob/main/SECURITY.md
