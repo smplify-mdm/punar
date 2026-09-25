@@ -15,6 +15,7 @@
 //! in `document` untouched.
 use std::path::Path;
 
+use punar_common::ipc::organization_name;
 use punar_smplifyd::budget::DISCOVERY_BUDGET;
 use serde_json::{Value, json};
 
@@ -140,7 +141,11 @@ pub fn parse_document(domain: &str, mut value: Value) -> Result<Organization, Ca
     let methods = strings_at(&value, &["enrollment", "methods"]);
     let remote_query_scopes = strings_at(&value, &["enrollment", "remote_query_scopes"]);
     match str_at(&value, &["discovery", "domain"]) {
+        // The document names another domain, in text the domain's owner
+        // chose and punard repeats to a person: cleaned and bounded like an
+        // organization's name before it goes anywhere.
         Some(named) if named != domain => {
+            let named = organization_name(&named).unwrap_or_else(|| "another domain".to_string());
             return Err(CallError::new(
                 ErrorCode::NotFound,
                 format!("{domain}'s management document is for {named}"),
@@ -273,6 +278,35 @@ mod tests {
         let mut d = doc();
         d.as_object_mut().unwrap().remove("name");
         assert!(parse_document("acme.com", d).is_err());
+    }
+
+    /// The domain a document says it is for is the domain owner's text, and
+    /// the refusal that names it reaches a person's terminal through punard:
+    /// cleaned and bounded like an organization's name.
+    #[test]
+    fn another_domains_name_is_cleaned_before_it_is_repeated() {
+        let mut d = doc();
+        d["discovery"] = json!({"domain": format!(
+            "x\u{1b}]52;c;cm0=\u{7}\nPolicy: forged\u{202e}{}",
+            "y".repeat(100_000)
+        )});
+        let refused = parse_document("acme.com", d).unwrap_err();
+        assert!(
+            !refused
+                .message
+                .chars()
+                .any(|c| c.is_control() || c == '\u{202e}'),
+            "{:?}",
+            refused.message
+        );
+        assert!(
+            refused
+                .message
+                .starts_with("acme.com's management document is for x]52;c;cm0= Policy"),
+            "{}",
+            refused.message
+        );
+        assert!(refused.message.chars().count() < 200, "{}", refused.message);
     }
 
     #[test]

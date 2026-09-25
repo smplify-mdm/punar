@@ -28,6 +28,7 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use punar_common::ipc::{MAX_ORGANIZATION_TEXT_CHARS, organization_text};
 use serde_json::Value;
 
 use crate::browser_policy::{render_effective_browser_policy, validate_rendered_policy};
@@ -171,9 +172,10 @@ impl Rejection {
         }
     }
 
-    /// The loader's or renderer's own words, or the colliding file, when
-    /// there are any. For the journal and `enroll.start`'s refusal only: the
-    /// audit trail has no free-text field.
+    /// The loader's or renderer's own words, cleaned and bounded where
+    /// [`prepare`] read them, or the colliding file, when there are any. For
+    /// the journal and `enroll.start`'s refusal only: the audit trail has no
+    /// free-text field.
     pub fn detail(&self) -> Option<&str> {
         match self {
             Rejection::InvalidEnvelope(detail)
@@ -494,9 +496,9 @@ pub fn prepare(
 
     // The organization's files alone: whatever fails here is the set's own.
     let organization_only = load_policy_dir(&staging)
-        .map_err(|e| PrepareError::Rejected(Rejection::InvalidEnvelope(e.to_string())))?;
+        .map_err(|e| PrepareError::Rejected(Rejection::InvalidEnvelope(cleaned(&e))))?;
     render_checked(&organization_only)
-        .map_err(|e| PrepareError::Rejected(Rejection::BrowserPolicyRefused(e.to_string())))?;
+        .map_err(|e| PrepareError::Rejected(Rejection::BrowserPolicyRefused(cleaned(&e))))?;
 
     // Everything else in policy.d comes along untouched.
     let live = state_dir.join(POLICY_DIR);
@@ -537,16 +539,26 @@ pub fn prepare(
 
     let loaded = if carried {
         let combined = load_policy_dir(&staging).map_err(|e| {
-            PrepareError::Local(LocalFailure::ConflictsWithLocalPolicy(e.to_string()))
+            PrepareError::Local(LocalFailure::ConflictsWithLocalPolicy(cleaned(&e)))
         })?;
         render_checked(&combined).map_err(|e| {
-            PrepareError::Local(LocalFailure::ConflictsWithLocalPolicy(e.to_string()))
+            PrepareError::Local(LocalFailure::ConflictsWithLocalPolicy(cleaned(&e)))
         })?;
         combined
     } else {
         organization_only
     };
     Ok(Prepared { loaded, staging })
+}
+
+/// The loader's or the renderer's words about a set. They quote the
+/// envelopes' own keys and values ("unknown field `…`"), which the
+/// organization chose, and go on into `enroll.start`'s refusal and the
+/// journal: cleaned and bounded here, where punard first holds them, by the
+/// rules the organization's name gets.
+fn cleaned(error: &io::Error) -> String {
+    organization_text(&error.to_string(), MAX_ORGANIZATION_TEXT_CHARS)
+        .unwrap_or_else(|| "no detail".to_string())
 }
 
 /// Render the managed browser document the way the backend will write it,

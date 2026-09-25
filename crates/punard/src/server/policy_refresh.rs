@@ -189,16 +189,6 @@ fn is_news(
     }
 }
 
-/// The longest control-plane or loader text the journal repeats.
-const JOURNAL_DETAIL_CHARS: usize = 512;
-
-/// Text the device did not write, fit for one journal line: cut to
-/// [`JOURNAL_DETAIL_CHARS`] and escaped, so it cannot forge a line of its own.
-fn journal_detail(text: &str) -> String {
-    let cut: String = text.chars().take(JOURNAL_DETAIL_CHARS).collect();
-    format!("{cut:?}")
-}
-
 /// A digest of a list that was refused before it could be put in canonical
 /// form, so the same list is audited once. Hashed as it is written, never
 /// held: a list refused for its size is not copied whole to be named.

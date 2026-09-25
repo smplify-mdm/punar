@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use punar_common::Redacted;
-use punar_common::ipc::{OrganizationView, OrganizationViewCategory};
+use punar_common::ipc::{
+    MAX_ORGANIZATION_NAME_CHARS, MAX_ORGANIZATION_TEXT_CHARS, OrganizationView,
+    OrganizationViewCategory, organization_text,
+};
 use punar_common::query::{
     CP_METHOD_QUERIES_ANSWER, CP_METHOD_QUERIES_PENDING, PendingQuery, ScopeSet,
 };
@@ -216,17 +219,22 @@ impl ControlPlaneClient {
             ));
         }
         if let Some(error) = value.get("error") {
+            // The control plane's own words, some of them the organization's
+            // (its management document, its server's refusal), and every one
+            // reaches a terminal as part of a refusal, the journal, or both:
+            // cleaned here, once, by the rules the organization's name gets,
+            // so no surface after this has to remember to.
+            let said = |key: &str, bound: usize| {
+                error
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .and_then(|text| organization_text(text, bound))
+            };
             return Err(UpstreamError::Refused {
-                code: error
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                message: error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("(no message)")
-                    .to_string(),
+                code: said("code", MAX_ORGANIZATION_NAME_CHARS)
+                    .unwrap_or_else(|| "unknown".to_string()),
+                message: said("message", MAX_ORGANIZATION_TEXT_CHARS)
+                    .unwrap_or_else(|| "(no message)".to_string()),
             });
         }
         value.get_mut("result").map(Value::take).ok_or_else(|| {
