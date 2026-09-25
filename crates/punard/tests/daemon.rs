@@ -1103,9 +1103,12 @@ fn assert_asks_for_the_persons_password(error: &Value, retry: &str) {
     assert!(!message.contains("privilege request"), "{message}");
 }
 
-/// A ticket exactly as punar-authd mints one: an empty file named by the
-/// token, in a 0700 directory named by the uid that proved its password.
+/// A ticket exactly as punar-authd mints one: a file named by the token, in a
+/// 0700 directory named by the uid that proved its password, holding the boot
+/// clock's reading at mint time (SMP-1405) — the daemon under test reads the
+/// same system clock and judges the ticket's age against it.
 fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
+    use punar_common::trusted_time::{SystemClock, TrustedClock};
     use std::os::unix::fs::DirBuilderExt;
     let per_uid = dir.join("tickets").join(uid.to_string());
     fs::DirBuilder::new()
@@ -1114,7 +1117,8 @@ fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
         .create(&per_uid)
         .unwrap();
     let path = per_uid.join(token);
-    fs::File::create(&path).unwrap();
+    let stamp = SystemClock::new().now().expect("this machine's boot clock");
+    fs::write(&path, serde_json::to_vec(&stamp).unwrap()).unwrap();
     path
 }
 
@@ -2658,9 +2662,9 @@ fn a_policy_change_without_a_reason_is_refused() {
 ///
 /// The ticket directory is injected rather than reached at `/run` so this can
 /// run on a build machine — but the ticket itself is created exactly as
-/// punar-authd creates one (a 0700 per-uid directory, an empty 0600 file named
-/// by the token), because a test that mints them a different way would prove
-/// something about the test.
+/// punar-authd creates one (a 0700 per-uid directory, a file named by the
+/// token holding the boot-clock stamp of the moment it was minted), because a
+/// test that mints them a different way would prove something about the test.
 #[test]
 fn a_valid_ticket_authorizes_an_ordinary_user_and_is_spent() {
     use std::os::unix::fs::DirBuilderExt;
@@ -2684,7 +2688,12 @@ fn a_valid_ticket_authorizes_an_ordinary_user_and_is_spent() {
         .mode(0o700)
         .create(&per_uid)
         .unwrap();
-    fs::File::create(per_uid.join(TOKEN)).unwrap();
+    // Stamped on the boot clock at mint time, as punar-authd stamps it.
+    let stamp = punar_common::trusted_time::TrustedClock::now(
+        &punar_common::trusted_time::SystemClock::new(),
+    )
+    .expect("this machine's boot clock");
+    fs::write(per_uid.join(TOKEN), serde_json::to_vec(&stamp).unwrap()).unwrap();
 
     let set = td.call(
         "policy.set",

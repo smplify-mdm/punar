@@ -174,16 +174,35 @@ impl Inner {
         }
     }
 
+    /// "Now" on the boot clock, for every M9 expiry decision (SMP-1405).
+    /// `None` when the clock cannot be read, and `None` authorizes nothing:
+    /// no grant is live, no approval is answerable, and nothing that
+    /// expires can be created.
+    pub(super) fn trusted_now(&self) -> Option<BootStamp> {
+        self.cfg.trusted_clock.now()
+    }
+
     /// Lazy expiry (contract section 14.4), for approvals **and** grants.
     ///
     /// Runs on every read, at resolve, at consume, and on every reconcile
     /// pass — no timer anywhere (SPEC section 6.3). Each lapse is audited
     /// once, attributed to the daemon: nobody *did* this, time passed.
+    ///
+    /// Skipped, loudly, when the boot clock cannot be read: a sweep writes
+    /// terminal state, and expiring every record over a transient read
+    /// failure would be destruction, not caution. Nothing is live meanwhile,
+    /// because every decision takes the same unreadable `now`.
     pub(super) fn sweep_approvals(&self, store: &mut ApprovalStore) {
-        let now = approvals::now_secs();
+        let Some(now) = self.trusted_now() else {
+            eprintln!(
+                "punard: the boot clock could not be read; no grant or approval is live \
+                 until it can, and nothing was swept"
+            );
+            return;
+        };
         let daemon = AuditActor::daemon();
         let mut changed = false;
-        for env in store.sweep(now) {
+        for env in store.sweep(&now) {
             changed = true;
             self.log_audit(self.m9_event(
                 &daemon,
@@ -194,7 +213,7 @@ impl Inner {
                 vec![env.policy.policy_id.clone()],
             ));
         }
-        for grant in store.sweep_grants(now) {
+        for grant in store.sweep_grants(&now) {
             changed = true;
             self.log_audit(self.m9_event(
                 &daemon,
@@ -214,7 +233,7 @@ impl Inner {
     /// file is a display view, and the socket is the authority (contract
     /// section 15).
     pub(super) fn publish_approvals_summary(&self, store: &ApprovalStore) {
-        if let Err(e) = store.publish_summary(approvals::now_secs()) {
+        if let Err(e) = store.publish_summary(self.trusted_now().as_ref()) {
             eprintln!(
                 "punard: could not write {}: {e}",
                 self.cfg.approvals_file.display()
@@ -247,9 +266,16 @@ impl Inner {
             )
         })?;
 
-        let now = approvals::now_secs();
-        let device_pending = store.pending_count(now);
-        let mine = store.pending_for_requester(&spec.requester.id, now);
+        // The window opens now, on the boot clock. A device that cannot read
+        // that clock raises nothing: an approval whose expiry cannot be
+        // judged would be either immortal or born dead.
+        let Some(opened) = self.trusted_now() else {
+            return Err(
+                self.internal("the boot clock could not be read, so no approval was raised")
+            );
+        };
+        let device_pending = store.pending_count(Some(&opened));
+        let mine = store.pending_for_requester(&spec.requester.id, Some(&opened));
         if device_pending >= MAX_PENDING_APPROVALS || mine >= MAX_PENDING_PER_REQUESTER {
             self.log_audit(self.m9_event(
                 actor,
@@ -299,7 +325,8 @@ impl Inner {
                 reason: spec.reason,
                 risk: spec.risk,
                 status: ApprovalStatus::Pending,
-                expires_at: approvals::rfc3339_in(ttl),
+                // For people to read; the window below decides.
+                expires_at: approvals::display_expiry_in(ttl),
             },
             kind: spec.kind,
             created_at: utc_now_rfc3339(),
@@ -311,6 +338,7 @@ impl Inner {
             resolved_by: None,
             consumed_at: None,
             execution: None,
+            lifetime: Some(BootWindow::of_secs(opened, ttl)),
         };
         store
             .put(envelope.clone())
@@ -368,7 +396,7 @@ impl Inner {
         {
             let mut store = self.approvals.lock().unwrap();
             self.sweep_approvals(&mut store);
-            if let Some(grant) = store.live_grant(peer.uid, id, approvals::now_secs()) {
+            if let Some(grant) = store.live_grant(peer.uid, id, self.trusted_now().as_ref()) {
                 return Ok(MutationAuthority::Grant {
                     grant_id: grant.grant_id.clone(),
                 });
@@ -782,7 +810,9 @@ impl Inner {
         // --- Rule 3: state. Expiry beats everything: a lapsed approval is
         // `expired`, never `conflict`, because "you were too late" and
         // "someone already answered" are different facts.
-        if env.approval.status == ApprovalStatus::Pending && env.has_lapsed(approvals::now_secs()) {
+        if env.approval.status == ApprovalStatus::Pending
+            && env.has_lapsed(self.trusted_now().as_ref())
+        {
             self.sweep_approvals(&mut store);
             return Err(IpcError::expired(id, &env.approval.expires_at));
         }
@@ -910,12 +940,32 @@ impl Inner {
         store: &mut ApprovalStore,
         env: &ApprovalEnvelope,
     ) -> Execution {
-        let minutes = env
-            .approval
-            .resource
-            .trim_end_matches('m')
-            .parse::<u64>()
-            .unwrap_or(punar_common::approval::GRANT_DEFAULT_MINUTES);
+        // Clamped again on the way out: the record is punard's own, but the
+        // bound on how long privilege lasts is not something to trust a file
+        // for.
+        let minutes = punar_common::approval::clamp_grant_minutes(Some(
+            env.approval
+                .resource
+                .trim_end_matches('m')
+                .parse::<u64>()
+                .unwrap_or(punar_common::approval::GRANT_DEFAULT_MINUTES),
+        ));
+        // The grant's window opens now, on the boot clock, and ends at the
+        // next reboot at the latest. No readable clock, no grant: a window
+        // that cannot be judged is never issued.
+        let Some(lifetime) =
+            BootWindow::opening_now(self.cfg.trusted_clock.as_ref(), minutes.saturating_mul(60))
+        else {
+            return Execution {
+                result: "internal".to_string(),
+                error: Some(
+                    "This device could not read its boot clock, so no time-limited \
+                     privilege was granted and nothing changed. Ask again."
+                        .to_string(),
+                ),
+                ..Execution::default()
+            };
+        };
         let uid = env
             .requester_peer
             .as_ref()
@@ -940,8 +990,10 @@ impl Inner {
             capability: env.approval.capability.clone(),
             reason: env.approval.reason.clone(),
             granted_at: utc_now_rfc3339(),
-            expires_at: approvals::rfc3339_in(minutes.saturating_mul(60)),
+            // For people to read; `lifetime` decides.
+            expires_at: approvals::display_expiry_in(minutes.saturating_mul(60)),
             revoked_at: None,
+            lifetime: Some(lifetime),
         };
         if let Err(e) = store.put_grant(grant.clone()) {
             return Execution {
@@ -1015,7 +1067,7 @@ impl Inner {
         }
         // An approved credential approval **still expires**: a human's yes
         // is not a standing grant, and a second issuance raises a new one.
-        if env.has_lapsed(approvals::now_secs()) {
+        if env.has_lapsed(self.trusted_now().as_ref()) {
             return Err(IpcError::expired(id, &env.approval.expires_at));
         }
         if env.approval.status != ApprovalStatus::Approved {
@@ -1189,7 +1241,7 @@ impl Inner {
         self.sweep_approvals(&mut store);
         let scope = (peer.uid != 0).then_some(peer.uid);
         Ok(to_value(PrivilegeStatusResult {
-            grants: store.live_grants(scope, approvals::now_secs()),
+            grants: store.live_grants(scope, self.trusted_now().as_ref()),
             checked_at: utc_now_rfc3339(),
         }))
     }
@@ -1214,8 +1266,6 @@ impl Inner {
         })?;
         let mut store = self.approvals.lock().unwrap();
         self.sweep_approvals(&mut store);
-        let now = approvals::now_secs();
-
         let ids: Vec<String> = match target {
             Some(grant_id) => {
                 let Some(grant) = store.grant(grant_id) else {
@@ -1252,11 +1302,10 @@ impl Inner {
                 }
                 vec![grant_id.to_string()]
             }
-            None => store
-                .live_grants((peer.uid != 0).then_some(peer.uid), now)
-                .into_iter()
-                .map(|g| g.grant_id)
-                .collect(),
+            // Handing privilege back needs no clock: `--all` drops every
+            // grant this peer holds, live or not, so an unreadable boot clock
+            // can never leave one behind.
+            None => store.grant_ids((peer.uid != 0).then_some(peer.uid)),
         };
 
         let mut revoked = Vec::new();

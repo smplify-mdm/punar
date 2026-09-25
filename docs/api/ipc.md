@@ -686,6 +686,17 @@ depend on *who is asking* is settled before a password is requested:
    caller's own uid** within the last 120 seconds. It is spent whether or
    not it turns out to be fresh.
 
+   **Ticket format and age (SMP-1405).** The ticket file holds one boot-clock
+   stamp, `{"boot_id": "…", "raw_bt_ms": …}`, written by `punar-authd` at the
+   moment of the PAM success. punard judges its age on its own boot clock —
+   never the file's mtime or the wall clock — by the rule of §14.4: same
+   boot, and `elapsed_ms < 120000 − 24`. A ticket from another boot, one
+   stamped in the future of punard's clock, one with no readable stamp (an
+   empty ticket an older `punar-authd` minted during an upgrade: the person
+   types their password again), or any ticket while punard cannot read its
+   clock is refused as `reauthentication_expired`, and is spent all the
+   same.
+
 `policy.set` is deliberately **not** root-only. There is no sudo on a Punar
 desktop, so "root only" would mean "nobody can do this at the keyboard".
 
@@ -781,7 +792,8 @@ checks run in this order:
 4. **The ticket is spent** — audited as a denial on failure:
    `details.reason: "reauthentication_missing"` (absent from the caller's own
    uid directory: never minted, already spent, or minted for someone else),
-   `"reauthentication_expired"` (older than 120 s) or
+   `"reauthentication_expired"` (older than 120 s on the boot clock, from
+   another boot, or undatable — see the ticket format under §5.8a) or
    `"reauthentication_malformed"` (not 64 hexadecimal characters). The
    unlink is the commit, so a replay finds nothing. A ticket is never
    forwarded, audited, stored or returned.
@@ -2607,7 +2619,10 @@ recorded human decision.
   "contract": "SetFirewall(disabled)",
   "resolved_at": null, "resolved_by": null,
   "consumed_at": null,
-  "execution": null
+  "execution": null,
+  "lifetime": {"start": {"boot_id": "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b",
+                         "raw_bt_ms": 5123456},
+               "duration_ms": 300000}
 }}
 ```
 
@@ -2647,6 +2662,13 @@ recorded human decision.
 - **`consumed_at`** is set when a `credential_request` approval is spent
   (14.7). It is a sibling field, **not** a fifth `status` value: the
   shipped enum `pending|approved|denied|expired` is not widened.
+- **`lifetime`** (additive, SMP-1405) is what decides expiry: the TTL as a
+  window on the **boot clock**, `{"start": {"boot_id", "raw_bt_ms"},
+  "duration_ms"}`, opened when the approval was raised (14.4). It is a
+  sibling, never inside `approval`. A record without one — written by an
+  older punard — is expired. Consumers should treat it as opaque;
+  `approval.expires_at` is the same deadline on the wall clock, for
+  display.
 
 ### 14.4 Lifecycle, TTL and expiry
 
@@ -2663,6 +2685,27 @@ pending ──resolve(approved)──▶ approved ──(consume, credential kin
   under a minute). The requester may ask for a **shorter** TTL
   (`params.ttl`, clamped to `[15, 300]`) and never a longer one; the
   maximum is policy-owned.
+- **Expiry is measured on the boot clock, never the wall clock**
+  (SMP-1405, trusted time phase P0a). The TTL is the record's `lifetime`
+  window: `raw_bt = CLOCK_MONOTONIC_RAW + (CLOCK_BOOTTIME −
+  CLOCK_MONOTONIC)`, which counts suspend and which NTP, `timedated` and
+  a person cannot move, keyed to `/proc/sys/kernel/random/boot_id`. An
+  approval is answerable iff it is the same boot and
+  `elapsed_ms < duration_ms − ceil(duration_ms × 200 / 10⁶)`: the 200 ppm
+  drift allowance makes it close a little **early**, never late (60 ms
+  on a 300 s TTL). Therefore:
+  - **a pending approval lapses at reboot**;
+  - rolling the wall clock back (or reading it as 1970) revives nothing;
+  - a boot clock punard cannot read answers nothing and raises nothing
+    (`internal`), and the sweep is skipped rather than expiring
+    everything over a failed read;
+  - `approval.expires_at` is the wall-clock rendering of the same
+    deadline, for people to read, and is never compared with anything.
+    A card may therefore lapse before its `expires_at` (at reboot, or by
+    the drift allowance).
+  - **Upgrade:** a record an older punard wrote has no `lifetime` and is
+    expired at the first sweep after the upgrade; its requester asks
+    again.
 - **Expiry is swept lazily**: on every read (`approvals.list`,
   `approvals.get`, and each summary-file rewrite), at `resolve` and
   `consume` time, and on every `reconcile` pass — which reuses the
@@ -2789,13 +2832,26 @@ On approval, punard writes a grant to
 {"v": 1, "grant_id": "gnt_2b8e11c4", "approval_id": "apr_…",
  "uid": 1000, "user": "punar", "capability": "time.timezone",
  "reason": "Reproducing the Atlas net bug",
- "granted_at": "…", "expires_at": "…", "revoked_at": null}
+ "granted_at": "…", "expires_at": "…", "revoked_at": null,
+ "lifetime": {"start": {"boot_id": "…", "raw_bt_ms": 5123456},
+              "duration_ms": 900000}}
 ```
+
+**A grant is live iff it is unrevoked and its `lifetime` window on the
+boot clock is open** — the rule of 14.4: same boot, and
+`elapsed_ms < duration_ms − ceil(duration_ms × 200 / 10⁶)` (180 ms early
+on 15 minutes). **Grants lapse at reboot.** `expires_at` is the wall-clock
+rendering, for display only; rolling the wall clock back extends
+nothing. A grant an older punard wrote has no `lifetime` and is dead: on
+upgrade an in-flight grant lapses (audited `privilege.expire`) and the
+person requests it again. A boot clock punard cannot read keeps no grant
+live and mints none; `privilege.revoke --all` needs no clock and drops
+every grant the caller holds.
 
 `privilege.status` result:
 `{"grants": [{"grant_id", "capability", "reason", "granted_at",
-"expires_at"}], "checked_at": "…"}` — the caller's own grants, or every
-grant for root.
+"expires_at", "lifetime"}], "checked_at": "…"}` — the caller's own
+grants, or every grant for root. `lifetime` is additive (SMP-1405).
 
 `privilege.revoke` params: `{"grant_id": "gnt_…"}` or `{"all": true}`
 (exactly one; neither or both → `invalid_params`). Owner or root.
@@ -2892,6 +2948,10 @@ client in the shell**.
   overlay renders `EXPIRED · denied by timeout` the moment the clock
   reaches zero whether or not punard has swept yet (14.4). Pressing `A`
   on a lapsed card gets `expired` from the daemon and the card says so.
+  The countdown is **display only**: punard decides on the boot clock
+  (14.4), so a card can lapse before its countdown ends (at reboot, or by
+  the drift allowance) and a wrong wall clock cannot keep one open. The
+  file carries no `lifetime`; its shape is unchanged.
 
 ---
 
@@ -3033,10 +3093,16 @@ it.
 `{"valid": true, "credential": "github", "expires_at": "…"}` or error
 `expired` / `not_found`.
 
-Expiry is computed against the clock **on validate** — no timer, no
-sweep (spec 6.3). An expired entry is dropped on the first validate that
-observes it and audited **once** (`credential.expire`, `result:
-"expired"`). A validate of an **unknown** token is **not audited at
+Expiry is computed **on validate** — no timer, no sweep (spec 6.3) — and
+on the **boot clock**, as for approvals (14.4, SMP-1405): each credential's
+TTL is a window opened at issuance, closed at the drift-shortened edge and
+at reboot, so rolling the wall clock back stretches nothing. `expires_at`
+is the wall-clock rendering, for display; `expires_in` is the whole seconds
+left on the drift-shortened window, floored. A broker that cannot read the
+boot clock issues and validates nothing (`internal`) and leaves the
+credentials it holds alone. An expired entry is dropped on the first
+validate that observes it and audited **once** (`credential.expire`,
+`result: "expired"`). A validate of an **unknown** token is **not audited at
 all**: there is nothing to attribute, and auditing it would hand any
 local process an audit-flood primitive (spec 6.4). A **successful**
 validate is not audited either, for the same reason.

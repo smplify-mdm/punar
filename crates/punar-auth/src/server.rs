@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use pam_client2::conv_mock::Conversation;
 use pam_client2::{Context, Flag};
+use punar_common::trusted_time::{BootStamp, BootWindow, SystemClock, TrustedClock};
 use rustix::net::sockopt::{Timeout, set_socket_timeout};
 use rustix::rand::{GetRandomFlags, getrandom};
 use zeroize::{Zeroize, Zeroizing};
@@ -63,7 +64,9 @@ pub fn session() -> io::Result<()> {
     // three-verdict rule exists to prevent. The caller sees `ok` with no
     // ticket, and punard refuses the change for a stated, fixable reason.
     let ticket = match (verdict, purpose) {
-        (Verdict::Ok, Purpose::Admin) => mint_ticket(Path::new(TICKET_DIR), uid),
+        (Verdict::Ok, Purpose::Admin) => {
+            mint_ticket(Path::new(TICKET_DIR), uid, &SystemClock::new())
+        }
         _ => None,
     };
     write_response(&mut writer, verdict, ticket)
@@ -106,13 +109,22 @@ fn decide(uid: u32, reader: &mut dyn Read) -> (Verdict, Purpose) {
 
 /// Create one single-use ticket for `uid` under `dir`, returning its name.
 ///
-/// THE FILE'S EXISTENCE IS THE WHOLE PROOF, which is why it has no contents and
-/// no signature. `dir` is root-owned and mode 0700, so an unprivileged process
+/// THE FILE'S EXISTENCE IS THE WHOLE PROOF OF WHO, which is why it has no
+/// signature. `dir` is root-owned and mode 0700, so an unprivileged process
 /// cannot create an entry in it; punard, which is root, therefore knows that
 /// any name it finds there was written by this daemon after a real PAM success.
-/// The uid is the SUBDIRECTORY rather than a field, so there is no parse step
-/// that could be got wrong and no format for a later edit to extend.
-fn mint_ticket(dir: &Path, uid: u32) -> Option<String> {
+/// The uid is the SUBDIRECTORY rather than a field, so no parse can confuse
+/// whose ticket it is.
+///
+/// THE CONTENTS SAY WHEN, and only when: one `BootStamp`
+/// (`{"boot_id":…,"raw_bt_ms":…}`) read from the boot clock at mint time
+/// (SMP-1405). punard judges the ticket's age against its own boot clock, so
+/// neither a wall clock stepped back nor a touched mtime can stretch it. A
+/// clock that cannot be read mints no ticket: the caller sees `ok` with no
+/// ticket, and punard refuses the change for a stated, fixable reason.
+fn mint_ticket(dir: &Path, uid: u32, clock: &dyn TrustedClock) -> Option<String> {
+    let stamp = clock.now()?;
+    let body = serde_json::to_vec(&stamp).ok()?;
     let per_uid = dir.join(uid.to_string());
     DirBuilder::new()
         .recursive(true)
@@ -122,7 +134,7 @@ fn mint_ticket(dir: &Path, uid: u32) -> Option<String> {
     // recursive(true) does not apply the mode to a directory that already
     // exists, and a wrong mode here is the one thing that would matter.
     fs::set_permissions(&per_uid, fs::Permissions::from_mode(0o700)).ok()?;
-    sweep_expired(&per_uid);
+    sweep_expired(&per_uid, clock);
 
     let mut raw = [0_u8; 32];
     let mut filled = 0;
@@ -136,17 +148,54 @@ fn mint_ticket(dir: &Path, uid: u32) -> Option<String> {
     let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
 
     let path: PathBuf = per_uid.join(&name);
-    OpenOptions::new()
+    // The stamp is written under a private name first and linked into place
+    // complete, so no reader — punard spending it, or another punar-authd
+    // sweeping — can ever find the ticket empty. The staging name starts
+    // with a dot, which is never a token and never swept.
+    let staging = per_uid.join(format!(".{name}.minting"));
+    let linked = OpenOptions::new()
         .write(true)
-        // create_new: a name this daemon just drew at random must not be able
-        // to land on an existing file, and 256 bits says it will not — so if it
-        // somehow does, that is a fact worth failing on rather than papering
-        // over by truncating whatever was there.
+        // create_new, here and in hard_link below: a name this daemon just
+        // drew at random must not be able to land on an existing file, and 256
+        // bits says it will not — so if it somehow does, that is a fact worth
+        // failing on rather than papering over by truncating whatever was
+        // there.
         .create_new(true)
         .mode(0o600)
-        .open(&path)
-        .ok()?;
+        .open(&staging)
+        .and_then(|mut file| file.write_all(&body))
+        .and_then(|()| fs::hard_link(&staging, &path));
+    let _ = fs::remove_file(&staging);
+    linked.ok()?;
     Some(name)
+}
+
+/// A minted ticket's name: 64 lowercase hexadecimal characters. Anything else
+/// in the directory (a staging file being written right now) is not one.
+fn is_ticket_name(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The largest ticket body this daemon writes, and the most it reads back.
+const TICKET_MAX_BYTES: u64 = 256;
+
+/// Whether the ticket at `path` is still within its window on `clock`. A file
+/// that cannot be read, is oversized, or holds no stamp is not.
+fn ticket_is_live(path: &Path, clock: &dyn TrustedClock) -> bool {
+    let mut body = Vec::new();
+    let read = fs::File::open(path)
+        .and_then(|file| file.take(TICKET_MAX_BYTES + 1).read_to_end(&mut body))
+        .is_ok();
+    if !read || body.len() as u64 > TICKET_MAX_BYTES {
+        return false;
+    }
+    serde_json::from_slice::<BootStamp>(&body).is_ok_and(|stamp| {
+        BootWindow::of_secs(stamp, crate::protocol::TICKET_MAX_AGE_SECS)
+            .is_open(clock.now().as_ref())
+    })
 }
 
 /// Remove EXPIRED tickets before minting another, so a session that asks
@@ -158,25 +207,21 @@ fn mint_ticket(dir: &Path, uid: u32) -> Option<String> {
 /// invalidated by the second. Each is single-use and each expires on its own
 /// clock; punard unlinks on use and re-checks the age, and that is where the
 /// guarantee lives.
-fn sweep_expired(per_uid: &Path) {
+///
+/// Age is read from each ticket's own stamp on the boot clock, never from its
+/// mtime. A ticket that cannot be dated (an empty one an older punar-authd
+/// minted, a damaged one, one from another boot) is not one to keep.
+fn sweep_expired(per_uid: &Path, clock: &dyn TrustedClock) {
     let Ok(entries) = fs::read_dir(per_uid) else {
         return;
     };
     for entry in entries.flatten() {
-        let expired = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .map(|when| {
-                when.elapsed()
-                    .map(|age| age.as_secs() > crate::protocol::TICKET_MAX_AGE_SECS)
-                    // A modification time in the future is a clock that moved.
-                    // Treat it as expired: a ticket that cannot be aged is not
-                    // one to keep.
-                    .unwrap_or(true)
-            })
-            .unwrap_or(false);
-        if expired {
-            let _ = fs::remove_file(entry.path());
+        if !entry.file_name().to_str().is_some_and(is_ticket_name) {
+            continue;
+        }
+        let path = entry.path();
+        if !ticket_is_live(&path, clock) {
+            let _ = fs::remove_file(path);
         }
     }
 }
@@ -259,6 +304,8 @@ fn write_response(
 
 #[cfg(test)]
 mod tests {
+    use punar_common::trusted_time::ManualClock;
+
     use super::*;
 
     fn framed(body: &[u8]) -> Vec<u8> {
@@ -333,11 +380,15 @@ mod tests {
         }
     }
 
+    const BOOT: &str = "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b";
+    const NEXT_BOOT: &str = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b";
+
     #[test]
     fn a_minted_ticket_is_a_root_only_file_named_by_its_own_secret() {
         let dir = std::env::temp_dir().join(format!("punar-auth-tickets-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let name = mint_ticket(&dir, 1000).expect("mint");
+        let clock = ManualClock::new(BOOT, 7_000);
+        let name = mint_ticket(&dir, 1000, &clock).expect("mint");
         assert_eq!(name.len(), 64, "256 bits, hex");
         assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
 
@@ -352,18 +403,43 @@ mod tests {
             fs::metadata(&ticket).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(fs::read(&ticket).unwrap(), Vec::<u8>::new(), "no contents");
+        // The only contents are WHEN, on the boot clock: no uid, no name, no
+        // secret, and nothing a wall clock could move.
+        let stamp: BootStamp = serde_json::from_slice(&fs::read(&ticket).unwrap()).unwrap();
+        assert_eq!(
+            stamp,
+            BootStamp {
+                boot_id: BOOT.to_string(),
+                raw_bt_ms: 7_000
+            }
+        );
 
         // A second mint is a different secret, in the same place.
-        let second = mint_ticket(&dir, 1000).expect("mint again");
+        let second = mint_ticket(&dir, 1000, &clock).expect("mint again");
         assert_ne!(second, name);
         assert!(per_uid.join(&second).exists());
         assert!(ticket.exists(), "and it did not disturb the first");
 
         // A different uid cannot reach it: the uid is the directory.
-        let other = mint_ticket(&dir, 1001).expect("mint for another uid");
+        let other = mint_ticket(&dir, 1001, &clock).expect("mint for another uid");
         assert!(dir.join("1001").join(&other).exists());
         assert!(!dir.join("1001").join(&name).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A clock that cannot be read mints nothing, rather than a ticket that
+    /// could not be dated.
+    #[test]
+    fn no_readable_clock_mints_no_ticket() {
+        let dir = std::env::temp_dir().join(format!("punar-auth-noclock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let clock = ManualClock::new(BOOT, 7_000);
+        clock.set(None);
+        assert_eq!(mint_ticket(&dir, 1000, &clock), None);
+        let left = fs::read_dir(dir.join("1000"))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(left, 0, "no empty ticket was left behind");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -371,20 +447,75 @@ mod tests {
     fn minting_sweeps_a_ticket_that_has_outlived_its_window() {
         let dir = std::env::temp_dir().join(format!("punar-auth-sweep-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let stale = mint_ticket(&dir, 1000).expect("mint");
+        let clock = ManualClock::new(BOOT, 7_000);
+        let stale = mint_ticket(&dir, 1000, &clock).expect("mint");
         let per_uid = dir.join("1000");
         let path = per_uid.join(&stale);
-        // Age it past the window by moving its mtime, which is the only input
-        // the sweep reads.
-        let old = std::time::SystemTime::now()
-            - Duration::from_secs(crate::protocol::TICKET_MAX_AGE_SECS + 60);
-        let file = fs::File::options().write(true).open(&path).unwrap();
-        file.set_modified(old).unwrap();
-        drop(file);
+        // An empty ticket, as an older punar-authd minted them, and one from
+        // the previous boot: neither can be dated here.
+        let legacy = per_uid.join("00".repeat(32));
+        fs::write(&legacy, b"").unwrap();
+        let previous_boot = per_uid.join("11".repeat(32));
+        fs::write(
+            &previous_boot,
+            format!(r#"{{"boot_id":"{NEXT_BOOT}","raw_bt_ms":7000}}"#),
+        )
+        .unwrap();
 
-        let fresh = mint_ticket(&dir, 1000).expect("mint again");
+        // Age the first past its window on the boot clock. Its mtime is left
+        // alone on purpose: the sweep does not read it.
+        clock.advance_secs(crate::protocol::TICKET_MAX_AGE_SECS);
+        let fresh = mint_ticket(&dir, 1000, &clock).expect("mint again");
         assert!(!path.exists(), "the stale ticket did not survive the sweep");
+        assert!(!legacy.exists(), "an undatable ticket is not kept");
+        assert!(
+            !previous_boot.exists(),
+            "a ticket from another boot is not kept"
+        );
         assert!(per_uid.join(&fresh).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Another punar-authd may be minting in the same directory at the same
+    /// moment. Its staging file is empty until it is linked into place, and
+    /// the sweep must not mistake it for an undatable ticket; nor may a
+    /// minted ticket ever be visible empty.
+    #[test]
+    fn minting_never_sweeps_a_ticket_still_being_written() {
+        let dir = std::env::temp_dir().join(format!("punar-auth-staging-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let clock = ManualClock::new(BOOT, 7_000);
+        let first = mint_ticket(&dir, 1000, &clock).expect("mint");
+        let per_uid = dir.join("1000");
+        let staging = per_uid.join(format!(".{}.minting", "22".repeat(32)));
+        fs::write(&staging, b"").unwrap();
+        mint_ticket(&dir, 1000, &clock).expect("mint again");
+        assert!(
+            staging.exists(),
+            "a concurrent mint's staging file was swept"
+        );
+        // No staging file of our own is left behind, and every ticket holds
+        // its stamp.
+        let names: Vec<String> = fs::read_dir(&per_uid)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.iter().filter(|n| n.starts_with('.')).count(), 1);
+        assert!(ticket_is_live(&per_uid.join(&first), &clock));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The sweep keeps a ticket that is still inside its window.
+    #[test]
+    fn minting_keeps_a_ticket_that_is_still_live() {
+        let dir = std::env::temp_dir().join(format!("punar-auth-keep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let clock = ManualClock::new(BOOT, 7_000);
+        let first = mint_ticket(&dir, 1000, &clock).expect("mint");
+        clock.advance_secs(60);
+        let second = mint_ticket(&dir, 1000, &clock).expect("mint again");
+        assert!(dir.join("1000").join(&first).exists());
+        assert!(dir.join("1000").join(&second).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

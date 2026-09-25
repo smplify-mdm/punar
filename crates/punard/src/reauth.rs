@@ -9,22 +9,33 @@
 //! re-authenticates against punar-authd, which mints a ticket, and punard spends
 //! it.
 //!
-//! WHY THE TICKET NEEDS NO SIGNATURE, AND HAS NO CONTENTS. The directory is
-//! root-owned and mode 0700. An unprivileged process cannot create an entry in
-//! it, so a name found there was written by punar-authd after a real PAM
-//! success. The uid is the *subdirectory*, not a field, so there is no format
-//! to parse and no parse to get wrong — `tickets/1000/<token>` can only ever
-//! mean "uid 1000 proved itself". A signature would add key management to
-//! protect a fact the filesystem already states.
+//! WHY THE TICKET NEEDS NO SIGNATURE. The directory is root-owned and mode
+//! 0700. An unprivileged process cannot create an entry in it, so a name found
+//! there was written by punar-authd after a real PAM success. The uid is the
+//! *subdirectory*, not a field, so `tickets/1000/<token>` can only ever mean
+//! "uid 1000 proved itself". A signature would add key management to protect a
+//! fact the filesystem already states.
+//!
+//! WHAT THE TICKET SAYS: WHEN, ON THE BOOT CLOCK (SMP-1405). The file holds one
+//! [`BootStamp`] — `{"boot_id": …, "raw_bt_ms": …}` — taken by punar-authd at
+//! the moment of the PAM success, and its age is judged against punard's own
+//! boot clock ([`punar_common::trusted_time`]). It used to be the file's mtime
+//! against the wall clock, which anyone who could step that clock back could
+//! stretch. A ticket is refused as expired when it is from another boot, when
+//! its stamp is in the future of this clock, when it carries no readable stamp
+//! (an empty ticket an older punar-authd minted during an upgrade: the person
+//! types their password again), or when punard cannot read its own clock.
 //!
 //! WHAT SPENDING MEANS. The unlink is the commit, and it happens before the age
-//! is judged. Two callers racing on one token both see the file; only one
-//! `remove_file` succeeds, and that one is the spender. Checking the age first
+//! is judged. Two callers racing on one token may both read the file; only one
+//! `remove_file` succeeds, and that one is the spender. Judging the age first
 //! and removing afterwards would leave a window where both proceed.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+
+use punar_common::trusted_time::{BootStamp, BootWindow, TrustedClock};
 
 /// Where `punar-authd` mints tickets (`punar_auth::protocol::TICKET_DIR`, not
 /// imported: punard does not link libpam and must not grow a dependency on the
@@ -34,12 +45,18 @@ pub const TICKET_DIR: &str = "/run/punar-authd/tickets";
 /// How long a ticket may be presented for. Mirrors
 /// `punar_auth::protocol::TICKET_MAX_AGE_SECS`; the minting side sweeps at this
 /// age too, so the two agreeing is belt and braces rather than a single point.
+/// Measured on the boot clock and shortened by the drift allowance, so a
+/// ticket is refused a few milliseconds before two minutes, never after.
 pub const TICKET_MAX_AGE_SECS: u64 = 120;
 
 /// A token is 256 bits of hex and nothing else. Checked before the name is
 /// joined to a path, so `..`, `/` and every other traversal shape is refused as
 /// a malformed token rather than resolved.
 const TOKEN_LEN: usize = 64;
+
+/// More than any stamp punar-authd writes (a 36-byte boot id and an integer);
+/// a larger file is not a ticket, and is not read past this.
+const TICKET_MAX_BYTES: u64 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReauthError {
@@ -49,9 +66,11 @@ pub enum ReauthError {
     /// No such ticket for this uid — never minted, already spent, or minted for
     /// somebody else.
     Missing,
-    /// It existed, and it was too old. Distinguished from `Missing` because the
-    /// remedy differs: this one says "type your password again", and saying
-    /// "no such ticket" there would send a person looking for a fault.
+    /// It existed, and it was too old — or could not be dated at all, which is
+    /// the same answer for the same reason. Distinguished from `Missing`
+    /// because the remedy differs: this one says "type your password again",
+    /// and saying "no such ticket" there would send a person looking for a
+    /// fault.
     Expired,
 }
 
@@ -82,9 +101,14 @@ impl ReauthError {
     }
 }
 
-/// Spend `token` on behalf of `uid`. Consumes the ticket whether or not it
-/// turns out to be fresh: a presented ticket is spent.
-pub fn consume(dir: &Path, uid: u32, token: &str, now: SystemTime) -> Result<(), ReauthError> {
+/// Spend `token` on behalf of `uid`, judging its age on `clock`. Consumes the
+/// ticket whether or not it turns out to be fresh: a presented ticket is spent.
+pub fn consume(
+    dir: &Path,
+    uid: u32,
+    token: &str,
+    clock: &dyn TrustedClock,
+) -> Result<(), ReauthError> {
     if token.len() != TOKEN_LEN
         || !token
             .bytes()
@@ -93,18 +117,18 @@ pub fn consume(dir: &Path, uid: u32, token: &str, now: SystemTime) -> Result<(),
         return Err(ReauthError::Malformed);
     }
     let path: PathBuf = dir.join(uid.to_string()).join(token);
-    let minted_at = fs::metadata(&path)
-        .and_then(|meta| meta.modified())
+    let mut body = Vec::new();
+    fs::File::open(&path)
+        .and_then(|file| file.take(TICKET_MAX_BYTES + 1).read_to_end(&mut body))
         .map_err(|_| ReauthError::Missing)?;
     // The unlink IS the spend. Losing this race means somebody else spent it.
     fs::remove_file(&path).map_err(|_| ReauthError::Missing)?;
 
-    let age = now
-        .duration_since(minted_at)
-        // A ticket stamped in the future is a clock that moved. Treat it as
-        // unusable rather than as infinitely fresh.
-        .unwrap_or_else(|_| Duration::from_secs(TICKET_MAX_AGE_SECS + 1));
-    if age.as_secs() > TICKET_MAX_AGE_SECS {
+    let minted: Option<BootStamp> = (body.len() as u64 <= TICKET_MAX_BYTES)
+        .then(|| serde_json::from_slice(&body).ok())
+        .flatten();
+    let window = minted.map(|stamp| BootWindow::of_secs(stamp, TICKET_MAX_AGE_SECS));
+    if !window.is_some_and(|w| w.is_open(clock.now().as_ref())) {
         return Err(ReauthError::Expired);
     }
     Ok(())
@@ -112,10 +136,15 @@ pub fn consume(dir: &Path, uid: u32, token: &str, now: SystemTime) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
     use std::os::unix::fs::DirBuilderExt;
 
+    use punar_common::trusted_time::{ManualClock, live_budget_ms};
+
     use super::*;
+
+    const BOOT: &str = "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b";
+    const NEXT_BOOT: &str = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b";
+    const T0: i64 = 5_000_000;
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("punard-reauth-{tag}-{}", std::process::id()));
@@ -123,7 +152,8 @@ mod tests {
         dir
     }
 
-    fn mint(dir: &Path, uid: u32, token: &str) -> PathBuf {
+    /// Write a ticket body exactly where punar-authd would.
+    fn mint_body(dir: &Path, uid: u32, token: &str, body: &[u8]) -> PathBuf {
         let per_uid = dir.join(uid.to_string());
         fs::DirBuilder::new()
             .recursive(true)
@@ -131,8 +161,14 @@ mod tests {
             .create(&per_uid)
             .unwrap();
         let path = per_uid.join(token);
-        File::create(&path).unwrap();
+        fs::write(&path, body).unwrap();
         path
+    }
+
+    /// A ticket stamped at `clock`'s current reading, as punar-authd mints it.
+    fn mint(dir: &Path, uid: u32, token: &str, clock: &ManualClock) -> PathBuf {
+        let stamp = clock.now().unwrap();
+        mint_body(dir, uid, token, &serde_json::to_vec(&stamp).unwrap())
     }
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -140,11 +176,12 @@ mod tests {
     #[test]
     fn a_fresh_ticket_is_accepted_exactly_once() {
         let dir = scratch("once");
-        let path = mint(&dir, 1000, TOKEN);
-        assert_eq!(consume(&dir, 1000, TOKEN, SystemTime::now()), Ok(()));
+        let clock = ManualClock::new(BOOT, T0);
+        let path = mint(&dir, 1000, TOKEN, &clock);
+        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
         assert!(!path.exists(), "spending a ticket removes it");
         assert_eq!(
-            consume(&dir, 1000, TOKEN, SystemTime::now()),
+            consume(&dir, 1000, TOKEN, &clock),
             Err(ReauthError::Missing),
             "a second presentation of the same ticket is not a second authorization"
         );
@@ -158,22 +195,27 @@ mod tests {
     #[test]
     fn a_ticket_minted_for_one_uid_is_invisible_to_another() {
         let dir = scratch("uid");
-        let path = mint(&dir, 1000, TOKEN);
+        let clock = ManualClock::new(BOOT, T0);
+        let path = mint(&dir, 1000, TOKEN, &clock);
         assert_eq!(
-            consume(&dir, 1001, TOKEN, SystemTime::now()),
+            consume(&dir, 1001, TOKEN, &clock),
             Err(ReauthError::Missing)
         );
         assert!(path.exists(), "and the real owner's ticket was not spent");
-        assert_eq!(consume(&dir, 1000, TOKEN, SystemTime::now()), Ok(()));
+        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_expired_ticket_is_refused_and_still_spent() {
         let dir = scratch("expired");
-        let path = mint(&dir, 1000, TOKEN);
-        let later = SystemTime::now() + Duration::from_secs(TICKET_MAX_AGE_SECS + 1);
-        assert_eq!(consume(&dir, 1000, TOKEN, later), Err(ReauthError::Expired));
+        let clock = ManualClock::new(BOOT, T0);
+        let path = mint(&dir, 1000, TOKEN, &clock);
+        clock.advance_secs(TICKET_MAX_AGE_SECS + 1);
+        assert_eq!(
+            consume(&dir, 1000, TOKEN, &clock),
+            Err(ReauthError::Expired)
+        );
         assert!(
             !path.exists(),
             "an expired ticket must not survive to be retried against a lenient clock"
@@ -181,12 +223,109 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The window is two minutes less the drift allowance (24 ms), and the
+    /// edge is exact: the last live millisecond is accepted, the next refused.
     #[test]
-    fn a_ticket_exactly_at_the_window_edge_is_still_good() {
+    fn the_window_edge_is_exact_and_early() {
         let dir = scratch("edge");
-        mint(&dir, 1000, TOKEN);
-        let edge = SystemTime::now() + Duration::from_secs(TICKET_MAX_AGE_SECS);
-        assert_eq!(consume(&dir, 1000, TOKEN, edge), Ok(()));
+        let budget = live_budget_ms(120_000);
+        assert_eq!(budget, 119_976);
+
+        let clock = ManualClock::new(BOOT, T0);
+        mint(&dir, 1000, TOKEN, &clock);
+        clock.advance_ms(budget - 1);
+        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
+
+        let clock = ManualClock::new(BOOT, T0);
+        mint(&dir, 1000, TOKEN, &clock);
+        clock.advance_ms(budget);
+        assert_eq!(
+            consume(&dir, 1000, TOKEN, &clock),
+            Err(ReauthError::Expired)
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A ticket from another boot cannot be dated here. /run is a tmpfs, so
+    /// one should never survive a reboot, and if one somehow does it is dead.
+    #[test]
+    fn a_ticket_from_another_boot_is_refused() {
+        let dir = scratch("boot");
+        let clock = ManualClock::new(BOOT, T0);
+        let path = mint(&dir, 1000, TOKEN, &clock);
+        clock.reboot(NEXT_BOOT, T0 + 1);
+        assert_eq!(
+            consume(&dir, 1000, TOKEN, &clock),
+            Err(ReauthError::Expired)
+        );
+        assert!(!path.exists(), "and it was spent all the same");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A stamp in this clock's future is a forgery or a clock that moved;
+    /// either way it is not "infinitely fresh".
+    #[test]
+    fn a_ticket_stamped_in_the_future_is_refused() {
+        let dir = scratch("future");
+        let clock = ManualClock::new(BOOT, T0);
+        clock.advance_secs(30);
+        mint(&dir, 1000, TOKEN, &clock);
+        let earlier = ManualClock::new(BOOT, T0);
+        assert_eq!(
+            consume(&dir, 1000, TOKEN, &earlier),
+            Err(ReauthError::Expired)
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// No wall clock is consulted: a ticket whose file mtime says 1970, or
+    /// next century, is judged by its stamp alone.
+    #[test]
+    fn the_file_mtime_is_not_an_input() {
+        let dir = scratch("mtime");
+        let clock = ManualClock::new(BOOT, T0);
+        let path = mint(&dir, 1000, TOKEN, &clock);
+        let file = fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH).unwrap();
+        drop(file);
+        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A ticket that cannot be dated is refused as expired and spent: the
+    /// empty ticket an older punar-authd mints, a damaged body, a stamp with
+    /// extra fields, an oversized file — and any ticket at all while punard
+    /// cannot read its own clock.
+    #[test]
+    fn a_ticket_that_cannot_be_dated_is_refused() {
+        let dir = scratch("undated");
+        let clock = ManualClock::new(BOOT, T0);
+        let stamp = serde_json::to_string(&clock.now().unwrap()).unwrap();
+        let oversized = format!("{stamp}{}", " ".repeat(TICKET_MAX_BYTES as usize));
+        for body in [
+            String::new(),
+            "not json".to_string(),
+            format!(r#"{{"boot_id":"{BOOT}"}}"#),
+            format!(r#"{{"boot_id":"{BOOT}","raw_bt_ms":{T0},"extra":1}}"#),
+            format!(r#"{{"boot_id":"not-a-boot","raw_bt_ms":{T0}}}"#),
+            format!(r#"{{"boot_id":"{BOOT}","raw_bt_ms":-1}}"#),
+            oversized,
+        ] {
+            let path = mint_body(&dir, 1000, TOKEN, body.as_bytes());
+            assert_eq!(
+                consume(&dir, 1000, TOKEN, &clock),
+                Err(ReauthError::Expired),
+                "{body:?}"
+            );
+            assert!(!path.exists(), "an undatable ticket is still spent");
+        }
+
+        mint(&dir, 1000, TOKEN, &clock);
+        clock.set(None);
+        assert_eq!(
+            consume(&dir, 1000, TOKEN, &clock),
+            Err(ReauthError::Expired)
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -197,6 +336,7 @@ mod tests {
     #[test]
     fn a_token_that_is_not_hex_never_becomes_a_path() {
         let dir = scratch("shape");
+        let clock = ManualClock::new(BOOT, T0);
         for bad in [
             "",
             "short",
@@ -206,7 +346,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefg",
         ] {
             assert_eq!(
-                consume(&dir, 1000, bad, SystemTime::now()),
+                consume(&dir, 1000, bad, &clock),
                 Err(ReauthError::Malformed),
                 "token {bad:?}"
             );
@@ -217,8 +357,9 @@ mod tests {
     #[test]
     fn an_absent_directory_is_a_missing_ticket_and_not_a_crash() {
         let dir = scratch("absent");
+        let clock = ManualClock::new(BOOT, T0);
         assert_eq!(
-            consume(&dir, 1000, TOKEN, SystemTime::now()),
+            consume(&dir, 1000, TOKEN, &clock),
             Err(ReauthError::Missing)
         );
     }

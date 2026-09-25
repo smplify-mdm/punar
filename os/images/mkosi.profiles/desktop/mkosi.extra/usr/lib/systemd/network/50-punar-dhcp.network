@@ -44,9 +44,10 @@ UseTimezone=yes
 # THE NETWORK DOES NOT CHOOSE THIS MACHINE'S CLOCK. networkd's default,
 # UseNTP=yes, hands systemd-timesyncd whatever NTP server a DHCP server names,
 # and timesyncd speaks unauthenticated SNTP — so whoever runs the network
-# could step the wall clock backward or forward. Privilege grants and pending
-# approvals (M9) expire by that clock, and a clock stepped back keeps an
-# elevation alive past the window the person approved. timesyncd uses its
+# could step the wall clock backward or forward, and with it every audit
+# timestamp and every deadline that must outlive a reboot. (Grants, approvals,
+# tickets and credentials expire on the boot clock since SMP-1405, which no
+# network can move.) timesyncd uses its
 # built-in FallbackNTP= servers instead, the same ones on every network. This
 # takes away the network's right to PICK the server; it does not authenticate
 # the one timesyncd talks to, so an on-path attacker can still lie about the

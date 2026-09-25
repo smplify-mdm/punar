@@ -22,9 +22,11 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use punar_common::trusted_time::ManualClock;
 use punard::authz::{Peer, PeerSource};
 use punard::capability::Registry;
 use punard::capability::mock::MockCapability;
@@ -54,12 +56,19 @@ const SMELLY_PID: i32 = 4244;
 /// The uid the shipped image gives the session user, and the uid an
 /// agent-raised approval is routed to.
 const CONSOLE_UID: u32 = 1000;
+/// The boot every test daemon starts in, and the one a simulated reboot
+/// moves to. Expiry is decided on this clock, never on the wall clock
+/// (SMP-1405), so the tests move it instead of sleeping or rewriting files.
+const BOOT: &str = "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b";
+const NEXT_BOOT: &str = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b";
 
 struct TestDaemon {
     dir: PathBuf,
     handle: Option<DaemonHandle>,
     mock: MockCapability,
     sockets: u32,
+    /// The boot clock, shared across restarts exactly as the machine's is.
+    clock: Arc<ManualClock>,
 }
 
 impl TestDaemon {
@@ -111,6 +120,7 @@ punar-agent-notasession.scope\n",
         fs::create_dir_all(&state_dir).unwrap();
         let mock = MockCapability::with_default(GATED, json!("enabled"), json!("enabled"));
         let registry = Registry::new(vec![Box::new(mock.clone())]);
+        let clock = Arc::new(ManualClock::new(BOOT, 60_000));
         let cfg = DaemonConfig {
             group_file,
             passwd_file,
@@ -122,6 +132,7 @@ punar-agent-notasession.scope\n",
             // compiled-in shipped document, which is the same bytes the
             // image installs.
             ai_defaults_file: dir.join("absent-ai-defaults.yaml"),
+            trusted_clock: clock.clone(),
             ..DaemonConfig::new(dir.join("punard.sock"), state_dir, dir.join("audit.jsonl"))
         };
         let daemon = Daemon::new(cfg, registry).unwrap();
@@ -132,6 +143,7 @@ punar-agent-notasession.scope\n",
             handle: Some(handle),
             mock,
             sockets: 0,
+            clock,
         }
     }
 
@@ -158,6 +170,7 @@ punar-agent-notasession.scope\n",
             io_timeout: Duration::from_secs(5),
             console_uid: CONSOLE_UID,
             ai_defaults_file: self.dir.join("absent-ai-defaults.yaml"),
+            trusted_clock: self.clock.clone(),
             ..DaemonConfig::new(
                 self.dir.join(format!("punard-{}.sock", self.sockets)),
                 self.dir.join("state"),
@@ -195,25 +208,26 @@ punar-agent-notasession.scope\n",
         }));
     }
 
-    /// Rewrite a record's `expires_at` into the past and reload, so a lapse
-    /// can be tested without sleeping out a five-minute TTL. The daemon
-    /// still has to *notice*, which is what is under test.
-    fn expire_record_now(&mut self, approval_id: &str) {
-        let path = self.record_path(approval_id);
-        let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        record["approval"]["expires_at"] = json!("2020-01-01T00:00:00Z");
-        fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    /// Let `secs` pass on the boot clock — the only clock expiry reads — so
+    /// a lapse can be tested without sleeping out a five-minute TTL. The
+    /// daemon still has to *notice*, which is what is under test.
+    fn let_time_pass(&self, secs: u64) {
+        self.clock.advance_secs(secs);
     }
 
-    /// The same trick for a grant.
-    fn expire_grant_now(&mut self, grant_id: &str) {
-        let path = self
-            .dir
-            .join("state/grants")
-            .join(format!("{grant_id}.json"));
-        let mut grant: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        grant["expires_at"] = json!("2020-01-01T00:00:00Z");
-        fs::write(&path, serde_json::to_vec_pretty(&grant).unwrap()).unwrap();
+    /// Simulate a reboot: a new boot id, and a raw clock that starts again
+    /// near zero. Every grant and pending approval lapses with it.
+    fn reboot(&self) {
+        self.clock.reboot(NEXT_BOOT, 1_000);
+    }
+
+    /// Strip the boot-clock window from a persisted record, leaving exactly
+    /// what an older punard wrote.
+    fn make_legacy(path: &std::path::Path) {
+        let mut record: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert!(record.get("lifetime").is_some(), "{record}");
+        record.as_object_mut().unwrap().remove("lifetime");
+        fs::write(path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
     }
 
     /// Drop an organization AI authority document into `policy.d`, with the
@@ -761,7 +775,8 @@ fn an_expired_approval_can_never_be_executed() {
     let mut daemon = TestDaemon::as_agent(CONSOLE_UID);
     let approval_id = gated_approval_id(&daemon);
 
-    daemon.expire_record_now(&approval_id);
+    // The TTL runs out on the boot clock (300 s less the drift allowance).
+    daemon.let_time_pass(300);
     daemon.become_root();
 
     // A read sweeps it. There is no timer anywhere (SPEC section 6.3).
@@ -1187,7 +1202,7 @@ fn a_credential_approval_is_created_by_root_and_spent_once() {
 /// standing grant.
 #[test]
 fn an_approved_credential_approval_still_expires() {
-    let mut root = TestDaemon::as_root();
+    let root = TestDaemon::as_root();
     let created = root.call(
         "approvals.create",
         Some(json!({
@@ -1205,10 +1220,7 @@ fn an_approved_credential_approval_still_expires() {
         .unwrap()
         .to_string();
     root.resolve(&approval_id, "approved");
-    root.expire_record_now(&approval_id);
-    // Reload so the daemon reads the rewritten record, exactly as a restart
-    // would; the store is in memory while punard runs.
-    root.become_root();
+    root.let_time_pass(300);
 
     let consumed = root.call(
         "approvals.consume",
@@ -1410,7 +1422,7 @@ fn a_grant_does_not_leak_to_another_capability() {
 /// "Fifteen minutes" is a promise the daemon keeps, not a label.
 #[test]
 fn a_grant_expires_for_real() {
-    let mut user = TestDaemon::as_user(CONSOLE_UID);
+    let user = TestDaemon::as_user(CONSOLE_UID);
     let requested = user.call(
         "privilege.request",
         Some(json!({
@@ -1430,9 +1442,9 @@ fn a_grant_expires_for_real() {
         .to_string();
     assert!(user.set("disabled").get("result").is_some());
 
-    // Push the window into the past, the way a minute of wall clock would.
-    user.expire_grant_now(&grant_id);
-    user.become_user(CONSOLE_UID);
+    // A minute passes on the boot clock, which is the only clock the grant
+    // is judged on.
+    user.let_time_pass(60);
 
     let status = user.call("privilege.status", None);
     assert!(
@@ -1457,6 +1469,121 @@ fn a_grant_expires_for_real() {
     // The lapse is audited once, however many times anyone looks.
     user.call("privilege.status", None);
     assert_eq!(user.events("privilege.expire").len(), 1);
+}
+
+/// Mint a one-minute grant for the console user and hand back its id.
+fn granted(user: &TestDaemon, minutes: u64) -> String {
+    let requested = user.call(
+        "privilege.request",
+        Some(json!({
+            "capability": GATED,
+            "reason": "reboot test",
+            "duration_minutes": minutes,
+        })),
+    );
+    let approval_id = requested["error"]["details"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resolved = user.resolve(&approval_id, "approved");
+    resolved["result"]["execution"]["grant_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// **Grants lapse at reboot** (SMP-1405). The grant carries a window on the
+/// boot clock, and a window from another boot cannot be judged here — even
+/// though its wall-clock `expires_at` is still an hour away and the raw
+/// clock of the new boot reads lower than when it was granted.
+#[test]
+fn a_grant_lapses_at_reboot() {
+    let mut user = TestDaemon::as_user(CONSOLE_UID);
+    let grant_id = granted(&user, 60);
+    let status = user.call("privilege.status", None);
+    let grant = &status["result"]["grants"][0];
+    assert_eq!(grant["grant_id"], grant_id);
+    // Additive on the wire: the window rides beside the display expiry.
+    assert_eq!(grant["lifetime"]["start"]["boot_id"], BOOT);
+    assert_eq!(grant["lifetime"]["duration_ms"], 3_600_000);
+    assert!(grant["expires_at"].as_str().unwrap().ends_with('Z'));
+    assert!(user.set("disabled").get("result").is_some());
+
+    user.reboot();
+    user.become_user(CONSOLE_UID);
+
+    let status = user.call("privilege.status", None);
+    assert!(
+        status["result"]["grants"].as_array().unwrap().is_empty(),
+        "a grant from the previous boot is not live: {status}"
+    );
+    let expiries = user.events("privilege.expire");
+    assert_eq!(expiries.len(), 1);
+    assert_eq!(expiries[0]["resource"], grant_id);
+    assert!(
+        !user
+            .dir
+            .join("state/grants")
+            .join(format!("{grant_id}.json"))
+            .exists(),
+        "a lapsed grant is unlinked"
+    );
+    assert_eq!(user.set("enabled")["error"]["code"], "denied");
+}
+
+/// A pending approval lapses at reboot too: nobody can answer a card that
+/// was raised in a boot that no longer exists.
+#[test]
+fn a_pending_approval_lapses_at_reboot() {
+    let mut daemon = TestDaemon::as_agent(CONSOLE_UID);
+    let approval_id = gated_approval_id(&daemon);
+    daemon.reboot();
+    daemon.become_root();
+
+    let listed = daemon.call("approvals.list", None);
+    assert_eq!(
+        listed["result"]["approvals"][0]["approval"]["status"],
+        "expired"
+    );
+    let late = daemon.resolve(&approval_id, "approved");
+    assert_eq!(late["error"]["code"], "expired");
+    assert_eq!(daemon.mock.apply_calls(), 0);
+    assert_eq!(daemon.events("approval.expire").len(), 1);
+}
+
+/// Records an older punard wrote carry no boot-clock window. After the
+/// upgrade they are dead — fail closed — and swept at the first read: an
+/// in-flight grant lapses and its holder asks again, a pending card
+/// expires and its requester asks again. Nothing is revived.
+#[test]
+fn records_an_older_punard_wrote_are_expired_after_an_upgrade() {
+    let mut user = TestDaemon::as_user(CONSOLE_UID);
+    let grant_id = granted(&user, 30);
+    // A second request, left pending.
+    let pending = user.call(
+        "privilege.request",
+        Some(json!({"capability": GATED, "reason": "still waiting"})),
+    );
+    let pending_id = pending["error"]["details"]["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    TestDaemon::make_legacy(
+        &user
+            .dir
+            .join("state/grants")
+            .join(format!("{grant_id}.json")),
+    );
+    TestDaemon::make_legacy(&user.record_path(&pending_id));
+    user.become_user(CONSOLE_UID);
+
+    let status = user.call("privilege.status", None);
+    assert!(status["result"]["grants"].as_array().unwrap().is_empty());
+    assert_eq!(user.events("privilege.expire").len(), 1);
+    let got = user.call("approvals.get", Some(json!({ "approval_id": pending_id })));
+    assert_eq!(got["result"]["approval"]["status"], "expired");
+    assert_eq!(user.set("disabled")["error"]["code"], "denied");
 }
 
 /// **A grant is never issued to an AI agent** (SPEC sections 48, 60). Agents

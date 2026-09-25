@@ -1183,9 +1183,12 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     }
 }
 
-/// A ticket exactly as punar-authd mints one: an empty 0600 file named by the
-/// token, in a 0700 directory named by the uid that proved its password.
+/// A ticket exactly as punar-authd mints one: a file named by the token, in a
+/// 0700 directory named by the uid that proved its password, holding the boot
+/// clock's reading at mint time (SMP-1405) — the daemon under test reads the
+/// same system clock and judges the ticket's age against it.
 fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
+    use punar_common::trusted_time::{SystemClock, TrustedClock};
     use std::os::unix::fs::DirBuilderExt;
     let per_uid = dir.join("tickets").join(uid.to_string());
     fs::DirBuilder::new()
@@ -1194,7 +1197,8 @@ fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
         .create(&per_uid)
         .unwrap();
     let path = per_uid.join(token);
-    fs::File::create(&path).unwrap();
+    let stamp = SystemClock::new().now().expect("this machine's boot clock");
+    fs::write(&path, serde_json::to_vec(&stamp).unwrap()).unwrap();
     path
 }
 

@@ -1,13 +1,14 @@
 // Punar: nobody sets this machine's clock through timedated.
 //
-// WHY THIS FILE EXISTS. Privilege grants and pending approvals (M9) expire by
-// the wall clock: Grant::is_live and ApprovalEnvelope::has_lapsed in
-// crates/punar-common/src/approval.rs compare it with `expires_at`. Step the
-// clock back and an elevated grant outlives the 1-60 minute window the person
-// approved, and an approval stays answerable after it should have lapsed.
-// systemd ships the three actions below as auth_admin_keep, so any account
-// that can answer an administrator prompt could move the clock, and every
-// expiry with it.
+// WHY THIS FILE EXISTS. The audit trail's timestamps, and the deadlines that
+// must outlive a reboot (unattended-install answers, ledger and detection
+// retention, alert quiet windows), read the wall clock; step it and each of
+// them moves. Privilege grants, pending approvals, re-authentication tickets
+// and brokered credentials no longer do: since SMP-1405 they expire on the
+// boot clock (crates/punar-common/src/trusted_time.rs), which no one can set,
+// and a reboot ends them. systemd ships the three actions below as
+// auth_admin_keep, so any account that can answer an administrator prompt
+// could move the wall clock, and every timestamp with it.
 //
 // THE DECISION. NO, for every subject. Not a password prompt, because a prompt
 // is a yes to whoever can get one answered:
@@ -19,7 +20,7 @@
 //
 // WHAT THIS DOES NOT DO, stated so nobody reads more into it:
 //   * set-timezone is DELIBERATELY ABSENT. A zone changes how the instant is
-//     shown, not which instant it is, and expiry compares UTC; the
+//     shown, not which instant it is, and nothing Punar decides reads it; the
 //     time.timezone capability and the network-provided zone keep working.
 //   * Root is unaffected. timedated skips polkit for a caller that holds
 //     CAP_SYS_ADMIN, so a root shell can still `timedatectl set-time`. This

@@ -19,18 +19,28 @@
 //!
 //! # Expiry has no timer (SPEC section 6.3)
 //!
-//! Expiry is computed from `expires_at` against the clock **when a token is
-//! presented**. There is no sweep thread, no `punar-secrets.timer`, and
-//! zero idle CPU. The honest consequence, stated rather than hidden: a
-//! token that is never presented again produces no `credential.expire`
-//! event. The event records the moment expiry was *observed*; `expires_at`
-//! records the moment it *occurred*, so the instant is always recoverable —
-//! the same rule the approval sweep states in ipc.md section 14.4.
+//! Expiry is computed **when a token is presented**. There is no sweep
+//! thread, no `punar-secrets.timer`, and zero idle CPU. The honest
+//! consequence, stated rather than hidden: a token that is never presented
+//! again produces no `credential.expire` event. The event records the moment
+//! expiry was *observed*; `expires_at` records the moment it *occurred*, so
+//! the instant is always recoverable — the same rule the approval sweep
+//! states in ipc.md section 14.4.
+//!
+//! # Expiry reads the boot clock (SMP-1405)
+//!
+//! Each record's TTL is a [`BootWindow`] opened at issuance and judged on the
+//! boot clock ([`punar_common::trusted_time`]), shortened by the drift
+//! allowance so it closes early and never late. A wall clock rolled back
+//! cannot stretch a credential, and a broker that cannot read the boot clock
+//! issues nothing and validates nothing. `issued_at` and `expires_at` stay on
+//! the wall clock, for people to read.
 
 use std::io;
 
 use punar_common::Redacted;
 use punar_common::time::rfc3339_utc_from_unix_seconds;
+use punar_common::trusted_time::{BootStamp, BootWindow};
 use serde::Serialize;
 
 use crate::classes::CredentialClass;
@@ -74,11 +84,13 @@ pub struct IssuedRecord {
     /// The managed agent session that asked, when the peer's cgroup proved
     /// one (docs/api/ipc.md section 12.5).
     pub agent_session_id: Option<String>,
+    /// Wall clock, for people to read.
     pub issued_at: String,
+    /// Wall clock, for people to read. The decision is `lifetime`.
     pub expires_at: String,
-    /// `expires_at` as Unix seconds, kept so expiry is a comparison rather
-    /// than a re-parse on every presentation.
-    pub expires_at_unix: u64,
+    /// **What decides expiry**: the TTL on the boot clock, opened at
+    /// issuance. Lapses at the drift-shortened edge and at reboot.
+    pub lifetime: BootWindow,
     /// Set on the record handed to the audit path when a token is revoked.
     /// The map entry itself is dropped at the same moment — a tombstone
     /// would be a record of a credential that no longer exists.
@@ -86,14 +98,29 @@ pub struct IssuedRecord {
 }
 
 impl IssuedRecord {
-    pub fn is_expired(&self, now_secs: u64) -> bool {
-        now_secs >= self.expires_at_unix
+    /// Past its window, or not judgeable at all (`now` is `None`, another
+    /// boot, a clock that went backwards) — every one of those is expired.
+    pub fn is_expired(&self, now: Option<&BootStamp>) -> bool {
+        !self.lifetime.is_open(now)
     }
 
-    /// Whole seconds left, saturating at zero.
-    pub fn remaining_secs(&self, now_secs: u64) -> u64 {
-        self.expires_at_unix.saturating_sub(now_secs)
+    /// Whole seconds left on the drift-shortened window, floored, and zero
+    /// once it has closed — never more than the window will honour.
+    pub fn remaining_secs(&self, now: Option<&BootStamp>) -> u64 {
+        self.lifetime
+            .remaining_ms(now)
+            .map_or(0, |ms| u64::try_from(ms / 1_000).unwrap_or(0))
     }
+}
+
+/// "Now", read twice: the wall clock for the timestamps people read, and
+/// the boot clock for every expiry decision. `trusted` is `None` when the
+/// boot clock cannot be read, and then nothing is issued and nothing
+/// validates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Now {
+    pub wall_secs: u64,
+    pub trusted: Option<BootStamp>,
 }
 
 /// What a presented token turned out to be.
@@ -122,6 +149,9 @@ pub enum IssueError {
     /// `getrandom(2)` failed. A broker that cannot get entropy must refuse,
     /// never fall back to a weaker source.
     NoEntropy,
+    /// The boot clock could not be read, so the credential's lifetime could
+    /// not be dated. A token whose expiry cannot be judged is not issued.
+    NoClock,
 }
 
 /// Fills a buffer with cryptographic random bytes. A function pointer, so
@@ -184,12 +214,9 @@ impl TokenStore {
         self.entries.is_empty()
     }
 
-    /// Entries that are still within their TTL at `now_secs`.
-    pub fn live(&self, now_secs: u64) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| !e.is_expired(now_secs))
-            .count()
+    /// Entries that are still within their TTL at `now`.
+    pub fn live(&self, now: Option<&BootStamp>) -> usize {
+        self.entries.iter().filter(|e| !e.is_expired(now)).count()
     }
 
     /// Mint a token for `class`.
@@ -203,14 +230,18 @@ impl TokenStore {
         ttl_secs: u64,
         owner_uid: u32,
         agent_session_id: Option<&str>,
-        now_secs: u64,
+        now: &Now,
     ) -> Result<(Redacted<String>, IssuedRecord), IssueError> {
         if !class.issuable() || ttl_secs == 0 {
             return Err(IssueError::NotIssuable);
         }
+        let Some(opened) = now.trusted.clone() else {
+            return Err(IssueError::NoClock);
+        };
         if self.entries.len() >= self.max_live {
             // Reclaim what has already lapsed before refusing.
-            self.entries.retain(|entry| !entry.is_expired(now_secs));
+            self.entries
+                .retain(|entry| !entry.is_expired(Some(&opened)));
             if self.entries.len() >= self.max_live {
                 return Err(IssueError::Flood);
             }
@@ -220,15 +251,14 @@ impl TokenStore {
         (self.fill)(&mut bytes).map_err(|_| IssueError::NoEntropy)?;
         let token = format!("{TOKEN_PREFIX}{}-{}", class.id, base64url(&bytes));
 
-        let expires_at_unix = now_secs.saturating_add(ttl_secs);
         let record = IssuedRecord {
             token_sha256: sha256_hex(token.as_bytes()),
             credential: class.id.clone(),
             owner_uid,
             agent_session_id: agent_session_id.map(str::to_string),
-            issued_at: rfc3339_utc_from_unix_seconds(now_secs),
-            expires_at: rfc3339_utc_from_unix_seconds(expires_at_unix),
-            expires_at_unix,
+            issued_at: rfc3339_utc_from_unix_seconds(now.wall_secs),
+            expires_at: rfc3339_utc_from_unix_seconds(now.wall_secs.saturating_add(ttl_secs)),
+            lifetime: BootWindow::of_secs(opened, ttl_secs),
             revoked: false,
         };
         self.entries.push(record.clone());
@@ -245,7 +275,7 @@ impl TokenStore {
         &mut self,
         token: &Redacted<String>,
         expect_class: Option<&str>,
-        now_secs: u64,
+        now: Option<&BootStamp>,
     ) -> Presented {
         let digest = sha256_hex(token.expose_secret().as_bytes());
         let Some(index) = self
@@ -258,7 +288,7 @@ impl TokenStore {
         if expect_class.is_some_and(|class| class != self.entries[index].credential) {
             return Presented::Unknown;
         }
-        if self.entries[index].is_expired(now_secs) {
+        if self.entries[index].is_expired(now) {
             return Presented::Expired(self.entries.remove(index));
         }
         Presented::Valid(self.entries[index].clone())
@@ -340,12 +370,36 @@ mod tests {
         TokenStore::new(test_entropy)
     }
 
+    const BOOT: &str = "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b";
+    const NEXT_BOOT: &str = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b";
+
+    /// This boot's raw clock at `raw_bt_ms`.
+    fn at(raw_bt_ms: i64) -> BootStamp {
+        BootStamp {
+            boot_id: BOOT.to_string(),
+            raw_bt_ms,
+        }
+    }
+
+    /// Both clocks at second `secs`: the wall clock for the display strings,
+    /// the boot clock (in ms) for the decisions.
+    fn now(secs: u64) -> Now {
+        Now {
+            wall_secs: secs,
+            trusted: Some(at(secs as i64 * 1_000)),
+        }
+    }
+
+    fn at_secs(secs: i64) -> Option<BootStamp> {
+        Some(at(secs * 1_000))
+    }
+
     #[test]
     fn an_issued_token_is_marked_mock_carries_its_class_and_is_high_entropy() {
         let catalog = catalog();
         let class = catalog.get("aws-dev").unwrap();
         let mut store = store();
-        let (token, record) = store.issue(class, 60, 1000, None, 1_000_000).unwrap();
+        let (token, record) = store.issue(class, 60, 1000, None, &now(1_000_000)).unwrap();
         let value = token.expose_secret();
 
         assert!(value.starts_with("punar-mock-aws-dev-"), "{value}");
@@ -353,7 +407,11 @@ mod tests {
         assert_eq!(value.len(), "punar-mock-aws-dev-".len() + 43);
         assert!(!value.contains('='));
         assert_eq!(record.credential, "aws-dev");
-        assert_eq!(record.expires_at_unix, 1_000_060);
+        assert_eq!(
+            record.lifetime,
+            BootWindow::of_secs(at(1_000_000_000), 60),
+            "the decision is a window on the boot clock"
+        );
         assert_eq!(record.expires_at, "1970-01-12T13:47:40Z");
         assert!(!record.revoked);
     }
@@ -363,7 +421,7 @@ mod tests {
         let catalog = catalog();
         let mut store = store();
         let (token, record) = store
-            .issue(catalog.get("github").unwrap(), 60, 0, None, 10)
+            .issue(catalog.get("github").unwrap(), 60, 0, None, &now(10))
             .unwrap();
         assert_eq!(
             record.token_sha256,
@@ -380,8 +438,8 @@ mod tests {
         let catalog = catalog();
         let class = catalog.get("github").unwrap();
         let mut store = store();
-        let (a, _) = store.issue(class, 60, 0, None, 10).unwrap();
-        let (b, _) = store.issue(class, 60, 0, None, 10).unwrap();
+        let (a, _) = store.issue(class, 60, 0, None, &now(10)).unwrap();
+        let (b, _) = store.issue(class, 60, 0, None, &now(10)).unwrap();
         assert_ne!(a.expose_secret(), b.expose_secret());
         assert_eq!(store.len(), 2);
     }
@@ -391,25 +449,81 @@ mod tests {
         let catalog = catalog();
         let class = catalog.get("github").unwrap();
         let mut store = store();
-        let (token, record) = store.issue(class, 5, 1000, Some("agt_x1"), 100).unwrap();
+        let (token, record) = store
+            .issue(class, 5, 1000, Some("agt_x1"), &now(100))
+            .unwrap();
 
-        match store.present(&token, Some("github"), 104) {
+        match store.present(&token, Some("github"), at_secs(103).as_ref()) {
             Presented::Valid(found) => {
                 assert_eq!(found.token_sha256, record.token_sha256);
                 assert_eq!(found.agent_session_id.as_deref(), Some("agt_x1"));
-                assert_eq!(found.remaining_secs(104), 1);
+                // 2 000 ms less the 1 ms drift allowance, floored: never more
+                // than the window will honour.
+                assert_eq!(found.remaining_secs(at_secs(103).as_ref()), 1);
+                assert_eq!(found.remaining_secs(at_secs(104).as_ref()), 0);
             }
             other => panic!("expected valid, got {other:?}"),
         }
+        // The last live millisecond: 5 000 ms less the 1 ms allowance.
+        assert!(matches!(
+            store.present(&token, None, Some(&at(100_000 + 4_998))),
+            Presented::Valid(_)
+        ));
 
-        // At exactly expires_at the token is already gone: a TTL is a
-        // deadline, not a grace period.
-        match store.present(&token, None, 105) {
+        // At the drift-shortened edge the token is already gone: a TTL is a
+        // deadline, not a grace period, and the edge comes early, never late.
+        match store.present(&token, None, Some(&at(100_000 + 4_999))) {
             Presented::Expired(found) => assert_eq!(found.credential, "github"),
             other => panic!("expected expired, got {other:?}"),
         }
         assert_eq!(store.len(), 0, "an observed expiry drops the entry");
-        assert_eq!(store.present(&token, None, 106), Presented::Unknown);
+        assert_eq!(
+            store.present(&token, None, at_secs(106).as_ref()),
+            Presented::Unknown
+        );
+    }
+
+    /// Another boot, a clock that went backwards, or no readable clock: the
+    /// credential cannot be judged, so it is expired.
+    #[test]
+    fn a_token_that_cannot_be_judged_is_expired() {
+        let catalog = catalog();
+        let class = catalog.get("github").unwrap();
+        let rebooted = BootStamp {
+            boot_id: NEXT_BOOT.to_string(),
+            raw_bt_ms: 100_001,
+        };
+        for judged_at in [Some(rebooted), Some(at(99_999)), None] {
+            let mut store = store();
+            let (token, _) = store.issue(class, 3600, 0, None, &now(100)).unwrap();
+            assert!(
+                matches!(
+                    store.present(&token, None, judged_at.as_ref()),
+                    Presented::Expired(_)
+                ),
+                "{judged_at:?}"
+            );
+            assert_eq!(store.live(judged_at.as_ref()), 0);
+        }
+    }
+
+    /// A broker that cannot read the boot clock issues nothing: a token whose
+    /// expiry cannot be judged would be either immortal or born dead.
+    #[test]
+    fn no_readable_clock_issues_nothing() {
+        let catalog = catalog();
+        let mut store = store();
+        let blind = Now {
+            wall_secs: 100,
+            trusted: None,
+        };
+        assert_eq!(
+            store
+                .issue(catalog.get("github").unwrap(), 60, 0, None, &blind)
+                .err(),
+            Some(IssueError::NoClock)
+        );
+        assert!(store.is_empty());
     }
 
     #[test]
@@ -417,15 +531,15 @@ mod tests {
         let catalog = catalog();
         let mut store = store();
         let (token, _) = store
-            .issue(catalog.get("github").unwrap(), 60, 0, None, 10)
+            .issue(catalog.get("github").unwrap(), 60, 0, None, &now(10))
             .unwrap();
         assert_eq!(
-            store.present(&token, Some("aws-dev"), 11),
+            store.present(&token, Some("aws-dev"), at_secs(11).as_ref()),
             Presented::Unknown
         );
         // …and the entry is untouched, so the real class still validates.
         assert!(matches!(
-            store.present(&token, Some("github"), 11),
+            store.present(&token, Some("github"), at_secs(11).as_ref()),
             Presented::Valid(_)
         ));
     }
@@ -437,7 +551,7 @@ mod tests {
             store.present(
                 &Redacted::new("punar-mock-github-nope".to_string()),
                 None,
-                10
+                at_secs(10).as_ref()
             ),
             Presented::Unknown
         );
@@ -449,13 +563,16 @@ mod tests {
         let catalog = catalog();
         let mut store = store();
         let (token, _) = store
-            .issue(catalog.get("aws-dev").unwrap(), 3600, 1000, None, 10)
+            .issue(catalog.get("aws-dev").unwrap(), 3600, 1000, None, &now(10))
             .unwrap();
         let record = store.revoke(&token).expect("live token revokes");
         assert!(record.revoked);
         assert_eq!(record.credential, "aws-dev");
         assert_eq!(store.len(), 0);
-        assert_eq!(store.present(&token, None, 11), Presented::Unknown);
+        assert_eq!(
+            store.present(&token, None, at_secs(11).as_ref()),
+            Presented::Unknown
+        );
         assert!(store.revoke(&token).is_none(), "revoking twice is a no-op");
     }
 
@@ -465,13 +582,13 @@ mod tests {
         let mut store = store();
         assert_eq!(
             store
-                .issue(catalog.get("aws-prod").unwrap(), 60, 0, None, 10)
+                .issue(catalog.get("aws-prod").unwrap(), 60, 0, None, &now(10))
                 .err(),
             Some(IssueError::NotIssuable)
         );
         assert_eq!(
             store
-                .issue(catalog.get("github").unwrap(), 0, 0, None, 10)
+                .issue(catalog.get("github").unwrap(), 0, 0, None, &now(10))
                 .err(),
             Some(IssueError::NotIssuable)
         );
@@ -483,7 +600,7 @@ mod tests {
         let mut store = TokenStore::new(no_entropy);
         assert_eq!(
             store
-                .issue(catalog.get("github").unwrap(), 60, 0, None, 10)
+                .issue(catalog.get("github").unwrap(), 60, 0, None, &now(10))
                 .err(),
             Some(IssueError::NoEntropy)
         );
@@ -495,17 +612,17 @@ mod tests {
         let catalog = catalog();
         let class = catalog.get("github").unwrap();
         let mut store = TokenStore::with_capacity_limit(test_entropy, 2);
-        store.issue(class, 5, 0, None, 100).unwrap();
-        store.issue(class, 3600, 0, None, 100).unwrap();
+        store.issue(class, 5, 0, None, &now(100)).unwrap();
+        store.issue(class, 3600, 0, None, &now(100)).unwrap();
         // Full, and nothing has lapsed yet.
         assert_eq!(
-            store.issue(class, 60, 0, None, 101).err(),
+            store.issue(class, 60, 0, None, &now(101)).err(),
             Some(IssueError::Flood)
         );
         // Once the short one lapses it is reclaimed and issuance resumes.
-        assert!(store.issue(class, 60, 0, None, 200).is_ok());
+        assert!(store.issue(class, 60, 0, None, &now(200)).is_ok());
         assert_eq!(store.len(), 2);
-        assert_eq!(store.live(200), 2);
+        assert_eq!(store.live(at_secs(200).as_ref()), 2);
     }
 
     #[test]
@@ -533,7 +650,7 @@ mod tests {
                 60,
                 1000,
                 Some("agt_a1"),
-                10,
+                &now(10),
             )
             .unwrap();
         let value = token.expose_secret().clone();
