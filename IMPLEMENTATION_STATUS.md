@@ -255,8 +255,17 @@ Deliverables (spec section 76, Milestone 1):
   each with a `punarctl` verb; `tools/hyprland-verify.sh` and
   `tests/desktop/keybind-contract-test.sh` gate the config in CI, and
   `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh`
-  presses real keys through QMP — **implemented, not yet run in CI** (its
-  first run is the next desktop gate).
+  presses real keys through QMP. **It has not run in CI yet** (its first
+  run is the next desktop gate). It has run on qcow2 overlays of the arm64
+  release image carrying this branch (2026-09-25, HVF), with a final
+  `PUNAR_KEYS_OK` (55 assertions) and the switcher's surface-cost budget
+  met. Those boots found and fixed two product faults: the Alt-release bind
+  never fired after a Tab, so every Alt+Tab took the five-second fallback,
+  and the overview and the switcher failed to load when opened on their
+  own. They also fixed four check faults. On a release overlay with no dev
+  fixtures, the login screen's keyboard picker was pressed for real
+  (Russian, then German) and followed into the session, the audit log and
+  the lock screen.
   After the WP-02 review: every chord works under every keyboard layout (the
   number row by key code; PUNAR+F1 and PUNAR+ALT+Tab twins for / and [ ]),
   the keyboard layout is set only from the person's own seat session, the
@@ -267,13 +276,16 @@ Deliverables (spec section 76, Milestone 1):
   microphone key on a real PipeWire source, a kept look across a reload,
   and the lock screen's layout line after a configuration load.
   **What this earns against Omarchy, once that CI run is green** (plan
-  rules 0.3 and 3.1-4): J14 PUNAR_BETTER (most-recent-first with previews)
-  only once keys-check's recorded quick-switch time has been compared with a
-  compositor-only switch and holds up, PARITY until then; B19,
-  J04, J11, J13, J16 and J19 PARITY (B19's login-screen picker is not pressed
-  in the VM, whose dev image signs in without it; J16's workspace-to-monitor
-  move needs a second monitor and is proven by configuration only); K06
-  NOT_COMPARABLE_YET (no backlight in a VM, WP-23). **Not earned by WP-02:**
+  rules 0.3 and 3.1-4): J14 PUNAR_BETTER (most-recent-first with previews,
+  measured against a compositor-only switch on an overlay boot: a median of
+  341 ms against 305 ms from request to focus through the same QMP path,
+  inside the compositor-only switch's own 219-369 ms spread; CI's KVM run
+  records its own figure); B19, J04, J11, J13, J16 and J19 PARITY (B19's
+  login-screen picker was pressed on a release overlay, but CI's dev image
+  signs in without it, so CI proves it only through session start's own
+  call; J16's workspace-to-monitor move needs a second monitor and is proven
+  by configuration only); K06 NOT_COMPARABLE_YET (no backlight in a VM,
+  WP-23). **Not earned by WP-02:**
   J15 stays OMARCHY_BETTER (pseudo-tiling, tiled fullscreen, width
   save/restore and move-to-scratchpad wait for WP-11), P06 stays
   OMARCHY_BETTER (the file manager in the terminal's folder waits for

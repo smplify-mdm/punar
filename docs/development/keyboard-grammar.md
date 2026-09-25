@@ -239,12 +239,34 @@ chooser is a command-center action (type "layout"), and
 
 Implemented in config and in `punarctl`. The in-VM proof is
 `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh`,
-which presses these as real keys through QMP (`tools/qmp-keys.py`); **it has
-not run in CI yet**, so until the desktop gate's next run is green the key
-behaviour below is proven only by the contract tests
-(`tests/desktop/keybind-contract-test.sh`, `layout-script-test.sh`), the
-pinned Hyprland's `--verify-config` (`tools/hyprland-verify.sh`) and
-punarctl's own tests.
+which presses these as real keys through QMP (`tools/qmp-keys.py`). **It has
+not run in CI yet.** It has run on real boots: qcow2 overlays of the arm64
+release image carrying this branch's binaries, configuration and shell, the
+dev profile's account and checks, and the same QMP driver (2026-09-25, HVF).
+Its final run was `PUNAR_KEYS_OK`, 55 assertions, and the switcher's
+surface-cost budget passed in the same boot. The first runs found two
+product faults that no static check could see, both fixed: the Alt-release
+bind never fired after a Tab (below), and the overview and the switcher did
+not load when opened on their own (`qml-url-surface-import-test.sh` now
+holds that). The contract tests (`tests/desktop/keybind-contract-test.sh`,
+`layout-script-test.sh`), the pinned Hyprland's `--verify-config`
+(`tools/hyprland-verify.sh`) and punarctl's own tests still gate every
+change in CI. The desktop gate's first run is what proves it on CI's KVM
+lane.
+
+**The login screen's choice, pressed for real.** On a release-image overlay
+with no dev fixtures, an account was created through onboarding, and on the
+login screen the keyboard picker was clicked and Russian chosen. After
+signing in: `/etc/vconsole.conf` held `XKBLAYOUT=ru`, the session's data
+file and the live compositor held `us,ru` with `grp:alts_toggle`, and the
+change was audited as `allow` under the person's uid. The lock screen named
+English (US) with the switch hint. PUNAR+Return opened a terminal. After
+both Alt keys, that terminal received `привет` and the lock screen named
+Russian. The next login screen showed the device's layout (RU). German
+chosen there gave `XKBLAYOUT=de`, a live `kb_layout` of `de`, German
+keyboards, and a lock screen reading "Keyboard German". Unlocks were typed
+on the lock screen, including one that needed both Alt keys first, because
+the active group was Russian when the screen locked.
 
 **Every chord works under every keyboard layout.** Hyprland matches a keysym
 bind against the first layout's unshifted symbol, so the number row is bound
@@ -312,9 +334,16 @@ running Alt+Tab does nothing (as the bar, the notifications and the lock
 screen do nothing). A compositor-only quick tap (`hl.dsp.focus({ last = true
 })`) was considered and not taken: the compositor's "last window" includes
 scratchpad windows and hidden group members the switcher leaves out, so a
-quick tap and a held Alt could choose different windows. keys-check.sh
-records how long a quick switch takes, in ms, so the difference is measured
-rather than assumed; J14 is not called better until it is.
+quick tap and a held Alt could choose different windows. The difference
+is measured, not assumed. On an overlay boot a compositor-only
+`hl.dsp.focus({ last = true })` bind was added, and both it and Alt+Tab
+were pressed as real keys through the same QMP driver path, seven times
+each. From the console request to the focus change, the shell's switch had a
+median of 341 ms (306-561) and the compositor-only switch 305 ms (219-369).
+The driver's own serial polling (up to 250 ms) and pacing are in both
+figures. The switcher's most-recent-first order, its previews and its
+scratchpad-aware choice cost about 36 ms at the median in that VM, inside
+the compositor-only switch's own spread.
 
 **Alt+Tab's release never swallows Alt, and is never lost.** The
 Alt-release binds that end a switch are non-consuming, so an application

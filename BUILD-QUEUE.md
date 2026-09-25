@@ -1298,9 +1298,12 @@ last in punar-binds.lua inside `pcall`, so no error can take earlier binds with
 it; `tools/hyprland-verify.sh` runs the whole config through the pinned
 Hyprland's `--verify-config` (which ignores bind options it does not know, so
 it proves the dispatchers parse, not that `mouse = true` does what it says),
-and keys-check.sh is written to drag a real window with PUNAR held through
-QMP. **keys-check.sh has not run in CI yet**: until the desktop gate's next
-run is green, the re-landed drag is proven only to parse.
+and keys-check.sh drags a real window with PUNAR held through QMP.
+**keys-check.sh has not run in CI yet.** On qcow2 overlays of the arm64
+release image carrying this branch (2026-09-25), PUNAR+drag moved a popped-out
+window (256,175 to 416,295), PUNAR+right-drag resized it (768x480 to 843x536),
+and the run ended `PUNAR_KEYS_OK`. The desktop gate's first run is the CI
+proof.
 
 **Still open.** A desktop right-click context menu — genuinely not built, not
 stubbed, and not something Thunar can provide, because no file manager owns the

@@ -519,8 +519,15 @@ Alt+Tab and destroyed after it; the one always-resident addition is the
 shell's `ShortcutUsage` singleton (a switch over the socket2 events the shell
 already receives, and a few hundred bytes of state), which writes its file
 once per account and once per newly tried key family, never per key press.
-The switcher's cost is gated relative to the overview's, both drawing the
-same three windows (`surface-cost-check.sh`).
+The switcher's cost is gated relative to the overview's
+(`surface-cost-check.sh`). Both draw the same three windows, one per
+workspace, so each draws three plates of one window, and the switcher's
+median must stay within the overview's highest sample of the same run. On
+an arm64 overlay boot (HVF, 2026-09-25, not a CI figure) the switcher was
+15.7 MiB resident and 105 ms to first map, against the overview's 18.0 MiB
+and 150 ms medians. With all three windows on one workspace, the switcher
+drew three plates of three windows against the overview's one, and was
+2.3 MiB heavier. That setup measured the wrong thing and was corrected.
 
 ### 4.1 Unpacked initramfs
 
