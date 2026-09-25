@@ -2370,8 +2370,9 @@ done
 # all. Whether the stronger `-multiple-sessions` action is reached depends on
 # another user happening to hold a session — machine state, not a property of
 # the fix. Asking polkit about that action by name removes the dependence: it is
-# auth_admin_keep in the shipped policy and YES only because
-# 50-punar-power.rules says so.
+# auth_admin_keep in the shipped policy (a challenge, pkcheck exit 2) and an
+# explicit NO (exit 1) only because 50-punar-power.rules says so: ending
+# another person's session from the desktop is refused to everyone (F0 review).
 if command -v pkcheck >/dev/null 2>&1; then
     pkcheck --action-id org.freedesktop.login1.reboot-multiple-sessions \
         --process "$$" >/dev/null 2>&1
@@ -2417,13 +2418,18 @@ else
         esac
     done
 
-    # The action that is authorized ONLY because of the Punar rule. Exit 0 is
-    # "authorized"; anything else is polkit declining to say yes without a
-    # password, which is the state the session menu cannot recover from.
+    # The action the Punar rule REFUSES by name. Exit 1 is "not authorized",
+    # the rule's NO; exit 2 is the shipped challenge (the rule is not in
+    # force); exit 0 would mean something granted ending another person's
+    # session from the desktop.
     pkcheck_result="$(sed -n 's/^pkcheck_multiple_sessions=//p' /run/punar/canpower.txt)"
     case "${pkcheck_result}" in
+        1)
+            note "ok   polkit refuses reboot-multiple-sessions outright (50-punar-power.rules is in force: nobody ends another person's session from the desktop)"
+            ;;
         0)
-            note "ok   polkit authorizes reboot-multiple-sessions for the session (50-punar-power.rules is in force)"
+            note "FAIL polkit authorizes reboot-multiple-sessions for the session: something grants ending another person's session with no fresh password"
+            FAILED=1
             ;;
         absent)
             note "info pkcheck is not installed, so the -multiple-sessions action could not be asked by name; the CanReboot legs above are then only as strong as this machine's session count"
@@ -2433,7 +2439,7 @@ else
             FAILED=1
             ;;
         *)
-            note "FAIL polkit does not authorize reboot-multiple-sessions (pkcheck exit ${pkcheck_result}); the shipped auth_admin_keep default is still in force, so 50-punar-power.rules is absent or is not being applied"
+            note "FAIL polkit challenges reboot-multiple-sessions (pkcheck exit ${pkcheck_result}) instead of refusing it; the shipped auth_admin_keep default is still in force, so 50-punar-power.rules is absent or is not being applied"
             FAILED=1
             ;;
     esac

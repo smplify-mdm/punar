@@ -6,8 +6,10 @@
 # WHAT IT HOLDS (F0-S1; docs/api/ipc.md section 23.2):
 #   - the person at the active local seat restarts or shuts down with no
 #     password when nobody else is signed in (the WP-01 decision);
-#   - with another session open, only a device administrator (group
-#     punar-admin) may, and anyone else is told no rather than challenged;
+#   - with another person signed in, nobody may from the desktop — not even
+#     a device administrator (polkit can neither spend a fresh password nor
+#     read an organization's administrator list) — and everyone is told no
+#     rather than challenged (F0 review);
 #   - a remote or inactive session, and a subject outside `punar`, get no
 #     opinion from this file;
 #   - the -ignore-inhibit actions are never granted.
@@ -71,7 +73,7 @@ for (const action of ["org.freedesktop.login1.reboot", "org.freedesktop.login1.p
 }
 for (const action of ["org.freedesktop.login1.reboot-multiple-sessions",
                       "org.freedesktop.login1.power-off-multiple-sessions"]) {
-  expect(`${action} for an administrator`, decide(action, admin), "yes");
+  expect(`${action} for an administrator`, decide(action, admin), "no");
   expect(`${action} for a person who is not an administrator`, decide(action, person), "no");
   expect(`${action} for a remote administrator`,
          decide(action, subject(["punar", "punar-admin"], { local: false })), null);
