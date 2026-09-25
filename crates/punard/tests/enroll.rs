@@ -4061,3 +4061,27 @@ fn an_unusable_assignment_enrolls_with_no_policy_and_says_so() {
     assert_eq!(policy_d_files(&daemon), ["eng-baseline-v12.json"]);
     assert_eq!(last_refresh(&daemon)["result"], "applied");
 }
+
+/// The files are what the device enforces at its next start, so they are
+/// what a refresh compares with, not the record of them: one that was
+/// edited or removed is written again from the organization's set.
+#[test]
+fn a_policy_file_edited_or_removed_on_the_device_is_written_again() {
+    let dir = test_dir("refresh-heal");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let bytes = policy_d_bytes(&daemon);
+    let file = daemon.state_path("policy.d/eng-baseline-v12.json");
+
+    let mut edited = read_json(&file);
+    edited["policy"]["spec"]["security"]["firewall"]["enabled"] = json!(false);
+    fs::write(&file, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+    daemon.result("reconcile", None);
+    assert_eq!(policy_d_bytes(&daemon), bytes, "edited: written again");
+    assert_eq!(last_refresh(&daemon)["result"], "applied");
+
+    fs::remove_file(&file).unwrap();
+    daemon.result("reconcile", None);
+    assert_eq!(policy_d_bytes(&daemon), bytes, "removed: written again");
+    assert_eq!(policy_events(&daemon).len(), 2);
+}

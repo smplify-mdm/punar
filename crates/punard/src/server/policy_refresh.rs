@@ -394,10 +394,13 @@ impl Inner {
         // changed leaves remediation suppression in recompute_effective;
         // browser.policy stays "managed" when only its document changes, so
         // it is released here.
+        // The paths are the organization's own keys: escaped, like every
+        // other string from it that reaches the journal.
         for unmapped in &loaded.unmapped {
             eprintln!(
                 "punard: organization policy {offered}: no registered capability for \
-                 {unmapped}; ignored (its capability lands in a later milestone)"
+                 {}; ignored (its capability lands in a later milestone)",
+                journal_detail(unmapped)
             );
         }
         *self.org_layers.lock().unwrap() = loaded.layers;
