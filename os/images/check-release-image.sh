@@ -115,6 +115,7 @@ scan_dev_paths() {
         -o -name 'punar-surface-cost-check.service' \
         -o -name 'punar-surfaces-check.service' \
         -o -name 'punar-wifi-check.service' \
+        -o -name 'punar-keys-check.service' \
         -o -name 'punar-mock-smplify.service' \
         -o -name 'punar-boot-marker.service' \
         -o -name 'punar-desktop-marker.*' \
@@ -127,6 +128,7 @@ scan_dev_paths() {
         -o -name 'surface-cost-check.sh' \
         -o -name 'surfaces-check.sh' \
         -o -name 'wifi-check.sh' \
+        -o -name 'keys-check.sh' \
         -o -name 'idle-ram.sh' \
         -o -name 'desktop-ready.sh' \
         -o -name 'foo-agent-fixture.sh' \
@@ -160,6 +162,7 @@ if [ -d "${ROOT}/usr/lib/systemd/system" ]; then
         case "${target}" in
             punar-m*-check.service|punar-surface-cost-check.service|\
             punar-surfaces-check.service|punar-wifi-check.service|\
+            punar-keys-check.service|\
             punar-mock-smplify.service|punar-boot-marker.service|\
             punar-desktop-marker.*|punar-desktop-diag.*|\
             punar-idle-ram.service)

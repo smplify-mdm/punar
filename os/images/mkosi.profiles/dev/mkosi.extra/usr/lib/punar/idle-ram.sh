@@ -431,6 +431,13 @@ systemctl start punar-surface-cost-check.service \
 systemctl start punar-surfaces-check.service \
     || echo "punar: idle-ram: punar-surfaces-check.service failed to start" >&2
 
+# Keys, keyboard layout and window grammar (SMP-1405 WP-02), pressed as real
+# keys by the host's QMP driver. After the surfaces exercise, so the untouched
+# shell is proven first; before the milestone checks, because it puts the
+# device's layout back and closes its own windows, and they inherit nothing.
+systemctl start punar-keys-check.service \
+    || echo "punar: idle-ram: punar-keys-check.service failed to start" >&2
+
 # M2 exercise ordering hook (milestone-2.md §7): start punar-m2-check
 # SYNCHRONOUSLY (Type=oneshot blocks until done) strictly AFTER the
 # sampling window above — so the idle measurement is never polluted — and

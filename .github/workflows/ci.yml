@@ -395,6 +395,7 @@ jobs:
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/recovery-check.sh \
             tools/check-doc-freshness.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surface-cost-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m2-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m3-check.sh \

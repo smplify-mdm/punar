@@ -480,12 +480,18 @@ SERIAL_LOG="${WORKDIR}/serial.log"
 EXPORT_RAW="${WORKDIR}/export.b64"
 VARS_COPY="${WORKDIR}/OVMF_VARS.fd"
 QEMU_PID=""
+QMP_KEYS_PID=""
+QMP_SOCKET="${WORKDIR}/qmp.sock"
 FIRMWARE_ARGS=()
 MINIMAL_DISPLAY_ARGS=(-display none)
 DESKTOP_DISPLAY_ARGS=(-display none)
 DISK_ARGS=(-drive "file=${IMAGE},format=qcow2,if=virtio")
 DESKTOP_NETWORK_ARGS=(-nic "user,model=virtio-net-pci")
 DESKTOP_SERIAL_ARGS=(-device virtio-serial-pci)
+# A keyboard and an absolute pointer the host can press through QMP: the keys
+# exercise (keys-check.sh, SMP-1405 WP-02) asks tools/qmp-keys.py for real key
+# chords and pointer drags, so the grammar is proven as a person uses it.
+DESKTOP_INPUT_ARGS=(-device virtio-keyboard-pci -device virtio-tablet-pci)
 
 if [ "${ARCH}" = "x86_64" ]; then
     cp "${OVMF_VARS}" "${VARS_COPY}"
@@ -513,11 +519,16 @@ else
     )
     DESKTOP_SERIAL_ARGS=(-device "virtio-serial-pci,romfile=")
     DESKTOP_DISPLAY_ARGS+=(-device "virtio-gpu-pci,romfile=")
+    DESKTOP_INPUT_ARGS=(-device "virtio-keyboard-pci,romfile=" -device "virtio-tablet-pci,romfile=")
 fi
 
 # Invoked indirectly via the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup() {
+    if [ -n "${QMP_KEYS_PID}" ] && kill -0 "${QMP_KEYS_PID}" 2>/dev/null; then
+        kill "${QMP_KEYS_PID}" 2>/dev/null || true
+        wait "${QMP_KEYS_PID}" 2>/dev/null || true
+    fi
     if [ -n "${QEMU_PID}" ] && kill -0 "${QEMU_PID}" 2>/dev/null; then
         kill "${QEMU_PID}" 2>/dev/null || true
         wait "${QEMU_PID}" 2>/dev/null || true
@@ -643,6 +654,9 @@ run_desktop() {
           "${PROOF_DIR}/wifi-report.txt" \
           "${PROOF_DIR}"/wifi-*.txt \
           "${PROOF_DIR}/recovery-report.txt" \
+          "${PROOF_DIR}/keys-report.txt" \
+          "${PROOF_DIR}/keys-set.txt" \
+          "${PROOF_DIR}/qmp-keys.log" \
           "${PROOF_DIR}"/lock-frost-*.png \
           "${PROOF_DIR}/surfaces-report.txt" \
           "${PROOF_DIR}"/surfaces-*.json \
@@ -717,6 +731,8 @@ run_desktop() {
         "${DESKTOP_SERIAL_ARGS[@]}"
         -chardev "file,id=punarexp,path=${EXPORT_RAW}"
         -device "virtserialport,chardev=punarexp,name=punar.export"
+        "${DESKTOP_INPUT_ARGS[@]}"
+        -qmp "unix:${QMP_SOCKET},server=on,wait=off"
     )
 
     echo "==> Booting ${IMAGE} (mode=desktop)"
@@ -724,6 +740,11 @@ run_desktop() {
     echo "    firmware=${FIRMWARE_LABEL} proof-dir=${PROOF_DIR}"
     "${QEMU}" "${qemu_args[@]}" &
     QEMU_PID=$!
+    # The key driver waits for requests on the serial console and stops when
+    # the export ends; its own log is proof of what it pressed and refused.
+    python3 "${REPO_ROOT}/tools/qmp-keys.py" "${QMP_SOCKET}" "${SERIAL_LOG}" \
+        "${EXPORT_RAW}" "${PROOF_DIR}/qmp-keys.log" &
+    QMP_KEYS_PID=$!
 
     # Phase 1: graphical session up (greetd -> Hyprland -> punar-shell ->
     # desktop-ready.sh -> punar-desktop-marker.service).
@@ -803,7 +824,7 @@ run_desktop() {
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
                      wifi-report.txt wifi-link.txt wifi-devices.txt \
-                     recovery-report.txt \
+                     recovery-report.txt keys-report.txt keys-set.txt \
                      lock-frost-a.png lock-frost-a2.png lock-frost-b.png \
                      surfaces-report.txt surfaces-latency.txt surfaces-costs.txt \
                      surfaces-mail-launch.txt surfaces-mail.png \
@@ -1447,11 +1468,40 @@ run_desktop() {
         echo "==> Recovery door: no report under TCG (informational only)"
     fi
 
+    # Phase 11c: keys, keyboard layout and window grammar (SMP-1405 WP-02),
+    # pressed as real keys through QMP. Gated like the wireless verdict: a
+    # delivered FAIL, or a missing report under acceleration, fails the build.
+    local keys_report="${PROOF_DIR}/keys-report.txt"
+    if [ -f "${keys_report}" ]; then
+        if grep -q 'PUNAR_KEYS_FAIL' "${keys_report}"; then
+            echo "error: keys exercise reported PUNAR_KEYS_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${keys_report}" >&2 || true
+            echo "    QMP driver log: ${PROOF_DIR}/qmp-keys.log" >&2
+            exit 1
+        elif grep -q 'PUNAR_KEYS_OK' "${keys_report}"; then
+            echo "==> Keys: PUNAR_KEYS_OK ($(grep -c '^ok' "${keys_report}" || true) assertions passed)"
+        else
+            echo "error: keys-report.txt carries no verdict (guest crashed mid-exercise?)" >&2
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_KEYS_FAIL' "${SERIAL_LOG}"; then
+        echo "error: keys exercise reported PUNAR_KEYS_FAIL on the serial console" >&2
+        exit 1
+    elif grep -aq 'PUNAR_KEYS_OK' "${SERIAL_LOG}"; then
+        echo "==> Keys: PUNAR_KEYS_OK (verdict from serial console)"
+    elif [ "${HARDWARE_ACCEL}" -eq 1 ]; then
+        echo "error: no keys-report.txt and no verdict on serial — the keys exercise did not run" >&2
+        exit 1
+    else
+        echo "==> Keys: no report under TCG (informational only)"
+    fi
+
     # Phase 12c.1: isolated surface construction/resident-cost verdict. The
-    # five lazy-load candidates run in fresh probe processes beside the real
-    # shell. Values are evidence, not thresholds; the hard gate is that all 15
-    # samples produced valid timestamps and PSS reads. Missing evidence fails
-    # under KVM, following the M8 silent-skip lesson.
+    # seven lazy-load candidates run in fresh probe processes beside the real
+    # shell. Values are evidence, not thresholds, except the window
+    # switcher's relative budget; the hard gate is that all 21 samples
+    # produced valid timestamps and PSS reads. Missing evidence fails under
+    # KVM, following the M8 silent-skip lesson.
     local surface_costs="${PROOF_DIR}/surfaces-costs.txt"
     if [ -f "${surface_costs}" ]; then
         if grep -q 'PUNAR_SURFACE_COSTS_FAIL' "${surface_costs}"; then
@@ -1459,7 +1509,7 @@ run_desktop() {
             grep '^FAIL' "${surface_costs}" >&2 || true
             exit 1
         elif grep -q 'PUNAR_SURFACE_COSTS_OK' "${surface_costs}"; then
-            echo "==> Surface costs: PUNAR_SURFACE_COSTS_OK (15 isolated samples)"
+            echo "==> Surface costs: PUNAR_SURFACE_COSTS_OK (21 isolated samples)"
             grep '^median ' "${surface_costs}" || true
         else
             echo "error: surfaces-costs.txt carries no PUNAR_SURFACE_COSTS_OK/FAIL verdict" >&2
