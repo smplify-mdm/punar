@@ -10,8 +10,9 @@
 //! its own `0700` staging directory), and hands that ONE open descriptor to
 //! `punar-fetch`: a socket-activated helper (`punar-fetch.socket`,
 //! `punar-fetch@.service`) that runs as a dynamic user, with no capabilities,
-//! a read-only file system, no `/home`, `/var` or `/run`, and only IPv4 and
-//! IPv6 sockets, none of them to this machine's own services. The descriptor
+//! a read-only file system, no `/home`, nothing of `/var` or `/run` but the
+//! resolver's files, and only IPv4 and IPv6 sockets, none of them to this
+//! machine's own services except the DNS stub. The descriptor
 //! is the only thing the helper can write. punard keeps every decision about
 //! trust: it verifies the signature or digest of what arrived exactly as
 //! before, and it alone moves verified bytes into place.

@@ -3,11 +3,11 @@
 #
 # The helper is the only Punar program that runs the downloader, and this is
 # what it has: a dynamic user that exists only while it runs; no capabilities
-# and no way to gain any; a read-only file system with no /home, /var or /run
-# to read; no devices; IPv4 and IPv6 sockets only, and none to this machine's
-# own services apart from the DNS stub. The one thing it can write is the
-# descriptor punard sent, an empty private file punard created and verifies
-# afterwards.
+# and no way to gain any; a read-only file system with no /home, and nothing
+# of /var or /run but a private tmp and the resolver's files; no devices;
+# IPv4 and IPv6 sockets only, and none to this machine's own services apart
+# from the DNS stub. The one thing it can write is the descriptor punard
+# sent, an empty private file punard created and verifies afterwards.
 #
 # Measured under systemd 257 (Debian trixie) with the shipped helper: the
 # exposure `systemd-analyze security punar-fetch@x.service` reports is 1.1;

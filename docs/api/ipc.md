@@ -1431,8 +1431,8 @@ the URL and a byte and time bound, to `punar-fetch` over the root-only
 `SOCK_SEQPACKET` socket `/run/punar-fetch/request.sock`
 (`punar-fetch.socket`, `Accept=yes`). Each request is its own
 `punar-fetch@.service` instance: a dynamic user with no capabilities, a
-read-only file system without `/home`, `/var` or `/run`, IPv4 and IPv6 sockets
-only, and no loopback address but the resolver stub, so it cannot reach this
+read-only file system without `/home` and with nothing of `/var` or `/run` but
+a private tmp and the resolver's files, IPv4 and IPv6 sockets only, and no loopback address but the resolver stub, so it cannot reach this
 machine's own services or a link-local metadata endpoint. The helper serves
 only uid 0, only a request carrying exactly one empty regular file, and it
 builds the downloader's argument list itself: configuration files disabled,
