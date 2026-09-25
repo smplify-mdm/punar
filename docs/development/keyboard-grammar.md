@@ -141,13 +141,15 @@ PUNAR + comma / period       Previous / next layout preset (< / >)
 Cycle order: `balanced → columns → rows → focus → stack` (wraps). Both
 binds and the command center's chooser exec the same engine —
 `/usr/lib/punar/punar-layout.sh <preset|next|prev|restore>`, POSIX sh, one
-`hyprctl --batch` of keywords per invocation, active preset cached at
-`$XDG_RUNTIME_DIR/punar/layout-preset`. Presets are **global** in M2
-(per-workspace presets are a stretch goal — keyword-added workspace rules
-accumulate in 0.56.2, milestone-2.md §1.3). At session start
-`punar-layout.sh restore` re-applies the preset persisted in
-`~/.local/state/punar/workspaces.json` (written by punar-shell,
-milestone-2.md §6).
+`hyprctl eval` per invocation, active preset cached at
+`$XDG_RUNTIME_DIR/punar/layout-preset`. Presets were **global** in M2
+(per-workspace presets were a stretch goal — workspace rules accumulate in
+0.56.2, milestone-2.md §1.3). **SMP-1405 WP-02 made the keys per workspace**
+(kept across sessions; the accumulation is bounded by a reload or sign-out),
+while the command center still sets the session's preset; see the WP-02
+section below. At session start `punar-layout.sh restore` re-applies the
+preset persisted in `~/.local/state/punar/workspaces.json` (written by
+punar-shell, milestone-2.md §6) and every workspace's own.
 
 | Preset | Algorithm | Honest description |
 | --- | --- | --- |
@@ -235,9 +237,29 @@ chooser is a command-center action (type "layout"), and
 
 ## SMP-1405 WP-02 — keys, input and window grammar at Omarchy's level
 
-Implemented in config and in `punarctl`; proven in CI by
+Implemented in config and in `punarctl`. The in-VM proof is
 `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh`,
-which presses these as real keys through QMP (`tools/qmp-keys.py`).
+which presses these as real keys through QMP (`tools/qmp-keys.py`); **it has
+not run in CI yet**, so until the desktop gate's next run is green the key
+behaviour below is proven only by the contract tests
+(`tests/desktop/keybind-contract-test.sh`, `layout-script-test.sh`), the
+pinned Hyprland's `--verify-config` (`tools/hyprland-verify.sh`) and
+punarctl's own tests.
+
+**Every chord works under every keyboard layout.** Hyprland matches a keysym
+bind against the first layout's unshifted symbol, so the number row is bound
+by key code (`code:10` is the 1 key … `code:19` the 0 key), as Omarchy's
+workspace keys are: on AZERTY the unshifted number row types `& é " …` and a
+digit keysym would never fire. Letters are unshifted on every Latin layout
+(and a non-Latin layout gets a US first group). The three punctuation chords
+that German, French, Spanish and Italian keyboards put behind Shift or AltGr
+have a twin on a key every layout names the same: **PUNAR + F1** for the
+shortcut help (PUNAR + /), and **PUNAR + ALT + Tab** / **PUNAR + ALT + SHIFT
++ Tab** for the next and previous window in a group (PUNAR + ] and [). The
+layout presets need none: comma is unshifted on every Latin layout the login
+screen offers, PUNAR + comma alone cycles all five, and the command center
+sets any of them by name. The contract test refuses a digit keysym, and any
+punctuation keysym without a twin or a stated reason.
 
 ### Window grammar
 
@@ -257,8 +279,49 @@ PUNAR + comma / period       Previous / next layout preset FOR THIS WORKSPACE (k
 PUNAR + E                    Open files (punarctl app open thunar)
 ALT + TAB / SHIFT + ALT + TAB  Window switcher (most recent first; release Alt to choose)
 CTRL + ALT + TAB             Focus next monitor (SHIFT: previous)
-PUNAR + CTRL + T / G / A     This session's look: transparency / gaps / square lone window
+PUNAR + ALT + TAB            Next window in a group (SHIFT: previous); any layout
+PUNAR + F1                   Shortcut help, on any layout (as PUNAR + /)
+PUNAR + CTRL + T / G / A     Your look: transparency / gaps / square lone window (kept)
 ```
+
+**Layout presets: the keys are per workspace, the command center is the
+session's.** PUNAR + comma/period change the focused workspace's own preset
+(Omarchy's Super+L is per workspace too), and it is kept across sessions.
+Choosing a preset in the command center sets the **session's** preset, which
+every workspace without one of its own follows, and gives the focused
+workspace back to it, so the choice is seen where it was made. `punarctl
+layout <preset>` is the session's, `--workspace N|active` one workspace's, and
+`punarctl layout default --workspace N` gives a workspace back. Hyprland 0.56
+cannot delete a live workspace rule, so each per-workspace change adds one
+small rule until the next reload or sign-out, which clears them all;
+giving back a workspace that never had its own preset adds nothing.
+
+**The look is kept, as data.** PUNAR + CTRL + T/G/A run `punarctl window look
+transparency|gaps|square toggle`, which writes three booleans to
+`~/.config/punar/look.json` and applies them live; the compositor reads that
+file with patterns at every configuration load, so the look survives a reload
+and the next session. Omarchy keeps the same toggles by copying Lua files its
+configuration then runs; nothing here is run.
+
+**Alt+Tab is decided and drawn by the shell.** The compositor counts the
+Tabs of one Alt hold; the shell keeps the most-recent-first list, draws the
+strip and focuses the choice through `punarctl window focus`. A quick tap
+therefore starts two short `qs ipc` clients and two `punarctl` runs, where
+Omarchy's `cycle_next` stays inside the compositor, and if the shell is not
+running Alt+Tab does nothing (as the bar, the notifications and the lock
+screen do nothing). A compositor-only quick tap (`hl.dsp.focus({ last = true
+})`) was considered and not taken: the compositor's "last window" includes
+scratchpad windows and hidden group members the switcher leaves out, so a
+quick tap and a held Alt could choose different windows. keys-check.sh
+records how long a quick switch takes, in ms, so the difference is measured
+rather than assumed; J14 is not called better until it is.
+
+**Alt+Tab's release never swallows Alt.** The Alt-release binds that end a
+switch are non-consuming, so an application still sees every Alt release (a
+bare Alt opens the menu bar in Firefox and most GTK and Qt apps). This is
+held by `--verify-config` only as far as it goes: it ignores bind options it
+does not know, so the option's effect is not yet shown by a check.
+
 
 Not bound, on purpose: Omarchy's "file manager in the focused terminal's
 folder" (K125). Every foot window belongs to one server process, so the
@@ -271,31 +334,49 @@ WP-15's shell integration; the chord comes with it.
 
 ```text
 Play/Pause, Next, Previous   punarctl media play-pause|next|previous (MPRIS)
+ALT + Play / ALT+SHIFT+Play  Next / previous track, for keyboards with only Play
 Mic mute                     punarctl audio mute --input
 Brightness up/down           punarctl display brightness +5% / -5% (ALT: 1%)
+SHIFT + Brightness up/down   Brightness to full / to lowest (1%, never dark)
 Keyboard light up/down       punarctl display brightness --keyboard ±34%
 ```
 
 Brightness writes only through logind's `SetBrightness` on the session's own
 object: no root, no polkit prompt, no video group, no udev rule. A machine
-with no backlight (every VM) exits 6 and draws nothing.
+with no backlight (every VM) exits 6 and draws nothing. Every step moves the
+device at least one level, taken from the raw value it holds, so a firmware
+backlight with eight or ten levels never swallows a key press.
 
 ### Keyboard layout
 
 The device's layout is punard's `system.keymap` (`/etc/vconsole.conf`), set by
-the person at the machine with `punarctl keyboard layout set <layouts>`,
-System Control's Keyboard view, or a successful sign-in from the login
-screen's picker. Both compositors read it as data from
+the person at the machine, **from their own session on it**, with `punarctl
+keyboard layout set <layouts>`, System Control's Keyboard view, or a
+successful sign-in from the login screen's picker. punard checks the caller's
+own logind session (active, local, on seat0), not only its uid, so a user
+service, an SSH login or a helper started outside an agent's scope cannot
+change it (docs/api/ipc.md section 5.4). Both compositors read it as data from
 `$XDG_RUNTIME_DIR/punar/session/input.lua`. A first layout that cannot type
 Latin letters is led by US English, and **both Alt keys together** switch
 layouts (an XKB option, so it works on the login and lock screens too).
+
+The login screen names the device's whole value, variants and all ("US-DVORAK",
+"US RU"), so its label never names a layout it is not typing in, and its plain
+US entry means plain US. A choice made there is carried into the device only
+by a sign-in within ten minutes of it; after that the login screen goes back
+to the device's layout, so the next person does not adopt it unseen. The
+installer's layout is the first default only on a device nobody has signed in
+to yet; an updated device keeps what it types today, so no existing password
+moves under a new layout.
 
 ### Clipboard keys (optional)
 
 `punarctl keyboard clipboard-keys on`: PUNAR + C / V / X copy, paste and cut
 (Ctrl+Insert / Shift+Insert in a terminal), and floating and centring move to
-PUNAR + ALT + V and C. In foot, Ctrl+Insert and Shift+Insert copy and paste,
-and Ctrl+Shift+A copies the whole scrollback.
+PUNAR + ALT + V and C. In foot, Ctrl+Insert and Shift+Insert copy and paste.
+There is no select-all key: foot has no select-all action, and its only
+stand-in (piping the whole scrollback into the clipboard) would copy up to
+10,000 lines, secrets included, with nothing shown selected.
 
 ## Future — reserved / not in M2
 

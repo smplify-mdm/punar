@@ -1296,8 +1296,11 @@ it. Reproduce without the suspect change before backing anything out.
 option `{ mouse = true }` (Omarchy 4.0.4 tiling.lua K50/K51). The binds now sit
 last in punar-binds.lua inside `pcall`, so no error can take earlier binds with
 it; `tools/hyprland-verify.sh` runs the whole config through the pinned
-Hyprland's `--verify-config` in CI, and keys-check.sh drags a real window with
-PUNAR held through QMP.
+Hyprland's `--verify-config` (which ignores bind options it does not know, so
+it proves the dispatchers parse, not that `mouse = true` does what it says),
+and keys-check.sh is written to drag a real window with PUNAR held through
+QMP. **keys-check.sh has not run in CI yet**: until the desktop gate's next
+run is green, the re-landed drag is proven only to parse.
 
 **Still open.** A desktop right-click context menu — genuinely not built, not
 stubbed, and not something Thunar can provide, because no file manager owns the

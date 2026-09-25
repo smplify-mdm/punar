@@ -257,6 +257,29 @@ Deliverables (spec section 76, Milestone 1):
   `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh`
   presses real keys through QMP — **implemented, not yet run in CI** (its
   first run is the next desktop gate).
+  After the WP-02 review: every chord works under every keyboard layout (the
+  number row by key code; PUNAR+F1 and PUNAR+ALT+Tab twins for / and [ ]),
+  the keyboard layout is set only from the person's own seat session, the
+  install seed applies only on a device with no account yet, the login
+  screen names variants and forgets a stale choice, the look toggles are
+  kept as data (`punarctl window look`), and keys-check also proves the
+  French number row, the Mac-style clipboard keys in a terminal, the
+  microphone key on a real PipeWire source, a kept look across a reload,
+  and the lock screen's layout line after a configuration load.
+  **What this earns against Omarchy, once that CI run is green** (plan
+  rules 0.3 and 3.1-4): J14 PUNAR_BETTER (most-recent-first with previews)
+  only once keys-check's recorded quick-switch time has been compared with a
+  compositor-only switch and holds up, PARITY until then; B19,
+  J04, J11, J13, J16 and J19 PARITY (B19's login-screen picker is not pressed
+  in the VM, whose dev image signs in without it; J16's workspace-to-monitor
+  move needs a second monitor and is proven by configuration only); K06
+  NOT_COMPARABLE_YET (no backlight in a VM, WP-23). **Not earned by WP-02:**
+  J15 stays OMARCHY_BETTER (pseudo-tiling, tiled fullscreen, width
+  save/restore and move-to-scratchpad wait for WP-11), P06 stays
+  OMARCHY_BETTER (the file manager in the terminal's folder waits for
+  WP-15's shell integration), and K15 stays OMARCHY_BETTER (media keys are
+  bound, but output/source switching and the bar widget are WP-03, eject is
+  WP-19, and no in-VM check drives a real MPRIS player yet).
 
 Acceptance (spec section 76, Milestone 1):
 
