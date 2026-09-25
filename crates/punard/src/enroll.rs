@@ -18,7 +18,7 @@
 //! applications ([`crate::inventory`]) — nothing behavioral. Enrollment is
 //! explicit (`punarctl enroll start`), never automatic.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::inventory::{Collected, MAX_INVENTORY_BYTES, Withheld};
-use crate::util::write_atomic;
+use crate::util::{write_atomic, write_atomic_synced};
 
 /// Compiled-in default control-plane endpoint: `punar-smplifyd`, the
 /// built-in Smplify device agent, which serves this same NDJSON contract on
@@ -89,6 +89,14 @@ pub fn call_timeout(method: &str) -> Duration {
 /// Bootstrap secret size in bytes (64 hex chars on the wire — the mock
 /// requires ≥ 32 hex chars; milestone-5.md section 4.3).
 pub const BOOTSTRAP_SECRET_BYTES: usize = 32;
+
+/// The longest answer line punard reads from the control plane, newline
+/// included. A policy fetch now runs on every reconcile pass, as root, and an
+/// answer is read whole into memory before it is parsed: without a bound, a
+/// control plane that never ends its line could grow punard until the kernel
+/// stopped it. Sixty-four envelopes of the 256 KiB each one may be
+/// (`crate::policy_set`) fit with room to spare.
+pub const MAX_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Control-plane client (NDJSON RPC, the ipc.md section 3 envelope verbatim)
@@ -177,7 +185,9 @@ impl ControlPlaneClient {
             .write_all(line.as_bytes())
             .map_err(|e| UpstreamError::transport("send failed", &e))?;
 
-        let mut reader = BufReader::new(&stream);
+        // One byte past the bound is read, so an answer that reaches it is
+        // told apart from one that ends exactly there.
+        let mut reader = BufReader::new((&stream).take(MAX_ANSWER_BYTES + 1));
         let mut response = String::new();
         let read = reader
             .read_line(&mut response)
@@ -186,6 +196,11 @@ impl ControlPlaneClient {
             return Err(UpstreamError::Unreachable(
                 "the control plane closed the connection without answering".to_string(),
             ));
+        }
+        if read as u64 > MAX_ANSWER_BYTES {
+            return Err(UpstreamError::Unreachable(format!(
+                "the control plane's answer was too large (over {MAX_ANSWER_BYTES} bytes)"
+            )));
         }
 
         let value: Value = serde_json::from_str(response.trim_end()).map_err(|_| {
@@ -275,14 +290,18 @@ impl ControlPlaneClient {
     }
 
     /// `policy.fetch {device_token}` → the policy-source envelopes (each
-    /// carrying its embedded `DeviceDesiredState` as `policy`).
-    pub fn policy_fetch(&self, token: &Redacted<String>) -> Result<Vec<Value>, UpstreamError> {
+    /// carrying its embedded `DeviceDesiredState` as `policy`), and what the
+    /// control plane says the list is ([`Assignment`]).
+    pub fn policy_fetch(&self, token: &Redacted<String>) -> Result<FetchedPolicy, UpstreamError> {
         let result = self.call(
             "policy.fetch",
             json!({ "device_token": token.expose_secret() }),
         )?;
         match result.get("policies").and_then(Value::as_array) {
-            Some(policies) => Ok(policies.clone()),
+            Some(policies) => Ok(FetchedPolicy {
+                policies: policies.clone(),
+                assignment: Assignment::from_wire(result.get("assignment")),
+            }),
             None => Err(UpstreamError::Unreachable(
                 "policy.fetch answered without a policies array".into(),
             )),
@@ -453,6 +472,48 @@ impl ControlPlaneClient {
     }
 }
 
+/// What the control plane says a `policy.fetch` answer is (docs/api/ipc.md
+/// section 5.9). The list alone cannot say it: Smplify answers an empty list
+/// both when the organization assigned this device nothing and when it
+/// assigned something this release cannot turn into Punar policy, and only
+/// the first may take away a policy the device already enforces. One
+/// unreadable bundle must never wipe an organization's policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Assignment {
+    /// `"policies"`: the list is the organization's policy for this device.
+    Policies,
+    /// `"none"`: the organization assigns this device nothing. The one answer
+    /// that withdraws a policy the device holds.
+    NoneAssigned,
+    /// `"unusable"`: something is assigned, and the control plane could not
+    /// turn it into Punar policy. The device keeps what it has.
+    Unusable,
+    /// No marker (a control plane that predates it), or one this build has no
+    /// name for. A list is still a list; an empty one withdraws nothing.
+    Unstated,
+}
+
+impl Assignment {
+    /// Read the result's `assignment` marker. Anything but the three words
+    /// is [`Assignment::Unstated`], never a guess at a stronger meaning.
+    pub fn from_wire(value: Option<&Value>) -> Assignment {
+        match value.and_then(Value::as_str) {
+            Some("policies") => Assignment::Policies,
+            Some("none") => Assignment::NoneAssigned,
+            Some("unusable") => Assignment::Unusable,
+            _ => Assignment::Unstated,
+        }
+    }
+}
+
+/// A `policy.fetch` answer: the envelopes, and what the control plane says
+/// they are.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchedPolicy {
+    pub policies: Vec<Value>,
+    pub assignment: Assignment,
+}
+
 // ---------------------------------------------------------------------------
 // enrollment.json — private daemon store (peer of device-id; 0600, atomic)
 // ---------------------------------------------------------------------------
@@ -486,8 +547,11 @@ pub struct Enrollment {
     pub enrolled_at: String,
     /// The literal honesty label from the register step ("simulated").
     pub attestation: String,
-    /// policy.d file names this enrollment wrote — exactly what
-    /// `enroll.stop` removes.
+    /// The policy.d file names this enrollment owns now — exactly what
+    /// `enroll.stop` removes. Written at enrollment and by every policy
+    /// refresh that changes the set; while a refresh is being committed it
+    /// holds the old and the new names together, so a crash between the
+    /// record and the directory never leaves a file no record owns.
     pub policy_files: Vec<String>,
     pub last_sync: LastSyncRecord,
     /// SHA-256 hex of the last successfully reported inventory (the hash
@@ -553,6 +617,70 @@ pub struct Enrollment {
     /// Written only after a send succeeds.
     #[serde(default)]
     pub last_inventory_sent_at: Option<String>,
+    /// The revision (`sha256:…`, [`crate::policy_set::CanonicalSet::revision`])
+    /// of the organization's policy set this device enforces. For reporting
+    /// only: a refresh compares the fetched set with the files themselves, so
+    /// a stale or missing value can never hide a change. `None` in a file
+    /// written before the field existed; the first refresh fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_hash: Option<String>,
+    /// When the device last fetched the answer it is enforcing: an unchanged,
+    /// applied or withdrawn policy. A fetch that was refused, rejected, held
+    /// or failed never moves it, so it says how fresh the enforced policy is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_fetched_at: Option<String>,
+    /// When the enforced set last changed: at enrollment, or at the refresh
+    /// that applied or withdrew it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_changed_at: Option<String>,
+    /// The outcome of the most recent policy refresh (docs/api/ipc.md section
+    /// 5.10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_refresh: Option<PolicyRefreshRecord>,
+}
+
+/// The last policy refresh, as `enroll.status` shows it. Tolerant of fields
+/// a newer build adds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyRefreshRecord {
+    pub at: String,
+    /// `unchanged` | `applied` | `withdrawn` | `rejected` | `held` |
+    /// `unreachable` | `refused` | `failed`.
+    pub result: String,
+    /// Why, for every result but the three that mean "enforcing what the
+    /// organization serves": a closed snake_case code, never the control
+    /// plane's own words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// For `rejected`: the revision of the set that was refused, so the same
+    /// set is recorded and audited once, not on every pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_hash: Option<String>,
+}
+
+/// The part of an [`Enrollment`] a policy refresh may change, and nothing
+/// else: which files it owns, the revision they carry, when it was fetched
+/// and changed, and how the last refresh went. The terms fixed at enrollment
+/// (`removable`, `organization_owned`, `remote_query_scopes`, the
+/// organization, `enrolled_at`, the attestation label) have no field here,
+/// so no refresh can reach them however the organization's policy changes
+/// (docs/development/smplify-enrollment.md section 3.1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicyFields {
+    pub files: Vec<String>,
+    pub hash: Option<String>,
+    pub fetched_at: Option<String>,
+    pub changed_at: Option<String>,
+    pub refresh: Option<PolicyRefreshRecord>,
+}
+
+/// The one way a policy refresh writes to an enrollment. See [`PolicyFields`].
+pub fn apply_policy_fields(enrollment: &mut Enrollment, fields: PolicyFields) {
+    enrollment.policy_files = fields.files;
+    enrollment.policy_hash = fields.hash;
+    enrollment.policy_fetched_at = fields.fetched_at;
+    enrollment.policy_changed_at = fields.changed_at;
+    enrollment.policy_refresh = fields.refresh;
 }
 
 fn removable_by_default() -> bool {
@@ -681,13 +809,24 @@ impl Enrollment {
         ScopeSet::parse_json(Some(&Value::Array(values))).0
     }
 
-    /// The policy ids recorded at enrollment (file stem = policy id by the
-    /// enrollment chain's own naming rule).
+    /// The policy ids this enrollment currently owns (file stem = policy id
+    /// by the enrollment chain's own naming rule).
     pub fn policy_ids(&self) -> Vec<String> {
         self.policy_files
             .iter()
             .map(|f| f.trim_end_matches(".json").to_string())
             .collect()
+    }
+
+    /// A copy of the fields a policy refresh may change ([`PolicyFields`]).
+    pub fn policy_fields(&self) -> PolicyFields {
+        PolicyFields {
+            files: self.policy_files.clone(),
+            hash: self.policy_hash.clone(),
+            fetched_at: self.policy_fetched_at.clone(),
+            changed_at: self.policy_changed_at.clone(),
+            refresh: self.policy_refresh.clone(),
+        }
     }
 }
 
@@ -739,6 +878,25 @@ fn load_terms(path: &Path) -> io::Result<Option<EnrollmentTerms>> {
 /// Persist `enrollment.json` (0600, atomic), and the removal term beside it
 /// first, so no crash leaves an enrollment without its term.
 pub fn save_enrollment(path: &Path, enrollment: &Enrollment) -> io::Result<()> {
+    let (terms_bytes, bytes) = enrollment_bytes(enrollment);
+    write_atomic(&terms_path(path), &terms_bytes, 0o600)?;
+    write_atomic(path, &bytes, 0o600)
+}
+
+/// [`save_enrollment`], with both files and their directory `fsync`ed before
+/// it returns. Used where the record must be on disk before a change it
+/// describes: the files an enrollment owns in `policy.d` are written into it
+/// before they appear there, so a crash cannot leave organization policy
+/// enforced on a device whose record says it owns none of it, or reads as
+/// personal. The terms file is rewritten with the same bytes.
+pub fn save_enrollment_durable(path: &Path, enrollment: &Enrollment) -> io::Result<()> {
+    let (terms_bytes, bytes) = enrollment_bytes(enrollment);
+    write_atomic_synced(&terms_path(path), &terms_bytes, 0o600)?;
+    write_atomic_synced(path, &bytes, 0o600)
+}
+
+/// The bytes of [`TERMS_FILE`] and `enrollment.json` for one enrollment.
+fn enrollment_bytes(enrollment: &Enrollment) -> (Vec<u8>, Vec<u8>) {
     let terms = EnrollmentTerms {
         version: 1,
         org_id: enrollment.org.id.clone(),
@@ -746,9 +904,8 @@ pub fn save_enrollment(path: &Path, enrollment: &Enrollment) -> io::Result<()> {
         removable: enrollment.removable,
     };
     let terms_bytes = serde_json::to_vec_pretty(&terms).expect("terms serialize");
-    write_atomic(&terms_path(path), &terms_bytes, 0o600)?;
     let bytes = serde_json::to_vec_pretty(enrollment).expect("enrollment serializes");
-    write_atomic(path, &bytes, 0o600)
+    (terms_bytes, bytes)
 }
 
 /// Remove `enrollment.json`'s removal term (on unenroll).
@@ -1170,6 +1327,10 @@ mod tests {
             removable: true,
             organization_owned: false,
             last_inventory_sent_at: None,
+            policy_hash: None,
+            policy_fetched_at: None,
+            policy_changed_at: None,
+            policy_refresh: None,
         }
     }
 
@@ -2082,5 +2243,161 @@ mod tests {
             }
             other => panic!("expected Unreachable, got {other:?}"),
         }
+    }
+
+    /// A control plane on a socket of its own that answers each connection,
+    /// in turn, with the next of `answers`, whatever it was asked.
+    fn answering(tag: &str, answers: Vec<Vec<u8>>) -> (PathBuf, std::thread::JoinHandle<()>) {
+        use std::os::unix::net::UnixListener;
+        let socket = tmp(tag).join("control-plane.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let served = std::thread::spawn(move || {
+            for answer in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                // The client stops reading at its bound and hangs up.
+                let _ = stream.write_all(&answer);
+            }
+        });
+        (socket, served)
+    }
+
+    fn policies_answer(result: Value) -> Vec<u8> {
+        let mut line = json!({"v": 1, "id": "t", "result": result}).to_string();
+        line.push('\n');
+        line.into_bytes()
+    }
+
+    /// The fetch runs as root on every pass: an answer longer than the bound
+    /// is refused as unreachable rather than read into memory whole, and one
+    /// that fits is read as before.
+    #[test]
+    fn an_answer_past_the_bound_is_refused_and_one_within_it_is_read() {
+        let within = policies_answer(json!({"policies": [], "assignment": "none"}));
+        let mut past = b"{\"v\":1,\"id\":\"t\",\"result\":{\"policies\":[\"".to_vec();
+        past.resize(MAX_ANSWER_BYTES as usize + 64, b'x');
+        past.extend_from_slice(b"\"]}}\n");
+        let (socket, served) = answering("answer-bound", vec![past, within]);
+        let client = ControlPlaneClient::new(&socket);
+        let token = Redacted::new("tok_x".to_string());
+        match client.policy_fetch(&token) {
+            Err(UpstreamError::Unreachable(why)) => assert!(why.contains("too large"), "{why}"),
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+        assert_eq!(
+            client.policy_fetch(&token).unwrap(),
+            FetchedPolicy {
+                policies: vec![],
+                assignment: Assignment::NoneAssigned,
+            }
+        );
+        served.join().unwrap();
+    }
+
+    /// Only the three marker words mean anything; a missing marker, or one
+    /// this build has no name for, is unstated and never read as `none`.
+    #[test]
+    fn policy_fetch_reads_what_the_control_plane_says_the_list_is() {
+        let answers = [
+            (json!("policies"), Assignment::Policies),
+            (json!("none"), Assignment::NoneAssigned),
+            (json!("unusable"), Assignment::Unusable),
+            (json!("None"), Assignment::Unstated),
+            (json!(false), Assignment::Unstated),
+            (Value::Null, Assignment::Unstated),
+        ];
+        let lines = answers
+            .iter()
+            .map(|(marker, _)| {
+                let mut result = json!({"policies": [{"policy_id": "p"}]});
+                if !marker.is_null() {
+                    result["assignment"] = marker.clone();
+                }
+                policies_answer(result)
+            })
+            .collect();
+        let (socket, served) = answering("assignment", lines);
+        let client = ControlPlaneClient::new(&socket);
+        let token = Redacted::new("tok_x".to_string());
+        for (marker, expected) in answers {
+            let fetched = client.policy_fetch(&token).unwrap();
+            assert_eq!(fetched.assignment, expected, "{marker}");
+            assert_eq!(fetched.policies, vec![json!({"policy_id": "p"})]);
+        }
+        served.join().unwrap();
+    }
+
+    /// A file written before the policy fields existed loads with none of
+    /// them, and a file with them round-trips, through the durable save as
+    /// through the ordinary one, byte for byte.
+    #[test]
+    fn the_policy_fields_default_to_absent_and_round_trip() {
+        let dir = tmp("policy-fields");
+        let path = dir.join("enrollment.json");
+        let older = sample_enrollment();
+        save_enrollment(&path, &older).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("policy_hash"), "{raw}");
+        assert!(!raw.contains("policy_refresh"), "{raw}");
+        let loaded = load_enrollment(&path).unwrap().unwrap();
+        assert_eq!(loaded.policy_fields().hash, None);
+        assert_eq!(loaded.policy_fields().refresh, None);
+
+        let mut newer = sample_enrollment();
+        apply_policy_fields(
+            &mut newer,
+            PolicyFields {
+                files: vec!["eng-baseline-v12.json".into(), "eng-role-sre.json".into()],
+                hash: Some("sha256:ab".into()),
+                fetched_at: Some("2026-09-24T10:00:00Z".into()),
+                changed_at: Some("2026-09-24T09:00:00Z".into()),
+                refresh: Some(PolicyRefreshRecord {
+                    at: "2026-09-24T10:02:00Z".into(),
+                    result: "rejected".into(),
+                    reason: Some("duplicate_policy_id".into()),
+                    offered_hash: Some("sha256:cd".into()),
+                }),
+            },
+        );
+        save_enrollment_durable(&path, &newer).unwrap();
+        let durable = std::fs::read(&path).unwrap();
+        let durable_terms = std::fs::read(dir.join(TERMS_FILE)).unwrap();
+        assert_eq!(load_enrollment(&path).unwrap().unwrap(), newer);
+        save_enrollment(&path, &newer).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), durable);
+        assert_eq!(std::fs::read(dir.join(TERMS_FILE)).unwrap(), durable_terms);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whatever a refresh writes, every term fixed at enrollment is exactly
+    /// what it was: the fields a refresh may change are the only ones it can
+    /// name.
+    #[test]
+    fn a_policy_refresh_cannot_change_an_enrollment_term() {
+        let mut before = sample_enrollment();
+        before.removable = false;
+        before.organization_owned = true;
+        let mut after = before.clone();
+        apply_policy_fields(
+            &mut after,
+            PolicyFields {
+                files: vec![],
+                hash: Some("sha256:00".into()),
+                fetched_at: Some("2026-09-25T00:00:00Z".into()),
+                changed_at: Some("2026-09-25T00:00:00Z".into()),
+                refresh: Some(PolicyRefreshRecord {
+                    at: "2026-09-25T00:00:00Z".into(),
+                    result: "withdrawn".into(),
+                    reason: None,
+                    offered_hash: None,
+                }),
+            },
+        );
+        assert_ne!(after, before);
+        assert_eq!(after.policy_ids(), Vec::<String>::new());
+        apply_policy_fields(&mut after, before.policy_fields());
+        assert_eq!(after, before, "only the policy fields moved");
     }
 }

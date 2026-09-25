@@ -5107,6 +5107,7 @@ impl Inner {
         // all-or-nothing up through the policy.d write.
         let envelopes = client
             .policy_fetch(&token)
+            .map(|fetched| fetched.policies)
             .map_err(|e| fail_audit(self.upstream_error("policy.fetch", e)))?;
         let staging = self.cfg.state_dir.join(".policy.d.enroll-staging");
         let cleanup_staging = || {
@@ -5232,6 +5233,10 @@ impl Inner {
             removable,
             organization_owned,
             last_inventory_sent_at: None,
+            policy_hash: None,
+            policy_fetched_at: None,
+            policy_changed_at: None,
+            policy_refresh: None,
         };
         if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token) {
             rollback_files(&policy_files);
