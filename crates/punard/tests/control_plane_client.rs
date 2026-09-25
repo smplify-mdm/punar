@@ -5,14 +5,14 @@
 //! server is a listener too.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use punar_common::Redacted;
 use punard::enroll::{
     AgentFault, AgentQueue, Assignment, CallBudget, ControlPlaneClient, FetchedPolicy,
-    MAX_ANSWER_BYTES, UpstreamError,
+    MAX_ANSWER_BYTES, UpstreamError, listener_bound_at,
 };
 use serde_json::{Value, json};
 
@@ -417,5 +417,27 @@ fn a_listener_systemd_did_not_create_is_not_the_agents() {
         .identity_status(Some(&token))
         .unwrap();
     assert!(!identity.enrolled);
+    served.join().unwrap();
+}
+
+/// A connection reports the address its listener bound, not the path that
+/// was dialled: a symlink at the agent's path (a bind mount over it reads the
+/// same) that leads to another socket names that socket. That is how punard
+/// tells a re-routed path apart when systemd created the other listener too,
+/// and so passes the PID 1 check (measured on systemd 257; see
+/// docs/development/smplify-enrollment.md section 3.4).
+#[test]
+fn a_listener_reached_through_a_symlink_is_not_bound_at_the_dialled_path() {
+    let (socket, served) = serving(2, |_stream| {});
+    let agents_path = socket.with_file_name("api.sock");
+    std::os::unix::fs::symlink(&socket, &agents_path).unwrap();
+    let direct = UnixStream::connect(&socket).unwrap();
+    assert!(listener_bound_at(&direct, &socket));
+    let redirected = UnixStream::connect(&agents_path).unwrap();
+    assert!(!listener_bound_at(&redirected, &agents_path));
+    assert!(
+        listener_bound_at(&redirected, &socket),
+        "it names the socket it reached"
+    );
     served.join().unwrap();
 }

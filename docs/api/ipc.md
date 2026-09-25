@@ -1953,14 +1953,19 @@ or path other than the confirmed target device. An installed system returns
   the agent never gives: something else answers on its socket),
   `token_missing` (punard's own device token is gone, so this device cannot
   be asked about or reported on at all), `unexpected_listener` (the socket at
-  the agent's path was not created by systemd: its listener's credentials do
-  not name PID 1, checked on every connection before anything is sent), and
-  `unit_modified` (a unit management depends on — the agent's socket and
-  service, `punard.service`, `punard-reconcile.timer` and `.service` — is not
-  as the image ships it: masked, a fragment or drop-in outside
-  `/usr/lib/systemd/system`, the socket listening elsewhere, or the agent's
-  process not `/usr/bin/punar-smplifyd`; checked with `systemctl show` on
-  every pass while enrolled, and before `enroll.start` sends anything). A
+  the agent's path is not the agent's: its listener's credentials do not name
+  PID 1, or its address is not the agent's path because a symlink or a bind
+  mount led the connection elsewhere, both checked on every connection before
+  anything is sent; or another socket unit listens at the agent's path, which
+  only systemd's list of socket units shows), `unit_modified` (a unit
+  management depends on — the agent's socket and service, `punard.service`,
+  `punard-reconcile.timer` and `.service` — is not as the image ships it:
+  masked, a fragment or drop-in outside `/usr/lib/systemd/system`, the socket
+  listening elsewhere, or the agent's process not `/usr/bin/punar-smplifyd`;
+  checked with `systemctl show` on every pass while enrolled, and before
+  `enroll.start` sends anything), and `units_unreadable` (systemd could not
+  be asked about those units, or its answer could not be read: the check
+  fails closed, and `enroll.start` refuses as it does for the others). A
   socket that is gone or no longer listened on is started again
   (`systemctl start --no-block punar-smplifyd.socket`). An override of the
   control-plane socket (`PUNAR_CONTROL_PLANE_SOCKET`,

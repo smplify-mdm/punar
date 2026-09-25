@@ -1543,7 +1543,9 @@ fn app_ipc_error(error: AppError) -> IpcError {
         AppError::InvalidCatalog(_) => (
             ErrorCode::Internal,
             "The application catalog could not be trusted",
-            "verify the signed OS image and restart punard",
+            // Not "restart punard": it refuses a manual stop or restart
+            // (docs/development/smplify-enrollment.md section 3.4).
+            "verify the signed OS image and restart the device",
         ),
         AppError::NotFound(_) => (
             ErrorCode::NotFound,
@@ -5398,20 +5400,15 @@ impl Inner {
             .map(|c| Redacted::new(c.to_string()));
         // Nothing, the enrollment code least of all, goes to an agent whose
         // units are not the image's (a drop-in replacing its ExecStart= would
-        // run anything as the agent).
+        // run anything as the agent), or while another socket unit listens at
+        // its path.
         if let Some(integrity) = &self.cfg.agent_integrity {
-            match integrity.check() {
-                Ok(()) => {}
-                Err(finding @ crate::agent_units::UnitFinding::Modified { .. }) => {
-                    eprintln!("punard: enroll.start refused: {finding}");
-                    return Err(fail_audit(self.upstream_error(
-                        "discover",
-                        UpstreamError::AgentUnavailable(AgentFault::UnitModified),
-                    )));
-                }
-                Err(finding) => {
-                    eprintln!("punard: the management units were not checked: {finding}");
-                }
+            if let Err(finding) = integrity.check() {
+                eprintln!("punard: enroll.start refused: {finding}");
+                return Err(fail_audit(self.upstream_error(
+                    "discover",
+                    UpstreamError::AgentUnavailable(finding.fault()),
+                )));
             }
         }
         // Discover.
@@ -6642,17 +6639,15 @@ impl Inner {
         };
         match liveness {
             // Answering as this device's agent is not enough: it must be the
-            // image's agent, behind the image's units (crate::agent_units).
+            // image's agent, behind the image's units, alone at its path
+            // (crate::agent_units).
+            // What cannot be checked is not vouched for either (fails
+            // closed, `units_unreadable`).
             Liveness::Available => match integrity.check() {
                 Ok(()) => Liveness::Available,
-                Err(finding @ crate::agent_units::UnitFinding::Modified { .. }) => {
-                    eprintln!("punard: a unit management depends on was modified: {finding}");
-                    Liveness::Unavailable(AgentFault::UnitModified)
-                }
-                // Not knowing is not a finding: the agent answered as itself.
                 Err(finding) => {
-                    eprintln!("punard: the management units were not checked: {finding}");
-                    Liveness::Available
+                    eprintln!("punard: the management units are not as shipped: {finding}");
+                    Liveness::Unavailable(finding.fault())
                 }
             },
             // A socket that is gone or no longer listened on is started

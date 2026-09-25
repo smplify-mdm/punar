@@ -16,6 +16,15 @@
 //! must listen where punard dials. Anything else is management interrupted
 //! (`unit_modified`), audited like every other way the agent stops serving.
 //!
+//! The same answer lists every socket unit systemd has loaded (`*.socket`),
+//! because one more listener at the agent's path is invisible to a
+//! connection: root can remove the agent's socket node and start a socket
+//! unit of its own at the same path (a file in `/etc`, or a transient one
+//! from `systemd-run`), and systemd creates that listener too, with PID 1's
+//! credentials and the agent's address, while the agent's own unit stays
+//! loaded, listening and unmodified. Only systemd's own list shows the second
+//! unit (`unexpected_listener`).
+//!
 //! The image's unit directory is the boundary: administrator and runtime
 //! configuration (`/etc`, `/run`, `systemctl edit`, `set-property`, a mask)
 //! is checked, while a change to `/usr` itself is a change to the operating
@@ -27,7 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::enroll::DEFAULT_CONTROL_PLANE_SOCKET;
+use crate::enroll::{AgentFault, DEFAULT_CONTROL_PLANE_SOCKET};
 use crate::util::run_bounded;
 
 /// The agent's socket unit.
@@ -45,6 +54,11 @@ pub const MANAGEMENT_UNITS: [&str; 5] = [
     "punard-reconcile.timer",
     "punard-reconcile.service",
 ];
+
+/// Every socket unit systemd has loaded, the agent's among them: shown
+/// beside [`MANAGEMENT_UNITS`] so a second listener at the agent's path is
+/// found ([`UnitFinding::ForeignListener`]).
+pub const EVERY_SOCKET_UNIT: &str = "*.socket";
 
 /// Where the image ships its units, and its drop-ins for them.
 pub const VENDOR_UNIT_DIR: &str = "/usr/lib/systemd/system/";
@@ -86,6 +100,24 @@ pub enum UnitFinding {
     /// `unit` is not as the image ships it: `what` says how, for the
     /// journal (paths and systemd's own words, never a secret).
     Modified { unit: String, what: String },
+    /// `unit`, a socket unit other than the agent's, listens at the agent's
+    /// path too: a connection there may reach it, and nothing about the
+    /// connection tells it apart.
+    ForeignListener { unit: String },
+}
+
+impl UnitFinding {
+    /// The reason an episode of management interrupted records for this
+    /// finding. Failing closed: units systemd could not be asked about are
+    /// units nothing vouches for (a removed `/run/systemd/private` with the
+    /// system bus stopped would otherwise hide every other finding).
+    pub fn fault(&self) -> AgentFault {
+        match self {
+            UnitFinding::Unreadable(_) => AgentFault::UnitsUnreadable,
+            UnitFinding::Modified { .. } => AgentFault::UnitModified,
+            UnitFinding::ForeignListener { .. } => AgentFault::UnexpectedListener,
+        }
+    }
 }
 
 impl std::fmt::Display for UnitFinding {
@@ -93,6 +125,9 @@ impl std::fmt::Display for UnitFinding {
         match self {
             UnitFinding::Unreadable(why) => write!(f, "systemd could not be asked ({why})"),
             UnitFinding::Modified { unit, what } => write!(f, "{unit}: {what}"),
+            UnitFinding::ForeignListener { unit } => {
+                write!(f, "{unit} also listens at {DEFAULT_CONTROL_PLANE_SOCKET}")
+            }
         }
     }
 }
@@ -105,6 +140,7 @@ impl AgentIntegrity {
             "--property=Id,LoadState,FragmentPath,DropInPaths,Listen,MainPID",
         ];
         args.extend(MANAGEMENT_UNITS);
+        args.push(EVERY_SOCKET_UNIT);
         let shown = run_bounded(&self.systemctl, &args, SHOW_TIMEOUT, SHOW_MAX_BYTES)
             .map_err(|e| UnitFinding::Unreadable(e.to_string()))?;
         if !shown.success {
@@ -140,8 +176,10 @@ impl AgentIntegrity {
     }
 }
 
-/// Hold `systemctl show`'s answer for [`MANAGEMENT_UNITS`] to what the image
-/// ships. `exe_of` reads a process's executable.
+/// Hold `systemctl show`'s answer for [`MANAGEMENT_UNITS`] and
+/// [`EVERY_SOCKET_UNIT`] to what the image ships: each management unit as the
+/// image has it, and no socket unit but the agent's listening at the agent's
+/// path. `exe_of` reads a process's executable.
 pub fn judge(shown: &str, exe_of: impl Fn(u32) -> Option<PathBuf>) -> Result<(), UnitFinding> {
     let blocks = parse_show(shown);
     let modified = |unit: &str, what: String| UnitFinding::Modified {
@@ -183,7 +221,23 @@ pub fn judge(shown: &str, exe_of: impl Fn(u32) -> Option<PathBuf>) -> Result<(),
         .map(String::as_str)
         .unwrap_or("");
     if socket != format!("{DEFAULT_CONTROL_PLANE_SOCKET} (Stream)") {
-        return Err(modified(AGENT_SOCKET_UNIT, format!("Listen={socket}")));
+        return Err(modified(
+            AGENT_SOCKET_UNIT,
+            format!("Listen={}", socket.replace('\n', " ")),
+        ));
+    }
+    // Any other socket unit at the agent's path, of any socket type.
+    let at_agents_path = format!("{DEFAULT_CONTROL_PLANE_SOCKET} (");
+    if let Some(unit) = blocks
+        .iter()
+        .filter_map(|block| Some((block.get("Id")?, block.get("Listen")?)))
+        .find(|(id, listen)| {
+            id.as_str() != AGENT_SOCKET_UNIT
+                && listen.lines().any(|line| line.starts_with(&at_agents_path))
+        })
+        .map(|(id, _)| id.clone())
+    {
+        return Err(UnitFinding::ForeignListener { unit });
     }
     let main_pid = blocks
         .iter()
@@ -210,7 +264,9 @@ pub fn judge(shown: &str, exe_of: impl Fn(u32) -> Option<PathBuf>) -> Result<(),
 }
 
 /// `systemctl show` for several units: one block of `Key=Value` lines per
-/// unit, blank lines between.
+/// unit, blank lines between. A property systemd prints more than once (a
+/// socket unit's `Listen=`, one line per listener) keeps every value, one per
+/// line, so a second listener is never hidden behind the first.
 fn parse_show(shown: &str) -> Vec<BTreeMap<String, String>> {
     let mut blocks = Vec::new();
     let mut block = BTreeMap::new();
@@ -222,7 +278,13 @@ fn parse_show(shown: &str) -> Vec<BTreeMap<String, String>> {
             continue;
         }
         if let Some((key, value)) = line.split_once('=') {
-            block.insert(key.to_string(), value.to_string());
+            block
+                .entry(key.to_string())
+                .and_modify(|values: &mut String| {
+                    values.push('\n');
+                    values.push_str(value);
+                })
+                .or_insert_with(|| value.to_string());
         }
     }
     if !block.is_empty() {
@@ -252,6 +314,111 @@ mod tests {
              MainPID=0\nId=punard-reconcile.service\nLoadState=loaded\n\
              FragmentPath=/usr/lib/systemd/system/punard-reconcile.service\nDropInPaths=\n"
         )
+    }
+
+    /// `systemctl show` verbatim from systemd 257 (Debian trixie), the exact
+    /// command [`AgentIntegrity::check`] runs, with the image's units and the
+    /// agent running as process 139 (tests/fixtures/README.md): as shipped;
+    /// after `set-property` on the agent, an `/etc` drop-in on punard and a
+    /// masked timer; and with a transient socket unit of root's own at the
+    /// agent's path. Properties come in systemd's own order, not the order
+    /// asked for, the agent's socket twice, and a socket unit with two
+    /// listeners on two lines.
+    const SYSTEMD_257_SHIPPED: &str = include_str!("../tests/fixtures/systemctl-show-shipped.txt");
+    const SYSTEMD_257_MODIFIED: &str =
+        include_str!("../tests/fixtures/systemctl-show-modified.txt");
+    const SYSTEMD_257_TRANSIENT_LISTENER: &str =
+        include_str!("../tests/fixtures/systemctl-show-transient-listener.txt");
+
+    /// What real systemd prints is read as the synthetic fixtures are: the
+    /// shipped units pass, and each modification is caught, the first in
+    /// unit order first; with it undone, the next. A second socket unit at
+    /// the agent's path, which leaves the agent's own units exactly as
+    /// shipped, is found in the list of every socket unit.
+    #[test]
+    fn real_systemd_output_is_judged() {
+        let exe = |pid: u32| (pid == 139).then(|| PathBuf::from(AGENT_EXECUTABLE));
+        assert_eq!(judge(SYSTEMD_257_SHIPPED, exe), Ok(()));
+        assert_eq!(
+            judge(SYSTEMD_257_MODIFIED, exe),
+            Err(UnitFinding::Modified {
+                unit: AGENT_SERVICE_UNIT.to_string(),
+                what:
+                    "drop-in /run/systemd/system.control/punar-smplifyd.service.d/50-CPUWeight.conf"
+                        .to_string()
+            })
+        );
+        let rest = SYSTEMD_257_MODIFIED.replace(
+            "/run/systemd/system.control/punar-smplifyd.service.d/50-CPUWeight.conf",
+            "",
+        );
+        assert_eq!(unit_of(judge(&rest, exe)), "punard.service");
+        let rest = rest.replace("/etc/systemd/system/punard.service.d/route.conf", "");
+        assert_eq!(unit_of(judge(&rest, exe)), "punard-reconcile.timer");
+        assert_eq!(
+            judge(SYSTEMD_257_TRANSIENT_LISTENER, exe),
+            Err(UnitFinding::ForeignListener {
+                unit: "transient-fake.socket".to_string()
+            })
+        );
+        assert_eq!(
+            judge(SYSTEMD_257_TRANSIENT_LISTENER, exe)
+                .unwrap_err()
+                .fault(),
+            AgentFault::UnexpectedListener
+        );
+    }
+
+    /// Another socket unit at the agent's path is found whatever its socket
+    /// type and wherever its listener is in its list; one at any other path
+    /// is nobody's business. A second listener on the agent's own unit is a
+    /// modification of it, never hidden behind the first.
+    #[test]
+    fn a_second_listener_at_the_agents_path_is_found() {
+        let other = |listen: &str| {
+            format!(
+                "{}\nListen=/run/other.sock (Stream)\n{listen}\nId=fake.socket\nLoadState=loaded\n\
+                 FragmentPath=/etc/systemd/system/fake.socket\nDropInPaths=\n",
+                shipped()
+            )
+        };
+        for listen in [
+            format!("Listen={DEFAULT_CONTROL_PLANE_SOCKET} (Stream)"),
+            format!("Listen={DEFAULT_CONTROL_PLANE_SOCKET} (SequentialPacket)"),
+        ] {
+            assert_eq!(
+                judge(&other(&listen), agent_exe),
+                Err(UnitFinding::ForeignListener {
+                    unit: "fake.socket".to_string()
+                }),
+                "{listen}"
+            );
+        }
+        assert_eq!(
+            judge(
+                &other("Listen=/run/punar-smplifyd/api.sock.bak (Stream)"),
+                agent_exe
+            ),
+            Ok(())
+        );
+        let two = shipped().replace(
+            &format!("Listen={DEFAULT_CONTROL_PLANE_SOCKET} (Stream)"),
+            &format!("Listen={DEFAULT_CONTROL_PLANE_SOCKET} (Stream)\nListen=/run/x.sock (Stream)"),
+        );
+        assert_eq!(unit_of(judge(&two, agent_exe)), AGENT_SOCKET_UNIT);
+        assert_eq!(
+            UnitFinding::Modified {
+                unit: AGENT_SOCKET_UNIT.to_string(),
+                what: String::new()
+            }
+            .fault(),
+            AgentFault::UnitModified
+        );
+        assert_eq!(
+            UnitFinding::Unreadable(String::new()).fault(),
+            AgentFault::UnitsUnreadable,
+            "what cannot be seen is not vouched for"
+        );
     }
 
     fn agent_exe(pid: u32) -> Option<PathBuf> {

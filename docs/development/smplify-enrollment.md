@@ -61,7 +61,7 @@ performs the same `/os-identifiers/resolve` → `/enroll` (token + CSR) →
 
 | Process | Runs as | May do | May not do | Transport | Hardening |
 |---|---|---|---|---|---|
-| **punard** | root | Enroll/unenroll, fetch and load policy through the M4 loader, reconcile, collect and build the compliance body (category states only) and the inventory body (the tier's device facts, §3.2), keep the record of what was sent (§3.3), check that the agent answers on every pass while enrolled (§3.4), write audit and `status.json` | Hold the device key; speak TCP; start, stop or enable a unit | Serves `/run/punard/punard.sock`; dials `/run/punar-smplifyd/api.sock` (compiled default, `PUNAR_CONTROL_PLANE_SOCKET` overrides) | unchanged; `Wants=` and `After=punar-smplifyd.socket` (and `After=` the service, so it stops first at shutdown), never `Requires` (SPEC §55: cached policy enforces with the agent down) |
+| **punard** | root | Enroll/unenroll, fetch and load policy through the M4 loader, reconcile, collect and build the compliance body (category states only) and the inventory body (the tier's device facts, §3.2), keep the record of what was sent (§3.3), check that the agent answers on every pass while enrolled (§3.4), write audit and `status.json` | Hold the device key; speak TCP; start, stop or enable a unit | Serves `/run/punard/punard.sock`; dials `/run/punar-smplifyd/api.sock` (compiled default; `PUNAR_CONTROL_PLANE_SOCKET` overrides it only on an image that ships the development control plane, §3.4) | unchanged; `Wants=` and `After=punar-smplifyd.socket` (and `After=` the service, so it stops first at shutdown), never `Requires` (SPEC §55: cached policy enforces with the agent down) |
 | **punar-smplifyd** | `punar-smplifyd`, no capabilities | Generate key + CSR, redeem the code, hold cert/CA/pinned tenant key, translate the bodies punard hands it through a fixed allowlist (§3.3) and answer with exactly what it sent | Mutate the OS; call any punard method; act on a server command; gather anything; run on a device that never enrolled | Serves NDJSON on the listener `punar-smplifyd.socket` passes it (`/run/punar-smplifyd/api.sock`, root 0600 in a 0700 directory), `SO_PEERCRED` uid 0 only; outbound HTTPS with platform roots, TLS ≥ 1.2, client cert | `punar-pimd@`'s set: `CapabilityBoundingSet=`, `ProtectSystem=strict`, `StateDirectory` 0700, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `SystemCallFilter=@system-service`; started by its socket, never enabled, resident only while it holds an identity, a manual stop refused (§3.4) |
 | **punarctl** | the device's administrator (a `punar` group member), or root | `enroll start <domain> [--code-stdin] [--accept-non-removable] [--accept-organization-owned]` (asks for the code, then the person's password, relayed to `punar-authd` for a single-use ticket; the organization's terms — not removable, §3.1; owned by the organization, §3.2 — are shown together in one prompt and must be accepted), `enroll status`, `enroll stop` (the same password confirmation; refused for a non-removable enrollment, §3.1) | Put the code or the password on argv; decide authorization itself | punard socket; `punar-auth --admin` over a pipe | fixed argv |
 | **System Control › Organization** (slice 2) | session | Domain, visibility panel, code entry, re-auth, then fixed-argv `punarctl … --code-stdin` | Be a second control plane | `status.json` over inotify | ticket path, like `policy.set` |
@@ -535,18 +535,23 @@ option D of the activation design, with the review's corrections.
   half written). It waits for calls with no timeout of its own, so it adds no
   wakeup. On an enrolled boot, punard's boot reconcile makes the first call.
 - **Crash or kill.** `Restart=always` and `StartLimitIntervalSec=0`:
-  restarted forever. `RestartSec=100ms`, doubling over `RestartSteps=5` to
-  `RestartMaxDelaySec=5s`, because a new call does not bring a killed agent
-  back any sooner: while a restart is pending systemd counts the service as
-  starting and queues no earlier start, so the call waits out the delay. A
-  killed agent therefore answers well inside punard's 10 s liveness wait, and
-  an agent that cannot start at all (a missing or crashing binary) is
-  restarted every 5 s at most, forever, which punard reads as
-  `not_answering`. The socket's `TriggerLimitIntervalSec=10s`,
-  `TriggerLimitBurst=20` bound only an agent that exits cleanly at once with
-  calls queued; the socket then fails, punard reads `connection_refused` or
-  `socket_missing`, and asks systemd to start the socket again on every pass
-  (a masked socket stays stopped).
+  restarted forever. `RestartSec=100ms`, growing over `RestartSteps=5` to
+  `RestartMaxDelaySec=5s` (systemd resets the count only when the agent stops
+  cleanly), because a new call does not bring a killed agent back any
+  sooner: while a restart is pending systemd counts the service as starting
+  and queues no earlier start, so the call waits out the delay. A killed
+  agent therefore answers inside punard's 10 s liveness wait (measured on
+  systemd 257: 0.4 s after one kill, 5.3 s after the sixth in a row). An
+  agent that cannot start at all (a missing binary, a crash at start) is
+  restarted every 5 s, forever; the socket keeps listening, so a call is
+  accepted and never answered, which punard reads as `not_answering`
+  (measured: no answer in 12 s, the socket still active, the restarts going
+  on). The socket's `TriggerLimitIntervalSec=10s`, `TriggerLimitBurst=20`
+  bound only an agent that exits cleanly at once with calls queued; the
+  socket then fails, the call waiting has its connection reset and later
+  ones are refused (measured: one queued call tripped it in 0.8 s), punard
+  reads `connection_reset`, then `connection_refused`, and asks systemd to
+  start the socket again on every pass (a masked socket stays stopped).
 - **Unenroll.** `enroll.stop` first writes punard's release record
   (`identity-release.json`, durably), then asks the agent to wipe the
   identity (`enroll.unregister`, local, works offline); the agent answers and
@@ -580,18 +585,21 @@ What is left is another root process:
 | Path (as root) | What happens | What punard sees on its next pass |
 |---|---|---|
 | `systemctl stop` or `restart` of the service or the socket, `disable --now` | refused (`RefuseManualStop=yes`); nothing is enabled to disable | nothing: the agent keeps running |
-| `kill -TERM`, `kill -KILL`, `systemctl kill` | restarted after 100 ms (backing off to 5 s when it keeps failing) | a call in flight: `connection_reset` or `closed_without_answer`; the next call waits for the restart and is answered |
+| `kill -TERM`, `kill -KILL`, `systemctl kill` | restarted after 100 ms, growing to 5 s over repeated kills | a call in flight: `connection_reset` or `closed_without_answer`; the next call waits for the restart and is answered |
 | `kill -STOP`, `systemctl freeze` | stays `active`, never answers | `not_answering` (the liveness call gets no answer in 10 s) |
 | `mask`, then `stop`; a runtime drop-in lifting `RefuseManualStop=` | stopped | `socket_missing`, `connection_refused` or `connection_reset`, and punard asks systemd to start the socket again; once anything answers, `unit_modified` while the mask or drop-in stays |
 | any drop-in or override in `/etc` or `/run` on the agent's units, punard's or the reconcile timer's and service's (`systemctl edit`, `set-property`, an `ExecStart=` replaced, an `Environment=` pointing punard elsewhere, a moved state directory) | whatever it does | `unit_modified`: every pass while enrolled compares systemd's loaded units with the image's (fragment in `/usr/lib/systemd/system`, no drop-in outside it, not masked, the socket listening where punard dials, the agent's process running `/usr/bin/punar-smplifyd`); `enroll.start` refuses to send anything through such units |
 | `PUNAR_CONTROL_PLANE_SOCKET` or `--control-plane-socket` for punard, by any means | refused on every image without the development control plane: punard dials the agent anyway | `enroll.agent` `denied` (resource `agent.control_plane_override`) at punard's start; a drop-in that sets it is also `unit_modified` |
 | another program binding its own socket at the agent's path | it answers whatever it answers | `unexpected_listener` before anything is sent: the listener's credentials must name PID 1, as every socket-unit listener does |
+| a symlink at the agent's path, or a bind mount over it or its directory, leading to another socket (a socket unit of root's own included, whose listener is PID 1's too) | calls reach the other socket | `unexpected_listener` before anything is sent: a connection reports the address its listener bound, which must be the agent's path |
+| the agent's socket node removed and a socket unit of root's own started at the same path (a file in `/etc`, or `systemd-run --socket-property=ListenStream=`) | calls reach the new listener; the agent's own units stay loaded, listening and unmodified | `unexpected_listener`: the unit check lists every socket unit systemd has loaded and allows only the agent's at its path |
+| make `systemctl show` fail (the private socket removed with the system bus stopped, a hung manager) | nothing is checked | `units_unreadable`: the unit check fails closed |
 | a target with `Conflicts=` on it | stopped until the next call starts it again | the agent back, or `socket_missing` if the socket went too |
 | delete `device.json` and leave the key | the agent keeps running | `identity_missing` |
 | delete every identity file | the agent goes dormant 30 s later | `identity_missing`: the next call starts it, and it holds none |
 | an identity punard did not register | the agent answers for it | `identity_mismatch` |
-| delete punard's `device-token` and restart punard | punard cannot ask about or report on this device | `token_missing` (nothing is sent) |
-| delete `enrollment.json` (and its terms) and restart punard | punard no longer enforces or reports for the enrollment; the organization's policy files stay in `policy.d` as foreign files | the identity is kept, not released: `enroll.release` `kept` once, `identity_release: kept` everywhere the enrollment is shown |
+| delete punard's `device-token`, then kill punard or reboot | punard cannot ask about or report on this device | `token_missing` (nothing is sent) |
+| delete `enrollment.json` (and its terms), then kill punard or reboot | punard no longer enforces or reports for the enrollment; the organization's policy files stay in `policy.d` as foreign files | the identity is kept, not released: `enroll.release` `kept` once, `identity_release: kept` everywhere the enrollment is shown |
 | another program answering on the agent's socket with anything but this device's identity | whatever it says | `unexpected_answer` (the liveness call fails closed) |
 | an agent that cannot start (a missing or broken binary) | restarted every 5 s at most, forever | `not_answering` |
 | `systemctl stop` or `restart` of punard, or of the reconcile timer | refused (`RefuseManualStop=yes` on both) | nothing: passes go on |
@@ -625,28 +633,51 @@ journal line of their own (measured); what is audited is their effect.
 still stop the agent and punard, and every way above is noticed and audited
 when punard next runs a pass. What no process on the device can vouch for is
 the operating system image itself: root that rewrites `/usr` (punard's own
-binary, the vendor units, the agent's binary) or punard's state files can
-make punard report whatever it likes, and so can a program that copies the
-agent's key, runs as a systemd socket unit of its own on the agent's path
-after the vendor socket's node is removed, and answers as the agent. The
-organization's backstop for those is the device ceasing to check in, and
-the audit log's history (an `enroll.start` with no `enroll.stop`); no alert
-for missed check-ins exists on the Smplify side yet (§6).
+binary, the vendor units, the agent's binary, `systemctl`), rewrites a
+running process's memory, or edits punard's state files can make punard
+report whatever it likes. A listener of its own at the agent's path is not
+among those: another program's is refused by its credentials, a socket unit
+elsewhere reached through a symlink or bind mount by its address, and one at
+the same path by the unit check's list of every socket unit. The
+organization's backstop for what is left is the device ceasing to check in,
+and the audit log's history (an `enroll.start` with no `enroll.stop`); no
+alert for missed check-ins exists on the Smplify side yet (§6).
 
 **Measured, and not.** In a systemd 261 container with a stand-in and the
 real unit: stops refused as root, kills restarted, `mask` then `stop`
 succeeds, a frozen agent produces only timeouts, and a `RuntimeDirectory=` on
-the service deletes the socket node when it stops (hence none). That a call
-made while a restart is pending waits out `RestartSec=` is read from
-systemd's source (a service in auto-restart counts as starting, and the
-socket queues no start for it), not measured; neither is the kill-to-answer
-time with the new delay. The agent's
-resident cost while enrolled, and its activation latency under real socket
-activation on the release image, are **unmeasured** until measured on an
-enrolled device; the container's figures (about 1 MiB PSS idle, about 46 ms
-from start to answer, measured outside socket activation) are not budget
-numbers. `tests/images/smplifyd-activation-contract-test.sh` holds the units
-to all of the above.
+the service deletes the socket node when it stops (hence none). In a
+systemd 257 container (Debian trixie) with the branch's units and agent:
+
+- A connection to the socket unit's listener names PID 1, uid 0 and the
+  agent's path; a socket a process bound names that process; a symlink at
+  the agent's path, or a bind mount over it, leading to a socket unit of
+  root's own names PID 1 with that unit's address, never the agent's. That
+  is what `unexpected_listener` relies on on every connection.
+- A transient socket unit started at the agent's path after its node was
+  removed is listed by the unit check's `*.socket` pattern while the agent's
+  own unit still shows as listening; `systemctl show` reports a
+  `set-property --runtime` drop-in under `/run/systemd/system.control`, an
+  `/etc` drop-in, and a mask as `LoadState=masked` with the fragment in
+  `/etc`. The unit check's test reads that output verbatim
+  (`crates/punard/tests/fixtures/systemctl-show-*.txt`).
+- A call right after a kill is answered in 0.4 s, after the sixth kill in a
+  row in 5.3 s, capped by `RestartMaxDelaySec=`. With the binary missing, or
+  one that exits 1 at once, a call is accepted and gets no answer in 12 s
+  while the socket stays active and the service restarts every 5 s. One that
+  exits 75 at once trips the socket's trigger limit with a single queued
+  call.
+- The timer refuses a manual stop, and a unit never started has
+  `ExecMainStartTimestampMonotonic=0`, which the idle gate reads.
+
+Not measured: any of this on the release image, and punard itself running
+these checks there. The agent's resident cost while enrolled, and its
+activation latency under real socket activation on the release image, are
+**unmeasured** until measured on an enrolled device; the container's figures
+(about 1 MiB PSS idle, about 46 ms from start to answer, measured outside
+socket activation) are not budget numbers.
+`tests/images/smplifyd-activation-contract-test.sh` holds the units to all of
+the above.
 
 ## 4. Smplify backend — Phase 0 (gating) and later
 

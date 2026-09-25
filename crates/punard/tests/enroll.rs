@@ -5324,6 +5324,73 @@ fn a_modified_management_unit_is_management_interrupted() {
     );
 }
 
+/// A second socket unit at the agent's path, which leaves the agent's own
+/// units exactly as shipped and whose listener systemd creates too (PID 1's
+/// credentials, the agent's address), is management interrupted
+/// (`unexpected_listener`); so is a systemd that cannot be asked about the
+/// units (`units_unreadable`): what punard cannot see it does not vouch for.
+/// Each ends when the units are as shipped again.
+#[test]
+fn another_listener_at_the_agents_path_or_units_unseen_is_management_interrupted() {
+    let dir = test_dir("units-foreign-listener");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = with_integrity(&dir, &control_plane, fake_systemctl(&dir, false));
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    daemon.result("reconcile", None);
+    assert_eq!(
+        daemon.result("enroll.status", None)["management"]["state"],
+        "active"
+    );
+    let shown = dir.join("units/shown.txt");
+    let systemctl = dir.join("units/systemctl");
+    let original = fs::read_to_string(&systemctl).unwrap();
+    let cases: [(&str, &dyn Fn()); 2] = [
+        ("unexpected_listener", &|| {
+            fs::write(
+                &shown,
+                format!(
+                    "{}\nListen=/run/punar-smplifyd/api.sock (Stream)\n\
+                     Id=transient-fake.socket\nLoadState=loaded\n\
+                     FragmentPath=/run/systemd/transient/transient-fake.socket\n\
+                     DropInPaths=\n",
+                    shipped_units()
+                ),
+            )
+            .unwrap()
+        }),
+        ("units_unreadable", &|| {
+            fs::write(
+                &systemctl,
+                "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n",
+            )
+            .unwrap()
+        }),
+    ];
+    for (reason, break_it) in cases {
+        break_it();
+        daemon.result("reconcile", None);
+        let status = daemon.result("enroll.status", None);
+        assert_eq!(status["management"]["state"], "interrupted", "{reason}");
+        assert_eq!(status["management"]["reason"], reason);
+        fs::write(&shown, shipped_units()).unwrap();
+        fs::write(&systemctl, &original).unwrap();
+        daemon.result("reconcile", None);
+        assert_eq!(
+            daemon.result("enroll.status", None)["management"]["state"],
+            "active",
+            "{reason}"
+        );
+    }
+    let expected: Vec<(String, String)> = ["unexpected_listener", "units_unreadable"]
+        .iter()
+        .flat_map(|reason| {
+            ["agent_unavailable", "success"]
+                .map(|result| (result.to_string(), format!("agent.{reason}")))
+        })
+        .collect();
+    assert_eq!(agent_events(&daemon), expected);
+}
+
 /// Nothing, the enrollment code least of all, goes to an agent behind
 /// modified units, or over a socket systemd did not create.
 #[test]

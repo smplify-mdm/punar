@@ -307,6 +307,10 @@ pub enum AgentFault {
     /// ([`crate::agent_units`]): a drop-in, a mask, an override of its
     /// fragment, or an agent process that is not the image's binary.
     UnitModified,
+    /// systemd could not be asked about the units management depends on, or
+    /// its answer could not be read: the check fails closed, since what it
+    /// cannot see it cannot vouch for.
+    UnitsUnreadable,
 }
 
 impl AgentFault {
@@ -328,6 +332,7 @@ impl AgentFault {
             AgentFault::TokenMissing => "token_missing",
             AgentFault::UnexpectedListener => "unexpected_listener",
             AgentFault::UnitModified => "unit_modified",
+            AgentFault::UnitsUnreadable => "units_unreadable",
         }
     }
 
@@ -452,6 +457,18 @@ pub fn listener_is_systemds(stream: &UnixStream) -> bool {
         .is_ok_and(|cred| cred.pid == rustix::process::Pid::INIT && cred.uid.is_root())
 }
 
+/// Whether the listener behind a connected Unix stream socket was bound at
+/// `path` itself. A connection reports the address its listener bound
+/// (`getpeername`), not the path that was dialled, so a symlink at `path`, or
+/// a bind mount over it or over its directory, that leads to another socket
+/// shows that socket's own address, even when systemd created that one too
+/// (measured on systemd 257: PID 1's credentials, another address).
+pub fn listener_bound_at(stream: &UnixStream, path: &Path) -> bool {
+    stream
+        .peer_addr()
+        .is_ok_and(|addr| addr.as_pathname() == Some(path))
+}
+
 /// What `identity.status` said, as far as punard's liveness check reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentIdentity {
@@ -484,12 +501,15 @@ impl ControlPlaneClient {
     }
 
     /// Send nothing over a connection whose listener systemd did not create
-    /// ([`listener_is_systemds`]): the built-in agent's socket is
+    /// ([`listener_is_systemds`]), or did not bind at the path dialled
+    /// ([`listener_bound_at`]): the built-in agent's socket is
     /// `punar-smplifyd.socket`'s, so every connection to it names PID 1 as
-    /// the listener, and one that names another process reached a socket
-    /// some other program bound at the agent's path
-    /// ([`AgentFault::UnexpectedListener`]). Only for the agent's own path:
-    /// the development mock and tests bind their sockets themselves.
+    /// the listener and the agent's path as its address. One that names
+    /// another process reached a socket some other program bound at the
+    /// agent's path, and one that names another address was led elsewhere
+    /// by a symlink or a bind mount ([`AgentFault::UnexpectedListener`]).
+    /// Only for the agent's own path: the development mock and tests bind
+    /// their sockets themselves.
     pub fn requiring_systemd_listener(mut self, required: bool) -> Self {
         self.systemd_listener = required;
         self
@@ -539,7 +559,9 @@ impl ControlPlaneClient {
                 (stream, Instant::now() + own, None)
             }
         };
-        if self.systemd_listener && !listener_is_systemds(&stream) {
+        if self.systemd_listener
+            && !(listener_bound_at(&stream, &self.socket) && listener_is_systemds(&stream))
+        {
             return Err(UpstreamError::AgentUnavailable(
                 AgentFault::UnexpectedListener,
             ));
