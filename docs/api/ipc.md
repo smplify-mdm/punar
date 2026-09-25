@@ -678,6 +678,16 @@ depend on *who is asking* is settled before a password is requested:
 `policy.set` is deliberately **not** root-only. There is no sudo on a Punar
 desktop, so "root only" would mean "nobody can do this at the keyboard".
 
+From a terminal, `punarctl policy set <path> <value> --reason "…"` and
+`punarctl policy clear <path> --reason "…"` ask for the person's password on
+the controlling terminal and relay it to `punar-authd`, exactly as `enroll`
+and `update` do. Scripts, and System Control's helper, pipe
+`punar-auth --admin`'s answer into `--ticket-stdin` instead: `ok <ticket>` as
+it prints it, or the bare 64-character ticket. A `denied` or malformed line is
+refused by punarctl before anything is sent. With neither a terminal nor the
+flag, the request goes without a ticket and the refusal
+(`reauthentication_required`) names the terminal command.
+
 Result — a pin:
 
 ```json
@@ -1824,6 +1834,49 @@ or path other than the confirmed target device. An installed system returns
   otherwise — org rows never render on a personal device). The 5.4 M5
   amendments: the overridden-set verdict line and the org-citing denial.
   Rendering contract: docs/development/milestone-5.md section 8.3.
+- **Status live rows:** the human `punarctl status` adds a `RIGHT NOW`
+  stanza: `Firewall` (`capabilities.get` security.firewall), `AI sessions`
+  (`agents.list`), `Unknown AI` (`alerts.list`, live cards only),
+  `Approvals` (`approvals.list`, pending only), `Privilege`
+  (`privilege.status`) and `Updates` (`update.status`). Each row is its own
+  call. A daemon that does not answer turns only its rows to `UNKNOWN`,
+  with the first line of its error. `punarctl status --all --json` prints
+  one document, `{status, firewall, agents, alerts, approvals, privilege,
+  update, errors}`, where each key holds that method's result verbatim, or
+  null with `{code, message}` under `errors` (`code` is the daemon's error
+  code, or `unreachable` / `protocol` for a failure on this side). Plain
+  `status --json` is still the `status` result alone.
+- **`punarctl approvals watch [--answer]`:** follows every approval. Each one
+  prints when it arrives and again when it settles; with `--json`, that is
+  one `approvals.get` result per line. Approvals already settled when the
+  watch starts are history and do not print. It wakes the way `approvals
+  wait` does (an inotify watch on `/run/punard/`, section 15) and also at
+  the earliest pending `expires_at`, because `approvals.list` settles a
+  lapsed approval when it is read. The truth is always `approvals.list`
+  plus one `approvals.get` per change. `--answer` shows each new approval
+  routed to the invoking person on `/dev/tty` and reads approve / deny /
+  leave it from there. Standard input is never read as an answer. Without
+  a terminal it refuses with exit 2, and inside an agent scope with exit 3.
+  A decision goes to `approvals.resolve`, which stays human-only
+  (section 14.5); its refusal prints and the watch continues.
+- **Browser-context bindings (client-side, no new method):** `punarctl
+  web-apps context bind <id> --workspace <name> [--activate]` and `context
+  unbind --workspace <name>` edit the bindings in the user's
+  `browser-context.json` (milestone-11.md section 5.5). The context must be
+  one `webapps.list` returns, and the name must pass the workspace grammar
+  before anything is asked. System Control's picker runs `bind` (or `use`
+  on an unnamed workspace) instead of writing the file. `context status`
+  prints every binding.
+- **App parity (client-side, no new method):** `punarctl app list` joins
+  `apps.catalog {}` for category, trust tier and catalog version, and its
+  `--json` is still `apps.list` verbatim. `app list --all` adds every
+  visible desktop entry and marks the ones the launcher hides, with the
+  reason from `/usr/share/punar/catalog/launcher-hidden-entries.json`, the
+  file Apps.qml reads. `--all --json` prints `{apps: [{id, name, source,
+  terminal, hidden_in_launcher, hidden_why?}], launcher_hidden_list}`. `app open <catalog-id|desktop-id>` falls back to the
+  desktop index when `apps.catalog` answers `not_found`, or when punard is
+  unreachable. It raises an open window first, as the launcher does
+  (third-party-apps.md section 2.1).
 - `punarctl debug rpc <method>` (hidden) sends an empty-params request with an
   arbitrary method name — exists solely so the 74.4 "unauthorized IPC" /
   section 60 negative tests can probe the server from inside the image. The

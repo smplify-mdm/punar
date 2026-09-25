@@ -37,6 +37,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 
 Singleton {
@@ -50,21 +51,47 @@ Singleton {
     // not a working standalone application in Punar. A person should see the
     // products, not their process topology. This is intentionally an exact-id
     // list, never a fuzzy name filter.
+    //
+    // The list is not written here. It is catalog/launcher-hidden-entries.json,
+    // shipped next to the catalog, and `punarctl app list --all` reads the
+    // same file and lists these entries marked with their reason. The
+    // launcher and the terminal then differ only on purpose, and visibly.
+    // A file that cannot be read hides nothing: every entry shows, which is
+    // visible, rather than a stale copy of the list quietly applying.
     readonly property var rawEntries: DesktopEntries.applications.values
     readonly property var entries: root.productEntries(root.rawEntries)
-    readonly property var hiddenProductEntryIds: [
-        "footclient",
-        "foot-server",
-        "chromium",
-        "chromium-browser",
-        "org.chromium.chromium",
-        "thunar-settings",
-        "thunar-bulk-rename",
-        "xfce4-about",
-        "bssh",
-        "bvnc",
-        "avahi-discover"
-    ]
+    readonly property string hiddenEntriesInstalledPath: "/usr/share/punar/catalog/launcher-hidden-entries.json"
+    readonly property string hiddenEntriesDevPath: Quickshell.shellDir + "/../../catalog/launcher-hidden-entries.json"
+    property var hiddenProductEntryIds: []
+
+    FileView {
+        id: hiddenEntriesFile
+        path: root.hiddenEntriesInstalledPath
+        blockLoading: true
+        watchChanges: false
+        onLoaded: {
+            try {
+                var parsed = JSON.parse(hiddenEntriesFile.text());
+                var ids = [];
+                if (parsed && parsed.v === 1 && parsed.entries !== null
+                        && typeof parsed.entries === "object") {
+                    for (var id in parsed.entries)
+                        ids.push(String(id).toLowerCase());
+                }
+                root.hiddenProductEntryIds = ids;
+            } catch (e) {
+                console.warn("punar-shell: launcher hidden entries are invalid at",
+                    hiddenEntriesFile.path, e);
+                root.hiddenProductEntryIds = [];
+            }
+        }
+        onLoadFailed: {
+            if (hiddenEntriesFile.path === root.hiddenEntriesInstalledPath)
+                hiddenEntriesFile.path = root.hiddenEntriesDevPath;
+            else
+                root.hiddenProductEntryIds = [];
+        }
+    }
 
     // DesktopEntries updates asynchronously after an installer writes or
     // removes a desktop file. Keep the result of the just-completed typed

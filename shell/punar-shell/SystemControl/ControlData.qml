@@ -62,6 +62,7 @@
 // and the CLI are one capability layer — so they may as well share a mouth.
 
 import QtQuick
+import Qt.labs.folderlistmodel
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
@@ -128,6 +129,7 @@ Scope {
     property string pendingTimeZone: ""
     property bool pendingWebAppInstall: false
     property string pendingWebAppRemoval: ""
+    property string pendingWebContext: ""
 
     // Raised when the reader asks for the full AI surface.
     signal aiPanelRequested
@@ -225,6 +227,15 @@ Scope {
         return Math.max(0, Math.round((d.getTime() - data.nowMs) / 60000));
     }
 
+    /// A word as a POSIX shell would read it back, for commands this
+    /// surface prints for a person to copy. Display only: nothing is ever
+    /// run through a shell.
+    function shellWord(word: string): string {
+        if (/^[A-Za-z0-9._\/@:=+-]+$/.test(word))
+            return word;
+        return "'" + String(word).split("'").join("'\\''") + "'";
+    }
+
     function capabilityLabel(path: string): string {
         switch (path) {
         case "security.firewall":
@@ -233,6 +244,10 @@ Scope {
             return "Hostname";
         case "time.timezone":
             return "Timezone";
+        case "system.update_channel":
+            return "Update channel";
+        case "security.credential_isolation":
+            return "Credential isolation";
         default:
             return path;
         }
@@ -366,6 +381,11 @@ Scope {
                 data.pendingWebAppRemoval = "";
                 data.webAppRemoveArmed = "";
             }
+            if (data.pendingWebContext !== "") {
+                if (exitCode === 0)
+                    data.webAppContext = data.pendingWebContext;
+                data.pendingWebContext = "";
+            }
             // Disarm unconditionally. This used to sit inside the web-app
             // removal branch, so a power action that FAILED left its row
             // armed — one stray press away from trying again with no
@@ -396,6 +416,7 @@ Scope {
             data.lastActionError = "'" + argv[0] + "' could not be started on this machine.";
             data.pendingWebAppInstall = false;
             data.pendingWebAppRemoval = "";
+            data.pendingWebContext = "";
             data.webAppRemoveArmed = "";
             data.powerArmed = "";
         }
@@ -586,15 +607,68 @@ Scope {
         onLoaded: data.netAddress = String(macFile.text()).trim()
         onLoadFailed: data.netAddress = ""
     }
+    // WHICH power_supply entry is the battery, decided the way punard's
+    // device check decides it (crates/punard/src/device.rs,
+    // directory_has_battery): a name starting "BAT", otherwise the first
+    // entry whose `type` reads "Battery". Hardcoding BAT0 reported "no
+    // battery" on machines whose battery is BAT1, CMB0 or a vendor name,
+    // while punard counted them.
+    property string batteryName: ""
+    property var powerSupplyNames: []
+    property int powerSupplyProbe: -1
+
+    FolderListModel {
+        id: powerSupplies
+
+        folder: "file:///sys/class/power_supply"
+        showDirs: true
+        showFiles: true
+        showDotAndDotDot: false
+        sortField: FolderListModel.Name
+        onCountChanged: data.pickBattery()
+        onStatusChanged: data.pickBattery()
+    }
+
+    function pickBattery(): void {
+        var names = [];
+        for (var i = 0; i < powerSupplies.count; i++)
+            names.push(String(powerSupplies.get(i, "fileName")));
+        data.powerSupplyNames = names;
+        for (var j = 0; j < names.length; j++) {
+            if (names[j].indexOf("BAT") === 0) {
+                data.powerSupplyProbe = -1;
+                data.batteryName = names[j];
+                return;
+            }
+        }
+        data.batteryName = "";
+        data.powerSupplyProbe = names.length > 0 ? 0 : -1;
+    }
+
+    // Walks the entries one `type` file at a time until one says Battery.
+    FileView {
+        id: supplyTypeFile
+        path: data.powerSupplyProbe < 0 || data.powerSupplyProbe >= data.powerSupplyNames.length ? "" : "/sys/class/power_supply/" + data.powerSupplyNames[data.powerSupplyProbe] + "/type"
+        onLoaded: {
+            if (String(supplyTypeFile.text()).trim().toLowerCase() === "battery") {
+                data.batteryName = data.powerSupplyNames[data.powerSupplyProbe];
+                data.powerSupplyProbe = -1;
+            } else {
+                data.powerSupplyProbe += 1;
+            }
+        }
+        onLoadFailed: data.powerSupplyProbe += 1
+    }
+
     FileView {
         id: batCapFile
-        path: "/sys/class/power_supply/BAT0/capacity"
+        path: data.batteryName === "" ? "" : "/sys/class/power_supply/" + data.batteryName + "/capacity"
         onLoaded: data.batteryCapacity = String(batCapFile.text()).trim()
         onLoadFailed: data.batteryCapacity = ""
     }
     FileView {
         id: batStatusFile
-        path: "/sys/class/power_supply/BAT0/status"
+        path: data.batteryName === "" ? "" : "/sys/class/power_supply/" + data.batteryName + "/status"
         onLoaded: data.batteryStatus = String(batStatusFile.text()).trim()
         onLoadFailed: data.batteryStatus = ""
     }
@@ -865,17 +939,20 @@ Scope {
             else
                 data.runMutation(["/usr/bin/systemctl", "poweroff"]);
         } else if (kind === "webContext") {
+            // The same write a person types: punarctl checks the context
+            // against punard's list and the workspace name against the
+            // binding grammar, and its refusal shows in the action row.
+            // BrowserContext sees the new file through its watch.
+            if (mutation.running)
+                return;
             var contextId = String(a.contextId);
-            if (BrowserContext.bindToFocusedWorkspace(contextId)) {
-                data.webAppContext = contextId;
-                data.lastActionArgv = "Browser context preference · " + contextId;
-                data.lastActionExit = 0;
-                data.lastActionError = "";
-            } else {
-                data.lastActionArgv = "Browser context preference · " + contextId;
-                data.lastActionExit = 1;
-                data.lastActionError = "The browser context preference could not be saved.";
-            }
+            var workspace = BrowserContext.focusedWorkspaceName();
+            data.pendingWebContext = contextId;
+            if (workspace !== "")
+                data.runMutation(["punarctl", "web-apps", "context", "bind", contextId,
+                    "--workspace", workspace, "--activate"]);
+            else
+                data.runMutation(["punarctl", "web-apps", "context", "use", contextId]);
         } else if (kind === "application") {
             data.applicationRequested(a.entry, "");
         } else if (kind === "catalogApplication") {
@@ -954,10 +1031,13 @@ Scope {
             data.adminReason
         ];
         data.adminStage = "";
+        // The command a person would type for the same change, whole: it
+        // asks for the password on a terminal, as this surface just did.
         data.lastActionArgv = "punarctl policy "
             + (data.adminValue === "" ? "clear " : "set ")
             + data.adminPath
-            + (data.adminValue === "" ? "" : " " + data.adminValue);
+            + (data.adminValue === "" ? "" : " " + data.shellWord(data.adminValue))
+            + " --reason " + data.shellWord(data.adminReason);
         data.lastActionExit = -1;
         data.lastActionError = "";
         data.lastActionPending = true;
@@ -1130,17 +1210,22 @@ Scope {
         if (grant !== null && cap.mutable === true) {
             // A live §48 grant is the ONLY circumstance in which this
             // session may write the capability, so the set action appears
-            // only now — and it names the state it would write.
-            var current = data.stateWord(exp.effective_value);
-            var next = current === "enabled" ? "disabled" : "enabled";
-            acts.push({
-                hotkey: "S",
-                label: "Set " + next,
-                tone: "ghost",
-                kind: "capset",
-                path: path,
-                value: next
-            });
+            // only now — and it names the state it would write. Only for a
+            // capability that declares exactly two values, where one key
+            // can mean "the other one". A hostname or a timezone has an
+            // open value space, and "Set enabled" there would have renamed
+            // the machine "enabled": such a value is set from a terminal
+            // (`punarctl capabilities set <path> <value>`).
+            var next = data.otherAllowedState(cap, exp.effective_value);
+            if (next !== "")
+                acts.push({
+                    hotkey: "S",
+                    label: "Set " + next,
+                    tone: "ghost",
+                    kind: "capset",
+                    path: path,
+                    value: next
+                });
             acts.push({
                 hotkey: "R",
                 label: "Revoke grant",
@@ -1633,7 +1718,7 @@ Scope {
                 },
                 {
                     k: "Source",
-                    v: "/sys/class/power_supply/BAT0 — read once per open"
+                    v: "/sys/class/power_supply/" + data.batteryName + " — read once per open"
                 }
             ],
             note: "Punar reports the supply class and does not set it: there is no typed power capability. Ending the session, restarting and shutting down go to logind, which asks polkit whether this session may act.",
@@ -2275,17 +2360,24 @@ Scope {
             var c = caps[i];
             if (c === null || typeof c !== "object" || data.str(c, "capability", "") !== path)
                 continue;
-            var allowed = c.allowed_desired_states;
-            if (!Array.isArray(allowed) || allowed.length !== 2)
-                return "";
-            var current = JSON.stringify(entry.effective_value);
-            for (var j = 0; j < allowed.length; j++) {
-                if (JSON.stringify(allowed[j]) !== current)
-                    return String(allowed[j]);
-            }
-            return "";
+            return data.otherAllowedState(c, entry.effective_value);
         }
         return "";
+    }
+
+    /// For a capability descriptor that declares exactly two allowed
+    /// states, the one `value` is not. "" for any other capability.
+    function otherAllowedState(cap: var, value: var): string {
+        var allowed = cap === null || typeof cap !== "object" ? null : cap.allowed_desired_states;
+        if (!Array.isArray(allowed) || allowed.length !== 2)
+            return "";
+        var current = JSON.stringify(value);
+        var match = -1;
+        for (var j = 0; j < allowed.length; j++) {
+            if (JSON.stringify(allowed[j]) === current)
+                match = j;
+        }
+        return match < 0 ? "" : String(allowed[1 - match]);
     }
 
     function viewPrivilege(): var {

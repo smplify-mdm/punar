@@ -22,6 +22,7 @@ use punar_common::time::utc_now_rfc3339;
 use punar_common::webapp::{
     BrowserContext, WebAppArtifacts, WebAppIconRequest, WebAppInstallResult, WebAppManifest,
     WebAppRecord, origin_from_start_url, validate_context_id, validate_manifest,
+    validate_workspace_name,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -160,7 +161,32 @@ pub enum BrowserContextCommand {
         id: String,
     },
     Status,
+    /// Bind a named workspace to a context: entering the workspace switches
+    /// new windows to it. This is the same binding System Control makes.
+    Bind {
+        /// The context id, like `atlas`.
+        id: String,
+        /// The workspace name: letters, digits, spaces, `_` or `-`, at most
+        /// 32 characters, starting with a letter or digit.
+        #[arg(long)]
+        workspace: String,
+        /// Also make it the active context now, as entering the workspace
+        /// would.
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Remove a workspace's binding. If that binding chose the active
+    /// context, new windows go back to personal, as leaving the workspace
+    /// would.
+    Unbind {
+        /// The workspace name.
+        #[arg(long)]
+        workspace: String,
+    },
 }
+
+/// At most this many workspace bindings, the limit System Control keeps.
+const MAX_BINDINGS: usize = 64;
 
 #[derive(Debug, Deserialize)]
 struct WebAppView {
@@ -446,6 +472,102 @@ fn context_command(
                 println!("ACTIVE · {id} · NEW WINDOWS USE THIS CONTEXT");
             }
         }
+        BrowserContextCommand::Bind {
+            id,
+            workspace,
+            activate,
+        } => {
+            validate_workspace_name(&workspace).map_err(|reason| {
+                format!(
+                    "Workspace {workspace:?} cannot be bound.\nWhy: the {reason}.\n\
+                     Next step: use the workspace's name as Hyprland shows it."
+                )
+            })?;
+            let list = list(client, false)?;
+            if !list.contexts.iter().any(|context| context.id == id) {
+                return Err(format!(
+                    "Browser context {id:?} does not exist, so nothing was bound.\n\
+                     Next step: run `punarctl web-apps context list`."
+                )
+                .into());
+            }
+            let (mut state, _) =
+                repaired_active_state(read_active_state().ok(), &list.contexts, utc_now_rfc3339());
+            state
+                .bindings
+                .retain(|binding| binding.workspace != workspace);
+            if state.bindings.len() >= MAX_BINDINGS {
+                return Err(format!(
+                    "Workspace {workspace:?} was not bound.\n\
+                     Why: at most {MAX_BINDINGS} workspaces can be bound.\n\
+                     Next step: `punarctl web-apps context unbind --workspace <name>` frees one."
+                )
+                .into());
+            }
+            state.bindings.push(ContextBinding {
+                workspace: workspace.clone(),
+                context: id.clone(),
+            });
+            if activate {
+                state.active = id.clone();
+                state.active_cause = format!("workspace:{workspace}");
+            }
+            state.updated = utc_now_rfc3339();
+            write_json_atomic(&context_state_path()?, &state, USER_FILE_MODE)?;
+            if json_output {
+                print_json(&serde_json::to_value(&state).map_err(|e| e.to_string())?)?;
+            } else {
+                let mut out = fmt::verdict(
+                    style,
+                    Slot::Ok,
+                    &format!("Bound · workspace {workspace} · {id}"),
+                );
+                out.push_str(&render_bindings(style, &state.bindings));
+                print!("{out}");
+            }
+        }
+        BrowserContextCommand::Unbind { workspace } => {
+            validate_workspace_name(&workspace).map_err(|reason| {
+                format!(
+                    "Workspace {workspace:?} cannot be unbound.\nWhy: the {reason}.\n\
+                     Next step: `punarctl web-apps context status` lists the bound workspaces."
+                )
+            })?;
+            let mut state = read_active_state().map_err(|_| {
+                format!(
+                    "Workspace {workspace:?} is not bound, so nothing was removed.\n\
+                     Next step: `punarctl web-apps context status` lists the bound workspaces."
+                )
+            })?;
+            let before = state.bindings.len();
+            state
+                .bindings
+                .retain(|binding| binding.workspace != workspace);
+            if state.bindings.len() == before {
+                return Err(format!(
+                    "Workspace {workspace:?} is not bound, so nothing was removed.\n\
+                     Next step: `punarctl web-apps context status` lists the bound workspaces."
+                )
+                .into());
+            }
+            if state.active_cause == format!("workspace:{workspace}") {
+                state.active = "personal".into();
+                state.active_cause = "default".into();
+            }
+            state.updated = utc_now_rfc3339();
+            write_json_atomic(&context_state_path()?, &state, USER_FILE_MODE)?;
+            if json_output {
+                print_json(&serde_json::to_value(&state).map_err(|e| e.to_string())?)?;
+            } else {
+                let mut out = fmt::verdict(
+                    style,
+                    Slot::Ok,
+                    &format!("Unbound · workspace {workspace} · active {}", state.active),
+                );
+                out.push_str(&render_bindings(style, &state.bindings));
+                print!("{out}");
+            }
+        }
         BrowserContextCommand::Status => {
             let state = read_active_state().unwrap_or(ActiveContext {
                 version: 1,
@@ -476,11 +598,44 @@ fn context_command(
                         ),
                     ],
                 ));
+                out.push_str(&render_bindings(style, &state.bindings));
                 print!("{out}");
             }
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The workspace bindings: which named workspace switches new windows to
+/// which context. The same list System Control keeps.
+fn render_bindings(style: &Style, bindings: &[ContextBinding]) -> String {
+    let mut out = fmt::section(
+        style,
+        "Workspace bindings",
+        "entering one switches new windows",
+    );
+    if bindings.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "No workspace is bound · punarctl web-apps context bind <context> --workspace <name>",
+        ));
+        return out;
+    }
+    // Workspace names are case-sensitive and row labels are upper-cased, so
+    // the name is printed verbatim in the description.
+    let rows: Vec<Row> = bindings
+        .iter()
+        .map(|binding| {
+            Row::new(
+                &binding.context,
+                "bound",
+                Slot::Neutral,
+                &format!("workspace {}", binding.workspace),
+            )
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    out
 }
 
 fn call(client: &Client, method: &str, params: Option<Value>) -> WebResult<Value> {

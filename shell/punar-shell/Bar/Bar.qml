@@ -180,6 +180,47 @@ Scope {
 
     onGrantChanged: root.revokeArmed = false
 
+    // The revoke's own answer. It used to run detached, which threw the
+    // answer away: a refusal — the daemon down, the grant already gone,
+    // anything punard said no to — left the chip exactly as it was, as if
+    // nothing had been asked. A success still needs no word here: the grant
+    // leaving the approvals file is the answer, and the chip goes with it.
+    property string revokeError: ""
+
+    Process {
+        id: revokeProc
+
+        stderr: StdioCollector {
+            id: revokeErr
+            waitForEnd: true
+        }
+
+        // Connected, not declared: see Probe in SystemControl/ControlData.qml.
+        Component.onCompleted: revokeProc.exited.connect(function (exitCode) {
+            if (exitCode === 0) {
+                root.revokeError = "";
+                return;
+            }
+            root.showRevokeError(String(revokeErr.text), exitCode);
+        })
+    }
+
+    Timer {
+        id: revokeErrorTimer
+        interval: 8000
+        onTriggered: root.revokeError = ""
+    }
+
+    /// The first line of the daemon's refusal, short enough for the bar;
+    /// the whole of it is `punarctl privilege revoke`'s to print.
+    function showRevokeError(stderrText: string, exitCode: int): void {
+        var first = stderrText.trim().split("\n")[0];
+        if (first === "")
+            first = "punarctl exited with " + exitCode;
+        root.revokeError = first.length > 56 ? first.substring(0, 55) + "…" : first;
+        revokeErrorTimer.restart();
+    }
+
     function revokeGrant(): void {
         var id = Approvals.str(root.grant, "grant_id");
         if (id === "")
@@ -189,12 +230,17 @@ Scope {
             return;
         }
         root.revokeArmed = false;
+        if (revokeProc.running)
+            return;
+        root.revokeError = "";
+        revokeProc.command = ["punarctl", "privilege", "revoke", id];
         try {
-            Quickshell.execDetached(["punarctl", "privilege", "revoke", id]);
+            revokeProc.running = true;
         } catch (e) {
-            // No punarctl on a dev machine: the grant stands, and the
-            // daemon remains the only thing that can end it.
-            console.warn("punar-shell: privilege revoke unavailable:", e);
+            // No punarctl on this machine: the grant stands, and the
+            // daemon remains the only thing that can end it — said, not
+            // swallowed.
+            root.showRevokeError("punarctl could not be started", 127);
         }
     }
 
@@ -208,6 +254,9 @@ Scope {
 
     // Meta-row label grammar: Geist Mono, tracked, uppercase (§1 type roles).
     component MetaLabel: Text {
+        // Plain, always: the bar shows the organization's own name, and an
+        // org-supplied string must never be read as markup.
+        textFormat: Text.PlainText
         font.family: Theme.fontMono
         font.pixelSize: 11 // bar meta: 10–11px per type-role table
         font.weight: 500
@@ -584,6 +633,13 @@ Scope {
                     visible: root.grant !== null && root.revokeArmed
                     color: Theme.shellStatusBad
                     text: "Click again to revoke · "
+                }
+
+                MetaLabel {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.revokeError !== ""
+                    color: Theme.shellStatusBad
+                    text: "Revoke refused · " + root.revokeError + " · "
                 }
 
                 // Unmanaged-first (§8): org chrome renders only when

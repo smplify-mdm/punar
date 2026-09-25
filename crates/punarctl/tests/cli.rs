@@ -356,7 +356,8 @@ fn respond(request: &Value) -> Result<Value, Value> {
     let params = request.get("params");
 
     match method {
-        "status" | "capabilities.list" | "reconcile" | "policy.effective" | "update.status" => {
+        "status" | "capabilities.list" | "reconcile" | "policy.effective" | "update.status"
+        | "approvals.list" | "privilege.status" => {
             assert!(params.is_none(), "{method} takes no params");
         }
         _ => {}
@@ -365,6 +366,9 @@ fn respond(request: &Value) -> Result<Value, Value> {
     match method {
         "status" => Ok(fixture_status()),
         "update.status" => Ok(fixture_update_status()),
+        // A calm device: nothing waits on the person and no grant is held.
+        "approvals.list" => Ok(json!({"approvals": [], "checked_at": "2026-08-25T09:30:00Z"})),
+        "privilege.status" => Ok(json!({"grants": [], "checked_at": "2026-08-25T09:30:00Z"})),
         "update.check" => {
             assert_eq!(params.unwrap(), &json!({ "force": false }));
             Ok(fixture_update_check())
@@ -516,10 +520,17 @@ fn start_mock() -> PathBuf {
     start_mock_with(respond)
 }
 
+/// Where no agent registry listens: `run` points punarctl here so a test never
+/// reaches the host's own punar-agentd.
+fn no_agentd() -> PathBuf {
+    std::env::temp_dir().join("punarctl-no-agentd-here.sock")
+}
+
 fn run(socket: &PathBuf, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_punarctl"))
         .args(args)
         .env("PUNARD_SOCKET", socket)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
         .env("NO_COLOR", "1")
         .output()
         .expect("run punarctl")
@@ -568,8 +579,8 @@ const RULE: &str = "────────────────────
 
 #[test]
 fn status_human_output_matches_the_d014_snapshot() {
-    let socket = start_mock();
-    let output = run(&socket, &["status"]);
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["status"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
     let expected = format!(
@@ -584,6 +595,14 @@ fn status_human_output_matches_the_d014_snapshot() {
          FIREWALL      MATCHES\n\
          HOSTNAME      MATCHES\n\
          TIMEZONE      MATCHES\n\
+         \n\
+         RIGHT NOW                                   EACH ROW ASKS ITS OWN DAEMON\n\
+         FIREWALL      ENABLED    desired enabled · verify nftables\n\
+         AI SESSIONS   1 ACTIVE   agt_4f21c09ab3e1 · 1 unknown — punarctl agents list\n\
+         UNKNOWN AI    1 ALERT    foo-agent · punarctl agents alerts\n\
+         APPROVALS     NONE       nothing is waiting on you\n\
+         PRIVILEGE     NONE       no grant held\n\
+         UPDATES       STAGED     2026.09.01.1 · running 2026.08.30.1 · a restart boots it\n\
          PERSONAL DEVICE · ENROLLMENT LATER NEVER APPLIES RETROACTIVELY\n"
     );
     assert_eq!(stdout(&output), expected);
@@ -3055,6 +3074,128 @@ fn run_m9(punard: &PathBuf, secrets: &PathBuf, args: &[&str], stdin_text: Option
     child.wait_with_output().expect("run punarctl")
 }
 
+/// punard's side of `policy.set` for the tests below: it accepts exactly the
+/// bare 64-hex ticket punar-authd mints, and refuses a request that carries no
+/// confirmation the way punard does.
+const POLICY_TICKET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn policy_set_respond(request: &Value) -> Result<Value, Value> {
+    if request["method"] != "policy.set" {
+        return respond(request);
+    }
+    let params = &request["params"];
+    match params.get("ticket").and_then(Value::as_str) {
+        Some(POLICY_TICKET) => Ok(json!({
+            "capability": params["capability"],
+            "pinned_value": params["value"],
+            "effective_value": params["value"],
+            "source": {"kind": "device_specific_override", "rank": 4,
+                       "policy_id": "device-admin/owner",
+                       "name": "Device administrator"},
+            "changed": true
+        })),
+        Some(other) => Err(json!({
+            "code": "invalid_params",
+            "message": format!("WRONG TICKET REACHED PUNARD: {other:?}"),
+            "details": {}
+        })),
+        None => Err(json!({
+            "code": "denied",
+            "message": "Changing device policy needs your password again, and this request \
+                        did not carry a confirmation.\nPolicy: personal defaults — an \
+                        administrative change is confirmed at the moment it is made.\n\
+                        Next step: run `punarctl policy set security.firewall <value> \
+                        --reason \"<why>\"` in a terminal; it asks for your password.",
+            "details": {"decision": "deny", "reason": "reauthentication_required"}
+        })),
+    }
+}
+
+/// `--ticket-stdin` takes `punar-auth --admin`'s answer exactly as it prints
+/// it, or the bare ticket, and punard receives the bare ticket either way.
+/// Without a terminal and without the flag, nothing is invented: the request
+/// goes without a confirmation and punard's refusal is what prints.
+#[test]
+fn policy_set_takes_the_confirmation_as_punar_auth_prints_it() {
+    let socket = start_mock_with(policy_set_respond);
+    let unused = std::env::temp_dir().join("punarctl-no-secrets.sock");
+    for piped in [
+        format!("ok {POLICY_TICKET}\n"),
+        format!("{POLICY_TICKET}\n"),
+    ] {
+        let output = run_m9(
+            &socket,
+            &unused,
+            &[
+                "policy",
+                "set",
+                "security.firewall",
+                "disabled",
+                "--reason",
+                "lab bench",
+                "--ticket-stdin",
+            ],
+            Some(&piped),
+        );
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    }
+    let output = run_m9(
+        &socket,
+        &unused,
+        &[
+            "policy",
+            "clear",
+            "security.firewall",
+            "--reason",
+            "back to the org",
+            "--ticket-stdin",
+        ],
+        Some(&format!("ok {POLICY_TICKET}\n")),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    // punar-auth's refusal is not a ticket, and says so without a round trip.
+    let output = run_m9(
+        &socket,
+        &unused,
+        &[
+            "policy",
+            "set",
+            "security.firewall",
+            "disabled",
+            "--reason",
+            "x",
+            "--ticket-stdin",
+        ],
+        Some("denied\n"),
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not accepted"),
+        "{}",
+        stderr(&output)
+    );
+
+    // No terminal, no flag: the refusal names a command that asks.
+    let output = run_m9(
+        &socket,
+        &unused,
+        &[
+            "policy",
+            "set",
+            "security.firewall",
+            "disabled",
+            "--reason",
+            "x",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("it asks for your password"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
+}
+
 /// **Exit 4 is real.** An agent-originated mutation the AI policy gates
 /// returns `approval_required`, executes nothing, and says so in the
 /// section 73 voice — and stdout stays empty, because there is no result
@@ -3478,4 +3619,768 @@ fn privilege_status_and_revoke_render_the_live_grant() {
         "{}",
         stdout(&output)
     );
+}
+
+// ---------------------------------------------------------------------------
+// App list and browser-context status (terminal parity, step 3)
+// ---------------------------------------------------------------------------
+
+fn fixture_apps_list() -> Value {
+    json!({
+        "architecture": "aarch64",
+        "updates_available": 1,
+        "apps": [
+            {"id": "org.gnome.Calculator", "name": "Calculator", "source": "flathub",
+             "installed": true, "installed_commit": "aaa", "target_commit": "bbb",
+             "update_available": true},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "source": "flathub",
+             "installed": false, "installed_commit": null, "target_commit": "ccc",
+             "update_available": false}
+        ]
+    })
+}
+
+fn fixture_apps_catalog() -> Value {
+    json!({
+        "catalog_version": "2026.09.1",
+        "generated_at": "2026-09-01T00:00:00Z",
+        "architecture": "aarch64",
+        "apps": [
+            {"id": "org.gnome.Calculator", "name": "Calculator", "category": "utilities",
+             "trust_tier": "verified", "summary": "Sums"},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "category": "internet",
+             "trust_tier": "community", "summary": "Browser"}
+        ]
+    })
+}
+
+fn apps_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("apps.list") => Ok(fixture_apps_list()),
+        Some("apps.catalog") => {
+            // The whole catalog, unfiltered: an empty params object.
+            assert_eq!(request["params"], json!({}), "{request}");
+            Ok(fixture_apps_catalog())
+        }
+        _ => respond(request),
+    }
+}
+
+fn apps_without_catalog_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("apps.list") => Ok(fixture_apps_list()),
+        Some("apps.catalog") => Err(json!({
+            "code": "unavailable",
+            "message": "The app catalog is not readable.\nPolicy: none\nNext step: none",
+            "details": {}
+        })),
+        _ => respond(request),
+    }
+}
+
+/// `app list` answers what is installed and what the catalog says about it:
+/// category, trust tier and the catalog version it came from. `--json` is
+/// still apps.list verbatim.
+#[test]
+fn app_list_joins_category_trust_tier_and_catalog_version() {
+    let socket = start_mock_with(apps_respond);
+    let output = run(&socket, &["app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Calculator · utilities · verified"), "{text}");
+    assert!(text.contains("Firefox · internet · community"), "{text}");
+    assert!(text.contains("UPDATE AVAILABLE"), "{text}");
+    assert!(text.contains("CATALOG 2026.09.1"), "{text}");
+    assert!(text.contains("1 UPDATE AVAILABLE"), "{text}");
+
+    let output = run(&socket, &["--json", "app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let parsed: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(parsed, fixture_apps_list());
+}
+
+/// A catalog that cannot be read drops only its own columns, and says so.
+#[test]
+fn app_list_without_the_catalog_says_what_is_missing() {
+    let socket = start_mock_with(apps_without_catalog_respond);
+    let output = run(&socket, &["app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Calculator"), "{text}");
+    assert!(!text.contains("verified"), "{text}");
+    assert!(
+        text.contains("CATEGORY AND TRUST TIER UNAVAILABLE: THE APP CATALOG IS NOT READABLE."),
+        "{text}"
+    );
+}
+
+/// `web-apps context status` names the workspace bindings System Control
+/// keeps, not only the active context.
+#[test]
+fn context_status_prints_the_workspace_bindings() {
+    let state = std::env::temp_dir().join(format!("punarctl-context-{}", std::process::id()));
+    fs::create_dir_all(state.join("punar")).expect("state dir");
+    fs::write(
+        state.join("punar/browser-context.json"),
+        json!({
+            "version": 1,
+            "updated": "2026-09-24T00:00:00Z",
+            "active": "atlas",
+            "active_cause": "workspace:Atlas",
+            "bindings": [
+                {"workspace": "Atlas", "context": "atlas"},
+                {"workspace": "Home", "context": "personal"}
+            ]
+        })
+        .to_string(),
+    )
+    .expect("state file");
+    let socket = start_mock();
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["web-apps", "context", "status"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("XDG_STATE_HOME", &state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("WORKSPACE BINDINGS"), "{text}");
+    let atlas = text
+        .lines()
+        .find(|line| line.ends_with("workspace Atlas"))
+        .expect(&text);
+    assert!(atlas.starts_with("ATLAS"), "{text}");
+    let home = text
+        .lines()
+        .find(|line| line.ends_with("workspace Home"))
+        .expect(&text);
+    assert!(home.starts_with("PERSONAL"), "{text}");
+
+    fs::write(
+        state.join("punar/browser-context.json"),
+        json!({"version": 1, "updated": "x", "active": "personal",
+               "active_cause": "default", "bindings": []})
+        .to_string(),
+    )
+    .expect("state file");
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["web-apps", "context", "status"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("XDG_STATE_HOME", &state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl");
+    assert!(
+        stdout(&output).contains("NO WORKSPACE IS BOUND"),
+        "{}",
+        stdout(&output)
+    );
+    let _ = fs::remove_dir_all(&state);
+}
+
+// ---------------------------------------------------------------------------
+// `status`: the live rows (terminal parity, step 3)
+// ---------------------------------------------------------------------------
+
+/// A daemon that is down costs only its own rows: with punar-agentd gone the
+/// two AI rows say so, and every punard row still answers.
+#[test]
+fn status_degrades_only_the_rows_whose_daemon_is_down() {
+    let socket = start_mock();
+    let output = run(&socket, &["status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let line = |label: &str| {
+        text.lines()
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label} row in:\n{text}"))
+            .to_string()
+    };
+    for label in ["AI SESSIONS", "UNKNOWN AI"] {
+        let row = line(label);
+        assert!(row.contains("UNKNOWN"), "{row}");
+        assert!(row.contains("not reachable"), "{row}");
+    }
+    assert!(
+        line("FIREWALL      ENABLED").contains("verify nftables"),
+        "{text}"
+    );
+    assert!(line("APPROVALS").contains("NONE"), "{text}");
+    assert!(line("PRIVILEGE").contains("NONE"), "{text}");
+    assert!(line("UPDATES").contains("STAGED"), "{text}");
+}
+
+/// What waits on the person and what they hold: a pending approval and a
+/// live grant each name themselves and the verb that acts on them.
+#[test]
+fn status_names_pending_approvals_and_the_live_grant() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(&punard, &secrets, &["status"], None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let approvals = text
+        .lines()
+        .find(|line| line.starts_with("APPROVALS"))
+        .expect(&text);
+    assert!(approvals.contains("1 PENDING"), "{approvals}");
+    assert!(
+        approvals.contains("apr_7c1d9a4e · punarctl approvals list"),
+        "{approvals}"
+    );
+    let privilege = text
+        .lines()
+        .find(|line| line.starts_with("PRIVILEGE"))
+        .expect(&text);
+    assert!(privilege.contains("1 LIVE"), "{privilege}");
+    assert!(
+        privilege.contains("gnt_2b8e11c4 · time.timezone · until"),
+        "{privilege}"
+    );
+    assert!(
+        privilege.contains("punarctl privilege revoke"),
+        "{privilege}"
+    );
+}
+
+/// `status --all --json` is every daemon's answer verbatim, keyed; a daemon
+/// that did not answer is null with its reason under `errors`. Plain
+/// `status --json` is still the status result alone.
+#[test]
+fn status_all_json_keys_every_answer_and_names_what_failed() {
+    let socket = start_mock();
+    let output = run(&socket, &["--json", "status", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("stdout is JSON");
+    assert_eq!(document["status"], fixture_status());
+    assert_eq!(
+        document["firewall"],
+        json!({"descriptor": firewall_descriptor()})
+    );
+    assert_eq!(document["update"], fixture_update_status());
+    assert_eq!(document["approvals"]["approvals"], json!([]));
+    assert_eq!(document["privilege"]["grants"], json!([]));
+    for key in ["agents", "alerts"] {
+        assert_eq!(document[key], Value::Null, "{document}");
+        assert_eq!(document["errors"][key]["code"], "unreachable", "{document}");
+        assert!(
+            document["errors"][key]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("not reachable")),
+            "{document}"
+        );
+    }
+    assert_eq!(
+        document["errors"].as_object().map(|errors| errors.len()),
+        Some(2),
+        "{document}"
+    );
+
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["--json", "status", "--all"]);
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("stdout is JSON");
+    assert_eq!(document["agents"], fixture_agents_list());
+    assert_eq!(document["alerts"], fixture_alerts_list(false));
+    assert_eq!(document["errors"], json!({}));
+}
+
+// ---------------------------------------------------------------------------
+// `approvals watch` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+/// How many times the watch mock has answered `approvals.list`: the first
+/// read sees the approval pending, every later read sees it answered.
+static WATCH_LISTS: AtomicUsize = AtomicUsize::new(0);
+/// `approvals.resolve` must never be reached from a watch without a person.
+static WATCH_RESOLVES: AtomicUsize = AtomicUsize::new(0);
+
+fn approved_approval() -> Value {
+    let mut approval = pending_approval();
+    approval["approval"]["status"] = json!("approved");
+    approval["resolved_at"] = json!("2126-08-25T10:01:00Z");
+    approval["resolved_by"] = json!({"uid": 1000, "user": "punar", "pid": 812});
+    approval
+}
+
+/// History the watch must not reprint: answered before it started.
+fn old_approval() -> Value {
+    let mut approval = approved_approval();
+    approval["approval"]["approval_id"] = json!("apr_00000001");
+    approval
+}
+
+fn watch_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "approvals.list" => {
+            let calls = WATCH_LISTS.fetch_add(1, Ordering::SeqCst);
+            let current = if calls == 0 {
+                pending_approval()
+            } else {
+                approved_approval()
+            };
+            Ok(json!({"approvals": [current, old_approval()],
+                      "checked_at": "2126-08-25T10:00:30Z"}))
+        }
+        "approvals.get" => {
+            assert_eq!(request["params"]["approval_id"], json!("apr_7c1d9a4e"));
+            if WATCH_LISTS.load(Ordering::SeqCst) <= 1 {
+                Ok(pending_approval())
+            } else {
+                Ok(approved_approval())
+            }
+        }
+        "approvals.resolve" => {
+            WATCH_RESOLVES.fetch_add(1, Ordering::SeqCst);
+            Ok(approved_approval())
+        }
+        _ => respond(request),
+    }
+}
+
+/// Read stdout lines from a running child until `want` lines arrived or
+/// `limit` passed, then kill it.
+fn read_lines_then_kill(
+    mut child: std::process::Child,
+    want: usize,
+    limit: std::time::Duration,
+) -> Vec<String> {
+    let stdout = child.stdout.take().expect("stdout");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let mut lines = Vec::new();
+    while lines.len() < want {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match receiver.recv_timeout(left) {
+            Ok(line) => lines.push(line),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    lines
+}
+
+/// Each approval prints when it arrives and again when it settles, as the
+/// `approvals.get` result verbatim, one per line. What was answered before
+/// the watch started is history and does not print.
+#[test]
+fn approvals_watch_streams_each_approval_as_it_arrives_and_settles() {
+    let socket = start_mock_with(watch_respond);
+    let child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["--json", "approvals", "watch"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn punarctl");
+    // No summary directory to watch here, so the second read comes from
+    // the five-second fallback. Reprinted history would be one of the first
+    // two lines, so two are enough.
+    let lines = read_lines_then_kill(child, 2, std::time::Duration::from_secs(12));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let first: Value = serde_json::from_str(&lines[0]).expect("NDJSON");
+    let second: Value = serde_json::from_str(&lines[1]).expect("NDJSON");
+    assert_eq!(first, pending_approval());
+    assert_eq!(second, approved_approval());
+    assert!(
+        !lines.iter().any(|line| line.contains("apr_00000001")),
+        "{lines:?}"
+    );
+    assert_eq!(WATCH_RESOLVES.load(Ordering::SeqCst), 0);
+}
+
+/// `--answer` asks a person at a terminal and nobody else: without one it
+/// refuses before reading anything, and a piped "a" approves nothing.
+#[test]
+fn approvals_watch_answer_needs_a_terminal_and_ignores_stdin() {
+    if fs::File::open("/dev/tty").is_ok() {
+        eprintln!("skipped: this test process has a terminal the child would prompt on");
+        return;
+    }
+    let socket = start_mock_with(watch_respond);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["approvals", "watch", "--answer"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn punarctl");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"a\n")
+        .expect("write stdin");
+    // A watch that did not refuse would run until killed: bound it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().expect("poll child").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("collect punarctl");
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("--answer needs a terminal"), "{text}");
+    assert!(text.contains("Next step:"), "{text}");
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+    assert_eq!(WATCH_RESOLVES.load(Ordering::SeqCst), 0);
+}
+
+// ---------------------------------------------------------------------------
+// `web-apps context bind|unbind` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+fn browser_context(id: &str) -> Value {
+    json!({
+        "id": id, "name": id, "derived": false, "deletable": id != "personal",
+        "isolates": ["storage"], "profile_path_rel": format!("punar/browser/contexts/{id}")
+    })
+}
+
+/// punard's `webapps.list` with two contexts and no apps.
+fn contexts_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "webapps.list" => Ok(json!({
+            "apps": [],
+            "contexts": [browser_context("personal"), browser_context("atlas")],
+            "required_web_apps": [],
+            "policy": {"managed": false, "policy_ids": ["personal-defaults"],
+                       "allow_user_install": true}
+        })),
+        _ => respond(request),
+    }
+}
+
+fn run_with_state(socket: &PathBuf, state: &PathBuf, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", socket)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
+        .env("XDG_STATE_HOME", state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl")
+}
+
+fn context_state(state: &std::path::Path) -> Value {
+    serde_json::from_str(
+        &fs::read_to_string(state.join("punar/browser-context.json")).expect("state file"),
+    )
+    .expect("state is JSON")
+}
+
+/// A terminal binds a workspace the way System Control does: one binding
+/// per workspace, optionally active now, and unbinding the binding that
+/// chose the active context returns new windows to personal.
+#[test]
+fn context_bind_and_unbind_keep_one_binding_per_workspace() {
+    let state = std::env::temp_dir().join(format!("punarctl-bind-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    let socket = start_mock_with(contexts_respond);
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "atlas",
+            "--workspace",
+            "Atlas",
+            "--activate",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("BOUND · WORKSPACE ATLAS · ATLAS"), "{text}");
+    assert!(
+        text.lines().any(|line| line.ends_with("workspace Atlas")),
+        "{text}"
+    );
+    let doc = context_state(&state);
+    assert_eq!(doc["active"], "atlas");
+    assert_eq!(doc["active_cause"], "workspace:Atlas");
+    assert_eq!(
+        doc["bindings"],
+        json!([{"workspace": "Atlas", "context": "atlas"}])
+    );
+
+    // Rebinding replaces; without --activate the active context stays.
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "--json",
+            "web-apps",
+            "context",
+            "bind",
+            "personal",
+            "--workspace",
+            "Atlas",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let printed: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(printed, context_state(&state));
+    assert_eq!(
+        printed["bindings"],
+        json!([{"workspace": "Atlas", "context": "personal"}])
+    );
+    assert_eq!(printed["active"], "atlas");
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &["web-apps", "context", "unbind", "--workspace", "Atlas"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let doc = context_state(&state);
+    assert_eq!(doc["bindings"], json!([]));
+    assert_eq!(doc["active"], "personal");
+    assert_eq!(doc["active_cause"], "default");
+    let _ = fs::remove_dir_all(&state);
+}
+
+/// Each refusal says what did not happen and changes nothing: an unknown
+/// context, a workspace name outside the binding grammar (refused before
+/// punard is asked), and a workspace that is not bound.
+#[test]
+fn context_bind_refusals_change_nothing() {
+    let state = std::env::temp_dir().join(format!("punarctl-bind-refuse-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    let socket = start_mock_with(contexts_respond);
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "nosuch",
+            "--workspace",
+            "Atlas",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("does not exist, so nothing was bound"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!state.join("punar/browser-context.json").exists());
+
+    // The default mock does not know webapps.list: the name is refused first.
+    let plain = start_mock();
+    let output = run_with_state(
+        &plain,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "atlas",
+            "--workspace",
+            "../evil",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("cannot be bound"), "{text}");
+    assert!(text.contains("Next step:"), "{text}");
+    assert!(!state.join("punar/browser-context.json").exists());
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &["web-apps", "context", "unbind", "--workspace", "Nowhere"],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("is not bound, so nothing was removed"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = fs::remove_dir_all(&state);
+}
+
+// ---------------------------------------------------------------------------
+// `app list --all` and `app open <desktop-id>` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+/// The catalog knows only `apps.list`'s two apps; any other id is not found.
+fn desktop_open_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "apps.list" => Ok(fixture_apps_list()),
+        "apps.catalog" if request["params"].get("id").is_some() => Err(json!({
+            "code": "not_found",
+            "message": format!(
+                "No app named {} is in the catalog.\nNext step: punarctl app search",
+                request["params"]["id"]
+            ),
+            "details": {}
+        })),
+        "apps.catalog" => Ok(fixture_apps_catalog()),
+        _ => respond(request),
+    }
+}
+
+/// A data home with the kinds of entry the launcher meets.
+fn desktop_home(tag: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("punarctl-desktop-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    let apps = home.join("applications");
+    fs::create_dir_all(apps.join("kde")).expect("applications dir");
+    let marker = home.join("opened");
+    let write = |name: &str, body: &str| {
+        fs::write(
+            apps.join(name),
+            format!("[Desktop Entry]\nType=Application\n{body}\n"),
+        )
+        .expect("desktop file");
+    };
+    write("htop.desktop", "Name=htop\nExec=htop\nTerminal=true");
+    write("secret.desktop", "Name=Secret\nExec=secret\nNoDisplay=true");
+    write(
+        "punar-org.gnome.Calculator.desktop",
+        "Name=Calculator\nExec=/usr/bin/punarctl app open org.gnome.Calculator %U",
+    );
+    write(
+        "marker.desktop",
+        &format!("Name=Marker\nExec=/usr/bin/touch \"{}\"", marker.display()),
+    );
+    write("loop.desktop", "Name=Loop\nExec=punarctl app open loop");
+    fs::write(
+        apps.join("kde/konsole.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Konsole\nExec=konsole\n",
+    )
+    .expect("desktop file");
+    home
+}
+
+fn run_desktop(socket: &PathBuf, home: &PathBuf, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", socket)
+        .env("XDG_DATA_HOME", home)
+        .env("XDG_DATA_DIRS", "/nonexistent-punar-data")
+        .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl")
+}
+
+/// `--all` adds what the launcher offers beyond the catalog: hidden entries
+/// stay out, a catalog app's own launcher is its catalog row, and a
+/// subdirectory entry gets its desktop-file id.
+#[test]
+fn app_list_all_adds_the_desktop_entries_the_launcher_offers() {
+    let home = desktop_home("list");
+    let socket = start_mock_with(desktop_open_respond);
+    let output = run_desktop(&socket, &home, &["--json", "app", "list", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(
+        document["apps"],
+        json!([
+            {"id": "org.gnome.Calculator", "name": "Calculator", "source": "catalog",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "source": "catalog",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "htop", "name": "htop", "source": "desktop-entry",
+             "terminal": true, "hidden_in_launcher": false},
+            {"id": "kde-konsole", "name": "Konsole", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "loop", "name": "Loop", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "marker", "name": "Marker", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false}
+        ])
+    );
+    // The marks come from the image's shipped list. Where it is absent (this
+    // container), the document says so rather than implying nothing is hidden.
+    let installed = std::path::Path::new("/usr/share/punar/catalog/launcher-hidden-entries.json");
+    if installed.exists() {
+        assert_eq!(
+            document["launcher_hidden_list"],
+            json!(installed),
+            "{document}"
+        );
+    } else {
+        assert_eq!(document["launcher_hidden_list"], Value::Null, "{document}");
+        assert!(
+            document["launcher_hidden_error"]
+                .as_str()
+                .is_some_and(|why| why.contains("could not be read")),
+            "{document}"
+        );
+    }
+
+    let output = run_desktop(&socket, &home, &["app", "list", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("DESKTOP ENTRIES"), "{text}");
+    let htop = text
+        .lines()
+        .find(|line| line.starts_with("HTOP"))
+        .expect(&text);
+    assert!(htop.contains("TERMINAL"), "{htop}");
+    assert!(!text.contains("Secret"), "{text}");
+    if !installed.exists() {
+        assert!(
+            text.contains("THE LAUNCHER'S HIDDEN LIST COULD NOT BE READ, SO NOTHING IS MARKED"),
+            "{text}"
+        );
+    }
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// A desktop id opens its parsed Exec, never a shell string; an id that is
+/// neither kind says so; and an entry that hands over to a catalog id that
+/// does not exist stops instead of looping.
+#[test]
+fn app_open_runs_a_desktop_entry_and_names_what_is_missing() {
+    let home = desktop_home("open");
+    let socket = start_mock_with(desktop_open_respond);
+
+    let output = run_desktop(&socket, &home, &["app", "open", "marker"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let marker = home.join("opened");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(marker.exists(), "the entry's Exec did not run");
+
+    let output = run_desktop(&socket, &home, &["app", "open", "nosuch"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("Nothing is named nosuch"), "{text}");
+    assert!(text.contains("punarctl app list --all"), "{text}");
+
+    let output = run_desktop(&socket, &home, &["app", "open", "loop"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("No app named"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = fs::remove_dir_all(&home);
 }

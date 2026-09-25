@@ -10,6 +10,10 @@ APPS="${REPO_ROOT}/shell/punar-shell/Services/Apps.qml"
 COMMAND="${REPO_ROOT}/shell/punar-shell/CommandCenter/CommandCenter.qml"
 BROWSER="${REPO_ROOT}/shell/punar-shell/CommandCenter/ApplicationBrowser.qml"
 SURFACES="${REPO_ROOT}/os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh"
+HIDDEN="${REPO_ROOT}/catalog/launcher-hidden-entries.json"
+DESKTOP_RS="${REPO_ROOT}/crates/punarctl/src/desktop.rs"
+BUILD="${REPO_ROOT}/os/images/scripts/container-build.sh"
+HIDDEN_PATH="/usr/share/punar/catalog/launcher-hidden-entries.json"
 
 fail() {
     echo "app-launcher-contract-test: FAIL: $*" >&2
@@ -67,16 +71,40 @@ contains "${COMMAND}" 'root.appUpdateMessage = "Updating " + root.appUpdatesAvai
 # Package helper launchers are not separate products. Keep the filter exact so
 # ordinary third-party applications remain discoverable, and give the useful
 # hardware viewer a product name instead of exposing its implementation name.
-for helper_id in \
-    footclient foot-server thunar-settings thunar-bulk-rename \
-    xfce4-about bssh bvnc avahi-discover; do
-    contains "${APPS}" "\"${helper_id}\""
-done
+#
+# The exact ids live in ONE shipped file. The launcher hides them, punarctl
+# lists them marked, and the in-VM surface gate derives its check from the same
+# file, so no copy of the list can drift from another.
+python3 - "${HIDDEN}" "${APPS}" <<'PY'
+import json
+import re
+import sys
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+entries = doc.get("entries", {})
+for helper in ["footclient", "foot-server", "thunar-settings", "thunar-bulk-rename",
+               "xfce4-about", "bssh", "bvnc", "avahi-discover"]:
+    if not entries.get(helper):
+        raise SystemExit(f"app-launcher-contract-test: FAIL: {helper} is not hidden with a reason")
+# The launcher starts from an empty list and fills it from the file; a literal
+# list here would be a second copy that drifts.
+if re.search(r'hiddenProductEntryIds:\s*\[\s*"', open(sys.argv[2], encoding="utf-8").read()):
+    raise SystemExit("app-launcher-contract-test: FAIL: Apps.qml declares its own hidden list")
+PY
+contains "${APPS}" "\"${HIDDEN_PATH}\""
+contains "${APPS}" '"/../../catalog/launcher-hidden-entries.json"'
 contains "${APPS}" 'if (root.hiddenProductEntryIds.indexOf(id) !== -1)'
+contains "${DESKTOP_RS}" "\"${HIDDEN_PATH}\""
+# shellcheck disable=SC2016
+contains "${BUILD}" '"${extra}/usr/share/punar/catalog/launcher-hidden-entries.json"'
 contains "${APPS}" 'if (value === "lstopo")'
 contains "${APPS}" 'return "Hardware Information";'
-contains "${SURFACES}" '["footclient", "foot-server", "thunar-settings",'
-contains "${SURFACES}" '(["footclient", "foot-server", "thunar-settings",'
+contains "${SURFACES}" "--slurpfile hidden ${HIDDEN_PATH}"
+# shellcheck disable=SC2016
+contains "${SURFACES}" '| ($hidden[0].entries | has($id)) | not))'
+if grep -Fq '"footclient", "foot-server"' "${SURFACES}"; then
+    fail "the surface gate still carries its own copy of the hidden list"
+fi
 contains "${SURFACES}" '); .name == "Hardware Information")'
 
 # System Control's Applications summary distinguishes native applications,

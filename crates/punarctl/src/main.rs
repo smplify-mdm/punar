@@ -61,6 +61,7 @@
 
 #![forbid(unsafe_code)]
 
+mod desktop;
 mod fmt;
 mod ipc;
 mod model;
@@ -131,7 +132,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Show daemon and device status.
-    Status,
+    Status {
+        /// With --json, print every daemon's answer in one document:
+        /// `{status, firewall, agents, alerts, approvals, privilege,
+        /// update, errors}`. Each is that method's result verbatim, or
+        /// null with its error under `errors`. The human view always
+        /// shows every row.
+        #[arg(long)]
+        all: bool,
+    },
     /// Enroll this device with an organization, or inspect/stop the
     /// enrollment (Milestone 5 — against the dev/CI mock control plane).
     Enroll {
@@ -280,7 +289,11 @@ enum AppCommand {
         id: String,
     },
     /// List catalog apps and native installation state.
-    List,
+    List {
+        /// Also list every desktop entry the launcher offers.
+        #[arg(long)]
+        all: bool,
+    },
     /// Install the pinned native package for this architecture.
     Install {
         /// Catalog id, such as `spotify`.
@@ -302,9 +315,11 @@ enum AppCommand {
         #[arg(long)]
         acknowledge_host_access: bool,
     },
-    /// Open an installed native app, or its curated web-app fallback.
+    /// Open an app: a catalog id, or any desktop entry the launcher shows.
+    /// An open window of the app is raised instead of starting another.
     Open {
-        /// Catalog id, such as `spotify`.
+        /// Catalog id, such as `spotify`, or a desktop-entry id, such as
+        /// `org.gnome.Calculator`.
         id: String,
         /// Custom URI delivered by the desktop handler. Ordinary users do
         /// not type this; browsers supply it for flows such as OAuth.
@@ -363,9 +378,10 @@ enum PolicyCommand {
     /// Pin a value for everyone on this device, as its administrator
     /// (device_specific_override, rank 4).
     ///
-    /// Needs your password again unless you are root. The confirmation is
-    /// read from standard input as a single line, so it is never an argument
-    /// and never reaches /proc — the same discipline the lock screen uses.
+    /// Asks for your password on the terminal unless you are root. Scripts
+    /// pass a confirmation on standard input instead (--ticket-stdin), so it
+    /// is never an argument and never reaches /proc — the same discipline the
+    /// lock screen uses.
     Set {
         /// Dotted capability path, like `security.firewall`.
         path: CapabilityId,
@@ -376,12 +392,13 @@ enum PolicyCommand {
         #[arg(long)]
         reason: String,
         /// Read a re-authentication ticket from the first line of standard
-        /// input (as printed by `punar-auth --admin`).
+        /// input instead of asking for the password: `punar-auth --admin`'s
+        /// answer as it prints it (`ok <ticket>`), or the bare ticket.
         #[arg(long)]
         ticket_stdin: bool,
     },
     /// Withdraw the administrator's entry for a path, handing it back to the
-    /// layers underneath.
+    /// layers underneath. Asks for your password, as `set` does.
     Clear {
         /// Dotted capability path, like `security.firewall`.
         path: CapabilityId,
@@ -389,7 +406,8 @@ enum PolicyCommand {
         #[arg(long)]
         reason: String,
         /// Read a re-authentication ticket from the first line of standard
-        /// input.
+        /// input instead of asking for the password (`ok <ticket>` or the bare
+        /// ticket).
         #[arg(long)]
         ticket_stdin: bool,
     },
@@ -479,6 +497,21 @@ enum ApprovalsCommand {
         /// approval's `expires_at` either way.
         #[arg(long, default_value_t = 300, value_name = "SECONDS")]
         timeout: u64,
+    },
+    /// Follow every approval: each one prints when it arrives and again
+    /// when it is answered or expires. With --json, one `approvals.get`
+    /// result per line. Runs until interrupted.
+    ///
+    /// The wake is the one `wait` uses (a watch on punard's summary
+    /// directory, plus each pending approval's own expiry); the truth is
+    /// always the socket.
+    Watch {
+        /// Ask on this terminal for a decision on each new approval routed
+        /// to you: approve, deny or skip. Needs a terminal. Standard input
+        /// is never read as an answer, and punard accepts a decision only
+        /// from a person.
+        #[arg(long)]
+        answer: bool,
     },
 }
 
@@ -778,21 +811,65 @@ fn local_hostname() -> String {
 /// `/proc/<pid>/cmdline` for as long as the process runs, which is exactly long
 /// enough for another local process to take it and spend it first. The lock
 /// screen passes a password the same way, for the same reason.
-fn read_ticket(enabled: bool) -> Result<Option<String>, String> {
+///
+/// Accepts what `punar-auth --admin` prints (`ok <ticket>`) as well as the bare
+/// ticket, so its answer can be piped straight in. Anything else — `denied`,
+/// `unavailable`, a truncated line — is refused here with what it means,
+/// rather than sent to punard as if it were a ticket.
+fn read_ticket(enabled: bool) -> Result<Option<Zeroizing<String>>, String> {
     if !enabled {
         return Ok(None);
     }
-    let mut line = String::new();
+    let mut line = Zeroizing::new(String::new());
     std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
         .map_err(|e| format!("The confirmation could not be read from standard input: {e}"))?;
-    let ticket = line.trim().to_string();
-    if ticket.is_empty() {
-        return Err("No confirmation arrived on standard input.\n\
-                    Next step: run `punar-auth --admin` first and pipe its ticket in, or make \
-                    the change from System Control · Policy, which does this for you."
-            .to_string());
+    parse_stdin_ticket(line.trim())
+}
+
+/// The ticket in one line of `--ticket-stdin` input, or why there is none.
+fn parse_stdin_ticket(line: &str) -> Result<Option<Zeroizing<String>>, String> {
+    let next = "Next step: run the command without --ticket-stdin in a terminal, which asks \
+                for your password; or pipe `punar-auth --admin`'s answer into it; or make the \
+                change from System Control · Policy.";
+    if line.is_empty() {
+        return Err(format!(
+            "No confirmation arrived on standard input.\n{next}"
+        ));
     }
-    Ok(Some(ticket))
+    match parse_auth_answer(&format!("{line}\n")) {
+        AuthAnswer::Ticket(ticket) => return Ok(Some(ticket)),
+        AuthAnswer::Denied => {
+            return Err(format!(
+                "The confirmation on standard input says the password was not accepted, so \
+                 nothing was changed.\n{next}"
+            ));
+        }
+        AuthAnswer::Unavailable => {}
+    }
+    if line.len() == 64 && line.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(Some(Zeroizing::new(line.to_string())));
+    }
+    Err(format!(
+        "What arrived on standard input is not a confirmation ticket: expected `ok <ticket>` \
+         or the 64-character ticket itself.\n{next}"
+    ))
+}
+
+/// The confirmation for a policy change: the one on standard input when asked
+/// for, otherwise the person's password, asked on the terminal (root needs
+/// none). With no terminal the request goes without one, and punard's refusal
+/// says what to run — the client never decides.
+fn policy_ticket(ticket_stdin: bool, purpose: &str) -> Result<Option<Zeroizing<String>>, ExitCode> {
+    if ticket_stdin {
+        return read_ticket(true).map_err(|why| {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        });
+    }
+    if rustix::process::geteuid().is_root() {
+        return Ok(None);
+    }
+    admin_ticket(purpose)
 }
 
 fn fail(error: &CallError) -> ExitCode {
@@ -802,6 +879,52 @@ fn fail(error: &CallError) -> ExitCode {
 
 /// Print a result object as one JSON line (the `--json` contract: the IPC
 /// `result` verbatim).
+/// The reads `punarctl status` makes beyond punard's `status`. Each is its
+/// own call, so a daemon that does not answer costs only its own row.
+fn read_status_live(punard: &Client, agentd: &Client) -> views::StatusLive {
+    views::StatusLive {
+        firewall: punard.call(
+            "capabilities.get",
+            Some(json!({ "capability": "security.firewall" })),
+        ),
+        agents: agentd.call("agents.list", None),
+        alerts: agentd.call("alerts.list", Some(json!({ "include_dismissed": false }))),
+        approvals: punard.call("approvals.list", None),
+        privilege: punard.call("privilege.status", None),
+        update: punard.call("update.status", None),
+    }
+}
+
+/// `status --all --json`: punard's `status` result and each live read,
+/// verbatim. A read that failed is null, and `errors` says why in the
+/// daemon's own words.
+fn status_all_json(status: Value, live: &views::StatusLive) -> Value {
+    let mut document = serde_json::Map::new();
+    let mut errors = serde_json::Map::new();
+    document.insert("status".to_string(), status);
+    for (key, read) in live.named() {
+        match read {
+            Ok(result) => {
+                document.insert(key.to_string(), result.clone());
+            }
+            Err(error) => {
+                document.insert(key.to_string(), Value::Null);
+                let code = match error {
+                    CallError::Unreachable { .. } => "unreachable",
+                    CallError::Server(wire) => wire.code.as_str(),
+                    CallError::Protocol { .. } => "protocol",
+                };
+                errors.insert(
+                    key.to_string(),
+                    json!({ "code": code, "message": error.message() }),
+                );
+            }
+        }
+    }
+    document.insert("errors".to_string(), Value::Object(errors));
+    Value::Object(document)
+}
+
 fn print_json(result: &Value) -> ExitCode {
     match serde_json::to_string(result) {
         Ok(line) => {
@@ -1103,16 +1226,109 @@ fn app_update(
     }
 }
 
+/// `app list --all --json`: one row per thing the launcher can open, the
+/// catalog's first. A desktop entry the launcher hides is still a row, with
+/// `hidden_in_launcher` and the shipped reason. `launcher_hidden_list` names
+/// the file those marks came from, or is null with the reason it could not be
+/// read, in which case nothing is marked.
+fn app_list_all_json(
+    list: &Value,
+    entries: &[desktop::DesktopEntry],
+    hidden: &Result<std::collections::BTreeMap<String, String>, String>,
+) -> Value {
+    let mut rows: Vec<Value> = list
+        .get("apps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|app| {
+            json!({
+                "id": app.get("id").cloned().unwrap_or(Value::Null),
+                "name": app.get("name").cloned().unwrap_or(Value::Null),
+                "source": "catalog",
+                "terminal": false,
+                "hidden_in_launcher": false,
+            })
+        })
+        .collect();
+    rows.extend(entries.iter().map(|entry| {
+        let why = hidden
+            .as_ref()
+            .ok()
+            .and_then(|hidden| hidden.get(&entry.id.to_lowercase()));
+        let mut row = json!({
+            "id": entry.id,
+            "name": entry.name,
+            "source": "desktop-entry",
+            "terminal": entry.terminal,
+            "hidden_in_launcher": why.is_some(),
+        });
+        if let Some(why) = why {
+            row["hidden_why"] = json!(why);
+        }
+        row
+    }));
+    match hidden {
+        Ok(_) => json!({ "apps": rows, "launcher_hidden_list": desktop::LAUNCHER_HIDDEN }),
+        Err(why) => json!({
+            "apps": rows,
+            "launcher_hidden_list": null,
+            "launcher_hidden_error": why,
+        }),
+    }
+}
+
 fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
+    app_open_from(client, id, uris, true)
+}
+
+/// Say, at a terminal, that nothing new started.
+fn announce_focus(id: &str) {
+    if std::io::stdout().is_terminal() {
+        println!("FOCUSED · {id} · its open window was raised; nothing new started");
+    }
+}
+
+/// `app open` by catalog id first; a desktop-entry id when the catalog has
+/// no such app (or punard is not answering, since the launcher works without
+/// it). `desktop` is false when a desktop entry has already handed over to
+/// its catalog id, so two entries naming each other cannot loop.
+fn app_open_from(client: &Client, id: &str, uris: &[String], desktop: bool) -> ExitCode {
     let detail = match inspect_app(client, id) {
         Ok(value) => value,
-        Err(error) => return fail(&error),
+        Err(error) => {
+            let fallback = desktop
+                && (matches!(error, CallError::Unreachable { .. })
+                    || error.server().is_some_and(|wire| wire.code == "not_found"));
+            if !fallback {
+                return fail(&error);
+            }
+            return match desktop::index().into_iter().find(|entry| entry.id == id) {
+                Some(entry) => open_desktop_entry(client, &entry, uris),
+                None if error.server().is_some() => {
+                    eprintln!(
+                        "Nothing is named {}: it is neither a catalog app nor a desktop entry \
+                         the launcher shows.\n\
+                         Next step: `punarctl app list --all` lists both.",
+                        term_safe_name(id)
+                    );
+                    ExitCode::FAILURE
+                }
+                None => fail(&error),
+            };
+        }
     };
     let Some(app) = detail.get("app") else {
         return fail(&CallError::Protocol {
             why: "apps.catalog returned no app object".to_string(),
         });
     };
+    // Like the launcher: raise the window it already has. A callback URI
+    // must still reach the app, so it always goes through the launch path.
+    if uris.is_empty() && desktop::focus_existing(&desktop::catalog_candidates(app)) {
+        announce_focus(id);
+        return ExitCode::SUCCESS;
+    }
     let mut command = match app.get("source").and_then(Value::as_str) {
         Some("web") => {
             if !uris.is_empty() {
@@ -1189,6 +1405,59 @@ fn app_open(client: &Client, id: &str, uris: &[String]) -> ExitCode {
         Err(error) => {
             eprintln!(
                 "The application could not start.\nWhy: {error}.\nNext step: inspect it with `punarctl app show {id}`."
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Open a desktop entry the way the launcher does: raise its window if one
+/// is open, else run its parsed `Exec` (never a shell string), through
+/// Punar's terminal adapter when it asks for a terminal.
+fn open_desktop_entry(client: &Client, entry: &desktop::DesktopEntry, uris: &[String]) -> ExitCode {
+    if let Some(catalog_id) = entry.catalog_id() {
+        return app_open_from(client, catalog_id, uris, false);
+    }
+    let name = term_safe_name(&entry.name);
+    if !uris.is_empty() {
+        eprintln!(
+            "{name} was not opened.\nWhy: a desktop entry is opened here without files or \
+             URIs.\nNext step: `punarctl app open {}` with no URI.",
+            entry.id
+        );
+        return ExitCode::from(2);
+    }
+    if desktop::focus_existing(&desktop::entry_candidates(entry)) {
+        announce_focus(&entry.id);
+        return ExitCode::SUCCESS;
+    }
+    let mut argv: Vec<String> = Vec::new();
+    if entry.terminal {
+        argv.push("/usr/lib/punar/punar-terminal-app.sh".to_string());
+        if let Some(path) = &entry.path {
+            argv.push("--working-directory".to_string());
+            argv.push(path.clone());
+        }
+        argv.push("--".to_string());
+    }
+    argv.extend(entry.exec.iter().cloned());
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    if let (false, Some(path)) = (entry.terminal, &entry.path) {
+        command.current_dir(path);
+    }
+    match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "{name} could not start.\nWhy: {error}.\n\
+                 Next step: check its desktop entry, `{}.desktop`.",
+                entry.id
             );
             ExitCode::FAILURE
         }
@@ -2286,6 +2555,201 @@ fn approvals_wait(
             wait_exit(&status)
         }
         Err(error) => fail(&error),
+    }
+}
+
+/// How long `approvals watch` sleeps when nothing is pending and nothing
+/// wakes it. Not a poll: a change to the summary file or a pending
+/// approval's expiry always comes first. It only bounds how stale a
+/// missed wake can leave the stream.
+const WATCH_IDLE: Duration = Duration::from_secs(300);
+
+/// `punarctl approvals watch [--answer]`: every approval as it arrives and
+/// as it settles. The wake is an inotify watch on punard's summary
+/// directory, or the earliest pending expiry, since punard settles a lapsed
+/// approval lazily on the next read. The truth is `approvals.list` and one
+/// `approvals.get` per change. Nothing here decides anything: `--answer`
+/// relays a person's typed decision to `approvals.resolve`, which refuses
+/// anyone who is not one.
+fn approvals_watch(
+    client: &Client,
+    style: &Style,
+    json: bool,
+    hostname: &str,
+    answer: bool,
+) -> ExitCode {
+    // A decision is typed by a person at this device. Standard input is
+    // never an answer channel, so a piped "a" approves nothing.
+    let mut tty = if answer {
+        if peer::in_agent_scope() {
+            eprintln!(
+                "punarctl approvals watch --answer does not run inside an AI agent's session.\n\
+                 Why: an agent may resolve no approval, including its own; punard refuses it \
+                 either way.\n\
+                 Next step: answer from your own terminal or the approval overlay."
+            );
+            return ExitCode::from(ipc::EXIT_DENIED);
+        }
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+        {
+            Ok(tty) => Some(tty),
+            Err(_) => {
+                eprintln!(
+                    "punarctl approvals watch --answer needs a terminal.\n\
+                     Why: a decision is typed by a person at this device, and standard input \
+                     is never read as one.\n\
+                     Next step: run it in a terminal, or watch without --answer and use \
+                     `punarctl approvals resolve <id> --decision approved|denied`."
+                );
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+
+    if !json {
+        let mut out = fmt::masthead(
+            style,
+            "Approvals · watch",
+            &format!("{hostname} · Personal"),
+        );
+        out.push_str(&fmt::note(
+            style,
+            "Each approval prints when it arrives and when it settles · Ctrl-C stops",
+        ));
+        print!("{out}");
+    }
+
+    let watch = watch::DirWatch::on(Path::new(APPROVALS_SUMMARY)).ok();
+    // The last status printed for each approval id still listed.
+    let mut printed: std::collections::BTreeMap<String, String> = Default::default();
+    let mut first = true;
+    loop {
+        let list = match client.call("approvals.list", None) {
+            Ok(list) => list,
+            Err(error) => return fail(&error),
+        };
+        let listed: Vec<(String, String)> = list
+            .get("approvals")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        Some((
+                            row.pointer("/approval/approval_id")?.as_str()?.to_string(),
+                            approval_status(row),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        printed.retain(|id, _| listed.iter().any(|(listed_id, _)| listed_id == id));
+        // The earliest pending approval still ahead of its expiry. punard
+        // settles a lapsed one on the next read (approvals.list sweeps), so
+        // that read is due then even if no file changed. A deadline already
+        // behind us is left out, so a daemon that did not sweep cannot turn
+        // this into a spin.
+        let now = (punar_common::time::unix_now_millis() / 1000) as u64;
+        let next_expiry = list
+            .get("approvals")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|row| approval_status(row) == "pending")
+            .filter_map(approval_deadline)
+            .filter(|deadline| *deadline + 1 >= now)
+            .min();
+
+        for (id, status) in &listed {
+            if printed.get(id) == Some(status) {
+                continue;
+            }
+            // History is not news: at start, only what is pending prints.
+            if first && status != "pending" {
+                printed.insert(id.clone(), status.clone());
+                continue;
+            }
+            let current = match client.call("approvals.get", Some(json!({ "approval_id": id }))) {
+                Ok(current) => current,
+                Err(error) => {
+                    eprintln!("{}", error.message());
+                    printed.insert(id.clone(), status.clone());
+                    continue;
+                }
+            };
+            let status = approval_status(&current);
+            printed.insert(id.clone(), status.clone());
+            if let Err(code) = emit(json, &current, |v| views::approval_event(style, v)) {
+                return code;
+            }
+            if status != "pending" {
+                continue;
+            }
+            let Some(tty) = tty.as_mut() else { continue };
+            if !peer::may_resolve(&routed_user(&current)) {
+                continue;
+            }
+            let Some(decision) = ask_decision(tty, style, &current, hostname) else {
+                continue;
+            };
+            match client.call(
+                "approvals.resolve",
+                Some(json!({ "approval_id": id, "decision": decision })),
+            ) {
+                Ok(resolved) => {
+                    printed.insert(id.clone(), approval_status(&resolved));
+                    if let Err(code) = emit(json, &resolved, |v| views::approval_event(style, v)) {
+                        return code;
+                    }
+                }
+                // Refused (expired while you read it, or not yours): the
+                // daemon's reason prints and the watch goes on.
+                Err(error) => eprintln!("{}", error.message()),
+            }
+        }
+        first = false;
+        let _ = std::io::stdout().flush();
+
+        // Sleep until something changes or the earliest pending approval
+        // lapses.
+        let now = (punar_common::time::unix_now_millis() / 1000) as u64;
+        let until_expiry =
+            next_expiry.map(|deadline| Duration::from_secs(deadline.saturating_sub(now) + 1));
+        let budget = until_expiry.map_or(WATCH_IDLE, |d| d.min(WATCH_IDLE));
+        match &watch {
+            Some(w) => {
+                let _ = w.wait(budget);
+            }
+            None => std::thread::sleep(budget.min(watch::FALLBACK_RECHECK)),
+        }
+    }
+}
+
+/// Show one approval routed to this person on their terminal and read a
+/// decision: `approved`, `denied`, or `None` to leave it. Anything but an
+/// explicit a/approve or d/deny leaves it, including a read failure.
+fn ask_decision(
+    tty: &mut std::fs::File,
+    style: &Style,
+    approval: &Value,
+    hostname: &str,
+) -> Option<&'static str> {
+    let card = views::approval_get(style, approval, hostname, true).ok()?;
+    let _ = write!(tty, "{card}Approve [a] · Deny [d] · Leave it [Enter] › ");
+    let _ = tty.flush();
+    let mut line = String::new();
+    BufReader::new(tty.try_clone().ok()?)
+        .take(64)
+        .read_line(&mut line)
+        .ok()?;
+    match line.trim().to_ascii_lowercase().as_str() {
+        "a" | "approve" => Some("approved"),
+        "d" | "deny" => Some("denied"),
+        _ => None,
     }
 }
 
@@ -3951,7 +4415,16 @@ fn main() -> ExitCode {
     let json = cli.json;
 
     match cli.command {
-        Command::Status => match client.call("status", None) {
+        Command::Status { all } => match client.call("status", None) {
+            // `--all --json`: one document with every daemon's answer, so a
+            // script sees what the human view sees.
+            Ok(result) if json && all => {
+                let agents = Client::for_target(Target::Agentd, socket.as_deref());
+                print_json(&status_all_json(
+                    result,
+                    &read_status_live(&client, &agents),
+                ))
+            }
             // The human view's org row cites the policy ids, which live in
             // `enroll.status` (contract section 7) — a second read, fetched
             // only when the device is enrolled; the row degrades to the
@@ -3969,7 +4442,8 @@ fn main() -> ExitCode {
                     } else {
                         Vec::new()
                     };
-                views::status(&style, v, &policy_ids)
+                let agents = Client::for_target(Target::Agentd, socket.as_deref());
+                views::status(&style, v, &policy_ids, &read_status_live(&client, &agents))
             }),
             Err(error) => fail(&error),
         },
@@ -4159,11 +4633,61 @@ fn main() -> ExitCode {
                     Err(error) => fail(&error),
                 }
             }
-            AppCommand::List => {
+            AppCommand::List { all: true } => {
                 let hostname = local_hostname();
-                rpc(&client, json, "apps.list", None, |v| {
-                    views::apps(&style, v, &hostname)
-                })
+                match client.call("apps.list", None) {
+                    Ok(result) => {
+                        // A catalog app's own launcher is its catalog row
+                        // already; one naming an id the catalog lacks is not.
+                        let catalog_ids: Vec<&str> = result
+                            .get("apps")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|app| app.get("id").and_then(Value::as_str))
+                            .collect();
+                        let entries: Vec<desktop::DesktopEntry> = desktop::index()
+                            .into_iter()
+                            .filter(|entry| {
+                                entry
+                                    .catalog_id()
+                                    .is_none_or(|id| !catalog_ids.contains(&id))
+                            })
+                            .collect();
+                        let hidden = desktop::launcher_hidden();
+                        if json {
+                            return print_json(&app_list_all_json(&result, &entries, &hidden));
+                        }
+                        let catalog = Some(client.call("apps.catalog", Some(json!({}))));
+                        render_or_json(false, &result, |v| {
+                            let mut out = views::app_list(&style, v, catalog.as_ref(), &hostname)?;
+                            out.push_str(&views::desktop_entries(&style, &entries, &hidden));
+                            Ok(out)
+                        })
+                    }
+                    Err(error) => fail(&error),
+                }
+            }
+            AppCommand::List { all: false } => {
+                let hostname = local_hostname();
+                match client.call("apps.list", None) {
+                    Ok(result) => {
+                        // `--json` stays the verbatim apps.list result. The
+                        // human view joins the catalog's own facts — category,
+                        // trust tier, catalog version — which apps.catalog
+                        // already answers; a catalog that cannot be read only
+                        // drops those columns.
+                        let catalog = if json {
+                            None
+                        } else {
+                            Some(client.call("apps.catalog", Some(json!({}))))
+                        };
+                        render_or_json(json, &result, |v| {
+                            views::app_list(&style, v, catalog.as_ref(), &hostname)
+                        })
+                    }
+                    Err(error) => fail(&error),
+                }
             }
             AppCommand::Install {
                 id,
@@ -4271,13 +4795,12 @@ fn main() -> ExitCode {
                     "value": parsed,
                     "reason": reason,
                 });
-                match read_ticket(ticket_stdin) {
-                    Ok(Some(ticket)) => params["ticket"] = Value::String(ticket),
+                let purpose =
+                    format!("allow pinning {path} to {value} for everyone on this device");
+                match policy_ticket(ticket_stdin, &purpose) {
+                    Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
                     Ok(None) => {}
-                    Err(why) => {
-                        eprintln!("{why}");
-                        return ExitCode::FAILURE;
-                    }
+                    Err(exit) => return exit,
                 }
                 rpc(&client, json, "policy.set", Some(params), |v| {
                     views::policy_set(&style, v)
@@ -4293,13 +4816,11 @@ fn main() -> ExitCode {
                     "value": Value::Null,
                     "reason": reason,
                 });
-                match read_ticket(ticket_stdin) {
-                    Ok(Some(ticket)) => params["ticket"] = Value::String(ticket),
+                let purpose = format!("allow withdrawing the pin on {path} for everyone");
+                match policy_ticket(ticket_stdin, &purpose) {
+                    Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
                     Ok(None) => {}
-                    Err(why) => {
-                        eprintln!("{why}");
-                        return ExitCode::FAILURE;
-                    }
+                    Err(exit) => return exit,
                 }
                 rpc(&client, json, "policy.set", Some(params), |v| {
                     views::policy_set(&style, v)
@@ -4417,6 +4938,9 @@ fn main() -> ExitCode {
                     approval_id,
                     timeout,
                 } => approvals_wait(&client, &style, json, &hostname, &approval_id, timeout),
+                ApprovalsCommand::Watch { answer } => {
+                    approvals_watch(&client, &style, json, &hostname, answer)
+                }
             }
         }
         // M9 (contract section 14.8, Plate D-012): privilege you ask for,
@@ -4981,7 +5505,7 @@ mod tests {
     use super::{
         AuthAnswer, Cli, EnrollmentTerm, append_filtered_session_bus_mount, append_resolver_mount,
         append_vendor_open_bridge, enrollment_terms_prompt, filtered_bus_proxy_command,
-        parse_auth_answer, password_refused_message, read_secret_line,
+        parse_auth_answer, parse_stdin_ticket, password_refused_message, read_secret_line,
         read_vendor_callback_payload, unaccepted_terms, validated_vendor_callback_uris,
         vendor_runtime_tmp, vendor_supervisor_command,
     };
@@ -4999,6 +5523,25 @@ mod tests {
     /// shaped exactly as punar-authd mints one is ever forwarded to punard;
     /// everything else is the device failing to answer, never a statement
     /// about the password.
+    /// `--ticket-stdin` takes `punar-auth --admin`'s answer as it prints it,
+    /// or the bare ticket. A refusal or a malformed line never reaches punard
+    /// dressed as a ticket.
+    #[test]
+    fn a_piped_confirmation_is_the_ticket_or_a_reason_why_not() {
+        let token = "0123456789abcdef".repeat(4);
+        for line in [format!("ok {token}"), token.clone()] {
+            let ticket = parse_stdin_ticket(&line).unwrap().unwrap();
+            assert_eq!(ticket.as_str(), token);
+        }
+        let denied = parse_stdin_ticket("denied").unwrap_err();
+        assert!(denied.contains("not accepted"), "{denied}");
+        for bad in ["", "unavailable", "ok ../1001/aaaa", "0123"] {
+            let why = parse_stdin_ticket(bad).unwrap_err();
+            assert!(why.contains("Next step"), "{bad:?}: {why}");
+            assert!(!why.contains("sudo"), "{why}");
+        }
+    }
+
     #[test]
     fn punar_auth_answers_parse_to_exactly_three_outcomes() {
         let token = "0123456789abcdef".repeat(4);
@@ -5906,6 +6449,46 @@ mod tests {
             } => assert_eq!(timeout, 300),
             _ => panic!("parsed into the wrong command"),
         }
+    }
+
+    /// `app list --all --json` keeps an entry the launcher hides as a row,
+    /// marked with the shipped reason, and when the list cannot be read it
+    /// marks nothing and says why instead of implying nothing is hidden.
+    #[test]
+    fn app_list_all_json_marks_what_the_launcher_hides() {
+        let entry = |id: &str| super::desktop::DesktopEntry {
+            id: id.into(),
+            name: id.into(),
+            exec: vec![id.into()],
+            terminal: false,
+            path: None,
+        };
+        let entries = [entry("footclient"), entry("htop")];
+        let list = serde_json::json!({"apps": []});
+        let hidden = Ok([(
+            "footclient".to_string(),
+            "Another way to reach Foot.".to_string(),
+        )]
+        .into_iter()
+        .collect());
+        let document = super::app_list_all_json(&list, &entries, &hidden);
+        assert_eq!(document["apps"][0]["hidden_in_launcher"], true);
+        assert_eq!(
+            document["apps"][0]["hidden_why"],
+            "Another way to reach Foot."
+        );
+        assert_eq!(document["apps"][1]["hidden_in_launcher"], false);
+        assert!(document["apps"][1].get("hidden_why").is_none());
+        assert_eq!(
+            document["launcher_hidden_list"],
+            super::desktop::LAUNCHER_HIDDEN
+        );
+
+        let unread = Err("it could not be read".to_string());
+        let document = super::app_list_all_json(&list, &entries, &unread);
+        assert_eq!(document["apps"][0]["hidden_in_launcher"], false);
+        assert_eq!(document["launcher_hidden_list"], serde_json::Value::Null);
+        assert_eq!(document["launcher_hidden_error"], "it could not be read");
     }
 
     /// `audit tail` defaults to 20 events (docs/api/ipc.md section 5.5).

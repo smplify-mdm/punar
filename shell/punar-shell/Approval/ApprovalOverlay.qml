@@ -460,23 +460,47 @@ Scope {
 
     // ---- actions ----
 
-    // Every decision runs DETACHED through punarctl with fixed argv —
-    // never a shell string, never an IPC client in the shell. The overlay
-    // does not read the process result: the next FileView change is the
-    // truth (ipc.md §15). Only the `approval_id` is sent; punard
-    // re-derives the contract from its own record before executing.
+    // Every decision runs through punarctl with fixed argv — never a
+    // shell string, never an IPC client in the shell. A decision that was
+    // RECORDED is still read from the next FileView change, which is the
+    // truth (ipc.md §15). One that was REFUSED is read from punarctl's own
+    // answer: it used to run detached, which threw that answer away, so a
+    // refusal left the card exactly as it was and the person could not
+    // tell their decision had gone nowhere. Only the `approval_id` is
+    // sent; punard re-derives the contract from its own record.
+    property string resolveError: ""
+
+    onSelectedIdChanged: root.resolveError = ""
+
+    Process {
+        id: resolveProc
+
+        stderr: StdioCollector {
+            id: resolveErr
+            waitForEnd: true
+        }
+
+        // Connected, not declared: see Probe in SystemControl/ControlData.qml.
+        Component.onCompleted: resolveProc.exited.connect(function (exitCode) {
+            var said = String(resolveErr.text).trim();
+            root.resolveError = exitCode === 0 ? "" : (said !== "" ? said : "punarctl exited with " + exitCode);
+        })
+    }
+
     function resolve(decision: string): void {
         if (!root.actionable)
             return;
         var id = root.selectedId;
-        if (id === "")
+        if (id === "" || resolveProc.running)
             return;
+        root.resolveError = "";
+        resolveProc.command = ["punarctl", "approvals", "resolve", id, "--decision", decision];
         try {
-            Quickshell.execDetached(["punarctl", "approvals", "resolve", id, "--decision", decision]);
+            resolveProc.running = true;
         } catch (e) {
-            // No punarctl on a dev machine: the card stays as it is, and
-            // the request stays pending in the daemon. Nothing is guessed.
-            console.warn("punar-shell: approval action unavailable:", e);
+            // No punarctl on this machine: the request stays pending in the
+            // daemon, and the card says the decision was not sent.
+            root.resolveError = "punarctl could not be started, so the decision was not sent.";
         }
     }
 
@@ -989,6 +1013,28 @@ Scope {
                             enabledLook: root.actionable
                             onActivated: root.resolve("approved")
                         }
+                    }
+                }
+
+                // A decision punard refused, in its own words. Plain text:
+                // it quotes the daemon, and it can quote a name.
+                Item {
+                    width: parent.width
+                    height: resolveErrorText.implicitHeight + 8
+                    visible: root.resolveError !== ""
+
+                    Text {
+                        id: resolveErrorText
+
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Not recorded — " + root.resolveError
+                        font.family: Theme.fontSans
+                        font.pixelSize: 12
+                        color: Theme.shellStatusBad
+                        wrapMode: Text.WordWrap
+                        textFormat: Text.PlainText
                     }
                 }
 

@@ -482,21 +482,44 @@ Scope {
     }
 
     // [D] Dismiss — DISMISS FILES, IT NEVER DESTROYS (§5.4, D-009 Sect I
-    // register 03). Detached `punarctl` with fixed argv — never a shell
-    // string, never an IPC client in the shell. The result is not read:
-    // agentd rewrites alerts.json and the next FileView change is the
-    // truth. The alert stays in `punarctl agents alerts` with its
-    // dismissal time, and in the detection record.
+    // register 03). `punarctl` with fixed argv — never a shell string,
+    // never an IPC client in the shell. A dismissal that WORKED is read
+    // from alerts.json: agentd rewrites it and the next FileView change is
+    // the truth. One that was REFUSED is read from punarctl's own answer;
+    // run detached, that answer was thrown away and the card simply stayed,
+    // as if the key had not been pressed. The alert stays in `punarctl
+    // agents alerts` with its dismissal time, and in the detection record.
+    property string dismissError: ""
+    property string dismissErrorId: ""
+
+    Process {
+        id: dismissProc
+
+        stderr: StdioCollector {
+            id: dismissErr
+            waitForEnd: true
+        }
+
+        // Connected, not declared: see Probe in SystemControl/ControlData.qml.
+        Component.onCompleted: dismissProc.exited.connect(function (exitCode) {
+            var said = String(dismissErr.text).trim();
+            root.dismissError = exitCode === 0 ? "" : (said !== "" ? said : "punarctl exited with " + exitCode);
+        })
+    }
+
     function dismiss(): void {
         var id = root.focusedId;
-        if (id === "")
+        if (id === "" || dismissProc.running)
             return;
+        root.dismissError = "";
+        root.dismissErrorId = id;
+        dismissProc.command = ["punarctl", "agents", "alerts", "dismiss", id];
         try {
-            Quickshell.execDetached(["punarctl", "agents", "alerts", "dismiss", id]);
+            dismissProc.running = true;
         } catch (e) {
-            // No punarctl on a dev machine: the card stays exactly as it
-            // is and the record is untouched. Nothing is guessed.
-            console.warn("punar-shell: alert dismissal unavailable:", e);
+            // No punarctl on this machine: the card stays and the record is
+            // untouched — and the card says the dismissal was not sent.
+            root.dismissError = "punarctl could not be started, so the alert was not dismissed.";
         }
     }
 
@@ -941,6 +964,15 @@ Scope {
                                         }
                                     }
                                 }
+                            }
+
+                            // A dismissal agentd refused, in its own words.
+                            Data {
+                                width: parent.width
+                                visible: root.dismissError !== "" && root.dismissErrorId === card.alertId
+                                color: Theme.shellStatusBad
+                                wrapMode: Text.WordWrap
+                                text: "Not dismissed — " + root.dismissError
                             }
 
                             Item {

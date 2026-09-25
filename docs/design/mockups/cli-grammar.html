@@ -177,6 +177,8 @@
       <p>Every verb takes <span class="specref">--json</span> and emits the capability-registry field names verbatim (<span class="specref">current_state</span>, <span class="specref">managed_by</span>, <span class="specref">verification</span>) — the human table and the JSON are two renderers over one struct. Dashed until punarctl ships. <span class="specref">spec §41 · §11.2</span></p></div>
     <div class="reg"><span class="no">02</span><span class="what">Pipes strip color</span>
       <p>When stdout is not a TTY, or <span class="specref">NO_COLOR</span> is set, ANSI codes drop and columns stay — grep and awk see clean fields, and no script ever parses an escape sequence.</p></div>
+    <div class="reg"><span class="no">04</span><span class="what">One row, one daemon</span>
+      <p><span class="specref">status</span> asks each daemon for its own rows — firewall, approvals, grants and updates from punard, AI sessions and unknown-AI alerts from punar-agentd. A daemon that does not answer turns only its rows to <span class="specref">UNKNOWN</span>, with its reason. <span class="specref">status --all --json</span> prints the same answers verbatim under <span class="specref">status · firewall · agents · alerts · approvals · privilege · update</span>, with a failed read null and its reason under <span class="specref">errors</span>; plain <span class="specref">status --json</span> stays the status result alone.</p></div>
     <div class="reg"><span class="no">03</span><span class="what">Exit codes &nbsp;<span class="simtag">Planned · M3</span></span>
       <p>0 for success, distinct nonzero codes for <span class="specref">deny</span>, <span class="specref">approval_required</span>, and drift — so the policy decision values (§20) are testable from a shell script without reading prose.</p></div>
   </section>
@@ -189,7 +191,7 @@
     <div class="reg"><span class="no">02</span><span class="what">One formatter</span>
       <p>A single output library in punarctl renders masthead, rule, row, and decision — no command formats itself. The terminal palette is design-language §6 v0 (<span class="specref">#08090A / #F2F3F5</span>, lime cursor); tuning the blue/magenta/cyan slots is an M1 task.</p></div>
     <div class="reg"><span class="no">03</span><span class="what">Approval TUI</span>
-      <p>The 05 prompt is the agent gateway (§26) speaking through the terminal: the same <span class="specref">apr_123</span> contract block as Plate D-003, same expiry, same audit line either way. Approve is the surface's one filled control — inverse-video lime; deny stays a red ghost. <span class="specref">spec §28</span></p></div>
+      <p>The 05 prompt is the agent gateway (§26) speaking through the terminal: the same <span class="specref">apr_123</span> contract block as Plate D-003, same expiry, same audit line either way. Approve is the surface's one filled control — inverse-video lime; deny stays a red ghost. <span class="specref">approvals watch</span> prints every approval as one row when it arrives and again when it settles (one <span class="specref">approvals.get</span> result per line with <span class="specref">--json</span>); <span class="specref">--answer</span> draws this same card on the terminal for each new approval routed to you and reads A/D from the terminal, never from a pipe. <span class="specref">spec §28</span></p></div>
   </section>
 
   <footer>
@@ -223,6 +225,9 @@
       : row('st-device', 'Device', 'Personal', 'fg', 'thinkpad-x1 · not enrolled · nothing leaves this machine');
     h += row('st-firewall', 'Firewall', 'Enabled', 'ok', 'inbound deny by default · nftables verified 08:24');
     h += row('st-ai', 'AI sessions', '2 active', 'fg', 'agt_123 · agt_124 · <span class="bad">1 unknown</span> — punarctl agents list');
+    h += row('st-unknown', 'Unknown AI', '1 alert', 'bad', 'foo-agent · punarctl agents alerts');
+    h += row('st-approvals', 'Approvals', '1 pending', 'warn', 'apr_7c1d9a4e · punarctl approvals list');
+    h += row('st-grant', 'Privilege', 'None', 'ok', 'no grant held');
     h += row('st-updates', 'Updates', 'Current', 'ok', 'stable channel · checked 07:58');
     if (managed) {
       h += row('st-compliance', 'Compliance', 'Compliant', 'ok', 'eng-baseline-v12 · reported 08:24');
