@@ -1062,9 +1062,9 @@ mod tests {
     /// enrolling share one deadline, resolving may not spend all of it, and
     /// nothing else is asked of Smplify.
     ///
-    /// Held to the budgets the two requests were given, and to the whole
-    /// call's time by the real clock with a margin no host load reaches
-    /// ([`OVERRUN`]).
+    /// Held to the budgets the two requests were given, to exactly the
+    /// requests that reached Smplify, and to the whole call's time by the
+    /// real clock with a margin no host load reaches ([`OVERRUN`]).
     #[test]
     fn a_registration_answers_within_its_budget_from_a_silent_smplify() {
         // Long enough that building a client, which reads the system's
@@ -1118,9 +1118,20 @@ mod tests {
             "enrolling was given {:?} of a {BUDGET:?} deadline after resolving waited out its third",
             granted[1]
         );
+        // And enough to go out: /enroll always has what resolving's third
+        // left, less only the moments the host took to wake the resolve and
+        // make the key, which are far under a third. So both granted requests
+        // were sent, and the count below cannot pass with a request made
+        // outside `grant()` standing in for one that never went out.
         assert!(
-            arrivals.lock().unwrap().len() <= granted.len(),
-            "nothing else reached Smplify"
+            granted[1] >= BUDGET / 3,
+            "enrolling was given only {:?} of a {BUDGET:?} deadline",
+            granted[1]
+        );
+        assert_eq!(
+            settled(port, &arrivals),
+            granted.len(),
+            "each granted request reached Smplify, and nothing else did"
         );
         assert!(!d.store.exists(), "no identity without a certificate");
         let _ = std::fs::remove_dir_all(root);
@@ -1279,12 +1290,7 @@ mod tests {
             .keep_identity(organization, "punar".into(), &csr, enrolled)
             .unwrap();
         assert!(answer["device_token"].as_str().is_some(), "{answer}");
-        // Anything the agent sent would have arrived by now.
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(
-            arrivals.lock().unwrap().is_empty(),
-            "Smplify was asked again"
-        );
+        assert_eq!(settled(port, &arrivals), 0, "Smplify was asked again");
         let status = d.identity_status(None).unwrap();
         assert_eq!(status["device_id"], "dev-1");
         assert_eq!(status["tenant_key_pinned"], false);
