@@ -80,6 +80,27 @@ if ! getent passwd greeter >/dev/null 2>&1; then
 fi
 install -d -m 0750 -o greeter -g greeter /var/lib/greetd
 
+# Neither the greeter's account nor any person's is ever in `input` or `video`
+# (docs/design/onboarding.md section 1.7). `input` is every keystroke typed on
+# this machine and `video` is the screen; the greeter's compositor takes its
+# devices from logind on the active seat, exactly as a person's session does.
+# Some packagings grant a greeter `video`, by a maintainer script or by a
+# sysusers.d `m` line that systemd-sysusers would replay on a later boot, so
+# take the membership away here and delete the line that would give it back.
+# check-release-image.sh A16 refuses a tree where either survives.
+for retired_group in input video; do
+    for member in $(getent group "${retired_group}" | cut -d: -f4 | tr ',' ' '); do
+        case "${member}" in
+            greeter|_greetd) gpasswd --delete "${member}" "${retired_group}" >/dev/null ;;
+        esac
+    done
+done
+for sysusers_conf in /usr/lib/sysusers.d/*.conf; do
+    [ -f "${sysusers_conf}" ] || continue
+    sed -i -E '/^[[:space:]]*m[[:space:]]+(greeter|_greetd)[[:space:]]+(input|video)([[:space:]].*)?$/d' \
+        "${sysusers_conf}"
+done
+
 # Same signed, payload-free remote definition as x86. Spotify itself selects
 # the web source on ARM64, while other curated Flatpaks can remain available
 # when their publishers provide ARM builds.

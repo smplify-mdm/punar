@@ -57,6 +57,7 @@ pub mod browser_policy;
 pub mod capability;
 pub mod device;
 pub mod enroll;
+pub mod fetch;
 pub mod hardware;
 pub mod install;
 pub mod inventory;

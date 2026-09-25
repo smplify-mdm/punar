@@ -1198,8 +1198,11 @@ requires the catalog digest, caller-confirmed digest and observed digest to
 agree before fixed-argv installation and resulting-commit verification.
 
 For `vendor_deb`, the same field confirms the signed-catalog package digest.
-punard downloads only from the catalog's closed vendor origin, enforces exact
-byte size and SHA-256, extracts only `data.tar.xz` into a root-owned staging
+The package is downloaded by the unprivileged `punar-fetch` helper (see
+"Download helper" under `update.check`), never by punard; the helper refuses
+any URL outside the catalog's closed vendor origins and follows no redirect,
+and punard copies what arrives into a private staging file the helper never
+holds. punard then enforces exact byte size and SHA-256, extracts only `data.tar.xz` into a root-owned staging
 tree, rejects unsafe paths/file types/symlinks, clears setuid/setgid bits, and
 generates its own desktop entry. Debian control archives and maintainer scripts
 are never executed, and no vendor repository is registered. A custom URI scheme
@@ -1417,13 +1420,17 @@ When root-owned `/etc/punar/update-repository.url` is present, the implemented
 transport issues two fixed HTTPS GETs beneath
 `<base>/<channel>/<architecture>/<boot-platform>/`: `channel.json` and its
 detached raw 64-byte signature. The file must be a non-symlink regular file
-owned by uid 0 and not group/other writable; only one unambiguous `https://`
-base URL is accepted. Curl configuration is disabled, redirects are refused,
-TLS 1.2 is the minimum, connect/overall time and response bytes are bounded,
-and downloads land in private `0600` staging files. Neither device identity
-nor current version appears in the request path or query. A configured HTTPS
-source is authoritative: invalid configuration or network failure never
-downgrades to removable media.
+owned by uid 0, not group/other writable, and readable by others (`0644`):
+the unprivileged download helper, which runs as a dynamic user, reads it too,
+and punard refuses a file the helper could not read rather than let every
+download fail. Only one unambiguous `https://` base URL is accepted. Neither device identity nor current version appears in
+the request path or query. A configured HTTPS source is authoritative: invalid
+configuration or network failure never downgrades to removable media.
+
+punard does not download anything itself: the two GETs, and every artifact
+download after them, go through the unprivileged `punar-fetch` helper, and
+the helper refuses any update URL that is not beneath this base (see
+"Download helper" below).
 
 When that configuration file is absent, the same transaction reads the
 bounded pair from `/run/punar/update-source` for offline CI and recovery media.
@@ -1460,6 +1467,84 @@ selection is audited `success`; authorization denial, unreachable source and
 trust/cache failures are all audited distinctly. This method discovers and
 caches a decision only. It does not download, stage, apply, reboot, bless, or
 roll back a release.
+
+#### Download helper
+
+punard does not download anything itself, and it cannot: `punard.service`
+makes `/usr/bin/curl` and `/usr/bin/wget` inaccessible in its mount
+namespace, so an exec of either by punard or anything it starts fails. Each
+transfer is its own `punar-fetch@.service` instance, started by
+`punar-fetch.socket` (`Accept=yes`) when punard connects to the root-only
+`SOCK_SEQPACKET` socket `/run/punar-fetch/request.sock`. The protocol and both
+halves of it are in `crates/punard/src/fetch.rs`.
+
+**What the helper can reach of punard: one pipe.** punard sends the request
+(kind, URL, byte and time bound) with the write end of a pipe attached, and
+reads the body from the read end into a private `0600` staging file in its own
+`0700` cache. The helper never holds that file, so nothing it or its
+downloader does, before or after it answers, can change the bytes punard then
+verifies. punard bounds the byte count itself, reads to the end of the pipe
+before it reads the helper's answer, refuses the transfer when the answer's
+count differs from what arrived, and empties the file on any failure. When
+punard stops reading, the helper's next write fails, so a stalled or oversized
+transfer ends at once. The helper makes itself undumpable before it reads a
+request, so a downloader taken over by a hostile server cannot trace it or
+write its memory.
+
+**What the helper can do.** It runs as a dynamic user with no capabilities, a
+read-only file system without `/home` and with nothing of `/var` or `/run` but
+a private tmp and the resolver's files, and IPv4 and IPv6 sockets only. The
+kernel drops every packet it sends to a loopback address (the resolver stub
+at 127.0.0.53 apart), to link-local and multicast addresses (and with them
+the cloud metadata addresses 169.254.169.254 and, in the unique-local range,
+fd00:ec2::254), and to the private, carrier-grade NAT, reserved, benchmarking
+and documentation ranges. It reaches public addresses only. The rule is by
+address, not by host: a public address this machine holds on its own
+interface, such as a global IPv6 address, is reachable like any other public
+address.
+
+**What the helper will fetch.** It serves only uid 0 and only a request
+carrying exactly one pipe, and it builds the downloader's argument list
+itself: configuration files disabled, HTTPS only, TLS 1.2 minimum, no redirect
+followed (a redirect fails the transfer), connect and overall time and
+response bytes bounded. An update URL must lie beneath the channel base the
+helper reads itself from `/etc/punar/update-repository.url`, through the same
+function and ownership rules as punard; a vendor URL must lie beneath one of
+the catalog's three fixed vendor origins. punard then verifies the bytes
+exactly as before, so a compromised helper can at worst make a download fail.
+
+**An organization's own network.** An update mirror on the local network, or
+a proxy, is outside the public address space the helper may reach, so it is
+allowed explicitly and by address, with a drop-in for the helper:
+
+```ini
+# /etc/systemd/system/punar-fetch@.service.d/50-organization.conf
+[Service]
+IPAddressAllow=10.1.2.3
+```
+
+The helper uses a proxy root has configured in its environment
+(`https_proxy`/`HTTPS_PROXY` and `no_proxy`/`NO_PROXY`, for example through the
+service manager's `DefaultEnvironment=`), validated, and passes the downloader
+those two variables and nothing else of its environment. A proxy value that
+is set but invalid refuses every transfer rather than letting one go direct.
+When a configured proxy cannot be reached, the error names the drop-in above.
+Release images ship no such drop-in, and release gate A19 refuses one. Like
+`/etc/punar/update-repository.url` itself, the drop-in and the environment
+live in the slot's `/etc`, and a new slot boots the vendor's `/etc`
+(ADR-003): until a capability produces them, which is not built yet, an
+organization applies them again after each update.
+
+**Not done yet.** The per-origin kernel pin the design calls for (egress to
+the channel's own addresses only, through netd's per-cgroup rules) is not
+built: netd's rules are CIDR zones bound to agent sessions and need the cgroup
+to exist when the rule loads, and a socket-activated instance's cgroup does
+not until the request arrives. Until then the origin rule above is enforced by
+the helper on the URL, and the kernel rule is "public addresses only". A
+helper taken over through its downloader could therefore still connect to
+other public addresses, including a host on the local network that has one
+(a global IPv6 address, typically); it holds no secret and can write only the
+pipe.
 
 ### 5.17a `update.apply`
 
