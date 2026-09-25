@@ -11,13 +11,13 @@ change in the same commit.
 Report privately. Please do not open a public issue, pull request or
 discussion for a security problem.
 
-- **GitHub:** [report a vulnerability](https://github.com/smplify-mdm/punar/security/advisories/new)
-  through private vulnerability reporting. Only you and the maintainers can
-  see the report.
-- **Email:** [security@smplify.com](mailto:security@smplify.com), if the
-  GitHub form is unavailable to you. There is no PGP key yet, so email is not
-  encrypted end to end: if the details are sensitive and you cannot use the
-  GitHub form, write first without them and we will arrange a private channel.
+- **Email:** [security@smplify.com](mailto:security@smplify.com). There is no
+  PGP key yet, so email is not encrypted end to end: if the details are
+  sensitive, write first without them and we will arrange a private channel.
+
+GitHub private vulnerability reporting is not switched on for this repository
+yet. When it is, it becomes a second route, listed here and in `security.txt`
+in the same commit.
 
 Include what you can of:
 
@@ -32,14 +32,19 @@ A running machine carries the same contacts in `/usr/share/punar/security.txt`
 
 ## What happens next
 
-| Step | Target |
+| Step | Target, counted from the day you report |
 | --- | --- |
 | We confirm we received the report | 3 business days |
 | We tell you our assessment: severity (CVSS 4.0), affected code, and the plan | 10 days |
-| A fix is on `main`, for a **critical** issue | 7 days after assessment |
-| A fix is on `main`, for a **high** issue | 30 days after assessment |
-| A fix is on `main`, for a **medium** or **low** issue | 90 days after assessment |
-| Public disclosure | when the fix ships, and no later than 90 days after your report |
+| A fix is on `main`, for a **critical** issue | 14 days |
+| A fix is on `main`, for a **high** issue | 45 days |
+| A fix is on `main`, for a **medium** or **low** issue | 90 days |
+| Public disclosure | when the fix ships, and no later than 90 days |
+
+Every target runs from the same day, so no fix is due after the day the report
+may be disclosed. If a fix cannot ship within 90 days, we tell you before then
+and agree with you whether to extend disclosure or to publish the problem with
+a workaround.
 
 We update you at least every 14 days until the report is closed. If a problem is
 being exploited, we fix and disclose sooner, and we tell you before we do. If we
@@ -67,8 +72,10 @@ After the first release:
   for 90 days after its successor ships, so an organization can stage the
   update.
 - A device running a release older than its channel's signed
-  `min_supported_version` is unsupported. The updater says so, and the fix is to
-  update.
+  `min_supported_version` is unsupported, and the updater will not update it in
+  place: `punarctl update check` reports it as not eligible ("the running
+  release is older than the signed channel minimum"). The way back is to
+  reinstall from a current image, so back up your files first.
 
 ## Scope
 
