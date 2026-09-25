@@ -421,6 +421,15 @@ firewall asks for them, and only an administrator may.
   holds it*. A device set up before the role existed therefore comes out of
   its first boot on the new image with its owner as administrator, and a
   device whose administrator has already handed the role on is left alone.
+  *Decided from the code:* onboarding creates exactly one account and refuses
+  a second first run, and nothing else in Punar creates accounts today, so a
+  device with several accounts has no record that ranks them. Should one
+  exist, the account `completed.json` names is still the one granted — never
+  the most recent sign-in and never the lowest uid — and the others wait for
+  an administrator's `punarctl admins add`. An image without the
+  `punar-admin` group (an older release after a rollback) changes nothing.
+  Proven by `an_upgraded_device_gives_its_owner_the_role_once` and the
+  WP-01 upgrade tests in `crates/punar-onboard/src/identity.rs`.
 - **An enrolled device's organization may decide instead**, through
   `spec.security.localAdmin.administrators`: pin the list, or turn local
   administration off. Leaving an enrollment the organization made removable

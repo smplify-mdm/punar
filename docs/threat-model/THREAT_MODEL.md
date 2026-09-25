@@ -255,18 +255,23 @@ IPC.
     a process it did not start. Debian's kernel shipped it at 0.
   - **Passwords cross terminals and sockets only** (`punar-reauth`): a pipe or file can be
     reopened through `/proc/<pid>/fd` by any same-uid process, a socket cannot; holders are
-    non-dumpable with no core file. System Control no longer pipes the password to a helper.
+    non-dumpable with no core file (the lock screen's relay included). System Control and
+    the approval overlay hand the password to `punarctl` over a rendezvous socket that only
+    the parent may answer; a replaced socket is detected and reported as an interception.
   - **Device administrators**: actions that reach other people (other uids' processes and
-    sessions, other people's data, device policy, enrollment, what the OS runs) need uid 0
-    or an administrator's fresh ticket; agents are refused; every attempt is audited.
+    sessions, other people's data, device policy, enrollment, what the OS runs, restarting
+    while another person is signed in) need uid 0 or an administrator's fresh ticket (polkit:
+    the administrator role at the active seat); agents are refused; every attempt is audited.
   - **Other people's records are no longer group-readable**: the audit trail and the AI
-    ledger side file are `root:punar-audit`, a group no person is in; `audit.tail` and
-    `agents.access` give each person their own.
+    ledger side file are `root:punar-audit`, a group no person is in, and punar-netd's
+    connection side file is root-only; `audit.tail`, `agents.access` and
+    `network.connections` give each person their own and count what they withheld.
 - **Deferred / Phase 2.** Executable provenance via signed packages / IMA-style measurement;
   stronger per-service MAC confinement after the MAC ADR; container-to-host socket exposure
   policy for dev containers; a trusted prompt process that owns the password input surface,
-  which closes the one handoff a same-uid process can still race (docs/api/ipc.md §23.5);
-  moving the lock screen's relay off its stdin pipe.
+  which closes the races a same-uid process still has on the password rendezvous and on the
+  person's own terminal (docs/api/ipc.md §23.5); moving the lock screen's relay off its stdin
+  pipe, after a proof on real hardware.
 - **Residual risk — moderate.** Same-UID processes are still hard to separate on Linux: a
   process running as the user can imitate the user's own IPC rights, open a dumpable
   process's `/proc/<pid>/fd` (READ mode, which Yama does not restrict), and race the

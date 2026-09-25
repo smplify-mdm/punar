@@ -231,7 +231,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `capabilities.list` | any connected peer    | no       | no      | — |
 | `capabilities.get`  | any connected peer    | no       | no      | — |
 | `capabilities.set`  | **root only (uid 0)** | yes      | always (allow and deny, success and failure) | **yes** on the grant path, re-checked each use (§23.2) |
-| `audit.tail`        | any connected peer    | no       | no      | — |
+| `audit.tail`        | any connected peer; **a non-root caller sees its own events and the device's, with a `withheld` count** (§5.5, F0-S3) | no       | no      | — (scoped, §23.2) |
 | `reconcile`         | **root only (uid 0)** | no in M3 (re-verify only); **yes since M4** (remediates per policy, section 5.6) | always | — |
 | `policy.effective` (M4) | any connected peer | no      | no      | — |
 | `policy.explain` (M4)   | any connected peer | no      | no      | — |
@@ -4136,7 +4136,7 @@ Rules:
 ```text
 /run/punar-netd/                  0750 root:punar
 /run/punar-netd/netd.sock         0660 root:punar
-/run/punar-netd/connections.json  0640 root:punar
+/run/punar-netd/connections.json  0600 root:punar   (root only: every person's rows)
 /var/lib/punar/network/           0700 root:root
 ```
 
@@ -4210,8 +4210,21 @@ every unconditional reject. The limiter never guards the reject.
     "connections":[
       {"destination":"198.51.100.10","name":"Reviewed site label",
        "zone":"corp_dev","category":"corporate","route":"direct",
-       "state":"established"}]}]}
+       "state":"established"}]}],
+ "withheld":0}
 ```
+
+**Scoped to the caller (F0; §23.1).** Which destinations another person's
+programs reach is that person's data. Root sees every row. Any other caller
+sees the rows of processes and managed sessions running as its own uid, and
+the device's — the rows netd adds about itself and punard, and processes of
+system uids (root, system daemons, systemd's dynamic users: anything outside
+the person range 1000–59999). Another person's rows, and a managed session
+whose root process's uid could not be read from `/proc/<pid>/status`, are
+left out and counted in `withheld` (additive on `v: 1`; always `0` for
+root). The side file holds every row and is root-only (`0600`); it used to
+be `0640 root:punar`, readable by every account. The privacy panel shows the
+caller's answer, not the file.
 
 The serializable result has no local address, local or remote port, uid, pid,
 cgroup path, command line, DNS query/history, SNI, URL, packet, or payload.
@@ -4344,15 +4357,34 @@ role as well.
 | `capabilities.set` on the grant path (§14.8) | a device-wide change | organization's, else the device's | no — the grant was minted with one; the **role is re-checked at every use**, so taking it away takes the grant's effect away |
 | `admins.set` | who may act on everyone | organization's, else the device's | yes |
 
+Outside punard's socket, the same rule reaches:
+
+| Path | What reaches others | Now |
+|---|---|---|
+| `org.freedesktop.login1.{reboot,power-off}-multiple-sessions` (polkit, `50-punar-power.rules`) | restarting or shutting down while another person is signed in ends their session | a device administrator at the active local seat (group `punar-admin`, as NSS reports it at the moment of asking); anyone else is refused, not challenged. With no other session open, the person at the seat still restarts unprompted. polkit cannot spend a `punar-authd` ticket, so the seat's physical presence stands in for the fresh password, and polkit reads the device's own group, not an organization's pinned list — both limits stated in the rule |
+
+**Reads that would reveal another person's data are scoped, not refused.** A
+person keeps their own view; the rows of other people are left out and
+counted, so "is this everything?" has an honest answer, and root sees every
+row:
+
+| Read | Scoping |
+|---|---|
+| `audit.tail` | own events and the device's, `withheld` count (§5.5; F0-S3). The trail itself is `0640 root:punar-audit` (§6) |
+| `network.connections` (punar-netd) | own processes and managed sessions and the device's, `withheld` count (§21.3). Its side file is root-only |
+| the AI panel's ledger | read through `agents.access`, owner-or-root (§12.2); the device-wide side file `/run/punar-agentd/ledger.json` is `0640 root:punar-audit` (§13.2) |
+
 Reviewed and left as they are, with the reason:
 
 - `update.check` refreshes the verified channel cache and changes nothing any
   person runs; it keeps its ticket and needs no role.
 - `apps.install`, `apps.update` and `apps.remove` act on the signed catalog's
-  system-wide packages, never on another person's data (per-user application
-  data is kept on removal), and are governed by the organization's application
-  policy while enrolled. They are listed for the owner's review before a
-  device can hold more than one onboarded account.
+  sandboxed, system-wide packages, never on another person's data (per-user
+  application data is kept on removal), and are governed by the
+  organization's application policy while enrolled. Onboarding creates one
+  account per device today, so no other person exists for a removal to reach;
+  **before a second account can be created, `apps.remove` must join the table
+  above** (an app one person removes is gone for everyone). Owner review item.
 - `webapps.*`, `pim.mail.*` and `punar-secrets`' `credential.*` are scoped to
   the caller's own uid by `SO_PEERCRED`.
 - `approvals.resolve` with `decision: denied`, or on a `credential_request`,
@@ -4496,10 +4528,12 @@ ticket comes from `punar-authd`'s socket directly; no client spawns
   `$XDG_RUNTIME_DIR/punar-reauth` (a `0700` directory of the caller, checked;
   `/run/user/<uid>` when the environment names nothing private), prints
   `password-socket <path>` as its **first line of standard output**, and
-  accepts one connection. It keeps the connection only if `SO_PEERCRED` says
-  it comes from **its parent process, running as the same uid**; anything
-  else is refused and nothing is read. The name is removed the moment a
-  connection is accepted. System Control and the approval overlay use this.
+  reads the password only from a connection `SO_PEERCRED` says comes from
+  **its parent process, running as the same uid**. A connection from anyone
+  else is closed unread and the wait goes on, so a stranger that connects
+  first cannot use the rendezvous up; if the parent never arrives the answer
+  says a stranger tried. The name is removed the moment the parent's
+  connection is in. System Control and the approval overlay use this.
 - `--ticket-stdin` and `--password-stdin` are refused with exit 2 and a
   message naming the replacements.
 
@@ -4508,14 +4542,28 @@ process's own pidfd, which needs no `unsafe`; a seccomp filter that refuses
 it (Docker's default profile) is reported as such, and the terminal still
 works.
 
-**What this does not stop, stated rather than implied:** another program of
-the same person that watches `punar-reauth` can race to replace the
-rendezvous socket between the moment its path is printed and the moment the
-parent connects, and receive what the parent sends. That needs an active
-attacker already running as the person; closing it needs the prompt itself to
-move into a trusted process that owns the input surface, which is open work.
-The lock screen's own relay (`punar-auth`, stdin pipe) is not yet moved onto
-this library.
+**What this does not stop, stated rather than implied.** Both accepted
+sources leave one race to an active program already running as the same
+person, and neither is closed by Yama (§23.1, F0-S2), which restricts ATTACH
+access but not the READ-mode opens involved:
+
+- the rendezvous: such a program can watch `punar-reauth`, replace the socket
+  between the moment its path is printed and the moment the parent connects,
+  and receive what the parent sends. It cannot do so unseen — the name is
+  bound to one inode, and a wait that ends with no parent checks it, so a
+  name that is gone or names another socket is reported as an interception
+  (`punarctl` exit 2), telling the person to treat the password as known and
+  change it, and the replacement is left in place as evidence;
+- the terminal: such a program can open the person's own pseudo-terminal and
+  compete for the keystrokes typed at the prompt.
+
+Closing both needs the prompt to move into a trusted process that owns the
+input surface — a different uid, or the compositor — which is open work and
+an owner review item. The lock screen's relay (`punar-auth`) now hardens
+itself before it reads (non-dumpable, no core), but still takes the password
+on a stdin pipe from the lock surface; moving it onto the rendezvous needs a
+proof on real hardware first, because a lock screen that cannot unlock is
+worse than the race it closes.
 <!-- /F0-S4 -->
 
 ---
