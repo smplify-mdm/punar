@@ -403,6 +403,11 @@ pub struct DaemonConfig {
     /// `system.keymap` is theirs to set (SMP-1405 WP-02); injectable so
     /// tests can seat someone without a logind.
     pub seat_state_file: PathBuf,
+    /// logind's per-session records (`/run/systemd/sessions`): a
+    /// person-scoped call must come from the seated person's own active,
+    /// local session on seat0, not merely from their uid
+    /// ([`crate::authz::is_active_local_person`]).
+    pub sessions_dir: PathBuf,
     /// How the management chain's own units are checked on every pass while
     /// enrolled, and whether a connection to the agent must reach systemd's
     /// listener ([`crate::agent_units`], [`ControlPlaneClient::requiring_systemd_listener`]).
@@ -482,6 +487,7 @@ impl DaemonConfig {
             inventory_retry_base: INVENTORY_RETRY_BASE,
             reconcile_control_plane_budget: RECONCILE_CONTROL_PLANE_BUDGET,
             seat_state_file: PathBuf::from(crate::authz::SEAT0_STATE),
+            sessions_dir: PathBuf::from(crate::authz::SESSIONS_DIR),
             agent_integrity: None,
             control_plane_override_refused: false,
             boot_id_path: PathBuf::from("/proc/sys/kernel/random/boot_id"),

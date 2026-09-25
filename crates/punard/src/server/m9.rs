@@ -409,11 +409,20 @@ impl Inner {
         }
 
         // SMP-1405 WP-02: the keyboard layout is the person's own tool. The
-        // person at the machine may set it without an administrator; an
-        // agent never reaches this line (step 1), and an organization's pin
-        // still wins in the merge that follows.
+        // person at the machine may set it without an administrator, from
+        // their own session on the seat (not merely as the seated uid: a
+        // user service, an SSH login or an escaped agent helper runs as that
+        // uid too); an agent never reaches this line (step 1), and an
+        // organization's pin still wins in the merge that follows.
         if crate::authz::PERSON_SCOPED.contains(&id)
-            && crate::authz::is_active_local_person(&self.cfg.seat_state_file, peer)
+            && crate::authz::is_active_local_person(
+                crate::authz::SeatSources {
+                    seat_file: &self.cfg.seat_state_file,
+                    sessions_dir: &self.cfg.sessions_dir,
+                    proc_root: &self.cfg.proc_root,
+                },
+                peer,
+            )
         {
             return Ok(MutationAuthority::ActiveLocalPerson);
         }

@@ -501,19 +501,42 @@ Two amendments, both additive:
   forbidden (spec section 39); `--json` output was already complete in M4.
 
 **SMP-1405 WP-02: person-scoped capabilities.** `system.keymap` may also
-be set by the person in the **active local session**: a non-root peer whose
-uid logind names as `ACTIVE_UID` of seat0 (`/run/systemd/seats/seat0`, the
-file sd-login reads). The rest of the ladder is unchanged and runs first: an
-agent-attributed peer takes the AI authority path (which names no rule for
-`system.keymap`, so it is refused), root is allowed, a live grant is honoured.
-The call is validated, recorded as the person's preference, applied through
-the typed backend and audited under the person's name exactly like a root
-call; an organization's pin still outranks it in the merge (the result then
-carries `overridden`). A remote session has no seat, so it never qualifies;
-the greeter is on the seat before anyone signs in but is not admitted to the
-socket. A keyboard layout is the tool a person types with, not a security
-setting, and a password prompt between someone and their own keyboard would
-protect nothing. No other capability is person-scoped.
+be set by the person at the machine, **from their own session on it**. Three
+records must agree, each written by root or the kernel:
+
+1. logind names the peer's uid as `ACTIVE_UID` of seat0
+   (`/run/systemd/seats/seat0`, the file sd-login reads);
+2. the kernel places the peer's pid (`SO_PEERCRED`) in one of that uid's
+   session scopes, `0::/user.slice/user-<uid>.slice/session-<id>.scope` in
+   `/proc/<pid>/cgroup`;
+3. logind records that session (`/run/systemd/sessions/<id>`) as `UID=<uid>`,
+   `SEAT=seat0`, `ACTIVE=1` and `REMOTE=0`.
+
+The uid alone is not enough, because much runs as the seated person's uid
+that is not the person at the machine: a user service or timer, a
+D-Bus-activated app, an SSH login (`REMOTE=1`, no seat), and a helper an
+agent starts outside its scope with `systemd-run --user`. All of those live
+under `user@<uid>.service` or in a remote session, and all are refused. The
+session scope is root's (logind creates it and delegates nothing), so a
+process cannot move itself into it. **What this still cannot see**, the same
+limit section 14.5 states for attribution: a same-uid process that makes the
+session's own compositor or terminal server start a command for it gets a
+process inside the session scope. The check is evidence of where a call came
+from, not a sandbox.
+
+The rest of the ladder is unchanged and runs first: an agent-attributed peer
+takes the AI authority path (which names no rule for `system.keymap`, so it
+is refused), root is allowed, a live grant is honoured. The call is
+validated, recorded as the person's preference, applied through the typed
+backend and audited under the person's name exactly like a root call; an
+organization's pin still outranks it in the merge (the result then carries
+`overridden`). The greeter is on the seat before anyone signs in but is not
+admitted to the socket. A keyboard layout is the tool a person types with,
+not a security setting, and a password prompt between someone and their own
+keyboard would protect nothing; a device-wide layout change is visible at the
+login screen, which can always choose another layout for itself (section
+"Keyboard layout" of docs/development/keyboard-grammar.md). No other
+capability is person-scoped.
 
 ### 5.5 `audit.tail`
 
@@ -3179,7 +3202,10 @@ that deliberately launches a helper outside its own scope escapes
 attribution and would present as the console user; M8 already rests on
 the same foundation. M9 records the resolver's uid/pid/cgroup so an
 escape is visible after the fact, and names the real fixes (a dedicated
-uid per agent session; a logind seat-presence check) as deferred. No M9
+uid per agent session; a logind seat-presence check) as deferred. SMP-1405
+WP-02 applies the seat-presence check to the one person-scoped capability
+(`system.keymap`, section 5.4): a helper started outside an agent scope is
+refused there unless it also runs in the seated person's own session. No M9
 surface claims cryptographic proof of a human.
 
 ### 14.6 Execution ownership follows capability ownership
