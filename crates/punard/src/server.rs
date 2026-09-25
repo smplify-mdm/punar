@@ -53,6 +53,7 @@ use punar_common::ipc::{
     organization_name, term_safe_name,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
+use punar_common::reauth_ticket::Spender;
 use punar_common::time::utc_now_rfc3339;
 use punar_common::trusted_time::{BootStamp, BootWindow, SystemClock, TrustedClock};
 use punar_common::update::{
@@ -67,7 +68,7 @@ use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use crate::approvals::{self, ApprovalStore};
+use crate::approvals::{self, ApprovalStore, SummaryReader};
 use crate::apps::{AppError, AppManager};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
 use crate::browser_policy::persist_rendered_browser_policy;
@@ -333,13 +334,13 @@ pub struct DaemonConfig {
     /// are read ([`crate::inventory`]). Production paths by default; tests
     /// inject a fixture tree so no assertion depends on the host.
     pub inventory_sources: CollectorSources,
-    /// M9: the approval summary the shell watches (docs/api/ipc.md section
-    /// 15). `/run/punard/approvals.json` in production — deliberately
-    /// inside the `0750 root:punar` runtime directory, not beside the
-    /// world-readable `status.json` summary. Defaults to a
-    /// state-dir file so embedded/test daemons never write outside their
-    /// tempdir.
-    pub approvals_file: PathBuf,
+    /// M9: where the shell's approval views go, one `<uid>.json` per person
+    /// (docs/api/ipc.md section 15; F0 review). `/run/punard/approvals` in
+    /// production — deliberately inside the `0750 root:punar` runtime
+    /// directory, not beside the world-readable `status.json` summary.
+    /// Defaults to a state-dir directory so embedded/test daemons never
+    /// write outside their tempdir.
+    pub approvals_dir: PathBuf,
     /// M9: the shipped AI authority document (SPEC section 20).
     pub ai_defaults_file: PathBuf,
     /// Where `punar-authd` mints re-authentication tickets
@@ -439,7 +440,7 @@ pub const RECONCILE_GAP_LIMIT: Duration = Duration::from_secs(3 * 120 + 60);
 impl DaemonConfig {
     pub fn new(socket_path: PathBuf, state_dir: PathBuf, audit_path: PathBuf) -> Self {
         let status_file = state_dir.join("status.json");
-        let approvals_file = state_dir.join("approvals.json");
+        let approvals_dir = state_dir.join("approval-views");
         let update_check_sources = UpdateCheckSources {
             cached_channel: state_dir.join("update/verified-channel.json"),
             cached_signature: state_dir.join("update/verified-channel.json.sig"),
@@ -470,7 +471,7 @@ impl DaemonConfig {
             os_release_path: PathBuf::from("/etc/os-release"),
             kernel_release_path: PathBuf::from("/proc/sys/kernel/osrelease"),
             inventory_sources: CollectorSources::default(),
-            approvals_file,
+            approvals_dir,
             reauth_ticket_dir: PathBuf::from(crate::reauth::TICKET_DIR),
             identity_accounts_dir: PathBuf::from("/var/lib/punar/identity/accounts"),
             userdb_dir: PathBuf::from("/run/userdb"),
@@ -692,6 +693,12 @@ struct Inner {
     /// but their human-paced mutations still serialize per daemon.
     webapps: WebAppManager,
     webapp_mutation: Mutex<()>,
+    /// Held by `admins.set` from the moment it counts who else administers
+    /// the device until the role has changed (F0 review): punard serves each
+    /// connection on its own thread, and two administrators removing each
+    /// other at the same instant must not both see "one other remains" and
+    /// leave the device with none.
+    admins_change: Mutex<()>,
     installer: Installer,
     update_status: UpdateStatusEngine,
     update_check: UpdateCheckEngine,
@@ -1017,11 +1024,7 @@ impl Daemon {
         // M9: the approval store and the AI authority document. A store
         // that will not open is fatal — a daemon that cannot record an
         // approval must not serve a gate it cannot honour.
-        let approvals = ApprovalStore::load(
-            &cfg.state_dir,
-            cfg.approvals_file.clone(),
-            lookup_gid(&cfg.group_file, &cfg.group),
-        )?;
+        let approvals = ApprovalStore::load(&cfg.state_dir, cfg.approvals_dir.clone())?;
         let ai =
             crate::aipolicy::load_authority(&cfg.ai_defaults_file, &cfg.state_dir.join("policy.d"));
 
@@ -1075,6 +1078,7 @@ impl Daemon {
                 app_mutation: Mutex::new(()),
                 webapps,
                 webapp_mutation: Mutex::new(()),
+                admins_change: Mutex::new(()),
                 installer,
                 update_status,
                 update_check,
@@ -1385,16 +1389,55 @@ fn admin_may_override(entry: &punar_policy::EffectiveEntry<Value>) -> bool {
             && entry.provenance.rank >= DEVICE_ADMIN_RANK)
 }
 
+/// A catalog id as it may appear inside a suggested command: the id shape
+/// punarctl accepts, or a placeholder, so nothing a caller sent is echoed into
+/// something a person might paste.
+fn app_id_word(id: &str) -> String {
+    let ok = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    if ok {
+        id.to_string()
+    } else {
+        "<id>".to_string()
+    }
+}
+
 /// Whether an audit event belongs to the device rather than to a person
 /// (F0-S3): it names no person — a daemon, the device, the organization — or
 /// it is root administering the device. Root is not a person on a Punar
 /// device (nobody signs in as root), and what root changed is what every
 /// person on the device lives with.
+///
+/// AN EVENT ABOUT A PERSON'S WORK IS NEVER THE DEVICE'S (F0 review), whoever
+/// wrote it. punar-netd refusing an agent's connection and punar-agentd
+/// reaping a session write their events as themselves, a service, but they
+/// name that person's agent session and project — which is exactly what one
+/// person must not read of another's. Such an event is shown to its person
+/// when it carries their name, and to root; the person also reads it in
+/// their session's access ledger (`punarctl agents access`).
 fn audit_event_is_the_devices(event: &AuditEvent) -> bool {
-    matches!(
-        event.source,
-        PrincipalKind::Service | PrincipalKind::Device | PrincipalKind::Organization
-    ) || event.user_id.as_deref() == Some("root")
+    !audit_event_names_a_persons_work(event)
+        && (matches!(
+            event.source,
+            PrincipalKind::Service | PrincipalKind::Device | PrincipalKind::Organization
+        ) || event.user_id.as_deref() == Some("root"))
+}
+
+/// Whether an audit event names an agent session or a project — anything
+/// but the "none" sentinels the schema requires when no agent or project is
+/// involved.
+fn audit_event_names_a_persons_work(event: &AuditEvent) -> bool {
+    event
+        .agent_session_id
+        .as_deref()
+        .is_some_and(|session| session != punar_common::audit::AGENT_SESSION_NONE)
+        || event
+            .project_id
+            .as_deref()
+            .is_some_and(|project| project != punar_common::audit::PROJECT_ID_SYSTEM)
 }
 
 fn source_ref(provenance: &Provenance) -> PolicySourceRef {
@@ -2137,8 +2180,8 @@ impl Inner {
             Method::EnrollStatus => Ok(to_value(self.handle_enroll_status())),
             Method::EnrollStop(params) => self.handle_enroll_stop(peer, params),
             // M9 (contract section 14.2).
-            Method::ApprovalsList => self.handle_approvals_list(),
-            Method::ApprovalsGet(params) => self.handle_approvals_get(params),
+            Method::ApprovalsList => self.handle_approvals_list(peer),
+            Method::ApprovalsGet(params) => self.handle_approvals_get(peer, params),
             Method::ApprovalsCreate(params) => self.handle_approvals_create(peer, params),
             Method::ApprovalsResolve(params) => self.handle_approvals_resolve(peer, params),
             Method::ApprovalsConsume(params) => self.handle_approvals_consume(peer, params),
@@ -2346,7 +2389,7 @@ impl Inner {
                 json!({ "decision": "deny", "reason": "reauthentication_required" }),
             ));
         }
-        self.spend_reauth_ticket(peer, &actor, action, resource, ticket, &words.retry)?;
+        self.spend_reauth_ticket(peer, &actor, action, action, resource, ticket, &words.retry)?;
         Ok(actor)
     }
 
@@ -3336,6 +3379,18 @@ impl Inner {
                 json!({ "param": "confirm_metadata_sha256" }),
             ));
         }
+        // F0 review: an application installed for everyone changes what
+        // every person on the device runs — the role, then the password.
+        self.admit_device_change(
+            peer,
+            &actor,
+            "apps.install",
+            action,
+            &params.id,
+            params.ticket.as_deref(),
+            "Installing an application for everyone on this device",
+            &format!("punarctl app install {}", app_id_word(&params.id)),
+        )?;
         let _guard = self.app_mutation.lock().unwrap();
         match self.apps.install(
             &params.id,
@@ -3384,6 +3439,18 @@ impl Inner {
     ) -> Result<Value, IpcError> {
         let action = "system.remove_package";
         let actor = self.app_mutation_authorized(peer, action, &params.id)?;
+        // F0 review: removing an application takes it away from everyone
+        // who uses it — the role, then the password.
+        self.admit_device_change(
+            peer,
+            &actor,
+            "apps.remove",
+            action,
+            &params.id,
+            params.ticket.as_deref(),
+            "Removing an application for everyone on this device",
+            &format!("punarctl app remove {}", app_id_word(&params.id)),
+        )?;
         let _guard = self.app_mutation.lock().unwrap();
         match self.apps.remove(&params.id) {
             Ok(result) => {
@@ -3450,6 +3517,22 @@ impl Inner {
                 json!({ "application": resource, "decision": "deny", "policy_ids": ["personal-defaults"] }),
             ));
         }
+        // F0 review: an update changes what everyone on the device runs —
+        // the role, then the password, once for the whole request.
+        let resource = params.id.as_deref().unwrap_or("installed_applications");
+        self.admit_device_change(
+            peer,
+            &requester,
+            "apps.update",
+            action,
+            resource,
+            params.ticket.as_deref(),
+            "Updating applications for everyone on this device",
+            &match params.id.as_deref() {
+                Some(id) => format!("punarctl app update {}", app_id_word(id)),
+                None => "punarctl app update --all".to_string(),
+            },
+        )?;
         // Hold the same transaction lock used by install/remove while
         // discovering installed state. Otherwise a concurrent removal could
         // make an app disappear between selection and update.
@@ -4879,8 +4962,11 @@ impl Inner {
             IpcError::with_details(ErrorCode::Denied, message, details)
         };
 
-        // 1. No agent, at any uid.
-        if let Some(session) = actor.agent_session_id.clone() {
+        // 1. No agent, at any uid — and "agent" in the wide sense of
+        //    contract section 23.1: a proven agent session, or any process
+        //    whose cgroup merely names an agent scope it could not be
+        //    attributed to.
+        if let Some(session) = self.agent_shaped_peer(peer, &actor) {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
                 &actor,
@@ -5032,34 +5118,28 @@ impl Inner {
                     ),
                 ));
             };
-            if let Err(why) = crate::reauth::consume(
-                &self.cfg.reauth_ticket_dir,
-                peer.uid,
-                ticket,
-                self.cfg.trusted_clock.as_ref(),
-            ) {
-                self.log_audit(AuditEvent::denial(
-                    &self.device_id,
-                    &actor,
-                    "policy.set",
-                    id,
-                ));
-                return Err(deny(
-                    json!({
-                        "decision": "deny",
-                        "capability": id,
-                        "reason": format!("reauthentication_{}", why.as_str()),
-                    }),
-                    format!(
-                        "Your password confirmation was not accepted: {}.\n\
-                         Policy: personal defaults — a confirmation is good once, for \
-                         two minutes, for the account that made it.\n\
-                         Next step: try the change again and enter your password when \
-                         asked.",
-                        why.as_message()
-                    ),
-                ));
-            }
+            let retry = if params.value.is_some() {
+                format!("punarctl policy set {id} <value> --reason \"<why>\"")
+            } else {
+                format!("punarctl policy clear {id} --reason \"<why>\"")
+            };
+            self.spend_reauth_ticket(
+                peer,
+                &actor,
+                "policy.set",
+                "policy.set",
+                id,
+                Some(ticket),
+                &retry,
+            )
+            .map_err(|mut error| {
+                // The shared refusal, with the capability named as this
+                // method's refusals always have.
+                if let Some(details) = error.details.as_mut() {
+                    details["capability"] = json!(id);
+                }
+                error
+            })?;
         }
 
         // Authorized. Record the entry, then let the shared settle path apply
@@ -5343,17 +5423,29 @@ impl Inner {
         ticket: Option<&str>,
         retry: &str,
     ) -> Result<(), IpcError> {
-        self.spend_reauth_ticket(peer, actor, action, RESOURCE_ENROLLMENT, ticket, retry)
+        self.spend_reauth_ticket(
+            peer,
+            actor,
+            action,
+            action,
+            RESOURCE_ENROLLMENT,
+            ticket,
+            retry,
+        )
     }
 
-    /// Spend a person's `punar-authd` confirmation for `action` on `resource`
-    /// (root has none to spend). Shared by every method a person reaches with
-    /// their password: the rule — good once, for two minutes, for the account
-    /// that made it — is one rule, not one per method.
-    fn spend_reauth_ticket(
+    /// Spend a person's `punar-authd` confirmation for the IPC `method` —
+    /// audited as `action` on `resource` — (root has none to spend). Shared by
+    /// every method a person reaches with their password: the rule — good
+    /// once, for two minutes, for the account that made it, on the call it was
+    /// typed for, presented by the process it was minted for (contract section
+    /// 23.1) — is one rule, not one per method.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spend_reauth_ticket(
         &self,
         peer: &Peer,
         actor: &AuditActor,
+        method: &str,
         action: &str,
         resource: &str,
         ticket: Option<&str>,
@@ -5362,11 +5454,17 @@ impl Inner {
         if peer.uid == 0 {
             return Ok(());
         }
+        let spender = peer
+            .pid
+            .and_then(|pid| u32::try_from(pid).ok())
+            .and_then(|pid| Spender::of(&self.cfg.proc_root, pid));
         let Err(why) = crate::reauth::consume(
             &self.cfg.reauth_ticket_dir,
             peer.uid,
             ticket.unwrap_or_default(),
             self.cfg.trusted_clock.as_ref(),
+            method,
+            spender,
         ) else {
             return Ok(());
         };
@@ -5376,7 +5474,8 @@ impl Inner {
             format!(
                 "Your password confirmation was not accepted: {}.\n\
                  Policy: personal defaults — a confirmation is good once, for two \
-                 minutes, for the account that made it.\n\
+                 minutes, for the account that made it, on the change it was given \
+                 for, sent by the program it was given to.\n\
                  Next step: run `{retry}` again and enter your password when asked.",
                 why.as_message()
             ),

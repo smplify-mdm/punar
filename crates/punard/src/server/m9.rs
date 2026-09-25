@@ -229,16 +229,68 @@ impl Inner {
         }
     }
 
-    /// Rewrite `/run/punard/approvals.json`. Best-effort and non-fatal: the
-    /// file is a display view, and the socket is the authority (contract
-    /// section 15).
+    /// Rewrite every person's view in `/run/punard/approvals/`. Best-effort
+    /// and non-fatal: the files are display views, and the socket is the
+    /// authority (contract section 15).
     pub(super) fn publish_approvals_summary(&self, store: &ApprovalStore) {
-        if let Err(e) = store.publish_summary(self.trusted_now().as_ref()) {
+        let readers = self.approval_readers(store);
+        if let Err(e) = store.publish_summary(self.trusted_now().as_ref(), &readers) {
             eprintln!(
-                "punard: could not write {}: {e}",
-                self.cfg.approvals_file.display()
+                "punard: could not write an approval view in {}: {e}",
+                self.cfg.approvals_dir.display()
             );
         }
+    }
+
+    /// Everyone a view is published for: every person account on the
+    /// device, the console user approvals are routed to, and anyone who
+    /// holds a grant — each with every name an approval may be routed to
+    /// them by.
+    fn approval_readers(&self, store: &ApprovalStore) -> Vec<SummaryReader> {
+        let sources = self.admin_sources();
+        let mut uids: Vec<u32> = sources
+            .accounts()
+            .into_iter()
+            .filter(|account| account.uid != u32::MAX)
+            .map(|account| account.uid)
+            .collect();
+        uids.push(self.cfg.console_uid);
+        uids.extend(
+            store
+                .live_grants(None, self.trusted_now().as_ref())
+                .into_iter()
+                .map(|grant| grant.uid),
+        );
+        uids.sort_unstable();
+        uids.dedup();
+        uids.into_iter()
+            .filter(|uid| *uid != 0)
+            .map(|uid| {
+                let mut names = vec![format!("uid:{uid}")];
+                if let Some(name) =
+                    lookup_username(&self.cfg.passwd_file, uid).or_else(|| sources.username_of(uid))
+                {
+                    names.push(name);
+                }
+                SummaryReader { uid, names }
+            })
+            .collect()
+    }
+
+    /// Whether the approval `env` is `peer`'s to see: routed to them, or
+    /// root, who sees every one (F0 review — a stranger with socket access
+    /// used to read every person's approvals).
+    pub(super) fn approval_is_visible_to(&self, peer: &Peer, env: &ApprovalEnvelope) -> bool {
+        peer.uid == 0 || self.peer_names(peer).contains(&env.approval.user)
+    }
+
+    /// Every name an approval may be routed to `peer` by.
+    fn peer_names(&self, peer: &Peer) -> Vec<String> {
+        let mut names = vec![format!("uid:{}", peer.uid), self.peer_user(peer)];
+        if let Some(name) = self.admin_sources().username_of(peer.uid) {
+            names.push(name);
+        }
+        names
     }
 
     /// Raise an approval: validate, bound, persist, audit, publish.
@@ -386,6 +438,31 @@ impl Inner {
         };
         if let Some(session) = actor.agent_session_id.clone() {
             return self.authorize_agent_capability_set(actor, &session, id, params, &state_hint);
+        }
+        // A process whose cgroup names an agent scope that could not be
+        // attributed to a session (a malformed or forged scope name) is an
+        // agent all the same (contract section 23.1): it gets neither root's
+        // path nor a person's grant, at any uid.
+        if let Some(who) = self.agent_shaped_peer(peer, actor) {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                actor,
+                "capabilities.set",
+                id,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "An AI agent may not change {id} this way.\n\
+                     Requested by: {who}\n\
+                     Policy: personal defaults — a process inside an agent scope is \
+                     an agent, whatever its uid, and its changes go through AI policy \
+                     and a person's approval (SPEC section 60).\n\
+                     Next step: run `punarctl capabilities set {id} {state_hint}` \
+                     yourself, outside the agent."
+                ),
+                json!({ "decision": "deny", "capability": id, "reason": "agent_scope" }),
+            ));
         }
         if peer.uid == 0 {
             return Ok(MutationAuthority::Root);
@@ -596,24 +673,37 @@ impl Inner {
 
     // -- approvals.* --------------------------------------------------------
 
-    pub(super) fn handle_approvals_list(&self) -> Result<Value, IpcError> {
+    /// `approvals.list`: root sees every approval; a person sees the ones
+    /// routed to them, and is told how many others were withheld — the
+    /// `audit.tail` shape (contract section 14.1; F0 review).
+    pub(super) fn handle_approvals_list(&self, peer: &Peer) -> Result<Value, IpcError> {
         let mut store = self.approvals.lock().unwrap();
         self.sweep_approvals(&mut store);
-        Ok(to_value(ApprovalsListResult {
-            approvals: store.list(),
+        let (approvals, withheld): (Vec<ApprovalEnvelope>, Vec<ApprovalEnvelope>) = store
+            .list()
+            .into_iter()
+            .partition(|env| self.approval_is_visible_to(peer, env));
+        let mut result = to_value(ApprovalsListResult {
+            approvals,
             checked_at: utc_now_rfc3339(),
-        }))
+        });
+        result["withheld"] = json!(withheld.len());
+        Ok(result)
     }
 
+    /// `approvals.get`: an approval routed to someone else is answered
+    /// exactly as one that does not exist, so its existence is not told
+    /// either.
     pub(super) fn handle_approvals_get(
         &self,
+        peer: &Peer,
         params: &ApprovalIdParams,
     ) -> Result<Value, IpcError> {
         let mut store = self.approvals.lock().unwrap();
         self.sweep_approvals(&mut store);
         match store.get(&params.approval_id) {
-            Some(env) => Ok(to_value(env.clone())),
-            None => Err(self.no_such_approval(&params.approval_id)),
+            Some(env) if self.approval_is_visible_to(peer, env) => Ok(to_value(env.clone())),
+            _ => Err(self.no_such_approval(&params.approval_id)),
         }
     }
 
@@ -914,6 +1004,7 @@ impl Inner {
             self.spend_reauth_ticket(
                 peer,
                 &actor,
+                "approvals.resolve",
                 "approval.resolve",
                 id,
                 params.ticket.as_deref(),

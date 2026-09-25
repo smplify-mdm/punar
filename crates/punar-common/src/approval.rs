@@ -96,14 +96,22 @@ pub const GRANT_MIN_MINUTES: u64 = 1;
 /// decision (SPEC sections 48, 60).
 pub const GRANT_MAX_MINUTES: u64 = 60;
 
-/// The shell's approval summary file (docs/api/ipc.md section 15).
+/// Where the shell's approval views live (docs/api/ipc.md section 15): one
+/// file per person, [`approvals_summary_path`].
 ///
-/// Deliberately **not** `/run/punar/approvals.json`: that directory contains
-/// world-readable display summaries. Approval details are group-readable and
-/// live behind `/run/punard`'s `0750 root:punar` traversal boundary, so an
-/// unrelated local account cannot even name them. Root ownership of both
-/// directories prevents replacement by an unprivileged process.
-pub const APPROVALS_SUMMARY_FILE: &str = "/run/punard/approvals.json";
+/// Deliberately **not** under `/run/punar`: that directory contains
+/// world-readable display summaries. These live behind `/run/punard`'s `0750
+/// root:punar` traversal boundary, in a root-owned directory nobody else can
+/// write, and each file is readable by root and by the one person it is for
+/// (a POSIX ACL entry for their uid). One shared file readable by group
+/// `punar` — every account on the device — used to show each person every
+/// person's agent requests (F0 review).
+pub const APPROVALS_SUMMARY_DIR: &str = "/run/punard/approvals";
+
+/// The approval view for `uid` under `dir`: `<dir>/<uid>.json`.
+pub fn approvals_summary_path(dir: &std::path::Path, uid: u32) -> std::path::PathBuf {
+    dir.join(format!("{uid}.json"))
+}
 
 /// Subdirectory of the punard state directory holding approval records.
 pub const APPROVALS_DIR_NAME: &str = "approvals";
@@ -474,7 +482,8 @@ pub struct SummaryGrant {
     pub expires_at: String,
 }
 
-/// `/run/punard/approvals.json` — the event-driven view the shell watches.
+/// `/run/punard/approvals/<uid>.json` — the event-driven view of one
+/// person's approvals and grants that the shell watches.
 ///
 /// **Non-authoritative for trust decisions**, exactly like the section 9 and
 /// 13.2 side contracts: the socket is the authority, the overlay's Approve

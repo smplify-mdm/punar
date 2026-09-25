@@ -6,9 +6,17 @@
 //! from exactly two kinds of place:
 //!
 //! 1. **the controlling terminal**, with echo off ([`read_terminal_line`]);
-//! 2. **a descriptor that `fstat` proves is a socket** — one the caller passes
-//!    by number ([`password_from_fd`]), or the private rendezvous a graphical
-//!    parent answers ([`ParentHandoff`]).
+//! 2. **a descriptor that `fstat` proves is a socket**, which the caller
+//!    passes by number ([`password_from_fd`]).
+//!
+//! A graphical surface never hands this process a password at all. It sends
+//! the password to `punar-authd` itself, over the daemon's socket, asking for
+//! a ticket bound to the process it started; only that ticket's answer
+//! reaches this process, through the private rendezvous
+//! [`ParentHandoff`] opens ([`ticket_from_parent`]). A ticket is bound to the
+//! one call it was typed for and the one process that may present it
+//! (`punar_common::reauth_ticket`), so an answer some other program manages
+//! to intercept is worth nothing to it.
 //!
 //! PIPES, STDIN AND ARGV ARE REFUSED, and the reason is one property of Linux.
 //! Any process running as the same uid can open `/proc/<pid>/fd/<n>` of a
@@ -110,7 +118,7 @@ pub enum SourceError {
     Empty,
     /// The line was longer than any password this device accepts.
     TooLong,
-    /// The line was not a ticket (`--ticket-fd` only).
+    /// The line was not a ticket (`--ticket-fd`, `--ticket-from-parent`).
     NotATicket,
     /// Nothing arrived in time.
     Timeout,
@@ -118,7 +126,7 @@ pub enum SourceError {
     NotTheParent,
     /// Nothing arrived, and the rendezvous name no longer names this
     /// process's socket: another program removed or replaced it, and the
-    /// parent may have sent the password there instead.
+    /// parent may have sent its answer there instead.
     Intercepted(PathBuf),
     /// The private rendezvous directory is not private.
     UnsafeDirectory(PathBuf),
@@ -161,9 +169,11 @@ impl fmt::Display for SourceError {
             SourceError::Intercepted(path) => write!(
                 f,
                 "the private socket at {} was removed or replaced by another program before \
-                 your password arrived, so it may have been sent to that program instead. \
-                 Nothing was changed. Treat your account password as known to that \
-                 program: change it, and look for a program you did not start",
+                 the confirmation arrived, so it may have gone to that program instead. \
+                 Nothing was changed. Your password never passes through this socket, and a \
+                 confirmation can be used only by this command, which has now ended, so \
+                 what that program may hold is worth nothing; look for a program you did \
+                 not start",
                 path.display()
             ),
             SourceError::UnsafeDirectory(dir) => write!(
@@ -316,8 +326,10 @@ fn password_from_owned(fd: i32, owned: OwnedFd) -> Result<Password, SourceError>
 }
 
 /// Take a ticket from inherited descriptor `fd`, which must be a socket
-/// (`--ticket-fd N`): `punar-auth --admin`'s answer as it prints it
-/// (`ok <ticket>`) or the bare ticket.
+/// (`--ticket-fd N`): punar-authd's answer in the rendezvous form
+/// (`ok <ticket>`) or the bare ticket. The ticket must have been minted for
+/// THIS process (`for_pid`) and for the call it is presented on; punard spends
+/// it for nothing else.
 pub fn ticket_from_fd(fd: i32) -> Result<Ticket, SourceError> {
     ticket_from_owned(fd, own_descriptor(fd)?)
 }
@@ -386,7 +398,7 @@ fn read_delivered_line(stream: &mut UnixStream) -> Result<Password, SourceError>
 }
 
 /// A private rendezvous that exactly one process may answer: the one that
-/// started this command (`--password-from-parent`).
+/// started this command (`--ticket-from-parent`).
 ///
 /// A graphical surface cannot hand a child a socket descriptor — Quickshell's
 /// `Process` offers a stdin pipe and nothing else — but it can connect to a
@@ -397,15 +409,19 @@ fn read_delivered_line(stream: &mut UnixStream) -> Result<Password, SourceError>
 /// refused and nothing is read. The name is removed the moment a connection
 /// is accepted, and again when this is dropped.
 ///
-/// WHAT THIS DOES NOT STOP, stated rather than implied: another program of
-/// the same person that watches the directory can race to replace the socket
-/// between the moment its path is printed and the moment the parent connects,
-/// and receive what the parent sends. It cannot do so unseen: the name is
-/// bound to one inode, and a wait that ends with no connection checks it —
-/// a name that is gone or names another socket is reported as
-/// [`SourceError::Intercepted`], telling the person to change their password.
-/// Closing the race itself needs the prompt to move into a trusted process
-/// (docs/api/ipc.md section 23.5).
+/// WHAT CROSSES IT IS NOT A PASSWORD, and that is what makes the race below
+/// harmless rather than merely visible. Another program of the same person
+/// can replace the socket between the moment its path is printed and the
+/// moment the parent connects (a rename in this person's own directory, which
+/// nothing stops); it can even put the parent's reader on a false path by
+/// writing to the parent's end of this process's output. Either way what it
+/// can receive is punar-authd's answer: a ticket minted for THIS process's
+/// pid and start time and for one call, which punard refuses from any other
+/// process. The password went from the parent to punar-authd directly and
+/// never came near this socket. [`SourceError::Intercepted`] is reported when
+/// a wait ends with the name gone or replaced — a best-effort signal, since a
+/// program that renames the original back in place leaves no trace — and it
+/// is not what the protection rests on.
 pub struct ParentHandoff {
     listener: UnixListener,
     path: PathBuf,
@@ -442,6 +458,8 @@ impl ParentHandoff {
     }
 
     /// Wait for the parent (`expected_pid`) and read the one line it sends.
+    /// The line is wiped on drop; [`ticket_from_parent`] reads it as
+    /// punar-authd's answer.
     ///
     /// A connection from anyone else is closed unread and the wait goes on,
     /// so a stranger that connects first cannot use up the rendezvous; if
@@ -515,6 +533,35 @@ impl Drop for ParentHandoff {
     }
 }
 
+/// What the parent relayed from punar-authd, read from `line`: `ok <ticket>`
+/// is a ticket, `denied` a refused password, anything else — `unavailable`,
+/// or a line that is not an answer — the device failing to answer, never a
+/// refusal of the password.
+pub fn parse_parent_answer(line: &str) -> Verdict {
+    match line {
+        "denied" => Verdict::Denied,
+        _ => line
+            .strip_prefix("ok ")
+            .and_then(Ticket::parse)
+            .map_or(Verdict::Unavailable, Verdict::Ticket),
+    }
+}
+
+/// `--ticket-from-parent`: open the rendezvous, hand its path to `announce`
+/// (which prints it for the parent), and read the parent's relay of
+/// punar-authd's answer. The parent asked punar-authd for a ticket bound to
+/// this process ([`parent_pid`] started it, and names it by pid).
+pub fn ticket_from_parent(
+    announce: impl FnOnce(&Path),
+    timeout: Duration,
+) -> Result<Verdict, SourceError> {
+    let parent = parent_pid().ok_or(SourceError::NotTheParent)?;
+    let handoff = ParentHandoff::open()?;
+    announce(handoff.path());
+    let line = handoff.receive(parent, timeout)?;
+    Ok(parse_parent_answer(&line))
+}
+
 /// This process's parent, the only process a [`ParentHandoff`] accepts.
 pub fn parent_pid() -> Option<i32> {
     rustix::process::getppid().map(|pid| pid.as_raw_nonzero().get())
@@ -579,34 +626,47 @@ pub enum Verdict {
     Unavailable,
 }
 
-/// Exchange a password for a ticket at the device's `punar-authd`.
-pub fn request_ticket(password: &str) -> Verdict {
-    request_ticket_at(Path::new(AUTHD_SOCKET), password)
+/// Exchange a password for a ticket at the device's `punar-authd`: one that
+/// punard spends only on the IPC method `action` (`policy.set`), presented by
+/// this process.
+pub fn request_ticket(password: &str, action: &str) -> Verdict {
+    request_ticket_at(Path::new(AUTHD_SOCKET), password, action, None)
 }
 
-/// [`request_ticket`] against a named socket (tests).
+/// [`request_ticket`] against a named socket, optionally for another process
+/// of this uid (`for_pid`) that will present the ticket.
 ///
 /// The request body is serialized straight into a wiped buffer sized so it
 /// never reallocates (JSON escaping at most sextuples a byte), and the
 /// account is whatever `SO_PEERCRED` says this process is: the request has
 /// no username field to fill.
-pub fn request_ticket_at(socket: &Path, password: &str) -> Verdict {
+pub fn request_ticket_at(
+    socket: &Path,
+    password: &str,
+    action: &str,
+    for_pid: Option<u32>,
+) -> Verdict {
     #[derive(Serialize)]
     struct Request<'a> {
         v: u32,
         password: &'a str,
         purpose: &'static str,
+        action: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        for_pid: Option<u32>,
     }
     if password.is_empty() || password.len() > MAX_SECRET_BYTES {
         return Verdict::Unavailable;
     }
-    let mut body = Zeroizing::new(Vec::with_capacity(password.len() * 6 + 64));
+    let mut body = Zeroizing::new(Vec::with_capacity(password.len() * 6 + 128 + action.len()));
     if serde_json::to_writer(
         &mut *body,
         &Request {
             v: PROTOCOL_VERSION,
             password,
             purpose: "admin",
+            action,
+            for_pid,
         },
     )
     .is_err()
@@ -997,20 +1057,36 @@ mod tests {
         let dir = scratch("authd");
         let reply: &'static str = r#"{"v":1,"verdict":"ok","ticket":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#;
         let (socket, authd) = fake_authd(&dir, reply);
-        match request_ticket_at(&socket, "three \"amber\" rivers") {
+        match request_ticket_at(&socket, "three \"amber\" rivers", "policy.set", None) {
             Verdict::Ticket(ticket) => assert_eq!(ticket.as_str(), TICKET),
             other => panic!("{other:?}"),
         }
         let sent: serde_json::Value = serde_json::from_str(&authd.join().unwrap()).unwrap();
         assert_eq!(
             sent,
-            serde_json::json!({"v": 1, "password": "three \"amber\" rivers", "purpose": "admin"}),
-            "no username, ever: the account is SO_PEERCRED's"
+            serde_json::json!({
+                "v": 1, "password": "three \"amber\" rivers", "purpose": "admin",
+                "action": "policy.set"
+            }),
+            "no username, ever: the account is SO_PEERCRED's; the call is always named"
         );
         fs::remove_file(&socket).unwrap();
 
+        let (socket, authd) = fake_authd(&dir, reply);
+        assert!(matches!(
+            request_ticket_at(&socket, "x", "approvals.resolve", Some(4242)),
+            Verdict::Ticket(_)
+        ));
+        let sent: serde_json::Value = serde_json::from_str(&authd.join().unwrap()).unwrap();
+        assert_eq!(sent["for_pid"], 4242);
+        assert_eq!(sent["action"], "approvals.resolve");
+        fs::remove_file(&socket).unwrap();
+
         let (socket, authd) = fake_authd(&dir, r#"{"v":1,"verdict":"denied"}"#);
-        assert!(matches!(request_ticket_at(&socket, "x"), Verdict::Denied));
+        assert!(matches!(
+            request_ticket_at(&socket, "x", "policy.set", None),
+            Verdict::Denied
+        ));
         authd.join().unwrap();
         fs::remove_file(&socket).unwrap();
 
@@ -1018,21 +1094,47 @@ mod tests {
         // answer, never a success.
         let (socket, authd) = fake_authd(&dir, r#"{"v":1,"verdict":"ok","ticket":"ABC"}"#);
         assert!(matches!(
-            request_ticket_at(&socket, "x"),
+            request_ticket_at(&socket, "x", "policy.set", None),
             Verdict::Unavailable
         ));
         authd.join().unwrap();
         fs::remove_file(&socket).unwrap();
 
         assert!(matches!(
-            request_ticket_at(&dir.join("absent.sock"), "x"),
+            request_ticket_at(&dir.join("absent.sock"), "x", "policy.set", None),
             Verdict::Unavailable
         ));
         assert!(matches!(
-            request_ticket_at(&socket, ""),
+            request_ticket_at(&socket, "", "policy.set", None),
             Verdict::Unavailable
         ));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The parent relays punar-authd's answer in three words; only
+    /// `ok <ticket>` with a spendable ticket is one, and only `denied` is a
+    /// refused password.
+    #[test]
+    fn the_parents_relay_is_read_as_one_of_three_answers() {
+        assert!(matches!(
+            parse_parent_answer(&format!("ok {TICKET}")),
+            Verdict::Ticket(t) if t.as_str() == TICKET
+        ));
+        assert!(matches!(parse_parent_answer("denied"), Verdict::Denied));
+        for other in [
+            "unavailable",
+            "",
+            "ok",
+            "ok short",
+            TICKET,
+            &format!("ok {}", TICKET.to_uppercase()),
+            "denied ",
+        ] {
+            assert!(
+                matches!(parse_parent_answer(other), Verdict::Unavailable),
+                "{other:?}"
+            );
+        }
     }
 
     #[test]
@@ -1040,6 +1142,9 @@ mod tests {
         let relay = include_str!("../../punar-auth/src/bin/punar-auth.rs");
         assert!(relay.contains(&format!("const SOCKET: &str = \"{AUTHD_SOCKET}\";")));
         let protocol = include_str!("../../punar-auth/src/protocol.rs");
+        // The two binding fields this crate sends are ones punar-authd reads.
+        assert!(protocol.contains("pub action: Option<String>,"));
+        assert!(protocol.contains("pub for_pid: Option<u32>,"));
         assert!(protocol.contains(&format!(
             "pub const PROTOCOL_VERSION: u32 = {PROTOCOL_VERSION};"
         )));

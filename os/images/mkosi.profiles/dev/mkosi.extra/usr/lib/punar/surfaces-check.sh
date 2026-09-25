@@ -2526,9 +2526,10 @@ fi
 # it straight to punar-authd's socket (punar-reauth, F0-S4), and spends the
 # ticket on policy.set — which also needs the caller to be a device
 # administrator (F0-S1; the dev user is one, as a product's first account is).
-# System Control runs the same command with --password-from-parent, handing
-# the password over a private socket instead of a terminal; that handoff is
-# proven by punar-reauth's and punarctl's own tests. Every piece has unit
+# System Control runs the same command with --ticket-from-parent: the shell
+# sends the password to punar-authd itself and hands punarctl only a ticket
+# bound to that punarctl and to policy.set; that relay is proven by
+# punar-reauth's, punar-auth's and punarctl's own tests. Every piece has unit
 # tests; none of them proves the CHAIN, and the chain is where a missing
 # binary, a socket group, a PAM stack or a ticket directory mode fails.
 #

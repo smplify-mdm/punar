@@ -417,10 +417,15 @@ firewall asks for them, and only an administrator may.
 - **Upgrades never leave a device without one.** On every boot, before the
   account is published, the materializer gives the **device owner** — the
   account `completed.json` records as having completed first run, which is the
-  first account by construction — the role *when no account on the device
-  holds it*. A device set up before the role existed therefore comes out of
-  its first boot on the new image with its owner as administrator, and a
-  device whose administrator has already handed the role on is left alone.
+  first account by construction — the role *when no account a person can
+  sign in as holds it*. A device set up before the role existed therefore
+  comes out of its first boot on the new image with its owner as
+  administrator. "Can sign in as" means an account whose user record boot
+  publishes; today that is the owner alone, so a role handed to an account
+  boot does not publish does not count, and the owner is given it back rather
+  than the device coming up with no administrator anyone can use (F0 review).
+  punard's last-administrator rule counts the same way: `admins remove`
+  refuses to leave only administrators nobody can sign in as.
   *Decided from the code:* onboarding creates exactly one account and refuses
   a second first run, and nothing else in Punar creates accounts today, so a
   device with several accounts has no record that ranks them. Should one
@@ -428,7 +433,7 @@ firewall asks for them, and only an administrator may.
   the most recent sign-in and never the lowest uid — and the others wait for
   an administrator's `punarctl admins add`. An image without the
   `punar-admin` group (an older release after a rollback) changes nothing.
-  Proven by `an_upgraded_device_gives_its_owner_the_role_once` and the
+  Proven by `an_upgraded_device_gives_its_owner_the_role_when_nobody_usable_holds_it` and the
   WP-01 upgrade tests in `crates/punar-onboard/src/identity.rs`.
 - **An enrolled device's organization may decide instead**, through
   `spec.security.localAdmin.administrators`: pin the list, or turn local

@@ -887,6 +887,14 @@ pub struct AppsInstallParams {
     /// permissions were shown and cannot be replayed against a later version.
     #[serde(default)]
     pub acknowledge_host_access: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Remove the native package associated with one catalog id.
@@ -894,6 +902,14 @@ pub struct AppsInstallParams {
 #[serde(deny_unknown_fields)]
 pub struct AppsRemoveParams {
     pub id: String,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Update one installed catalog application, or every installed catalog
@@ -906,6 +922,14 @@ pub struct AppsUpdateParams {
     pub id: Option<String>,
     #[serde(default)]
     pub all: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 // -- M11 user-created web apps and browser contexts ------------------------
@@ -2954,13 +2978,18 @@ mod tests {
                 confirm_metadata_sha256:
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
                 acknowledge_host_access: false,
+                ticket: Some(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                ),
             }),
             Method::AppsRemove(AppsRemoveParams {
                 id: "spotify".to_string(),
+                ticket: None,
             }),
             Method::AppsUpdate(AppsUpdateParams {
                 id: None,
                 all: true,
+                ticket: None,
             }),
             Method::WebAppsList(WebAppsListParams::default()),
             Method::WebAppsGet(WebAppsGetParams {
@@ -3335,7 +3364,8 @@ mod tests {
             request.method,
             Method::AppsUpdate(AppsUpdateParams {
                 id: None,
-                all: true
+                all: true,
+                ticket: None,
             })
         ));
         let reject = Request::parse_json_line(

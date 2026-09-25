@@ -47,7 +47,7 @@
 //   [E] REQUEST EXCEPTION →  punarctl privilege request --capability <p>
 //                            --reason <typed> --duration 15
 //       The §48 reason-required flow. It creates an APPROVAL: punard
-//       writes approvals.json and the M9 gate (Plate D-003) opens itself.
+//       writes the approval views and the M9 gate (Plate D-003) opens itself.
 //       This is the plate's amber "Request exception · Approval required"
 //       tag wearing the approval_required colour, exactly as drawn.
 //   [S] SET STATE        →  punarctl capabilities set <path> <state>
@@ -903,10 +903,23 @@ Scope {
         }
     }
 
-    /// Start the two-step administrator flow for one path.
+    /// Start the two-step administrator flow for one path — for a device
+    /// administrator. A person without the role is told who can make the
+    /// change instead of being asked for a reason and a password that could
+    /// not be used (F0-S1: punard checks the role first).
     function beginAdminEdit(path: string, value: string): void {
         if (mutation.running)
             return;
+        if (!DeviceAdmin.mayAdminister) {
+            // The command a person would type, whole: they can hand it to
+            // an administrator as it stands.
+            data.lastActionArgv = "punarctl policy "
+                + (value === "" ? "clear " + path : "set " + path + " " + data.shellWord(value))
+                + " --reason \"<why>\"";
+            data.lastActionExit = 3;
+            data.lastActionError = DeviceAdmin.refusal("Changing device policy");
+            return;
+        }
         data.adminPath = path;
         data.adminValue = value;
         data.adminReason = "";
@@ -934,12 +947,12 @@ Scope {
         data.adminStage = "password";
     }
 
-    /// The second step. The password goes to `punarctl policy set|clear` —
-    /// the very command a terminal runs — over a private socket that
-    /// punarctl opens for this surface and nobody else may answer
-    /// (`--password-from-parent`, F0-S4). It is never an argument, never an
-    /// environment variable, never a pipe, and never held past the handoff:
-    /// PasswordRun keeps it only until it has been written.
+    /// The second step: `punarctl policy set|clear`, the very command a
+    /// terminal runs. The password goes from this surface to punar-authd
+    /// directly, and punarctl receives only a ticket bound to it and to
+    /// `policy.set` (`--ticket-from-parent`, F0-S4). It is never an
+    /// argument, never an environment variable, never a pipe, and never held
+    /// past the handoff: PasswordRun keeps it only until it has been written.
     function submitAdminPassword(password: string): void {
         if (data.adminStage !== "password" || mutation.running || adminRun.running)
             return;
@@ -955,10 +968,10 @@ Scope {
             return;
         }
         var argv = data.adminValue === ""
-            ? ["punarctl", "policy", "clear", data.adminPath,
-               "--reason", data.adminReason, "--password-from-parent"]
-            : ["punarctl", "policy", "set", data.adminPath, data.adminValue,
-               "--reason", data.adminReason, "--password-from-parent"];
+            ? ["/usr/bin/punarctl", "policy", "clear", data.adminPath,
+               "--reason", data.adminReason, "--ticket-from-parent"]
+            : ["/usr/bin/punarctl", "policy", "set", data.adminPath, data.adminValue,
+               "--reason", data.adminReason, "--ticket-from-parent"];
         data.adminStage = "";
         // The command a person would type for the same change, whole: it
         // asks for the password on a terminal, as this surface just did.
@@ -971,7 +984,7 @@ Scope {
         data.lastActionError = "";
         data.lastActionPending = true;
         data.pendingTimeZone = "";
-        if (!adminRun.start(argv, password)) {
+        if (!adminRun.start(argv, password, "policy.set")) {
             data.lastActionPending = false;
             data.lastActionExit = 127;
             data.lastActionError = "punarctl could not be started on this machine.";
@@ -1076,6 +1089,9 @@ Scope {
         data.refreshProbes();
         data.refreshKernelFacts();
         data.refreshSelectedView();
+        // Whether this person administers the device, so an administrator
+        // edit is offered to one and explained to anyone else.
+        DeviceAdmin.refresh();
     }
 
     // A punar-netd verb that has not answered: its refusal verbatim when one

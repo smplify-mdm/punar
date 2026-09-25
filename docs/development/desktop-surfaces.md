@@ -89,8 +89,8 @@ exactly as before.
 |---|---|---|
 | **AI** | `/run/punar/agents.json` (`counts.managed + counts.observed`) | renders |
 | **UNKNOWN AI** | `max(agents.json counts.unknown, /run/punar-agentd/alerts.json activeCount)` | renders, never collapsed |
-| **APPROVAL** + countdown | `/run/punard/approvals.json` | renders |
-| **ELEVATED** chip | `grants[]` in `/run/punard/approvals.json` | renders |
+| **APPROVAL** + countdown | `/run/punard/approvals/<uid>.json` | renders |
+| **ELEVATED** chip | `grants[]` in `/run/punard/approvals/<uid>.json` | renders |
 | **ORG** name · dot · compliance word | `/run/punar/status.json` | renders **only when enrolled** (§8) |
 | **ENV** | *nothing to read* — `punar-env` writes no state file | **absent** |
 | **CRED** | *nothing to read* — `punar-secrets` has no state directory at all | **absent** |
@@ -288,7 +288,7 @@ qs -p /usr/share/punar/shell ipc call osd brightness 60      # the dashed row
 | **Plates** | D-003 Sect II (gate) · D-009 Sect I (alert) |
 | **Chord** | **none** |
 | **IPC** | `approval` · `alerts` |
-| **Data source** | `/run/punard/approvals.json` · `/run/punar-agentd/alerts.json` |
+| **Data source** | `/run/punard/approvals/<uid>.json` · `/run/punar-agentd/alerts.json` |
 | **Status** | **REAL** |
 
 Neither has a keybinding, and that is the design: **a gate the human has

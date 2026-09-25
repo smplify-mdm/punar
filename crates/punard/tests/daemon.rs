@@ -585,11 +585,7 @@ fn capabilities_list_returns_schema_shaped_descriptors() {
 fn catalog_install_is_digest_bound_human_available_and_audited() {
     let mock = MockCapability::new("mock.widget", json!("off"));
     let td = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         mock,
         |_| {},
         |cfg, dir| {
@@ -597,6 +593,8 @@ fn catalog_install_is_digest_bound_human_available_and_audited() {
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let detail = td.call("apps.catalog", Some(json!({ "id": "spotify" })));
@@ -612,24 +610,28 @@ fn catalog_install_is_digest_bound_human_available_and_audited() {
         .as_str()
         .unwrap();
 
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "apps.install");
     let stale = td.call(
         "apps.install",
         Some(json!({
             "id": "spotify",
-            "confirm_metadata_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "confirm_metadata_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "ticket": FIRST_TICKET
         })),
     );
     assert_eq!(stale["error"]["code"], "verify_failed");
     assert!(!td.dir.join("app-state").exists());
 
+    mint_ticket(&td.dir, 1000, SECOND_TICKET, "apps.install");
     let installed = td.call(
         "apps.install",
         Some(json!({
             "id": "spotify",
             "confirm_metadata_sha256": digest,
+            "ticket": SECOND_TICKET
         })),
     );
-    assert_eq!(installed["result"]["installed"], true);
+    assert_eq!(installed["result"]["installed"], true, "{installed}");
     assert_eq!(installed["result"]["changed"], true);
     let events = td.audit_lines();
     let event = events.last().unwrap();
@@ -644,11 +646,7 @@ fn catalog_install_is_digest_bound_human_available_and_audited() {
 fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits() {
     let mock = MockCapability::new("mock.widget", json!("off"));
     let td = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         mock,
         |_| {},
         |cfg, dir| {
@@ -656,9 +654,15 @@ fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits()
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
-    let absent = td.call("apps.update", Some(json!({ "id": "spotify" })));
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "apps.update");
+    let absent = td.call(
+        "apps.update",
+        Some(json!({ "id": "spotify", "ticket": FIRST_TICKET })),
+    );
     assert_eq!(absent["error"]["code"], "conflict", "{absent}");
     assert_eq!(absent["error"]["details"]["installed"], false);
 
@@ -679,7 +683,11 @@ fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits()
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     );
 
-    let updated = td.call("apps.update", Some(json!({ "all": true })));
+    mint_ticket(&td.dir, 1000, SECOND_TICKET, "apps.update");
+    let updated = td.call(
+        "apps.update",
+        Some(json!({ "all": true, "ticket": SECOND_TICKET })),
+    );
     assert_eq!(updated["result"]["eligible"], 1, "{updated}");
     assert_eq!(updated["result"]["updated"], 1);
     assert_eq!(updated["result"]["current"], 0);
@@ -694,7 +702,11 @@ fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits()
     assert_eq!(event["resource"], "spotify");
     assert_eq!(event["result"], "success");
 
-    let current = td.call("apps.update", Some(json!({ "id": "spotify" })));
+    mint_ticket(&td.dir, 1000, THIRD_TICKET, "apps.update");
+    let current = td.call(
+        "apps.update",
+        Some(json!({ "id": "spotify", "ticket": THIRD_TICKET })),
+    );
     assert_eq!(current["result"]["updated"], 0, "{current}");
     assert_eq!(current["result"]["current"], 1);
     assert_eq!(current["result"]["apps"][0]["status"], "current");
@@ -705,11 +717,7 @@ fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits()
 fn managed_required_app_installs_but_cannot_be_removed() {
     let mock = MockCapability::new("mock.widget", json!("off"));
     let td = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         mock,
         |state_dir| {
             prepare_enrolled_application_policy(
@@ -726,21 +734,27 @@ fn managed_required_app_installs_but_cannot_be_removed() {
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let detail = td.call("apps.catalog", Some(json!({"id": "spotify"})));
     let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
         .as_str()
         .unwrap();
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "apps.install");
     let installed = td.call(
         "apps.install",
         Some(json!({
             "id": "spotify",
-            "confirm_metadata_sha256": digest
+            "confirm_metadata_sha256": digest,
+            "ticket": FIRST_TICKET
         })),
     );
     assert_eq!(installed["result"]["installed"], true, "{installed}");
 
+    // The organization's rule is a fact about the device, settled before
+    // who is asking: refused without a password being asked for.
     let removed = td.call("apps.remove", Some(json!({"id": "spotify"})));
     assert_eq!(removed["error"]["code"], "denied", "{removed}");
     assert_eq!(removed["error"]["details"]["reason"], "required");
@@ -755,11 +769,7 @@ fn managed_required_app_installs_but_cannot_be_removed() {
 fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
     let mock = MockCapability::new("mock.widget", json!("off"));
     let denied = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         mock,
         |state_dir| {
             prepare_enrolled_application_policy(
@@ -776,6 +786,8 @@ fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let detail = denied.call("apps.catalog", Some(json!({"id": "spotify"})));
@@ -789,16 +801,13 @@ fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
             "confirm_metadata_sha256": digest
         })),
     );
+    // Refused by the organization before any password is asked for.
     assert_eq!(response["error"]["code"], "denied", "{response}");
     assert_eq!(response["error"]["details"]["reason"], "denied");
     assert!(!denied.dir.join("app-state").exists());
 
     let optional = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         MockCapability::new("mock.widget", json!("off")),
         |state_dir| {
             prepare_enrolled_application_policy(
@@ -815,25 +824,142 @@ fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let detail = optional.call("apps.catalog", Some(json!({"id": "spotify"})));
     let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
         .as_str()
         .unwrap();
+    mint_ticket(&optional.dir, 1000, FIRST_TICKET, "apps.install");
     assert_eq!(
         optional.call(
             "apps.install",
             Some(json!({
                 "id": "spotify",
-                "confirm_metadata_sha256": digest
+                "confirm_metadata_sha256": digest,
+                "ticket": FIRST_TICKET
             }))
         )["result"]["installed"],
         true
     );
-    let removed = optional.call("apps.remove", Some(json!({"id": "spotify"})));
+    mint_ticket(&optional.dir, 1000, SECOND_TICKET, "apps.remove");
+    let removed = optional.call(
+        "apps.remove",
+        Some(json!({"id": "spotify", "ticket": SECOND_TICKET})),
+    );
     assert_eq!(removed["result"]["installed"], false, "{removed}");
     assert_eq!(removed["result"]["changed"], true);
+}
+
+/// F0 review, finding 2: installing, updating or removing an application
+/// for everyone needs a device administrator's fresh password. A person
+/// without the role is refused before anything is spent; an administrator
+/// without a password is told to confirm; a ticket typed for another call
+/// does nothing.
+#[test]
+fn app_changes_need_a_device_administrators_password() {
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1001,
+            gid: 1001,
+            pid: Some(PERSON_PID),
+        }),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
+            // uid 1001 is an account, and not an administrator.
+            fs::write(
+                &cfg.passwd_file,
+                "root:x:0:0::/root:/bin/bash\npunar:x:1000:1000::/home/punar:/bin/nologin\n\
+                 other:x:1001:1001::/home/other:/bin/nologin\n",
+            )
+            .unwrap();
+        },
+    );
+    let detail = td.call("apps.catalog", Some(json!({ "id": "spotify" })));
+    let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let ticket = mint_ticket(&td.dir, 1001, FIRST_TICKET, "apps.install");
+    for (method, params) in [
+        (
+            "apps.install",
+            json!({"id": "spotify", "confirm_metadata_sha256": digest, "ticket": FIRST_TICKET}),
+        ),
+        (
+            "apps.remove",
+            json!({"id": "spotify", "ticket": FIRST_TICKET}),
+        ),
+        ("apps.update", json!({"all": true, "ticket": FIRST_TICKET})),
+    ] {
+        let refused = td.call(method, Some(params));
+        assert_eq!(
+            refused["error"]["details"]["reason"], "device_admin_required",
+            "{method}: {refused}"
+        );
+        assert!(ticket.exists(), "{method}: the role is checked first");
+    }
+    assert!(!td.dir.join("app-state").exists(), "nothing was installed");
+    assert!(td.audit_lines().iter().any(|e| {
+        e["action"] == "system.install_package" && e["result"] == "device_admin_required"
+    }));
+}
+
+/// The administrator's side of the same rule: no password, no change; a
+/// ticket typed for another call does nothing.
+#[test]
+fn an_administrators_app_change_is_confirmed_by_its_own_ticket() {
+    let td = TestDaemon::start_configured(
+        person_peer(),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
+        },
+    );
+    let detail = td.call("apps.catalog", Some(json!({ "id": "spotify" })));
+    let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bare = td.call(
+        "apps.install",
+        Some(json!({"id": "spotify", "confirm_metadata_sha256": digest})),
+    );
+    assert_eq!(
+        bare["error"]["details"]["reason"], "reauthentication_required",
+        "{bare}"
+    );
+    assert!(
+        bare["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("punarctl app install spotify")
+    );
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "policy.set");
+    let wrong = td.call(
+        "apps.install",
+        Some(json!({"id": "spotify", "confirm_metadata_sha256": digest, "ticket": FIRST_TICKET})),
+    );
+    assert_eq!(
+        wrong["error"]["details"]["reason"], "reauthentication_wrong_action",
+        "{wrong}"
+    );
+    assert!(!td.dir.join("app-state").exists(), "nothing was installed");
 }
 
 #[test]
@@ -1111,7 +1237,13 @@ fn assert_asks_for_the_persons_password(error: &Value, retry: &str) {
 /// 0700 directory named by the uid that proved its password, holding the boot
 /// clock's reading at mint time (SMP-1405) — the daemon under test reads the
 /// same system clock and judges the ticket's age against it.
-fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
+///
+/// Bound, as punar-authd binds every ticket, to the one call it was typed
+/// for (`action`) and to the one process that may present it: the person's
+/// peer process, [`PERSON_PID`], whose fake `/proc` entry
+/// [`fake_person_process`] writes.
+fn mint_ticket(dir: &Path, uid: u32, token: &str, action: &str) -> PathBuf {
+    use punar_common::reauth_ticket::{Spender, TicketBody};
     use punar_common::trusted_time::{SystemClock, TrustedClock};
     use std::os::unix::fs::DirBuilderExt;
     let per_uid = dir.join("tickets").join(uid.to_string());
@@ -1121,9 +1253,41 @@ fn mint_ticket(dir: &Path, uid: u32, token: &str) -> PathBuf {
         .create(&per_uid)
         .unwrap();
     let path = per_uid.join(token);
-    let stamp = SystemClock::new().now().expect("this machine's boot clock");
-    fs::write(&path, serde_json::to_vec(&stamp).unwrap()).unwrap();
+    let body = TicketBody {
+        minted: SystemClock::new().now().expect("this machine's boot clock"),
+        action: action.to_string(),
+        spender: Spender {
+            pid: PERSON_PID as u32,
+            start: PERSON_START,
+        },
+    };
+    fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
     path
+}
+
+/// The person's process every ticket in this file is minted for.
+const PERSON_PID: i32 = 4300;
+const PERSON_START: u64 = 430_000;
+
+/// A fake `/proc` under `dir` holding the person's process, and its path.
+fn fake_person_process(dir: &Path) -> PathBuf {
+    let proc_root = dir.join("proc");
+    let entry = proc_root.join(PERSON_PID.to_string());
+    fs::create_dir_all(&entry).unwrap();
+    fs::write(
+        entry.join("stat"),
+        format!(
+            "{PERSON_PID} (punarctl) S 1 {PERSON_PID} {PERSON_PID} 0 -1 4194560 0 0 0 0 0 0 0 0 \
+             20 0 1 0 {PERSON_START} 0 0\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        entry.join("cgroup"),
+        "0::/user.slice/user-1000.slice/session-2.scope\n",
+    )
+    .unwrap();
+    proc_root
 }
 
 const FIRST_TICKET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1134,7 +1298,7 @@ fn person_peer() -> PeerSource {
     PeerSource::Fixed(Peer {
         uid: 1000,
         gid: 1000,
-        pid: None,
+        pid: Some(PERSON_PID),
     })
 }
 
@@ -1142,6 +1306,7 @@ fn person_update_daemon() -> TestDaemon {
     TestDaemon::start_update(person_peer(), |cfg, dir| {
         configure_update_apply_fixture(cfg, dir);
         cfg.reauth_ticket_dir = dir.join("tickets");
+        cfg.proc_root = fake_person_process(dir);
     })
 }
 
@@ -1153,7 +1318,7 @@ fn person_update_daemon() -> TestDaemon {
 fn a_person_checks_installs_and_rolls_back_with_their_password() {
     let td = person_update_daemon();
 
-    let check = mint_ticket(&td.dir, 1000, FIRST_TICKET);
+    let check = mint_ticket(&td.dir, 1000, FIRST_TICKET, "update.check");
     let checked = td.call(
         "update.check",
         Some(json!({ "force": true, "ticket": FIRST_TICKET })),
@@ -1163,7 +1328,7 @@ fn a_person_checks_installs_and_rolls_back_with_their_password() {
     assert!(td.state_path("update/verified-channel.json").is_file());
 
     // Someone else's confirmation is not theirs.
-    let foreign = mint_ticket(&td.dir, 1001, SECOND_TICKET);
+    let foreign = mint_ticket(&td.dir, 1001, SECOND_TICKET, "update.apply");
     let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
     let refused = td.call(
         "update.apply",
@@ -1180,7 +1345,7 @@ fn a_person_checks_installs_and_rolls_back_with_their_password() {
     assert!(foreign.exists());
     assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
 
-    let apply = mint_ticket(&td.dir, 1000, SECOND_TICKET);
+    let apply = mint_ticket(&td.dir, 1000, SECOND_TICKET, "update.apply");
     let applied = td.call(
         "update.apply",
         Some(json!({
@@ -1204,7 +1369,7 @@ fn a_person_checks_installs_and_rolls_back_with_their_password() {
     );
     assert!(td.state_path("update/pending-uefi.json").is_file());
 
-    mint_ticket(&td.dir, 1000, THIRD_TICKET);
+    mint_ticket(&td.dir, 1000, THIRD_TICKET, "update.rollback");
     let rolled_back = td.call(
         "update.rollback",
         Some(json!({ "to_version": null, "ticket": THIRD_TICKET })),
@@ -1248,7 +1413,7 @@ fn a_persons_update_gets_the_same_admission_as_roots_and_nothing_more() {
     )
     .unwrap();
 
-    mint_ticket(&td.dir, 1000, FIRST_TICKET);
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "update.apply");
     let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
     let response = td.call(
         "update.apply",
@@ -1298,7 +1463,7 @@ fn an_agent_cannot_use_a_persons_confirmation_for_an_update() {
             cfg.proc_root = proc_root;
         },
     );
-    let ticket = mint_ticket(&td.dir, 1000, FIRST_TICKET);
+    let ticket = mint_ticket(&td.dir, 1000, FIRST_TICKET, "update.apply");
     for (method, params) in [
         (
             "update.check",
@@ -2706,33 +2871,20 @@ fn a_policy_change_without_a_reason_is_refused() {
 /// test that mints them a different way would prove something about the test.
 #[test]
 fn a_valid_ticket_authorizes_an_ordinary_user_and_is_spent() {
-    use std::os::unix::fs::DirBuilderExt;
-
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let td = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         MockCapability::new("mock.widget", json!("off")),
         |_| {},
         |cfg, dir| {
             cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let per_uid = td.dir.join("tickets/1000");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&per_uid)
-        .unwrap();
-    // Stamped on the boot clock at mint time, as punar-authd stamps it.
-    let stamp = punar_common::trusted_time::TrustedClock::now(
-        &punar_common::trusted_time::SystemClock::new(),
-    )
-    .expect("this machine's boot clock");
-    fs::write(per_uid.join(TOKEN), serde_json::to_vec(&stamp).unwrap()).unwrap();
+    // Stamped on the boot clock at mint time, typed for this call and bound
+    // to the person's process, as punar-authd mints it.
+    mint_ticket(&td.dir, 1000, TOKEN, "policy.set");
 
     let set = td.call(
         "policy.set",

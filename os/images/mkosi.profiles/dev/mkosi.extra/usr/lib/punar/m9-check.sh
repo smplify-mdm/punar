@@ -68,7 +68,10 @@ CLASSES_FILE=/usr/share/punar/secrets/classes.yaml
 AI_DEFAULTS=/usr/share/punar/policy/ai-defaults.yaml
 APPROVALS_DIR=/var/lib/punar/approvals
 GRANTS_DIR=/var/lib/punar/grants
-SUMMARY_FILE=/run/punard/approvals.json
+# The shell's approval views, one per person (F0 review): the dev user's is
+# SUMMARY_FILE, set once PUNAR_UID is known below.
+SUMMARY_DIR=/run/punard/approvals
+LEGACY_SUMMARY_FILE=/run/punard/approvals.json
 AUDIT_LOG=/var/log/punar/audit.jsonl
 LEDGER_DIR=/var/lib/punar/agents/ledger
 PUNAR_HOME=/home/punar
@@ -171,6 +174,7 @@ os_timezone() {
 
 PUNAR_UID="$(id -u punar 2>/dev/null || echo 1000)"
 PUNAR_RUN="/run/user/${PUNAR_UID}"
+SUMMARY_FILE="${SUMMARY_DIR}/${PUNAR_UID}.json"
 
 WL_DISPLAY=""
 for wl_sock in "${PUNAR_RUN}"/wayland-*; do
@@ -423,8 +427,33 @@ jq_check "the envelope carries the siblings, the contract line and the policy ci
         and (.policy.policy_id | length) > 0
         and .execution == null))"
 grep_row "the shell's summary file names the same approval" "${SUMMARY_FILE}" "${APR1}"
-check_eq "the summary file is 0640 root:punar in the ROOT-owned runtime dir (anti-spoofing)" \
-    "640 root punar" "$(stat -c '%a %U %G' "${SUMMARY_FILE}" 2>/dev/null)"
+# F0 review: one view per person, root-owned in a root-owned directory (anti-
+# spoofing), readable by root and by its one person through an ACL entry —
+# never by group punar, which every account is in.
+check_eq "the dev user's view is 0640 root:root (the group bits are the ACL mask)" \
+    "640 root root" "$(stat -c '%a %U %G' "${SUMMARY_FILE}" 2>/dev/null)"
+check_eq "the view directory is 0755 root:root" \
+    "755 root root" "$(stat -c '%a %U %G' "${SUMMARY_DIR}" 2>/dev/null)"
+if runuser -u punar -- cat "${SUMMARY_FILE}" >/dev/null 2>&1; then
+    note "ok   the dev user reads their own view"
+else
+    note "FAIL the dev user cannot read their own view (${SUMMARY_FILE})"
+    FAILED=1
+fi
+# Another account in group punar (it can traverse /run/punard) is refused.
+punar_gid="$(getent group punar | cut -d: -f3)"
+if setpriv --reuid=65534 --regid="${punar_gid:-65534}" --clear-groups cat "${SUMMARY_FILE}" >/dev/null 2>&1; then
+    note "FAIL another member of group punar read the dev user's approval view"
+    FAILED=1
+else
+    note "ok   another member of group punar cannot read the dev user's approval view"
+fi
+if [ -e "${LEGACY_SUMMARY_FILE}" ]; then
+    note "FAIL ${LEGACY_SUMMARY_FILE}, the view every account could read, still exists"
+    FAILED=1
+else
+    note "ok   there is no shared ${LEGACY_SUMMARY_FILE}"
+fi
 
 # --- 4. (c) an AI agent may resolve NOTHING (law 2, spec 60) -----------------
 in_scope "${CTL}" approvals resolve "${APR1}" --decision approved \

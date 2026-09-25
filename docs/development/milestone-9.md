@@ -1029,6 +1029,15 @@ So it lives inside the already-root-owned `/run/punard`
 that moved `ledger.json` into `/run/punar-agentd`. The shell (user
 `punar`, group `punar`) reads it; no non-root peer can replace it.
 
+> **Superseded by the F0 review (2026-09-25).** Group `punar` is every
+> account on a device, so on a shared device this one file showed each
+> person every person's approvals and grants. It is now one file per person,
+> `/run/punard/approvals/<uid>.json`, `0640 root:root` with a POSIX ACL entry
+> for that uid alone, holding only the approvals routed to that person and
+> their own grants; `approvals.list`/`approvals.get` are scoped the same way
+> (docs/api/ipc.md §14.2, §15, §23.2). The anti-spoofing argument above is
+> unchanged: the files are root-owned in a root-owned directory.
+
 Content: pending and recently-resolved approvals plus live grants —
 `{v, updated_at, approvals: [{approval_id, kind, status, requester:
 {type, id, agent_name}, user, capability, resource, reason, risk,

@@ -387,6 +387,10 @@ enum AppCommand {
         /// it would have been able to do.
         #[arg(long)]
         acknowledge_host_access: bool,
+        /// Installing for everyone on the device needs a device
+        /// administrator's password, asked on the terminal (F0 review).
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Open an app: a catalog id, or any desktop entry the launcher shows.
     /// An open window of the app is raised instead of starting another.
@@ -418,14 +422,18 @@ enum AppCommand {
         schemes: Vec<String>,
     },
     /// Remove the native package. Per-user application data is preserved.
+    /// Needs a device administrator's password: the app goes for everyone.
     Remove {
         /// Catalog id, such as `spotify`.
         id: String,
         /// Skip the interactive confirmation.
         #[arg(long)]
         yes: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Update one or all installed native apps from Punar's signed catalog.
+    /// Needs a device administrator's password.
     Update {
         /// Catalog id, such as `spotify`.
         id: Option<String>,
@@ -435,6 +443,8 @@ enum AppCommand {
         /// Skip the interactive confirmation.
         #[arg(long)]
         yes: bool,
+        #[command(flatten)]
+        confirm: Confirm,
     },
 }
 
@@ -495,15 +505,21 @@ struct Confirm {
     #[arg(long, value_name = "N")]
     password_fd: Option<i32>,
     /// Read a confirmation ticket from descriptor N, which must be a Unix
-    /// socket: `punar-auth --admin`'s answer as it prints it (`ok <ticket>`)
-    /// or the bare 64-character ticket.
+    /// socket: `ok <ticket>` or the bare 64-character ticket. punar-authd
+    /// must have minted it for this punarctl process (`for_pid`) and for
+    /// this change; punard accepts it for nothing else.
     #[arg(long, value_name = "N", conflicts_with = "password_fd")]
     ticket_fd: Option<i32>,
-    /// Print the path of a private socket as the first line of output, and
-    /// read your password from the program that started punarctl — only that
-    /// program; any other is refused. System Control and the approval
-    /// overlay use this.
+    /// Print `ticket-socket <path>` as the first line of output, and read the
+    /// confirmation from the program that started punarctl — only that
+    /// program; any other is refused. That program sends your password to
+    /// punar-authd itself and relays its answer, a ticket only this punarctl
+    /// can use. System Control and the approval overlay use this.
     #[arg(long, conflicts_with_all = ["password_fd", "ticket_fd"])]
+    ticket_from_parent: bool,
+    /// Removed: the password used to cross the private socket, which another
+    /// program running as you could redirect. Use --ticket-from-parent.
+    #[arg(long, hide = true)]
     password_from_parent: bool,
     /// Removed: a pipe on standard input can be read by any program running
     /// as you before punarctl reads it. Use --ticket-fd or --password-fd.
@@ -519,7 +535,7 @@ impl Confirm {
     /// Whether the caller named a source, rather than leaving punarctl to
     /// ask on the terminal.
     fn named(&self) -> bool {
-        self.password_fd.is_some() || self.ticket_fd.is_some() || self.password_from_parent
+        self.password_fd.is_some() || self.ticket_fd.is_some() || self.ticket_from_parent
     }
 }
 
@@ -971,11 +987,37 @@ Next step: run the command in a terminal, which asks for your password with echo
 or hand it over on a Unix socket with --password-fd N (or a ticket with --ticket-fd N); \
 or make the change from System Control.";
 
-/// The confirmation a verb carries: from the source the caller named, or the
-/// person's password asked on the terminal (root needs none). `Ok(None)` when
-/// there is no terminal and no source: the request then goes without one and
-/// punard, which decides, says what to run. The client gathers a credential
-/// when it can; it never makes the authorization decision itself.
+/// The refusal for `--password-from-parent`, which no longer exists.
+const PASSWORD_FROM_PARENT_REMOVED: &str = "punarctl: --password-from-parent is not accepted.\n\
+Why: the password crossed a private socket that another program running as you could \
+redirect.\n\
+Next step: a graphical surface uses --ticket-from-parent and sends the password to \
+punar-authd itself; in a terminal, leave the flag out and punarctl asks for the password.";
+
+/// Whether asking this caller for a password could lead anywhere (F0-S1;
+/// F0 review): a device-wide change needs root or a device administrator,
+/// and punard checks the role before it spends a ticket — so a person without
+/// the role is never asked for a password, never has one checked against the
+/// lock screen's shared faillock tally, and hears punard's own refusal naming
+/// who can act. `false` only when punard says plainly that the caller is
+/// neither; any doubt (an older punard, no answer) asks, and punard decides.
+fn caller_may_administer(client: &Client) -> bool {
+    match client.call("admins.list", None) {
+        Ok(listed) => listed["caller"]["root"] == true || listed["caller"]["administrator"] == true,
+        Err(_) => true,
+    }
+}
+
+/// The confirmation a verb carries for the IPC method `action`: from the
+/// source the caller named, or the person's password asked on the terminal
+/// (root needs none). `Ok(None)` when there is no terminal and no source: the
+/// request then goes without one and punard, which decides, says what to run.
+/// The client gathers a credential when it can; it never makes the
+/// authorization decision itself.
+///
+/// The ticket punar-authd mints is bound to `action` and to this process
+/// (docs/api/ipc.md section 23.1): punard spends it on that call, from this
+/// punarctl, and on nothing else.
 ///
 /// Before any secret is read this process is made non-dumpable with no core
 /// file ([`punar_reauth::harden`]), so no other program of the same person
@@ -983,13 +1025,19 @@ or make the change from System Control.";
 fn confirmation(
     confirm: &Confirm,
     purpose: &str,
+    action: &str,
 ) -> Result<Option<punar_reauth::Ticket>, ExitCode> {
     if confirm.ticket_stdin || confirm.password_stdin {
         eprintln!("{STDIN_SECRET_REMOVED}");
         return Err(ExitCode::from(2));
     }
-    let root = rustix::process::geteuid().is_root();
-    if root && !confirm.named() {
+    if confirm.password_from_parent {
+        eprintln!("{PASSWORD_FROM_PARENT_REMOVED}");
+        return Err(ExitCode::from(2));
+    }
+    if rustix::process::geteuid().is_root() {
+        // punar-authd refuses uid 0 by design, and root needs no ticket:
+        // nothing is read, and no rendezvous is offered to answer.
         return Ok(None);
     }
     if let Err(error) = punar_reauth::harden() {
@@ -1008,34 +1056,27 @@ fn confirmation(
             .map(Some)
             .map_err(unreadable);
     }
+    if confirm.ticket_from_parent {
+        let verdict = punar_reauth::ticket_from_parent(
+            |path| {
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(stdout, "ticket-socket {}", path.display());
+                let _ = stdout.flush();
+            },
+            punar_reauth::DELIVERY_TIMEOUT,
+        )
+        .map_err(unreadable)?;
+        return verdict_ticket(verdict).map(Some);
+    }
     let password = if let Some(fd) = confirm.password_fd {
         punar_reauth::password_from_fd(fd).map_err(unreadable)?
-    } else if confirm.password_from_parent {
-        password_from_parent().map_err(unreadable)?
     } else {
         match password_from_terminal(purpose)? {
             Some(password) => password,
             None => return Ok(None),
         }
     };
-    if root {
-        // punar-authd refuses uid 0 by design, and root needs no ticket.
-        return Ok(None);
-    }
-    ticket_for(&password).map(Some)
-}
-
-/// `--password-from-parent`: open the private rendezvous, say where it is on
-/// the first line of standard output, and take the password from the
-/// program that started this one.
-fn password_from_parent() -> Result<punar_reauth::Password, punar_reauth::SourceError> {
-    let parent = punar_reauth::parent_pid().ok_or(punar_reauth::SourceError::NotTheParent)?;
-    let handoff = punar_reauth::ParentHandoff::open()?;
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "password-socket {}", handoff.path().display());
-    let _ = stdout.flush();
-    drop(stdout);
-    handoff.receive(parent, punar_reauth::DELIVERY_TIMEOUT)
+    verdict_ticket(punar_reauth::request_ticket(&password, action)).map(Some)
 }
 
 /// Ask on the terminal. `Ok(None)` when there is no terminal to ask on.
@@ -1074,9 +1115,9 @@ fn password_from_terminal(purpose: &str) -> Result<Option<punar_reauth::Password
     }
 }
 
-/// Exchange a password for a ticket at punar-authd, over its socket.
-fn ticket_for(password: &str) -> Result<punar_reauth::Ticket, ExitCode> {
-    match punar_reauth::request_ticket(password) {
+/// punar-authd's answer, as a ticket or as the refusal a person reads.
+fn verdict_ticket(verdict: punar_reauth::Verdict) -> Result<punar_reauth::Ticket, ExitCode> {
+    match verdict {
         punar_reauth::Verdict::Ticket(ticket) => Ok(ticket),
         punar_reauth::Verdict::Denied => {
             let conf = std::fs::read_to_string(FAILLOCK_CONF).unwrap_or_default();
@@ -1117,10 +1158,12 @@ fn admins_set(
         )
     };
     let mut params = json!({ "user": user, "administrator": administrator });
-    match confirmation(confirm, &purpose) {
-        Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
-        Ok(None) => {}
-        Err(exit) => return exit,
+    if caller_may_administer(client) {
+        match confirmation(confirm, &purpose, "admins.set") {
+            Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
+            Ok(None) => {}
+            Err(exit) => return exit,
+        }
     }
     rpc(client, json, "admins.set", Some(params), |v| {
         views::admins_set(style, v)
@@ -1145,8 +1188,12 @@ fn resolve_approval(
     let mut params = json!({ "approval_id": id, "decision": decision });
     let purpose = format!("approve {id}, a change to a setting everyone on this device shares");
     if decision == "approved" && confirm.named() {
-        if let Some(ticket) = confirmation(confirm, &purpose)? {
-            params["ticket"] = json!(ticket.as_str());
+        // The role first, so a source that would hand over a password is
+        // never read for an answer the caller may not give.
+        if caller_may_administer(client) {
+            if let Some(ticket) = confirmation(confirm, &purpose, "approvals.resolve")? {
+                params["ticket"] = json!(ticket.as_str());
+            }
         }
         return Ok(client.call("approvals.resolve", Some(params)));
     }
@@ -1162,7 +1209,7 @@ fn resolve_approval(
     if decision != "approved" || !wants_password {
         return Ok(first);
     }
-    match confirmation(confirm, &purpose)? {
+    match confirmation(confirm, &purpose, "approvals.resolve")? {
         Some(ticket) => {
             params["ticket"] = json!(ticket.as_str());
             Ok(client.call("approvals.resolve", Some(params)))
@@ -1335,12 +1382,22 @@ fn restart_after_update(kind: UpdateRestart) -> ExitCode {
 /// No account on a Punar device is root, so checking, installing and rolling
 /// back take the same confirmation as enrolling. Without a terminal the
 /// request goes without one, and punard's refusal says what to run.
+///
+/// `role` says whether the change reaches everyone on the device, and so
+/// needs a device administrator: then a caller punard says is not one is
+/// never asked for a password, and its refusal is what prints.
 fn with_person_ticket(
+    client: &Client,
     mut params: Value,
     confirm: &Confirm,
     purpose: &str,
+    action: &str,
+    role: bool,
 ) -> Result<Value, ExitCode> {
-    if let Some(ticket) = confirmation(confirm, purpose)? {
+    if role && !caller_may_administer(client) {
+        return Ok(params);
+    }
+    if let Some(ticket) = confirmation(confirm, purpose, action)? {
         params["ticket"] = json!(ticket.as_str());
     }
     Ok(params)
@@ -1383,6 +1440,7 @@ fn inspect_app(client: &Client, id: &str) -> Result<Value, CallError> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn app_install(
     client: &Client,
     style: &Style,
@@ -1391,6 +1449,7 @@ fn app_install(
     yes: bool,
     confirmed: Option<String>,
     acknowledge_host_access: bool,
+    confirm: &Confirm,
 ) -> ExitCode {
     let detail = match inspect_app(client, id) {
         Ok(value) => value,
@@ -1453,13 +1512,27 @@ fn app_install(
             return ExitCode::FAILURE;
         }
     }
-    match client.call_with_timeout(
-        "apps.install",
-        Some(json!({
+    let params = match with_person_ticket(
+        client,
+        json!({
             "id": id,
             "confirm_metadata_sha256": digest,
             "acknowledge_host_access": acknowledge_host_access,
-        })),
+        }),
+        confirm,
+        &format!(
+            "allow installing {} for everyone on this device",
+            term_safe_name(id)
+        ),
+        "apps.install",
+        true,
+    ) {
+        Ok(params) => params,
+        Err(exit) => return exit,
+    };
+    match client.call_with_timeout(
+        "apps.install",
+        Some(params),
         crate::ipc::APP_MUTATION_TIMEOUT,
     ) {
         Ok(result) => render_or_json(json_output, &result, |v| {
@@ -1469,7 +1542,14 @@ fn app_install(
     }
 }
 
-fn app_remove(client: &Client, style: &Style, json_output: bool, id: &str, yes: bool) -> ExitCode {
+fn app_remove(
+    client: &Client,
+    style: &Style,
+    json_output: bool,
+    id: &str,
+    yes: bool,
+    confirm: &Confirm,
+) -> ExitCode {
     if !yes && !json_output && std::io::stdin().is_terminal() {
         eprint!("Remove {id}? Type yes to continue: ");
         let mut answer = String::new();
@@ -1479,9 +1559,23 @@ fn app_remove(client: &Client, style: &Style, json_output: bool, id: &str, yes: 
             return ExitCode::FAILURE;
         }
     }
+    let params = match with_person_ticket(
+        client,
+        json!({ "id": id }),
+        confirm,
+        &format!(
+            "allow removing {} for everyone on this device",
+            term_safe_name(id)
+        ),
+        "apps.remove",
+        true,
+    ) {
+        Ok(params) => params,
+        Err(exit) => return exit,
+    };
     match client.call_with_timeout(
         "apps.remove",
-        Some(json!({ "id": id })),
+        Some(params),
         crate::ipc::APP_MUTATION_TIMEOUT,
     ) {
         Ok(result) => render_or_json(json_output, &result, |v| {
@@ -1498,6 +1592,7 @@ fn app_update(
     id: Option<&str>,
     all: bool,
     yes: bool,
+    confirm: &Confirm,
 ) -> ExitCode {
     if all == id.is_some() {
         eprintln!("Choose one application id or --all, not both.");
@@ -1517,6 +1612,17 @@ fn app_update(
     let params = match id {
         Some(id) => json!({ "id": id, "all": false }),
         None => json!({ "all": true }),
+    };
+    let purpose = match id {
+        Some(id) => format!(
+            "allow updating {} for everyone on this device",
+            term_safe_name(id)
+        ),
+        None => "allow updating every installed app for everyone on this device".to_string(),
+    };
+    let params = match with_person_ticket(client, params, confirm, &purpose, "apps.update", true) {
+        Ok(params) => params,
+        Err(exit) => return exit,
     };
     match client.call_with_timeout(
         "apps.update",
@@ -2588,12 +2694,19 @@ fn privacy_ledger_json(
 // Milestone 9 helpers
 // ---------------------------------------------------------------------
 
-/// The approval summary file (contract section 15). Read here only as a
-/// **wake source** for `approvals wait`; every verdict comes from the
-/// socket. It is `0640 root:punar` inside the root-owned `/run/punard`
-/// on purpose — the file that tells a human what they are about to
-/// authorize must not sit in a user-writable directory.
-const APPROVALS_SUMMARY: &str = "/run/punard/approvals.json";
+/// This person's approval view (contract section 15): `/run/punard/
+/// approvals/<uid>.json`. Read here only as a **wake source** for
+/// `approvals wait`; every verdict comes from the socket. It sits in a
+/// root-owned directory inside `/run/punard`, readable by root and this uid
+/// alone, on purpose — the file that tells a human what they are about to
+/// authorize must not sit in a user-writable directory, nor be readable by
+/// anyone else on the device (F0 review).
+fn approvals_summary() -> std::path::PathBuf {
+    punar_common::approval::approvals_summary_path(
+        Path::new(punar_common::approval::APPROVALS_SUMMARY_DIR),
+        rustix::process::getuid().as_raw(),
+    )
+}
 
 /// The redraw cadence of `approvals wait`'s countdown. One second, and
 /// only while a human is being asked something.
@@ -2784,7 +2897,7 @@ fn approvals_wait(
     // watched (no punard, or no read permission) degrades to a slower
     // re-check rather than failing — a missing summary file is a calm
     // state, not an error surface.
-    let watch = watch::DirWatch::on(Path::new(APPROVALS_SUMMARY)).ok();
+    let watch = watch::DirWatch::on(&approvals_summary()).ok();
     let mut since_recheck = Duration::ZERO;
     let live = std::io::stderr().is_terminal();
 
@@ -2941,7 +3054,7 @@ fn approvals_watch(
         print!("{out}");
     }
 
-    let watch = watch::DirWatch::on(Path::new(APPROVALS_SUMMARY)).ok();
+    let watch = watch::DirWatch::on(&approvals_summary()).ok();
     // The last status printed for each approval id still listed.
     let mut printed: std::collections::BTreeMap<String, String> = Default::default();
     let mut first = true;
@@ -3104,6 +3217,7 @@ fn run_enroll_start(
     mut accepted: Vec<EnrollmentTerm>,
     render: impl Fn(&Value) -> Result<String, String>,
 ) -> ExitCode {
+    let may_administer = caller_may_administer(client);
     loop {
         let mut params = json!({ "org_domain": domain });
         if let Some(code) = code {
@@ -3113,14 +3227,18 @@ fn run_enroll_start(
             params[term.param()] = json!(true);
         }
         // Asked last, so the two-minute confirmation is spent by the call it
-        // was typed for rather than by however long the code took to find.
-        match confirmation(
-            confirm,
-            &format!("allow enrolling this device with {domain}"),
-        ) {
-            Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
-            Ok(None) => {}
-            Err(exit) => return exit,
+        // was typed for rather than by however long the code took to find —
+        // and only of a caller who may enroll the device at all.
+        if may_administer {
+            match confirmation(
+                confirm,
+                &format!("allow enrolling this device with {domain}"),
+                "enroll.start",
+            ) {
+                Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
+                Ok(None) => {}
+                Err(exit) => return exit,
+            }
         }
         // 90 s client budget for this one verb (contract section 2): the
         // pipeline runs a full reconcile pass server-side.
@@ -3139,7 +3257,11 @@ fn run_enroll_start(
             // Only terms not already accepted are worth asking about: a
             // refusal of one this request accepted is punard's final answer.
             .filter(|(_, terms)| terms.iter().all(|term| !accepted.contains(term)));
-        if let (Some((org, terms)), false) = (refused, json) {
+        // Asking again needs a second confirmation, which only a terminal
+        // can give: a descriptor or a parent answers once. With one of those,
+        // punard's refusal — which names the flags that accept the terms up
+        // front — is the answer.
+        if let (Some((org, terms)), false) = (refused, json || confirm.named()) {
             match accept_terms_on_terminal(&org, &terms) {
                 // Accepted: once more, with the flags and a new password.
                 Some(Ok(true)) => {
@@ -3270,8 +3392,18 @@ fn already_enrolled(client: &Client) -> Option<(String, bool)> {
 /// needs none, and the real control plane says so itself if one is
 /// required. There is deliberately no `--code` flag.
 fn enrollment_code(code_stdin: bool) -> Result<Option<Redacted<String>>, ExitCode> {
+    // Not dumpable, no core file, before the code is read (F0 review): the
+    // code enrolls this device, and a core file or /proc/<pid>/mem read
+    // taken while it is held would carry it.
+    if let Err(error) = punar_reauth::harden() {
+        eprintln!(
+            "punarctl enroll start: this process could not be protected before reading \
+             the enrollment code ({error}), so nothing was read and nothing was changed."
+        );
+        return Err(ExitCode::from(1));
+    }
     if code_stdin {
-        let mut raw = String::new();
+        let mut raw = Zeroizing::new(String::new());
         if std::io::stdin().read_to_string(&mut raw).is_err() {
             eprintln!(
                 "punarctl enroll start: the enrollment code could not be read from \
@@ -4638,24 +4770,36 @@ fn main() -> ExitCode {
                         );
                         ExitCode::FAILURE
                     }
-                    None => match enrollment_code(code_stdin) {
-                        Err(exit) => exit,
-                        Ok(code) => run_enroll_start(
-                            &client,
-                            json,
-                            &domain,
-                            code.as_ref(),
-                            &confirm,
-                            EnrollmentTerm::ALL
-                                .into_iter()
-                                .filter(|term| match term {
-                                    EnrollmentTerm::NonRemovable => accept_non_removable,
-                                    EnrollmentTerm::OrganizationOwned => accept_organization_owned,
-                                })
-                                .collect(),
-                            |v| views::enroll_start(&style, v, &hostname),
-                        ),
-                    },
+                    // A caller who may not enroll the device is asked for
+                    // neither the code nor a password: the bare request
+                    // brings punard's refusal naming who can.
+                    None => {
+                        let code = if caller_may_administer(&client) {
+                            enrollment_code(code_stdin)
+                        } else {
+                            Ok(None)
+                        };
+                        match code {
+                            Err(exit) => exit,
+                            Ok(code) => run_enroll_start(
+                                &client,
+                                json,
+                                &domain,
+                                code.as_ref(),
+                                &confirm,
+                                EnrollmentTerm::ALL
+                                    .into_iter()
+                                    .filter(|term| match term {
+                                        EnrollmentTerm::NonRemovable => accept_non_removable,
+                                        EnrollmentTerm::OrganizationOwned => {
+                                            accept_organization_owned
+                                        }
+                                    })
+                                    .collect(),
+                                |v| views::enroll_start(&style, v, &hostname),
+                            ),
+                        }
+                    }
                 },
                 EnrollCommand::Status => rpc(&client, json, "enroll.status", None, |v| {
                     views::enroll_status(&style, v, &hostname)
@@ -4702,9 +4846,32 @@ fn main() -> ExitCode {
                     }
                     // A person confirms with their password, as for enrolling.
                     // Asked after the yes, so the two-minute confirmation is
-                    // spent by the call it was typed for.
+                    // spent by the call it was typed for — and only once
+                    // punard has said a password is what it lacks: leaving
+                    // follows the device's own administrators, not the
+                    // organization's list, so `admins list` cannot answer
+                    // this one, and a bare request can.
+                    if !rustix::process::geteuid().is_root() {
+                        let probe = client.call("enroll.stop", None);
+                        let wants_password = matches!(
+                            &probe,
+                            Err(error) if error
+                                .server()
+                                .and_then(|wire| wire.details.as_ref())
+                                .and_then(|details| details["reason"].as_str())
+                                == Some("reauthentication_required")
+                        );
+                        if !wants_password {
+                            return match probe {
+                                Ok(result) => render_or_json(json, &result, |v| {
+                                    views::enroll_stop(&style, v, &hostname)
+                                }),
+                                Err(error) => fail(&error),
+                            };
+                        }
+                    }
                     let mut params = None;
-                    match confirmation(&confirm, "allow unenrolling this device") {
+                    match confirmation(&confirm, "allow unenrolling this device", "enroll.stop") {
                         Ok(Some(ticket)) => params = Some(json!({ "ticket": ticket.as_str() })),
                         Ok(None) => {}
                         Err(exit) => return exit,
@@ -4860,6 +5027,7 @@ fn main() -> ExitCode {
                 yes,
                 confirm_metadata_sha256,
                 acknowledge_host_access,
+                confirm,
             } => app_install(
                 &client,
                 &style,
@@ -4868,6 +5036,7 @@ fn main() -> ExitCode {
                 yes,
                 confirm_metadata_sha256,
                 acknowledge_host_access,
+                &confirm,
             ),
             AppCommand::Open { id, uris } => app_open(&client, &id, &uris),
             AppCommand::RunVendor { id } => app_run_vendor(&client, &id),
@@ -4876,10 +5045,15 @@ fn main() -> ExitCode {
                 executable,
                 schemes,
             } => app_vendor_session(&app_id, &executable, &schemes),
-            AppCommand::Remove { id, yes } => app_remove(&client, &style, json, &id, yes),
-            AppCommand::Update { id, all, yes } => {
-                app_update(&client, &style, json, id.as_deref(), all, yes)
+            AppCommand::Remove { id, yes, confirm } => {
+                app_remove(&client, &style, json, &id, yes, &confirm)
             }
+            AppCommand::Update {
+                id,
+                all,
+                yes,
+                confirm,
+            } => app_update(&client, &style, json, id.as_deref(), all, yes, &confirm),
         },
         Command::WebApps { command } => webapps::run(command, &client, &style, json),
         Command::Mail { command } => match command {
@@ -4988,10 +5162,12 @@ fn main() -> ExitCode {
                 });
                 let purpose =
                     format!("allow pinning {path} to {value} for everyone on this device");
-                match confirmation(&confirm, &purpose) {
-                    Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
-                    Ok(None) => {}
-                    Err(exit) => return exit,
+                if caller_may_administer(&client) {
+                    match confirmation(&confirm, &purpose, "policy.set") {
+                        Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
+                        Ok(None) => {}
+                        Err(exit) => return exit,
+                    }
                 }
                 rpc(&client, json, "policy.set", Some(params), |v| {
                     views::policy_set(&style, v)
@@ -5008,10 +5184,12 @@ fn main() -> ExitCode {
                     "reason": reason,
                 });
                 let purpose = format!("allow withdrawing the pin on {path} for everyone");
-                match confirmation(&confirm, &purpose) {
-                    Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
-                    Ok(None) => {}
-                    Err(exit) => return exit,
+                if caller_may_administer(&client) {
+                    match confirmation(&confirm, &purpose, "policy.set") {
+                        Ok(Some(ticket)) => params["ticket"] = json!(ticket.as_str()),
+                        Ok(None) => {}
+                        Err(exit) => return exit,
+                    }
                 }
                 rpc(&client, json, "policy.set", Some(params), |v| {
                     views::policy_set(&style, v)
@@ -5591,9 +5769,12 @@ fn main() -> ExitCode {
                 }),
                 UpdateCommand::Check { force, confirm } => {
                     let params = match with_person_ticket(
+                        &client,
                         json!({ "force": force }),
                         &confirm,
                         "allow checking this device's update channel",
+                        "update.check",
+                        false,
                     ) {
                         Ok(params) => params,
                         Err(exit) => return exit,
@@ -5609,12 +5790,15 @@ fn main() -> ExitCode {
                     confirm,
                 } => {
                     let params = match with_person_ticket(
+                        &client,
                         json!({
                             "version": version,
                             "allow_downgrade": allow_downgrade,
                         }),
                         &confirm,
                         &format!("allow installing Punar {version}"),
+                        "update.apply",
+                        true,
                     ) {
                         Ok(params) => params,
                         Err(exit) => return exit,
@@ -5684,9 +5868,12 @@ fn main() -> ExitCode {
                             .to_string(),
                     };
                     let params = match with_person_ticket(
+                        &client,
                         json!({ "to_version": to_version }),
                         &confirm,
                         &purpose,
+                        "update.rollback",
+                        true,
                     ) {
                         Ok(params) => params,
                         Err(exit) => return exit,
@@ -5773,6 +5960,7 @@ mod tests {
             for extra in [
                 &["--password-fd", "3"][..],
                 &["--ticket-fd", "4"],
+                &["--ticket-from-parent"],
                 &["--password-from-parent"],
                 &["--ticket-stdin"],
                 &["--password-stdin"],

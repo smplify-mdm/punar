@@ -46,6 +46,8 @@ const AGENT: &str = "agt_4f21c09ab3e1";
 /// is written at `<proc_root>/<pid>/cgroup`.
 const AGENT_PID: i32 = 4242;
 const HUMAN_PID: i32 = 4243;
+/// When the human peer's process started, in its fake `/proc/<pid>/stat`.
+const HUMAN_START: u64 = 424_300;
 /// A peer sitting in a scope that *names* a managed agent session but spells
 /// no valid id (`punar-agent-notasession.scope`). Attribution refuses to name
 /// it — `agent_session_in_cgroup` returns `None` — while the wide M9 rule
@@ -112,6 +114,14 @@ punar-agent-{AGENT}.scope\n"
         fs::write(
             proc_root.join(HUMAN_PID.to_string()).join("cgroup"),
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-1.scope\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_root.join(HUMAN_PID.to_string()).join("stat"),
+            format!(
+                "{HUMAN_PID} (punarctl) S 1 {HUMAN_PID} {HUMAN_PID} 0 -1 4194560 0 0 0 0 0 0 0 0 \
+                 20 0 1 0 {HUMAN_START} 0 0\n"
+            ),
         )
         .unwrap();
         fs::create_dir_all(proc_root.join(SMELLY_PID.to_string())).unwrap();
@@ -286,10 +296,22 @@ punar-agent-notasession.scope\n",
             .unwrap();
         // A clock the test has made unreadable mints what punar-authd would
         // mint then: a ticket with no stamp, which nothing accepts.
+        // Bound, as punar-authd binds every ticket, to the call it is for and
+        // to the process that presents it (the human peer).
         let body = self
             .clock
             .now()
-            .map(|stamp| serde_json::to_vec(&stamp).unwrap())
+            .map(|minted| {
+                serde_json::to_vec(&punar_common::reauth_ticket::TicketBody {
+                    minted,
+                    action: "approvals.resolve".to_string(),
+                    spender: punar_common::reauth_ticket::Spender {
+                        pid: HUMAN_PID as u32,
+                        start: HUMAN_START,
+                    },
+                })
+                .unwrap()
+            })
             .unwrap_or_default();
         fs::write(per_uid.join(&token), body).unwrap();
         token
@@ -384,8 +406,13 @@ punar-agent-notasession.scope\n",
             .collect()
     }
 
+    /// The console user's view, where the overlay reads it.
     fn summary(&self) -> Value {
-        let text = fs::read_to_string(self.dir.join("state/approvals.json")).unwrap();
+        let text = fs::read_to_string(
+            self.dir
+                .join(format!("state/approval-views/{CONSOLE_UID}.json")),
+        )
+        .unwrap();
         serde_json::from_str(&text).unwrap()
     }
 
@@ -1130,9 +1157,31 @@ fn an_approval_is_answered_only_by_the_user_it_is_routed_to() {
     assert!(message.contains("not other"), "{message}");
     assert!(message.contains("expires at"), "{message}");
     assert!(!message.contains("as root"), "{message}");
-    // Reading it is still fine — a gate is not a secret.
+    // Nor may they read it (F0 review): an approval routed to someone else
+    // is that person's — its reason, its requester, what it would change.
+    // `get` answers exactly as for an approval that does not exist, and
+    // `list` counts it as withheld without showing it.
     let got = daemon.call("approvals.get", Some(json!({ "approval_id": approval_id })));
-    assert_eq!(got["result"]["approval"]["status"], "pending");
+    assert_eq!(got["error"]["code"], "not_found", "{got}");
+    let listed = daemon.call("approvals.list", None);
+    assert_eq!(listed["result"]["approvals"], json!([]), "{listed}");
+    assert_eq!(listed["result"]["withheld"], 1, "{listed}");
+    // And no view of it is published for them.
+    let other_view = daemon.dir.join("state/approval-views/1001.json");
+    if other_view.exists() {
+        let view: Value = serde_json::from_str(&fs::read_to_string(&other_view).unwrap()).unwrap();
+        assert_eq!(view["approvals"], json!([]), "{view}");
+    }
+
+    // The routed user reads it, and root reads everything.
+    daemon.become_user(CONSOLE_UID);
+    let got = daemon.call("approvals.get", Some(json!({ "approval_id": approval_id })));
+    assert_eq!(got["result"]["approval"]["status"], "pending", "{got}");
+    let listed = daemon.call("approvals.list", None);
+    assert_eq!(listed["result"]["withheld"], 0, "{listed}");
+    daemon.become_root();
+    let got = daemon.call("approvals.get", Some(json!({ "approval_id": approval_id })));
+    assert_eq!(got["result"]["approval"]["status"], "pending", "{got}");
 
     // The routed user may answer it.
     daemon.become_user(CONSOLE_UID);

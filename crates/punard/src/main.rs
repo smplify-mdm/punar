@@ -102,12 +102,13 @@ struct RunArgs {
     #[arg(long, default_value = punard::enroll::DEFAULT_STATUS_FILE)]
     status_file: PathBuf,
 
-    /// M9 approval summary the shell watches (docs/api/ipc.md section 15).
-    /// Inside the `0750 root:punar` `/run/punard`, deliberately not beside
-    /// the world-readable status summary: approval details are admitted-user
-    /// data, and a file a local process can substitute is a spoofing primitive.
-    #[arg(long, default_value = punar_common::approval::APPROVALS_SUMMARY_FILE)]
-    approvals_file: PathBuf,
+    /// M9 approval views the shell watches, one `<uid>.json` per person
+    /// (docs/api/ipc.md section 15). Inside the `0750 root:punar`
+    /// `/run/punard`, deliberately not beside the world-readable status
+    /// summary: approval details are a person's own data, and a file a local
+    /// process can substitute is a spoofing primitive.
+    #[arg(long, default_value = punar_common::approval::APPROVALS_SUMMARY_DIR)]
+    approvals_dir: PathBuf,
 
     /// M9 AI authority document (SPEC section 20). A missing or unreadable
     /// file falls back to the compiled-in personal defaults — the same
@@ -240,7 +241,7 @@ fn run(args: RunArgs) -> ExitCode {
         control_plane_override_refused,
         agentd_socket,
         status_file: args.status_file,
-        approvals_file: args.approvals_file,
+        approvals_dir: args.approvals_dir,
         ai_defaults_file: args.ai_defaults_file,
         console_uid: args.console_uid,
         device_class_override: args.device_class_override,

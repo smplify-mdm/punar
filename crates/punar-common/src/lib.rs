@@ -85,6 +85,7 @@ pub mod ledger;
 pub mod network;
 pub mod principal;
 pub mod query;
+pub mod reauth_ticket;
 mod redacted;
 pub mod storage;
 pub mod time;

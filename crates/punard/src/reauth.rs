@@ -28,6 +28,16 @@
 //! punar-authd minted during an upgrade: the person types their password
 //! again), or when punard cannot read its own clock.
 //!
+//! WHAT THE TICKET SAYS: FOR WHICH CALL, AND BY WHOM (F0-S1, F0-S4). Since
+//! the F0 review the body is a [`TicketBody`]: the mint stamp above, the one
+//! IPC method the person typed their password for, and the one process — pid
+//! and start time — that may present it. A ticket is spent only on that
+//! method, and only when the connection's peer (`SO_PEERCRED`) is that
+//! process. So a confirmation given to approve a time-zone change cannot be
+//! spent on `admins.set`, and a ticket copied out of the process it was meant
+//! for — however it was copied — is worth nothing to the copier. An older
+//! punar-authd's bare stamp binds nothing and is refused as expired.
+//!
 //! WHAT SPENDING MEANS. The unlink is the commit, and it happens before the age
 //! is judged. Two callers racing on one token may both read the file; only one
 //! `remove_file` succeeds, and that one is the spender. Judging the age first
@@ -37,7 +47,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use punar_common::trusted_time::{BootStamp, BootWindow, TrustedClock};
+use punar_common::reauth_ticket::{Spender, TICKET_MAX_BYTES, TicketBody};
+use punar_common::trusted_time::{BootWindow, TrustedClock};
 
 /// Where `punar-authd` mints tickets (`punar_auth::protocol::TICKET_DIR`, not
 /// imported: punard does not link libpam and must not grow a dependency on the
@@ -56,10 +67,6 @@ pub const TICKET_MAX_AGE_SECS: u64 = 120;
 /// a malformed token rather than resolved.
 const TOKEN_LEN: usize = 64;
 
-/// More than any stamp punar-authd writes (a 36-byte boot id and an integer);
-/// a larger file is not a ticket, and is not read past this.
-const TICKET_MAX_BYTES: u64 = 256;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReauthError {
     /// The token is not the shape punar-authd mints. Never reaches the
@@ -74,6 +81,11 @@ pub enum ReauthError {
     /// and saying "no such ticket" there would send a person looking for a
     /// fault.
     Expired,
+    /// It was typed for a different call than the one presenting it.
+    WrongAction,
+    /// It was minted for a different process than the one presenting it —
+    /// the mark of a ticket copied out of the program it was meant for.
+    WrongProcess,
 }
 
 impl ReauthError {
@@ -90,6 +102,12 @@ impl ReauthError {
             ReauthError::Expired => {
                 "the confirmation took longer than two minutes and has expired, so nothing was changed"
             }
+            ReauthError::WrongAction => {
+                "the confirmation was given for a different change, so nothing was changed"
+            }
+            ReauthError::WrongProcess => {
+                "the confirmation was given to a different program than the one that sent it, so nothing was changed"
+            }
         }
     }
 
@@ -99,17 +117,24 @@ impl ReauthError {
             ReauthError::Malformed => "malformed",
             ReauthError::Missing => "missing",
             ReauthError::Expired => "expired",
+            ReauthError::WrongAction => "wrong_action",
+            ReauthError::WrongProcess => "wrong_process",
         }
     }
 }
 
-/// Spend `token` on behalf of `uid`, judging its age on `clock`. Consumes the
-/// ticket whether or not it turns out to be fresh: a presented ticket is spent.
+/// Spend `token` on behalf of `uid` for the call `action`, presented by the
+/// process `spender` (the connection's peer, as the kernel names it; `None`
+/// when it could not be resolved, which no ticket matches), judging its age on
+/// `clock`. Consumes the ticket whether or not it turns out to be good: a
+/// presented ticket is spent.
 pub fn consume(
     dir: &Path,
     uid: u32,
     token: &str,
     clock: &dyn TrustedClock,
+    action: &str,
+    spender: Option<Spender>,
 ) -> Result<(), ReauthError> {
     if token.len() != TOKEN_LEN
         || !token
@@ -126,12 +151,17 @@ pub fn consume(
     // The unlink IS the spend. Losing this race means somebody else spent it.
     fs::remove_file(&path).map_err(|_| ReauthError::Missing)?;
 
-    let minted: Option<BootStamp> = (body.len() as u64 <= TICKET_MAX_BYTES)
-        .then(|| serde_json::from_slice(&body).ok())
-        .flatten();
-    let window = minted.map(|stamp| BootWindow::of_secs(stamp, TICKET_MAX_AGE_SECS));
-    if !window.is_some_and(|w| w.is_open(clock.now().as_ref())) {
+    let Some(ticket) = TicketBody::parse(&body) else {
         return Err(ReauthError::Expired);
+    };
+    if !BootWindow::of_secs(ticket.minted, TICKET_MAX_AGE_SECS).is_open(clock.now().as_ref()) {
+        return Err(ReauthError::Expired);
+    }
+    if ticket.action != action {
+        return Err(ReauthError::WrongAction);
+    }
+    if spender != Some(ticket.spender) {
+        return Err(ReauthError::WrongProcess);
     }
     Ok(())
 }
@@ -167,10 +197,31 @@ mod tests {
         path
     }
 
-    /// A ticket stamped at `clock`'s current reading, as punar-authd mints it.
+    const ACTION: &str = "policy.set";
+    const SPENDER: Spender = Spender {
+        pid: 4242,
+        start: 98_765,
+    };
+
+    /// A ticket stamped at `clock`'s current reading, for [`ACTION`] by
+    /// [`SPENDER`], as punar-authd mints it.
     fn mint(dir: &Path, uid: u32, token: &str, clock: &ManualClock) -> PathBuf {
-        let stamp = clock.now().unwrap();
-        mint_body(dir, uid, token, &serde_json::to_vec(&stamp).unwrap())
+        let body = TicketBody {
+            minted: clock.now().unwrap(),
+            action: ACTION.to_string(),
+            spender: SPENDER,
+        };
+        mint_body(dir, uid, token, &serde_json::to_vec(&body).unwrap())
+    }
+
+    /// Present `token` as [`SPENDER`] making the [`ACTION`] call.
+    fn spend(
+        dir: &Path,
+        uid: u32,
+        token: &str,
+        clock: &dyn TrustedClock,
+    ) -> Result<(), ReauthError> {
+        consume(dir, uid, token, clock, ACTION, Some(SPENDER))
     }
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -180,10 +231,10 @@ mod tests {
         let dir = scratch("once");
         let clock = ManualClock::new(BOOT, T0);
         let path = mint(&dir, 1000, TOKEN, &clock);
-        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Ok(()));
         assert!(!path.exists(), "spending a ticket removes it");
         assert_eq!(
-            consume(&dir, 1000, TOKEN, &clock),
+            spend(&dir, 1000, TOKEN, &clock),
             Err(ReauthError::Missing),
             "a second presentation of the same ticket is not a second authorization"
         );
@@ -199,12 +250,9 @@ mod tests {
         let dir = scratch("uid");
         let clock = ManualClock::new(BOOT, T0);
         let path = mint(&dir, 1000, TOKEN, &clock);
-        assert_eq!(
-            consume(&dir, 1001, TOKEN, &clock),
-            Err(ReauthError::Missing)
-        );
+        assert_eq!(spend(&dir, 1001, TOKEN, &clock), Err(ReauthError::Missing));
         assert!(path.exists(), "and the real owner's ticket was not spent");
-        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Ok(()));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -214,10 +262,7 @@ mod tests {
         let clock = ManualClock::new(BOOT, T0);
         let path = mint(&dir, 1000, TOKEN, &clock);
         clock.advance_secs(TICKET_MAX_AGE_SECS + 1);
-        assert_eq!(
-            consume(&dir, 1000, TOKEN, &clock),
-            Err(ReauthError::Expired)
-        );
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Err(ReauthError::Expired));
         assert!(
             !path.exists(),
             "an expired ticket must not survive to be retried against a lenient clock"
@@ -236,15 +281,12 @@ mod tests {
         let clock = ManualClock::new(BOOT, T0);
         mint(&dir, 1000, TOKEN, &clock);
         clock.advance_ms(budget - 1);
-        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Ok(()));
 
         let clock = ManualClock::new(BOOT, T0);
         mint(&dir, 1000, TOKEN, &clock);
         clock.advance_ms(budget);
-        assert_eq!(
-            consume(&dir, 1000, TOKEN, &clock),
-            Err(ReauthError::Expired)
-        );
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Err(ReauthError::Expired));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -256,10 +298,7 @@ mod tests {
         let clock = ManualClock::new(BOOT, T0);
         let path = mint(&dir, 1000, TOKEN, &clock);
         clock.reboot(NEXT_BOOT, T0 + 1);
-        assert_eq!(
-            consume(&dir, 1000, TOKEN, &clock),
-            Err(ReauthError::Expired)
-        );
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Err(ReauthError::Expired));
         assert!(!path.exists(), "and it was spent all the same");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -273,15 +312,12 @@ mod tests {
         let path = mint(&dir, 1000, TOKEN, &clock);
         clock.advance_secs(5);
         clock.suspend(3_000);
-        assert_eq!(
-            consume(&dir, 1000, TOKEN, &clock),
-            Err(ReauthError::Expired)
-        );
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Err(ReauthError::Expired));
         assert!(!path.exists(), "and it was spent all the same");
         // One minted after the resume is good.
         mint(&dir, 1000, TOKEN, &clock);
         clock.advance_secs(5);
-        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Ok(()));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -295,7 +331,7 @@ mod tests {
         mint(&dir, 1000, TOKEN, &clock);
         let earlier = ManualClock::new(BOOT, T0);
         assert_eq!(
-            consume(&dir, 1000, TOKEN, &earlier),
+            spend(&dir, 1000, TOKEN, &earlier),
             Err(ReauthError::Expired)
         );
         let _ = fs::remove_dir_all(&dir);
@@ -311,7 +347,7 @@ mod tests {
         let file = fs::File::options().write(true).open(&path).unwrap();
         file.set_modified(std::time::UNIX_EPOCH).unwrap();
         drop(file);
-        assert_eq!(consume(&dir, 1000, TOKEN, &clock), Ok(()));
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Ok(()));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -327,6 +363,9 @@ mod tests {
         let oversized = format!("{stamp}{}", " ".repeat(TICKET_MAX_BYTES as usize));
         for body in [
             String::new(),
+            // An older punar-authd's ticket: a perfectly good stamp that
+            // binds no call and no process.
+            stamp.clone(),
             "not json".to_string(),
             format!(r#"{{"boot_id":"{BOOT}"}}"#),
             format!(r#"{{"boot_id":"{BOOT}","raw_bt_ms":{T0}}}"#),
@@ -340,7 +379,7 @@ mod tests {
         ] {
             let path = mint_body(&dir, 1000, TOKEN, body.as_bytes());
             assert_eq!(
-                consume(&dir, 1000, TOKEN, &clock),
+                spend(&dir, 1000, TOKEN, &clock),
                 Err(ReauthError::Expired),
                 "{body:?}"
             );
@@ -349,10 +388,7 @@ mod tests {
 
         mint(&dir, 1000, TOKEN, &clock);
         clock.set(None);
-        assert_eq!(
-            consume(&dir, 1000, TOKEN, &clock),
-            Err(ReauthError::Expired)
-        );
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Err(ReauthError::Expired));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -373,7 +409,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefg",
         ] {
             assert_eq!(
-                consume(&dir, 1000, bad, &clock),
+                spend(&dir, 1000, bad, &clock),
                 Err(ReauthError::Malformed),
                 "token {bad:?}"
             );
@@ -385,9 +421,55 @@ mod tests {
     fn an_absent_directory_is_a_missing_ticket_and_not_a_crash() {
         let dir = scratch("absent");
         let clock = ManualClock::new(BOOT, T0);
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Err(ReauthError::Missing));
+    }
+
+    /// F0 review: a confirmation is spent by the call it was typed for, and
+    /// by the process it was minted for, or not at all — and a presentation
+    /// that fails either test still spends it, so the copier cannot retry.
+    #[test]
+    fn a_ticket_is_spent_only_on_its_call_by_its_process() {
+        let dir = scratch("bound");
+        let clock = ManualClock::new(BOOT, T0);
+
+        let path = mint(&dir, 1000, TOKEN, &clock);
         assert_eq!(
-            consume(&dir, 1000, TOKEN, &clock),
-            Err(ReauthError::Missing)
+            consume(&dir, 1000, TOKEN, &clock, "admins.set", Some(SPENDER)),
+            Err(ReauthError::WrongAction)
         );
+        assert!(
+            !path.exists(),
+            "a ticket presented for another call is spent"
+        );
+
+        for (who, what) in [
+            (None, "a peer whose process could not be resolved"),
+            (
+                Some(Spender {
+                    pid: 4243,
+                    ..SPENDER
+                }),
+                "another process",
+            ),
+            (
+                Some(Spender {
+                    start: SPENDER.start + 1,
+                    ..SPENDER
+                }),
+                "a later process that reused the pid",
+            ),
+        ] {
+            let path = mint(&dir, 1000, TOKEN, &clock);
+            assert_eq!(
+                consume(&dir, 1000, TOKEN, &clock, ACTION, who),
+                Err(ReauthError::WrongProcess),
+                "{what}"
+            );
+            assert!(!path.exists(), "{what}: spent all the same");
+        }
+
+        mint(&dir, 1000, TOKEN, &clock);
+        assert_eq!(spend(&dir, 1000, TOKEN, &clock), Ok(()));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

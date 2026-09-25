@@ -78,6 +78,13 @@ pub struct Account {
     pub uid: u32,
     pub administrator: bool,
     pub origin: Origin,
+    /// Whether a person can sign in as this account right now: its user
+    /// record is published (`/run/userdb/<user>.user`, what the materializer
+    /// writes at boot) or the image ships it in `/etc/passwd`. An
+    /// administrator nobody can sign in as administers nothing, so "never
+    /// zero administrators" counts only these.
+    #[serde(skip)]
+    pub signs_in: bool,
 }
 
 /// Why `admins.set` could not change a role. Every variant is a fact about
@@ -137,6 +144,7 @@ impl AdminSources {
                 Some(Account {
                     administrator: self.is_member(&user),
                     uid: record_uid(&record)?,
+                    signs_in: self.signs_in(&user),
                     user,
                     origin: Origin::Onboarded,
                 })
@@ -146,16 +154,24 @@ impl AdminSources {
             if accounts.iter().any(|account| account.user == member) {
                 continue;
             }
-            let uid = uid_of_name(&self.passwd_file, &member).unwrap_or(u32::MAX);
+            let uid = uid_of_name(&self.passwd_file, &member);
             accounts.push(Account {
                 user: member,
-                uid,
+                uid: uid.unwrap_or(u32::MAX),
                 administrator: true,
                 origin: Origin::Image,
+                signs_in: uid.is_some(),
             });
         }
         accounts.sort_by(|a, b| a.uid.cmp(&b.uid).then_with(|| a.user.cmp(&b.user)));
         accounts
+    }
+
+    /// Whether a person can sign in as `user` now ([`Account::signs_in`]).
+    pub fn signs_in(&self, user: &str) -> bool {
+        name_ok(user)
+            && (self.userdb_dir.join(format!("{user}.user")).is_file()
+                || uid_of_name(&self.passwd_file, user).is_some())
     }
 
     /// Give `user` the role or take it away. `Ok(true)` when something
@@ -342,6 +358,7 @@ mod tests {
         });
         fs::write(dir.join("account.json"), record.to_string()).unwrap();
         fs::create_dir_all(&src.userdb_dir).unwrap();
+        fs::write(src.userdb_dir.join(format!("{user}.user")), "{}").unwrap();
         for group in groups {
             fs::write(
                 src.userdb_dir.join(format!("{user}:{group}.membership")),
@@ -429,6 +446,7 @@ mod tests {
                 uid: 1000,
                 administrator: true,
                 origin: Origin::Image,
+                signs_in: true,
             }]
         );
         assert!(matches!(
@@ -495,6 +513,30 @@ mod tests {
         assert!(src.is_member("bob"));
         assert!(src.set_member("bob", false).unwrap());
         assert!(!src.is_member("bob"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An account whose user record boot does not publish cannot be signed
+    /// in as, however its record reads.
+    #[test]
+    fn only_a_published_account_signs_in() {
+        let dir = scratch("signs-in");
+        let src = sources(&dir);
+        onboard(&src, "acct_0000000000000001", "alice", 1000, &["punar"]);
+        assert!(src.signs_in("alice"));
+        fs::remove_file(src.userdb_dir.join("alice.user")).unwrap();
+        assert!(!src.signs_in("alice"));
+        assert!(!src.accounts()[0].signs_in);
+        assert!(!src.signs_in("../alice"));
+        fs::write(
+            &src.passwd_file,
+            "root:x:0:0::/root:/bin/bash\npunar:x:1000:970::/home/punar:/bin/bash\n",
+        )
+        .unwrap();
+        assert!(
+            src.signs_in("punar"),
+            "an image account signs in through /etc/passwd"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -45,9 +45,6 @@ HELPERS = {
     "qs": (("CommandCenter/Actions.qml", "CommandCenter/CommandCenter.qml", "Bar/StatusCluster.qml"),
            "the shell's own IPC to itself (open a surface, probe its targets); "
            "a surface is not a device or session action"),
-    "/usr/bin/punar-auth": (("Lock/Lock.qml",),
-                            "the lock screen's password check through PAM; unlocking "
-                            "is the lock surface's own job and has no terminal form"),
     "/usr/bin/date": (("Services/LocalTime.qml",),
                       "formats the bar clock; reads nothing a daemon owns"),
     "busctl": (("Services/Notifications.qml",),
@@ -69,8 +66,8 @@ HELPERS = {
 # A launch whose argv is a variable. Each names what fills it.
 DYNAMIC = {
     ("Services/PasswordRun.qml", "argv"):
-        "PasswordRun.start's funnel; every caller passes a literal punarctl argv with "
-        "--password-from-parent, which this test checks",
+        "PasswordRun.start's funnel; every caller passes a literal /usr/bin/punarctl argv "
+        "with --ticket-from-parent and the IPC method its ticket is for, which this test checks",
     ("SystemControl/ControlData.qml", "argv"):
         "runMutation's own funnel; every caller passes a literal argv this test checks",
     ("SystemControl/ControlData.qml", "probe"):
@@ -173,13 +170,16 @@ for name, reason in FILE_EXCEPTIONS.items():
     if len(reason) < 30:
         problems.append(f"the exception for {name} needs a real reason")
 
-# PasswordRun (F0-S4) hands a password to the command it starts, so what it
-# starts is held to more than the rule above: every `<run>.start(argv, …)` on a
-# PasswordRun instance passes punarctl's own argv — a literal, or a local
-# variable whose assignment is made only of literals — and every one of those
-# carries --password-from-parent, the socket handoff PasswordRun implements.
-# Anything else would hand a password to a program nobody reviewed, or leave
-# punarctl waiting on a terminal it does not have.
+# PasswordRun (F0-S4) confirms the command it starts with a ticket punar-authd
+# binds to that process, so what it starts is held to more than the rule
+# above: every `<run>.start(argv, …, action)` on a PasswordRun instance passes
+# punarctl's own argv by its ABSOLUTE path — a punarctl earlier on PATH would
+# be the process the ticket is bound to — as a literal, or a local variable
+# whose assignment is made only of literals; every one of those carries
+# --ticket-from-parent, the relay PasswordRun implements; and the call names
+# the IPC method the ticket is for, as a string literal that is a method name.
+# Anything else would bind a confirmation to a program nobody reviewed, or
+# leave punarctl waiting on a terminal it does not have.
 password_starts = 0
 for qml in sorted(shell.rglob("*.qml")):
     relative = str(qml.relative_to(shell))
@@ -208,10 +208,27 @@ for qml in sorted(shell.rglob("*.qml")):
                 continue
             for literal in literals:
                 first = FIRST.match(literal)
-                if first is None or first.group(1) not in PUNARCTL:
-                    problems.append(f"{where}: {run}.start() would hand a password to {literal[:40]}…, not punarctl")
-                if '"--password-from-parent"' not in literal:
-                    problems.append(f"{where}: {run}.start() runs an argv without --password-from-parent")
+                if first is None or first.group(1) != "/usr/bin/punarctl":
+                    problems.append(f"{where}: {run}.start() would bind a confirmation to {literal[:40]}…, not /usr/bin/punarctl")
+                if '"--ticket-from-parent"' not in literal:
+                    problems.append(f"{where}: {run}.start() runs an argv without --ticket-from-parent")
+                if '"--password-from-parent"' in literal:
+                    problems.append(f"{where}: {run}.start() still passes the removed --password-from-parent")
+            # The call's last argument: the IPC method the ticket is for.
+            depth, end = 0, None
+            for index in range(call.start(1), len(text)):
+                char = text[index]
+                if char in "([":
+                    depth += 1
+                elif char in ")]":
+                    if depth == 0:
+                        end = index
+                        break
+                    depth -= 1
+            tail = text[call.start(1):end] if end is not None else ""
+            method = re.search(r',\s*"([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)"\s*$', tail)
+            if method is None:
+                problems.append(f"{where}: {run}.start() does not name the IPC method its ticket is for")
             password_starts += 1
 if password_starts == 0:
     problems.append("no PasswordRun.start() call was found; the DYNAMIC entry for PasswordRun is unchecked")

@@ -8,7 +8,7 @@ pragma ComponentBehavior: Bound
 // "THE CENTRE IS A LEDGER OF INTERRUPTIONS, GROUPED BY WHO SPOKE" — and
 // it reads three registers rather than keeping one of its own:
 //
-//   Approvals      punard's `/run/punard/approvals.json`, via the M9
+//   Approvals      punard's `/run/punard/approvals/<uid>.json`, via the M9
 //                  Approvals singleton. STICKY: `x` and `Clear all` skip
 //                  them, because an approval is a decision, not noise —
 //                  it leaves by being approved, denied or expiring

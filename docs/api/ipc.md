@@ -239,7 +239,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `enroll.start` (M5)     | root, or a person with a fresh `punar-authd` ticket; agents never (section 5.9) | yes  | always  | **yes** (§23.2) |
 | `enroll.status` (M5)    | any connected peer | no      | no      | — |
 | `enroll.stop` (M5)      | nobody, where the organization enrolled the device as not removable; otherwise root, or a person with a fresh `punar-authd` ticket; agents never (section 5.11) | yes  | always  | **yes**, the device's own list (§23.4) |
-| `approvals.list` / `approvals.get` (M9) | any connected peer | no (lazy expiry sweep) | no | — |
+| `approvals.list` / `approvals.get` (M9) | any connected peer; **scoped to the approvals routed to the caller** (root sees all; §14.2) | no (lazy expiry sweep) | no | — |
 | `approvals.create` (M9) | **root only (uid 0)** | yes | always | — |
 | `approvals.resolve` (M9) | **human only** (§14.5) | yes (may execute) | always | **yes** to approve a `capability_set` or `privilege_request`, with a ticket (§23.2) |
 | `approvals.consume` (M9) | **root only (uid 0)** | yes | always | — |
@@ -248,9 +248,9 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | `privilege.revoke` (M9) | grant owner or root | yes | always | — |
 | `apps.catalog` | any connected peer | no | no | — |
 | `apps.list` | any connected peer | no | no | — |
-| `apps.install` | **human; managed policy decides when enrolled** | yes | always | — |
-| `apps.remove` | **human; managed policy decides when enrolled** | yes | always | — |
-| `apps.update` | **human; managed policy decides per installed app** | yes | always | — |
+| `apps.install` | **human; managed policy decides when enrolled; then a device administrator** | yes | always | **yes** (§23.2) |
+| `apps.remove` | **human; managed policy decides when enrolled; then a device administrator** | yes | always | **yes** (§23.2) |
+| `apps.update` | **human; managed policy decides per installed app; a device administrator** | yes | always | **yes** (§23.2) |
 | `webapps.list` / `webapps.get` | any connected peer; own uid only | no | no | — |
 | `webapps.install` / `webapps.uninstall` | **human; own uid; managed policy decides when enrolled** | yes | always | — |
 | `webapps.context_create` / `webapps.context_delete` | **human; own uid; reserved contexts protected** | yes | always | — |
@@ -795,6 +795,15 @@ depend on *who is asking* is settled before a password is requested:
    punard cannot read its clock is refused as `reauthentication_expired`,
    and is spent all the same.
 
+   **Binding (F0 review, §23.5).** Since F0 the file is
+   `{"minted": <that stamp>, "action": "<method>", "spender": {"pid": …,
+   "start": …}}`: a ticket is spent only on the method named in `action`,
+   and only when the connection's peer (`SO_PEERCRED`) is the process named
+   by `spender` — pid and kernel start time. Presented for another call it is
+   refused as `reauthentication_wrong_action`, from another process as
+   `reauthentication_wrong_process`, and is spent either way. A bare stamp
+   binds nothing and is refused as `reauthentication_expired`.
+
 **F0 amendment (§23):** between steps 5 and 6, a caller other than root must
 be a **device administrator** — refused with `device_admin_required` before
 their ticket is spent, and audited. Device policy binds everyone who uses the
@@ -1281,10 +1290,16 @@ installed packages.
 Params:
 
 ```json
-{"id":"spotify","confirm_metadata_sha256":"<64 lowercase hex>"}
+{"id":"spotify","confirm_metadata_sha256":"<64 lowercase hex>","ticket":"<64 hex>"}
 ```
 
-The digest is the value shown by the calling app card. Under a single daemon
+`ticket` (F0 review, §23.2) is a `punar-authd` ticket minted for
+`apps.install` and the calling process; absent only for root. An application
+installed system-wide changes what every person on the device runs, so a
+person other than root must be a device administrator — checked after the
+organization's application policy and the digest shape, before the ticket is
+spent. `apps.remove` and `apps.update` carry the same optional `ticket`, for
+their own method. The digest is the value shown by the calling app card. Under a single daemon
 transaction lock, a Flatpak install re-inspects the exact pinned commit and
 requires the catalog digest, caller-confirmed digest and observed digest to
 agree before fixed-argv installation and resulting-commit verification.
@@ -2982,8 +2997,8 @@ the current status.
 
 | Method | AuthZ | Mutating | Audited |
 |---|---|---|---|
-| `approvals.list` | any connected peer | no (lazy expiry sweep) | no |
-| `approvals.get` | any connected peer | no (lazy expiry sweep) | no |
+| `approvals.list` | any connected peer; **a person sees the approvals routed to them, and a `withheld` count** (root sees all; F0 review, §23.2) | no (lazy expiry sweep) | no |
+| `approvals.get` | any connected peer; **an approval routed to someone else answers `not_found`**, as one that does not exist (root reads all) | no (lazy expiry sweep) | no |
 | `approvals.create` | **root only (uid 0)**, and **never from an agent-shaped peer** — see 14.5 | yes | always |
 | `approvals.resolve` | **human only** — see 14.5 | yes (may execute) | always |
 | `approvals.consume` | **root only (uid 0)** | yes | always |
@@ -3307,7 +3322,7 @@ lifecycle-paced; M9 adds no per-check or per-consult event class (spec
 
 ---
 
-## 15. Side contract (M9): `/run/punard/approvals.json`
+## 15. Side contract (M9): `/run/punard/approvals/<uid>.json`
 
 Not IPC — the approval sibling of section 9's `status.json` and section
 13.2's `ledger.json`, written atomically (tmp + `fsync` + `rename`) by
@@ -3316,13 +3331,28 @@ punard at **every** approval state transition and every grant change, so
 `ELEVATED` bar chip with an event-driven `FileView` and **no socket
 client in the shell**.
 
-- **`0640 root:punar`, inside the `0750 root:punar` `/run/punard`
-  directory** — deliberately *not* `/run/punar` alongside the
-  world-readable `status.json`/`agents.json`. Approval details are visible
-  only to admitted users, and root ownership prevents local replacement.
-  Both properties matter for **the file that tells a human what they are
-  about to authorize**; this is the same argument that put `ledger.json` in
-  `/run/punar-agentd`.
+- **One file per person (F0 review).** `/run/punard/approvals/<uid>.json`
+  holds the approvals routed to that person (`user` is their name or
+  `uid:<uid>`) and their own live grants, nothing else. It used to be one
+  `/run/punard/approvals.json`, `0640 root:punar` — and every account is in
+  `punar`, so each person could read every person's agent requests, the
+  justifications written for them and every live grant. A view is written
+  for every person account, the console user and every grant holder, and
+  removed when its person is no longer one; root gets none (root reads the
+  socket).
+- **`0640 root:root` plus the POSIX ACL entry `user:<uid>:r--` (mask `r--`),
+  set before the name exists**, in the `0755 root:root`
+  `/run/punard/approvals` inside the `0750 root:punar` `/run/punard` — never
+  `/run/punar` alongside the world-readable `status.json`/`agents.json`. Not
+  a group: a person's primary group is not guaranteed to be theirs alone.
+  Not the person as owner: an owner can chmod and rewrite a file, and root
+  ownership is what prevents local replacement of **the file that tells a
+  human what they are about to authorize**; this is the same argument that
+  put `ledger.json` in `/run/punar-agentd`. A filesystem without POSIX ACLs
+  gets no view at all (fail closed), never a readable one.
+- The shell reads its own uid's file (the uid of its `/run/user/<uid>`
+  runtime directory); `punarctl approvals wait` watches the same file as its
+  wake source.
 - Content:
 
 ```json
@@ -4312,7 +4342,8 @@ An action **reaches another person** when it does any of these:
 
 Such an action needs **uid 0, or a device administrator who has just
 confirmed their password** (a fresh `punar-authd` ticket, spent by the call it
-was typed for — §5.8a's ticket rules, unchanged). An **agent-attributed
+was typed for and presented by the process it was minted for — §5.8a's ticket
+rules and the binding of §23.5, which punard enforces). An **agent-attributed
 caller is always refused**, at any uid — the wide agent test of §14.5 rule 1 —
 before either question is asked. **Every attempt is audited**, allowed or
 refused.
@@ -4356,12 +4387,13 @@ role as well.
 | `approvals.resolve` with `decision: approved` on a `capability_set` or `privilege_request` approval | executes a device-wide change, or mints the grant for one | organization's, else the device's | **yes — new optional `ticket` param**; `reauthentication_required` without one |
 | `capabilities.set` on the grant path (§14.8) | a device-wide change | organization's, else the device's | no — the grant was minted with one; the **role is re-checked at every use**, so taking it away takes the grant's effect away |
 | `admins.set` | who may act on everyone | organization's, else the device's | yes |
+| `apps.install`, `apps.update`, `apps.remove` (F0 review) | what every person on the device runs: the catalog's system-wide packages, installed, moved to a new version, or taken away from everyone who uses them | organization's, else the device's | **yes — new optional `ticket` param**; the organization's application policy is settled first, then the role, then the ticket; `apps.update --all` spends one ticket for the whole request |
 
 Outside punard's socket, the same rule reaches:
 
 | Path | What reaches others | Now |
 |---|---|---|
-| `org.freedesktop.login1.{reboot,power-off}-multiple-sessions` (polkit, `50-punar-power.rules`) | restarting or shutting down while another person is signed in ends their session | a device administrator at the active local seat (group `punar-admin`, as NSS reports it at the moment of asking); anyone else is refused, not challenged. With no other session open, the person at the seat still restarts unprompted. polkit cannot spend a `punar-authd` ticket, so the seat's physical presence stands in for the fresh password, and polkit reads the device's own group, not an organization's pinned list — both limits stated in the rule |
+| `org.freedesktop.login1.{reboot,power-off}-multiple-sessions` (polkit, `50-punar-power.rules`) | restarting or shutting down while another person is signed in ends their session | **refused to every subject** (F0 review): the rule needs a fresh password and, while enrolled, the organization's administrator list, and polkit can do neither — it cannot spend a `punar-authd` ticket, and it cannot read the list punard resolves. It answers NO outright rather than challenging for a password nobody at the seat can give. With no other session open, the person at the seat still restarts unprompted; root (which logind does not ask polkit about) and the power button on the case still work. A path for an administrator with a fresh password belongs with the other actions that end another uid's session |
 
 **Reads that would reveal another person's data are scoped, not refused.** A
 person keeps their own view; the rows of other people are left out and
@@ -4370,7 +4402,8 @@ row:
 
 | Read | Scoping |
 |---|---|
-| `audit.tail` | own events and the device's, `withheld` count (§5.5; F0-S3). The trail itself is `0640 root:punar-audit` (§6) |
+| `audit.tail` | own events and the device's, `withheld` count (§5.5; F0-S3). An event that names an agent session or a project (anything but `agt_none` / `system`) is the person's whose work it is, never the device's, even when a daemon wrote it as itself — punar-netd refusing an agent a zone, punar-agentd reaping a session: it is shown to root, and its person reads it in their session's access ledger (F0 review). The trail itself is `0640 root:punar-audit` in a setgid `2750 root:punar-audit` directory, so every writer's files are born in that group (§6) |
+| `approvals.list`, `approvals.get` | the approvals routed to the caller; `list` counts the rest as `withheld`, `get` answers `not_found` for one routed to someone else (§14.2). The shell's view is one ACL-guarded file per person (§15) |
 | `network.connections` (punar-netd) | own processes and managed sessions and the device's, `withheld` count (§21.3). Its side file is root-only |
 | the AI panel's ledger | read through `agents.access`, owner-or-root (§12.2); the device-wide side file `/run/punar-agentd/ledger.json` is `0640 root:punar-audit` (§13.2) |
 
@@ -4378,13 +4411,6 @@ Reviewed and left as they are, with the reason:
 
 - `update.check` refreshes the verified channel cache and changes nothing any
   person runs; it keeps its ticket and needs no role.
-- `apps.install`, `apps.update` and `apps.remove` act on the signed catalog's
-  sandboxed, system-wide packages, never on another person's data (per-user
-  application data is kept on removal), and are governed by the
-  organization's application policy while enrolled. Onboarding creates one
-  account per device today, so no other person exists for a removal to reach;
-  **before a second account can be created, `apps.remove` must join the table
-  above** (an app one person removes is gone for everyone). Owner review item.
 - `webapps.*`, `pim.mail.*` and `punar-secrets`' `credential.*` are scoped to
   the caller's own uid by `SO_PEERCRED`.
 - `approvals.resolve` with `decision: denied`, or on a `credential_request`,
@@ -4418,7 +4444,12 @@ development image only; release gate A24 refuses one in a release).
 
 `admins.set` — params `{"user": "bob", "administrator": true, "ticket":
 "<64 hex>"}` (`deny_unknown_fields`; `ticket` absent only for root). Always
-audited, `action: "admins.set"`, `resource: "account/<user>"`. The ladder:
+audited — every refusal too, with its reason as the event's `result`
+(`invalid_params`, `not_found`, `image_account`, `last_administrator`,
+`device_admin_required`, `reauthentication_required`) — `action:
+"admins.set"`, `resource: "account/<user>"`. One `admins.set` runs at a time
+from step 4 to step 7, so two administrators removing each other at once
+cannot both count the other and leave none. The ladder:
 
 1. an agent-shaped peer, at any uid → `denied` (`agent_scope`);
 2. an organization roster in `pinned` or `none` mode → `denied`
@@ -4427,7 +4458,11 @@ audited, `action: "admins.set"`, `resource: "account/<user>"`. The ladder:
 3. not an account name → `invalid_params`; no such account → `not_found`; an
    `image` account → `invalid_params` (`image_account`);
 4. **removing the last administrator** → `denied` (`last_administrator`,
-   audited with that result). A device always keeps one;
+   audited with that result). A device always keeps one — counting only
+   administrators someone can **sign in as** (an account whose user record
+   is published at `/run/userdb/<user>.user`, or one the image ships in
+   `/etc/passwd`): a role held by an account boot does not publish
+   administers nothing;
 5. the caller is not an administrator → `denied` (`device_admin_required`);
 6. no ticket → `denied` (`reauthentication_required`); the ticket is spent;
 7. the account's record, then its runtime membership, is changed; audited
@@ -4461,15 +4496,19 @@ two is healed by the next boot's materialization.
 `punar-admin` when the image has the group (OD-1(a)).
 
 **No update leaves a device with no administrator.** On every boot, before
-the account is published, the materializer checks the device's records: when
-**no account holds the role**, the **device owner** gets it and the grant is
-recorded. The device owner is the account onboarding recorded as completing
-first run (`/var/lib/punar/onboarding/completed.json`) — the first account by
+the account is published, the materializer checks the accounts it publishes:
+when **no account a person can sign in as holds the role**, the **device
+owner** gets it and the grant is recorded. The device owner is the account
+onboarding recorded as completing first run
+(`/var/lib/punar/onboarding/completed.json`) — the first account by
 construction, since onboarding creates exactly one and refuses a second first
-run. A device that already has an administrator is left alone, so an
-administrator who hands the role on and then steps down is not overruled. An
-image without the group (an older release after a rollback) is left exactly
-as it was.
+run. The materializer publishes the owner alone today, so a role handed to
+an account boot does not publish does not count (F0 review: counting it let a
+device whose owner had handed the role on come up with no administrator
+anyone could use); when more accounts are published at boot they count too,
+and an administrator who handed the role to one of them and stepped down is
+then left alone. An image without the group (an older release after a
+rollback) is left exactly as it was.
 
 **An organization can decide instead**, while the device is enrolled, through
 `spec.security.localAdmin.administrators` in its desired state
@@ -4493,9 +4532,44 @@ enrollment transition.
 <!-- F0-S4 -->
 ### 23.5 Passwords and tickets from clients (F0-S4)
 
-Every client that turns a person's password into a ticket uses one library,
-`punar-reauth` (`crates/punar-reauth`), and takes the password from exactly
-two kinds of place:
+Every client that turns a person's password into a ticket either uses one
+library, `punar-reauth` (`crates/punar-reauth`), or — a graphical surface —
+sends the password to `punar-authd` itself over the daemon's socket. No
+password crosses a pipe, standard input, argv, the environment or a socket a
+program of the same person could stand in for.
+
+**What a ticket binds (F0 review).** `punar-authd` mints an `Admin` ticket
+only for a request that names the IPC method it is for (`"action":
+"policy.set"`); a request without one is malformed and refused before PAM is
+asked. The ticket names one **spender**: the requesting process, or the
+process the request names with `"for_pid"` — which must be alive and run
+entirely (real, effective, saved and filesystem uid) as the requester, so a
+caller can only name a process of its own and gains nothing it did not have.
+The spender is recorded as its pid and kernel start time
+(`/proc/<pid>/stat` field 22), so a recycled pid is a different process.
+punard spends a ticket only for that method and only when the connection's
+peer is that process (§5.8a). A ticket copied out of the process it was meant
+for — by whatever means — is therefore worth nothing to the copier: the one
+process that can spend it is the command the person started for the change
+they typed their password for.
+
+**The two framings of `punar-authd`'s socket.** The original: a 4-byte
+little-endian length, then the JSON request; the answer framed the same way.
+And one JSON object on one line, answered by one JSON line — what a
+graphical surface can write on a socket it opens itself. A line request
+starts `{"`; as a length header those two bytes would announce at least
+0x227B bytes, more than any request may hold, so the two cannot be confused.
+The request shape is unchanged besides the two optional binding fields:
+
+```json
+{"v": 1, "password": "…", "purpose": "admin", "action": "approvals.resolve", "for_pid": 4242}
+```
+
+```json
+{"v": 1, "verdict": "ok", "ticket": "<64 hex>"}
+```
+
+**The two sources `punar-reauth` accepts:**
 
 1. **the controlling terminal**, with echo off, canonical mode and suspend
    disabled;
@@ -4509,61 +4583,82 @@ environment are readable in `/proc/<pid>/cmdline` and `environ` outright.
 
 **Holders are not dumpable.** Before it reads a secret, a holder calls
 `harden()`: `PR_SET_DUMPABLE=0` (which also closes its `/proc/<pid>/fd`,
-`mem` and `environ` to other processes of the same uid) and `RLIMIT_CORE=0`.
-The password, the request body and the ticket live in `Zeroizing` memory. The
-ticket comes from `punar-authd`'s socket directly; no client spawns
-`punar-auth` with the password on a pipe.
+`mem` and `environ` to other processes of the same uid) and `RLIMIT_CORE=0`
+soft and hard — punarctl before any password, ticket or enrollment code. The
+password, the request body and the ticket live in `Zeroizing` memory. The
+desktop shell cannot call `harden()`; it runs with `RLIMIT_CORE` 0 soft and
+hard under `/usr/lib/punar/punar-shell-run`, so no core file of it holds a
+password, and Yama (F0-S2) keeps other programs from attaching to it.
 
 **The command-line convention** (every `punarctl` verb that needs a password:
 `policy set|clear`, `enroll start|stop`, `update check|apply|rollback`,
-`approvals resolve`, `admins add|remove`):
+`approvals resolve`, `admins add|remove`, `app install|remove|update`):
 
+- **the role first.** A verb that needs a device administrator asks punard
+  (`admins.list`) whether the caller is one before it reads any secret; a
+  caller who is not is never asked for a password, and punard's refusal —
+  naming who can act — is what prints (`enroll stop`, which follows the
+  device's own list, asks punard the bare request instead);
 - no flag — ask on the terminal; with no terminal, send no ticket and print
   punard's refusal;
 - `--password-fd N` — the password, one line, on descriptor N, which must be
-  a socket (descriptors 0–2 are refused);
-- `--ticket-fd N` — a ticket (`ok <ticket>` or the bare 64 hex), on a socket;
-- `--password-from-parent` — for a graphical parent that cannot hand a child
-  a descriptor. punarctl opens a listening socket at a fresh name inside
-  `$XDG_RUNTIME_DIR/punar-reauth` (a `0700` directory of the caller, checked;
-  `/run/user/<uid>` when the environment names nothing private), prints
-  `password-socket <path>` as its **first line of standard output**, and
-  reads the password only from a connection `SO_PEERCRED` says comes from
-  **its parent process, running as the same uid**. A connection from anyone
-  else is closed unread and the wait goes on, so a stranger that connects
-  first cannot use the rendezvous up; if the parent never arrives the answer
-  says a stranger tried. The name is removed the moment the parent's
-  connection is in. System Control and the approval overlay use this.
-- `--ticket-stdin` and `--password-stdin` are refused with exit 2 and a
-  message naming the replacements.
+  a socket (descriptors 0–2 are refused); punarctl asks for a ticket bound to
+  itself;
+- `--ticket-fd N` — a ticket (`ok <ticket>` or the bare 64 hex), on a socket.
+  It must have been minted for this punarctl process (`for_pid`) and this
+  method, or punard refuses it;
+- `--ticket-from-parent` — for a graphical parent that cannot hand a child a
+  descriptor. Once the role check passes, punarctl opens a listening socket
+  at a fresh name inside `$XDG_RUNTIME_DIR/punar-reauth` (a `0700` directory
+  of the caller, checked; `/run/user/<uid>` when the environment names
+  nothing private) and prints `ticket-socket <path>` on standard output. The
+  parent then sends the password to `punar-authd` itself, asking for a ticket
+  for this method with `for_pid` set to the punarctl it started (it knows the
+  pid because it started the process), and relays the answer — `ok <ticket>`,
+  `denied` or `unavailable` — over that socket, which accepts only a
+  connection `SO_PEERCRED` says comes from **its parent process, running as
+  the same uid**; a connection from anyone else is closed unread and the wait
+  goes on. System Control, the approval overlay and Command Center use this
+  through `shell/punar-shell/Services/PasswordRun.qml`, which starts
+  `/usr/bin/punarctl` by its absolute path — a `punarctl` earlier on PATH
+  would be the process the ticket is bound to;
+- `--password-from-parent`, `--ticket-stdin` and `--password-stdin` are
+  refused with exit 2 and a message naming the replacements.
+
+**Why the relay carries a ticket and never the password.** Another program of
+the same person can replace the rendezvous socket (a rename in the person's
+own directory), and can even put the parent on a false path by writing to
+the parent's end of punarctl's standard output — both READ-mode opens that
+Yama does not restrict. With the password on that socket, either was a way
+to take it; the old design could only report an interception afterwards, and
+not reliably (a program that renamed the original back left no trace). Now
+what such a program can receive is a ticket only this punarctl can spend, and
+punarctl then fails closed with nothing changed. `Intercepted`, reported when
+a wait ends with the name gone or replaced, is a best-effort signal and not
+what the protection rests on.
+
+**The lock screen** sends the passphrase to `punar-authd` the same way, as one
+line (`{"v":1,"password":"…"}`, purpose `unlock`, no ticket), over the socket
+it opens itself. It used to pipe the passphrase to the `punar-auth` relay, and
+the lock surface held that pipe's write end, which any program of the person
+could reopen through `/proc` to read the passphrase as it went by and write
+it back. The relay remains for scripts that verify an unlock (the recovery
+check); it no longer mints administrator tickets, whose answer would travel
+on its stdout pipe.
 
 Descriptor numbers become owned descriptors through `pidfd_getfd` on the
 process's own pidfd, which needs no `unsafe`; a seccomp filter that refuses
 it (Docker's default profile) is reported as such, and the terminal still
 works.
 
-**What this does not stop, stated rather than implied.** Both accepted
-sources leave one race to an active program already running as the same
-person, and neither is closed by Yama (§23.1, F0-S2), which restricts ATTACH
-access but not the READ-mode opens involved:
-
-- the rendezvous: such a program can watch `punar-reauth`, replace the socket
-  between the moment its path is printed and the moment the parent connects,
-  and receive what the parent sends. It cannot do so unseen — the name is
-  bound to one inode, and a wait that ends with no parent checks it, so a
-  name that is gone or names another socket is reported as an interception
-  (`punarctl` exit 2), telling the person to treat the password as known and
-  change it, and the replacement is left in place as evidence;
-- the terminal: such a program can open the person's own pseudo-terminal and
-  compete for the keystrokes typed at the prompt.
-
-Closing both needs the prompt to move into a trusted process that owns the
-input surface — a different uid, or the compositor — which is open work and
-an owner review item. The lock screen's relay (`punar-auth`) now hardens
-itself before it reads (non-dumpable, no core), but still takes the password
-on a stdin pipe from the lock surface; moving it onto the rendezvous needs a
-proof on real hardware first, because a lock screen that cannot unlock is
-worse than the race it closes.
+**What this does not stop, stated rather than implied.** At the terminal
+prompt, a program already running as the same person can open that person's
+own pseudo-terminal and compete for the keystrokes typed at it — a READ-mode
+open Yama does not restrict. The password a person types into a terminal is
+exposed to their own programs exactly as every other keystroke they type
+there is. Closing it needs the prompt to move into a trusted process that
+owns the input surface — a different uid, or the compositor — which is open
+work and an owner review item; the graphical surfaces above do not have it.
 <!-- /F0-S4 -->
 
 ---

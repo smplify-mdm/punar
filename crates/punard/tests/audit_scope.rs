@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use punar_common::reauth_ticket::{Spender, TicketBody};
 use punar_common::trusted_time::{SystemClock, TrustedClock};
 use punard::authz::{Peer, PeerSource};
 use punard::capability::Registry;
@@ -22,6 +23,10 @@ use punard::server::{Daemon, DaemonConfig, DaemonHandle};
 use serde_json::{Value, json};
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// The one process every peer in this file calls from, and when it started.
+const PEER_PID: i32 = 5200;
+const PEER_START: u64 = 520_000;
 
 struct Device {
     dir: PathBuf,
@@ -64,6 +69,21 @@ impl Device {
                 fs::write(dir.join(format!("userdb/{user}:{group}.membership")), "{}").unwrap();
             }
         }
+        let proc = dir.join("proc").join(PEER_PID.to_string());
+        fs::create_dir_all(&proc).unwrap();
+        fs::write(
+            proc.join("stat"),
+            format!(
+                "{PEER_PID} (punarctl) S 1 {PEER_PID} {PEER_PID} 0 -1 4194560 0 0 0 0 0 0 0 0 \
+                 20 0 1 0 {PEER_START} 0 0\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            proc.join("cgroup"),
+            "0::/user.slice/user-1000.slice/session-2.scope\n",
+        )
+        .unwrap();
         Device {
             dir,
             handle: None,
@@ -84,7 +104,7 @@ impl Device {
             peer_source: PeerSource::Fixed(Peer {
                 uid,
                 gid: uid,
-                pid: None,
+                pid: Some(PEER_PID),
             }),
             io_timeout: Duration::from_secs(5),
             reauth_ticket_dir: self.dir.join("tickets"),
@@ -125,8 +145,15 @@ impl Device {
             .mode(0o700)
             .create(&per_uid)
             .unwrap();
-        let stamp = SystemClock::new().now().expect("the boot clock");
-        fs::write(per_uid.join(token), serde_json::to_vec(&stamp).unwrap()).unwrap();
+        let body = TicketBody {
+            minted: SystemClock::new().now().expect("the boot clock"),
+            action: "policy.set".to_string(),
+            spender: Spender {
+                pid: PEER_PID as u32,
+                start: PEER_START,
+            },
+        };
+        fs::write(per_uid.join(token), serde_json::to_vec(&body).unwrap()).unwrap();
     }
 
     fn pin(&self, ticket: &str) -> Value {
@@ -216,4 +243,67 @@ fn a_person_reads_their_own_events_and_the_devices_and_is_told_what_was_withheld
     // The file itself is 0640: only its owner and group read it — and the
     // group, in the image, is punar-audit, which no person is in (gate A23).
     assert_eq!(mode(&device.dir.join("audit.jsonl")), 0o640);
+}
+
+/// F0 review, finding R4: a daemon's event about a person's agent session —
+/// punar-netd refusing alice's agent a production zone — names her session
+/// and her project. It is not the device's event: bob neither sees it nor
+/// sees it counted as the device's, and root still reads it.
+#[test]
+fn a_daemons_event_about_a_persons_agent_is_not_the_devices() {
+    let mut device = Device::new();
+    device.as_peer(1000, true);
+    let netd = json!({
+        "event_id": "evt_netd_0001",
+        "timestamp": "2026-09-25T10:00:00Z",
+        "device_id": "dev_test",
+        "user_id": "daemon",
+        "agent_session_id": "agt_0a1b2c3d4e5f",
+        "project_id": "atlas",
+        "source": "service",
+        "action": "network.deny",
+        "resource": "prod-db",
+        "decision": "deny",
+        "policy_ids": ["personal-defaults"],
+        "result": "denied_production"
+    });
+    let sweep = json!({
+        "event_id": "evt_netd_0002",
+        "timestamp": "2026-09-25T10:00:01Z",
+        "device_id": "dev_test",
+        "user_id": "punar-agentd",
+        "agent_session_id": "agt_none",
+        "project_id": "system",
+        "source": "service",
+        "action": "agents.scan",
+        "resource": "agent",
+        "decision": "allow",
+        "policy_ids": ["personal-defaults"],
+        "result": "success"
+    });
+    let mut trail = fs::read_to_string(device.dir.join("audit.jsonl")).unwrap_or_default();
+    trail.push_str(&format!("{netd}\n{sweep}\n"));
+    fs::write(device.dir.join("audit.jsonl"), trail).unwrap();
+
+    device.as_peer(1001, false);
+    let bob = device.call("audit.tail", Some(json!({"n": 1000})));
+    let text = bob["result"]["events"].to_string();
+    assert!(
+        !text.contains("agt_0a1b2c3d4e5f"),
+        "alice's session leaks: {bob}"
+    );
+    assert!(!text.contains("atlas"), "alice's project leaks: {bob}");
+    assert!(
+        text.contains("evt_netd_0002"),
+        "a device event that names no one is still shown: {bob}"
+    );
+    assert!(bob["result"]["withheld"].as_u64().unwrap() >= 1, "{bob}");
+
+    device.as_peer(0, false);
+    let root = device.call("audit.tail", Some(json!({"n": 1000})));
+    assert!(
+        root["result"]["events"]
+            .to_string()
+            .contains("evt_netd_0001")
+    );
 }

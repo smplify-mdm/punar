@@ -149,6 +149,45 @@ impl Inner {
         Err(device_admin_refusal(doing, &user, &view))
     }
 
+    /// A device-wide change a person makes with their password (contract
+    /// section 23.1): the role, then the confirmation, spent here for
+    /// `method`. Root needs neither. The caller refuses agents before this,
+    /// and settles everything that does not depend on who is asking first,
+    /// so a person without the role never spends a password on a change
+    /// they could not make.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn admit_device_change(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        method: &str,
+        action: &str,
+        resource: &str,
+        ticket: Option<&str>,
+        doing: &str,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        self.require_device_admin(peer, actor, action, resource, doing, RosterScope::Governed)?;
+        if peer.uid != 0 && ticket.is_none() {
+            let mut event = AuditEvent::denial(&self.device_id, actor, action, resource);
+            event.result = "reauthentication_required".to_string();
+            self.log_audit(event);
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "{doing} needs your password, and this request did not carry a \
+                     confirmation.\n\
+                     Policy: personal defaults — a change that reaches everyone on this \
+                     device is confirmed at the moment it is made (docs/api/ipc.md \
+                     section 23).\n\
+                     Next step: run `{retry}` in a terminal; it asks for your password."
+                ),
+                json!({ "decision": "deny", "reason": "reauthentication_required" }),
+            ));
+        }
+        self.spend_reauth_ticket(peer, actor, method, action, resource, ticket, retry)
+    }
+
     /// `admins.list` (contract section 23.3): who administers this device,
     /// who decides that, and whether the caller is one. Open to every
     /// admitted peer — a person must be able to find out whom to ask.
@@ -284,8 +323,16 @@ impl Inner {
         }
 
         // 3. and 4. The account must be one this device has, and one whose
-        //    role lives in a record punard may edit.
+        //    role lives in a record punard may edit. Every refusal from here
+        //    on is audited too (contract section 23.3: "always audited"): a
+        //    probe for account names is an attempt like any other.
+        let refused = |result: &str| {
+            let mut event = AuditEvent::denial(&self.device_id, &actor, ACTION, &resource);
+            event.result = result.to_string();
+            self.log_audit(event);
+        };
         if !name_ok(user) {
+            refused("invalid_params");
             return Err(IpcError::with_details(
                 ErrorCode::InvalidParams,
                 format!(
@@ -298,8 +345,13 @@ impl Inner {
                 json!({ "param": "user", "reason": "not an account name" }),
             ));
         }
+        // From the count below to the change itself, one `admins.set` at a
+        // time: two administrators removing each other at once must not both
+        // count the other and leave nobody.
+        let _change = self.admins_change.lock().unwrap();
         let accounts = sources.accounts();
         let Some(target) = accounts.iter().find(|account| account.user == user) else {
+            refused("not_found");
             return Err(IpcError::with_details(
                 ErrorCode::NotFound,
                 format!(
@@ -311,6 +363,7 @@ impl Inner {
             ));
         };
         if target.origin == Origin::Image {
+            refused("image_account");
             return Err(IpcError::with_details(
                 ErrorCode::InvalidParams,
                 format!(
@@ -327,10 +380,12 @@ impl Inner {
 
         // 5. Never zero administrators. Settled before the caller's standing,
         //    because it is a fact about the device and not about who asks —
-        //    and a password spent on it would buy nothing.
+        //    and a password spent on it would buy nothing. Only an
+        //    administrator someone can sign in as counts: a role held by an
+        //    account whose record boot does not publish administers nothing.
         let remaining = accounts
             .iter()
-            .filter(|account| account.administrator && account.user != user)
+            .filter(|account| account.administrator && account.signs_in && account.user != user)
             .count();
         if !params.administrator && target.administrator && remaining == 0 {
             let mut event = AuditEvent::denial(&self.device_id, &actor, ACTION, &resource);
@@ -361,12 +416,7 @@ impl Inner {
             RosterScope::Governed,
         )?;
         if peer.uid != 0 && params.ticket.is_none() {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                ACTION,
-                &resource,
-            ));
+            refused("reauthentication_required");
             return Err(IpcError::with_details(
                 ErrorCode::Denied,
                 format!(
@@ -382,6 +432,7 @@ impl Inner {
         self.spend_reauth_ticket(
             peer,
             &actor,
+            ACTION,
             ACTION,
             &resource,
             params.ticket.as_deref(),

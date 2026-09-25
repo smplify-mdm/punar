@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use punar_common::reauth_ticket::{Spender, TicketBody};
 use punar_common::trusted_time::{SystemClock, TrustedClock};
 use punard::authz::{Peer, PeerSource};
 use punard::capability::Registry;
@@ -34,12 +35,24 @@ const ALICE: u32 = 1000;
 const BOB: u32 = 1001;
 const HUMAN_PID: i32 = 5100;
 const AGENT_PID: i32 = 5101;
+/// A process in a scope that names an agent but is not a session punar-agentd
+/// could attribute (a malformed or forged scope name).
+const SMELLY_PID: i32 = 5102;
+/// Another process of the same person: not the one a ticket was minted for.
+const OTHER_PID: i32 = 5103;
 
 struct Device {
     dir: PathBuf,
     handle: Option<DaemonHandle>,
     mock: MockCapability,
     sockets: u32,
+    /// The pid the daemon currently sees as its peer.
+    pid: i32,
+}
+
+/// The kernel start time each fake process was given.
+fn start_time(pid: i32) -> u64 {
+    700_000 + pid as u64
 }
 
 impl Device {
@@ -68,15 +81,33 @@ impl Device {
                 "0::/user.slice/user-1000.slice/user@1000.service/app.slice/\
 punar-agent-agt_0a1b2c3d4e5f.scope\n",
             ),
+            (
+                SMELLY_PID,
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/\
+punar-agent-not-a-session.scope\n",
+            ),
+            (
+                OTHER_PID,
+                "0::/user.slice/user-1000.slice/session-2.scope\n",
+            ),
         ] {
             fs::create_dir_all(proc_root.join(pid.to_string())).unwrap();
             fs::write(proc_root.join(pid.to_string()).join("cgroup"), cgroup).unwrap();
+            fs::write(
+                proc_root.join(pid.to_string()).join("stat"),
+                format!(
+                    "{pid} (punarctl) S 1 {pid} {pid} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {} 0 0\n",
+                    start_time(pid)
+                ),
+            )
+            .unwrap();
         }
         Device {
             dir,
             handle: None,
             mock: MockCapability::new("security.firewall", json!("enabled")),
             sockets: 0,
+            pid: HUMAN_PID,
         }
     }
 
@@ -87,6 +118,7 @@ punar-agent-agt_0a1b2c3d4e5f.scope\n",
             handle.stop();
         }
         self.sockets += 1;
+        self.pid = pid;
         let cfg = DaemonConfig {
             group_file: self.dir.join("group"),
             passwd_file: self.dir.join("passwd"),
@@ -117,22 +149,13 @@ punar-agent-agt_0a1b2c3d4e5f.scope\n",
     }
 
     fn call(&self, method: &str, params: Option<Value>) -> Value {
-        let mut request = json!({ "v": 1, "id": "adm", "method": method });
-        if let Some(params) = params {
-            request["params"] = params;
-        }
-        let mut stream = UnixStream::connect(self.handle.as_ref().unwrap().socket_path()).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        stream.write_all(format!("{request}\n").as_bytes()).unwrap();
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).unwrap();
-        serde_json::from_str(&line).unwrap()
+        call_socket(self.handle.as_ref().unwrap().socket_path(), method, params)
     }
 
-    /// A ticket exactly as punar-authd mints one for `uid`.
-    fn mint(&self, uid: u32) -> (String, PathBuf) {
+    /// A ticket exactly as punar-authd mints one for `uid`: typed for
+    /// `method`, and to be presented by the process the daemon currently
+    /// sees as its peer.
+    fn mint(&self, uid: u32, method: &str) -> (String, PathBuf) {
         let seq = SEQ.fetch_add(1, Ordering::SeqCst);
         let token = format!("{:064x}", 0xadd0_0000_u128 + u128::from(seq));
         let per_uid = self.dir.join("tickets").join(uid.to_string());
@@ -141,9 +164,16 @@ punar-agent-agt_0a1b2c3d4e5f.scope\n",
             .mode(0o700)
             .create(&per_uid)
             .unwrap();
-        let stamp = SystemClock::new().now().expect("the boot clock");
+        let body = TicketBody {
+            minted: SystemClock::new().now().expect("the boot clock"),
+            action: method.to_string(),
+            spender: Spender {
+                pid: self.pid as u32,
+                start: start_time(self.pid),
+            },
+        };
         let path = per_uid.join(&token);
-        fs::write(&path, serde_json::to_vec(&stamp).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
         (token, path)
     }
 
@@ -219,6 +249,22 @@ impl Drop for Device {
     }
 }
 
+/// One request on the daemon's socket, as punarctl sends it.
+fn call_socket(socket: &Path, method: &str, params: Option<Value>) -> Value {
+    let mut request = json!({ "v": 1, "id": "adm", "method": method });
+    if let Some(params) = params {
+        request["params"] = params;
+    }
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
 /// An onboarded account exactly as onboarding writes it, and the drop-ins
 /// the materializer publishes for it.
 fn onboard(dir: &Path, id: &str, user: &str, uid: u32, administrator: bool) {
@@ -240,6 +286,7 @@ fn onboard(dir: &Path, id: &str, user: &str, uid: u32, administrator: bool) {
     )
     .unwrap();
     fs::create_dir_all(dir.join("userdb")).unwrap();
+    fs::write(dir.join(format!("userdb/{user}.user")), "{}").unwrap();
     for group in groups {
         fs::write(dir.join(format!("userdb/{user}:{group}.membership")), "{}").unwrap();
     }
@@ -258,7 +305,7 @@ fn a_person_without_the_role_cannot_set_device_policy_and_keeps_their_password()
 
     // Bob, with a perfectly good confirmation, is refused by role.
     device.as_person(BOB);
-    let (ticket, file) = device.mint(BOB);
+    let (ticket, file) = device.mint(BOB, "policy.set");
     let refused = device.policy_set(Some(&ticket));
     assert_eq!(refused["error"]["code"], "denied", "{refused}");
     assert_eq!(reason(&refused), "device_admin_required");
@@ -290,7 +337,7 @@ fn a_person_without_the_role_cannot_set_device_policy_and_keeps_their_password()
 
     // Alice's confirmation does it.
     device.as_person(ALICE);
-    let (ticket, file) = device.mint(ALICE);
+    let (ticket, file) = device.mint(ALICE, "policy.set");
     let pinned = device.policy_set(Some(&ticket));
     assert_eq!(
         pinned["result"]["source"]["kind"], "device_specific_override",
@@ -301,7 +348,7 @@ fn a_person_without_the_role_cannot_set_device_policy_and_keeps_their_password()
     // An agent running as alice, carrying alice's live ticket, is refused
     // before the role or the ticket is looked at.
     device.as_peer(ALICE, AGENT_PID);
-    let (ticket, file) = device.mint(ALICE);
+    let (ticket, file) = device.mint(ALICE, "policy.set");
     let agent = device.policy_set(Some(&ticket));
     assert_eq!(reason(&agent), "agent_scope", "{agent}");
     assert!(file.exists());
@@ -326,7 +373,7 @@ fn every_device_wide_method_asks_for_the_role_before_the_password() {
             json!({ "capability": "security.firewall", "reason": "lab", "duration_minutes": 15 }),
         ),
     ] {
-        let (ticket, file) = device.mint(BOB);
+        let (ticket, file) = device.mint(BOB, method);
         let mut params = params;
         if method != "privilege.request" {
             params["ticket"] = json!(ticket);
@@ -350,7 +397,7 @@ fn every_device_wide_method_asks_for_the_role_before_the_password() {
     // Checking for updates reaches nobody, so it stays open to any person
     // who confirms their password: it is refused for another reason here
     // (this fixture has no update source), never for the role.
-    let (ticket, _) = device.mint(BOB);
+    let (ticket, _) = device.mint(BOB, "update.check");
     let checked = device.call(
         "update.check",
         Some(json!({ "force": true, "ticket": ticket })),
@@ -383,7 +430,7 @@ fn a_person_who_loses_the_role_cannot_spend_a_grant() {
         Some(json!({ "approval_id": approval, "decision": "approved" })),
     );
     assert_eq!(reason(&missing), "reauthentication_required", "{missing}");
-    let (ticket, file) = device.mint(ALICE);
+    let (ticket, file) = device.mint(ALICE, "approvals.resolve");
     let resolved = device.call(
         "approvals.resolve",
         Some(json!({ "approval_id": approval, "decision": "approved", "ticket": ticket })),
@@ -403,12 +450,12 @@ fn a_person_who_loses_the_role_cannot_spend_a_grant() {
     );
 
     // Take the role away (bob first, so she is not the last one).
-    let (ticket, _) = device.mint(ALICE);
+    let (ticket, _) = device.mint(ALICE, "admins.set");
     assert_eq!(
         device.admins_set("bob", true, Some(&ticket))["result"]["changed"],
         true
     );
-    let (ticket, _) = device.mint(ALICE);
+    let (ticket, _) = device.mint(ALICE, "admins.set");
     assert_eq!(
         device.admins_set("alice", false, Some(&ticket))["result"]["changed"],
         true
@@ -436,7 +483,7 @@ fn the_last_administrator_is_never_removed_and_every_change_is_audited() {
     assert_eq!(listed["result"]["accounts"][1]["administrator"], false);
 
     // Bob cannot give himself the role.
-    let (ticket, file) = device.mint(BOB);
+    let (ticket, file) = device.mint(BOB, "admins.set");
     let refused = device.admins_set("bob", true, Some(&ticket));
     assert_eq!(reason(&refused), "device_admin_required", "{refused}");
     assert!(file.exists());
@@ -445,14 +492,14 @@ fn the_last_administrator_is_never_removed_and_every_change_is_audited() {
     // Alice cannot remove herself while she is the only one — refused
     // before her password is spent.
     device.as_person(ALICE);
-    let (ticket, file) = device.mint(ALICE);
+    let (ticket, file) = device.mint(ALICE, "admins.set");
     let last = device.admins_set("alice", false, Some(&ticket));
     assert_eq!(reason(&last), "last_administrator", "{last}");
     assert!(file.exists());
     assert!(device.member("alice"));
 
     // She makes bob one, then may step down; bob is then the last one.
-    let (ticket, _) = device.mint(ALICE);
+    let (ticket, _) = device.mint(ALICE, "admins.set");
     let granted = device.admins_set("bob", true, Some(&ticket));
     assert_eq!(granted["result"]["changed"], true, "{granted}");
     assert_eq!(granted["result"]["administrators"], json!(["alice", "bob"]));
@@ -469,13 +516,13 @@ fn the_last_administrator_is_never_removed_and_every_change_is_audited() {
     assert_eq!(recorded["groups"], json!(["punar", "punar-admin"]));
     assert_eq!(recorded["home"], "/home/bob", "no other field was touched");
 
-    let (ticket, _) = device.mint(ALICE);
+    let (ticket, _) = device.mint(ALICE, "admins.set");
     assert_eq!(
         device.admins_set("alice", false, Some(&ticket))["result"]["changed"],
         true
     );
     device.as_person(BOB);
-    let (ticket, file) = device.mint(BOB);
+    let (ticket, file) = device.mint(BOB, "admins.set");
     let last = device.admins_set("bob", false, Some(&ticket));
     assert_eq!(reason(&last), "last_administrator", "{last}");
     assert!(file.exists());
@@ -483,11 +530,11 @@ fn the_last_administrator_is_never_removed_and_every_change_is_audited() {
     // No ticket, an unknown account, an agent.
     let missing = device.admins_set("alice", true, None);
     assert_eq!(reason(&missing), "reauthentication_required", "{missing}");
-    let (ticket, _) = device.mint(BOB);
+    let (ticket, _) = device.mint(BOB, "admins.set");
     let nobody = device.admins_set("mallory", true, Some(&ticket));
     assert_eq!(nobody["error"]["code"], "not_found", "{nobody}");
     device.as_peer(BOB, AGENT_PID);
-    let (ticket, file) = device.mint(BOB);
+    let (ticket, file) = device.mint(BOB, "admins.set");
     let agent = device.admins_set("alice", true, Some(&ticket));
     assert_eq!(reason(&agent), "agent_scope", "{agent}");
     assert!(file.exists());
@@ -511,6 +558,8 @@ fn the_last_administrator_is_never_removed_and_every_change_is_audited() {
         ("uid:1000", "account/bob", "success"),
         ("uid:1000", "account/alice", "success"),
         ("uid:1001", "account/bob", "last_administrator"),
+        ("uid:1001", "account/alice", "reauthentication_required"),
+        ("uid:1001", "account/mallory", "not_found"),
         ("uid:1001", "account/alice", "denied"),
     ] {
         assert!(
@@ -540,7 +589,7 @@ fn an_organization_can_pin_the_list_or_turn_local_administration_off() {
     assert_eq!(listed["result"]["administrators"], json!(["bob"]));
     assert_eq!(listed["result"]["source"]["policy_id"], "acme-baseline-v4");
     // Alice is a local member and is not an administrator while pinned.
-    let (ticket, file) = device.mint(ALICE);
+    let (ticket, file) = device.mint(ALICE, "policy.set");
     let refused = device.policy_set(Some(&ticket));
     assert_eq!(reason(&refused), "device_admin_required", "{refused}");
     assert_eq!(
@@ -555,24 +604,172 @@ fn an_organization_can_pin_the_list_or_turn_local_administration_off() {
     );
     assert!(file.exists());
     // And the list itself is the organization's to change.
-    let (ticket, _) = device.mint(ALICE);
+    let (ticket, _) = device.mint(ALICE, "admins.set");
     let set = device.admins_set("bob", true, Some(&ticket));
     assert_eq!(reason(&set), "administrators_set_by_organization", "{set}");
 
     // Bob, whom the organization lists, may act.
     device.as_person(BOB);
-    let (ticket, _) = device.mint(BOB);
+    let (ticket, _) = device.mint(BOB, "policy.set");
     let pinned = device.policy_set(Some(&ticket));
     assert!(pinned.get("result").is_some(), "{pinned}");
 
     // `none`: nobody at the device; root still may.
     device.organization_roster(json!({ "mode": "none" }));
     device.as_person(BOB);
-    let (ticket, _) = device.mint(BOB);
+    let (ticket, _) = device.mint(BOB, "policy.set");
     let refused = device.policy_set(Some(&ticket));
     assert_eq!(reason(&refused), "device_admin_required", "{refused}");
     assert_eq!(refused["error"]["details"]["administrators_policy"], "none");
     device.as_person(0);
     let root = device.policy_set(None);
     assert!(root.get("result").is_some(), "{root}");
+}
+
+/// F0 review, finding 3: a confirmation is spent by the call it was typed
+/// for, presented by the process it was minted for — never by another call,
+/// never by another program of the same person.
+#[test]
+fn a_ticket_is_spent_only_on_its_own_call_by_its_own_process() {
+    let mut device = Device::new();
+    device.as_person(ALICE);
+
+    // Typed to approve something, presented to change who administers.
+    let (ticket, file) = device.mint(ALICE, "approvals.resolve");
+    let wrong_call = device.admins_set("bob", true, Some(&ticket));
+    assert_eq!(
+        reason(&wrong_call),
+        "reauthentication_wrong_action",
+        "{wrong_call}"
+    );
+    assert!(
+        !file.exists(),
+        "a ticket presented for another call is spent"
+    );
+    assert!(!device.member("bob"));
+
+    // Minted for this process, presented by another program of alice's.
+    let (ticket, file) = device.mint(ALICE, "admins.set");
+    device.as_peer(ALICE, OTHER_PID);
+    let copied = device.admins_set("bob", true, Some(&ticket));
+    assert_eq!(
+        reason(&copied),
+        "reauthentication_wrong_process",
+        "{copied}"
+    );
+    assert!(!file.exists());
+    assert!(!device.member("bob"));
+
+    // The same change, with a ticket that is its own, goes through.
+    let (ticket, _) = device.mint(ALICE, "admins.set");
+    let granted = device.admins_set("bob", true, Some(&ticket));
+    assert_eq!(granted["result"]["changed"], true, "{granted}");
+    let trail = fs::read_to_string(device.dir.join("audit.jsonl")).unwrap();
+    assert!(!trail.contains(&ticket), "no ticket is audited");
+}
+
+/// F0 review, finding 5: two removals racing each other still leave an
+/// administrator. Each round starts with two and fires both removals at once.
+#[test]
+fn racing_removals_never_leave_the_device_without_an_administrator() {
+    let mut device = Device::new();
+    device.as_person(0);
+    for round in 0..12 {
+        for user in ["alice", "bob"] {
+            let added = device.admins_set(user, true, None);
+            assert!(added.get("result").is_some(), "{round}: {added}");
+        }
+        let socket = device.handle.as_ref().unwrap().socket_path().to_path_buf();
+        std::thread::scope(|scope| {
+            for user in ["alice", "bob"] {
+                let socket = &socket;
+                scope.spawn(move || {
+                    call_socket(
+                        socket,
+                        "admins.set",
+                        Some(json!({ "user": user, "administrator": false })),
+                    )
+                });
+            }
+        });
+        assert!(
+            device.member("alice") || device.member("bob"),
+            "round {round} left nobody"
+        );
+    }
+}
+
+/// F0 review, finding 6: an administrator nobody can sign in as — an
+/// account whose user record boot does not publish — does not count toward
+/// "never zero administrators".
+#[test]
+fn an_administrator_nobody_can_sign_in_as_does_not_count() {
+    let mut device = Device::new();
+    device.as_person(ALICE);
+    let (ticket, _) = device.mint(ALICE, "admins.set");
+    assert_eq!(
+        device.admins_set("bob", true, Some(&ticket))["result"]["changed"],
+        true
+    );
+    // Bob's record holds the role, but after this boot nobody can sign in
+    // as him (the materializer publishes the device owner only).
+    fs::remove_file(device.dir.join("userdb/bob.user")).unwrap();
+    let (ticket, file) = device.mint(ALICE, "admins.set");
+    let last = device.admins_set("alice", false, Some(&ticket));
+    assert_eq!(reason(&last), "last_administrator", "{last}");
+    assert!(file.exists(), "refused before her password is spent");
+    assert!(device.member("alice"));
+}
+
+/// F0 review, finding 7: every `admins.set` attempt is audited, including
+/// the ones refused for a malformed name, an unknown account or an image
+/// account.
+#[test]
+fn every_admins_set_attempt_is_audited() {
+    let mut device = Device::new();
+    fs::write(
+        device.dir.join("group"),
+        "root:x:0:\npunar:x:970:\npunar-admin:x:971:punar\n",
+    )
+    .unwrap();
+    fs::write(
+        device.dir.join("passwd"),
+        "root:x:0:0::/root:/bin/bash\npunar:x:1002:970::/home/punar:/bin/bash\n",
+    )
+    .unwrap();
+    device.as_person(BOB);
+    for (user, result) in [
+        ("../etc", "invalid_params"),
+        ("mallory", "not_found"),
+        ("punar", "image_account"),
+    ] {
+        let (ticket, file) = device.mint(BOB, "admins.set");
+        let refused = device.admins_set(user, true, Some(&ticket));
+        assert!(refused.get("error").is_some(), "{user}: {refused}");
+        assert!(file.exists(), "{user}: no password spent");
+        assert!(
+            device.audit().iter().any(|e| e["action"] == "admins.set"
+                && e["result"] == result
+                && e["user_id"] == "uid:1001"),
+            "{user}'s refusal is audited as {result}"
+        );
+    }
+}
+
+/// F0 review, finding 8: device policy and a grant refuse a process in a
+/// scope that names an agent, even when it could not be attributed to a
+/// session — the wide agent test of contract section 23.1.
+#[test]
+fn a_process_in_an_unattributed_agent_scope_is_an_agent() {
+    let mut device = Device::new();
+    device.as_peer(ALICE, SMELLY_PID);
+    let (ticket, file) = device.mint(ALICE, "policy.set");
+    let refused = device.policy_set(Some(&ticket));
+    assert_eq!(reason(&refused), "agent_scope", "{refused}");
+    assert!(file.exists(), "refused before the ticket is looked at");
+    let set = device.call(
+        "capabilities.set",
+        Some(json!({ "capability": "security.firewall", "desired_state": "disabled" })),
+    );
+    assert_eq!(reason(&set), "agent_scope", "{set}");
 }

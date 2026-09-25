@@ -3249,20 +3249,105 @@ fn policy_set_takes_a_confirmation_from_a_socket_and_never_a_pipe() {
     assert!(!text.contains("sudo"), "{text}");
 }
 
-/// `--password-from-parent`: the path of the private socket is the first line
-/// punarctl prints, the program that started it hands the password over that
-/// socket, and punarctl then asks punar-authd — which does not exist in this
-/// test, so the honest answer is that the device could not check, never that
-/// the password was wrong. The rendezvous leaves no name behind.
+/// `--ticket-from-parent`: the path of the private socket is the first line
+/// punarctl prints, and the program that started it relays punar-authd's
+/// answer over that socket — never the password, which that program sent to
+/// punar-authd itself (F0 review). A ticket reaches punard exactly; a refused
+/// password is said as a refusal, a device that could not check as that, and
+/// the rendezvous leaves no name behind. The old `--password-from-parent`
+/// refuses, naming what replaced it.
 #[test]
-fn the_password_comes_from_the_parent_over_a_private_socket() {
+fn the_parent_relays_a_ticket_over_a_private_socket_and_never_the_password() {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let socket = start_mock_with(policy_set_respond);
     let runtime = std::env::temp_dir().join(format!("punarctl-xdg-{}", std::process::id()));
     let _ = fs::remove_dir_all(&runtime);
     fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+    let run = |flag: &str, relay: Option<&str>| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+            .args([
+                "policy",
+                "set",
+                "security.firewall",
+                "disabled",
+                "--reason",
+                "lab bench",
+                flag,
+            ])
+            .env("PUNARD_SOCKET", &socket)
+            .env("PUNAR_AGENTD_SOCKET", no_agentd())
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn punarctl");
+        let mut path = None;
+        // Held until punarctl exits: it prints its result on this pipe.
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        if let Some(relay) = relay {
+            let mut first = String::new();
+            out.read_line(&mut first).unwrap();
+            let named = first
+                .trim_end()
+                .strip_prefix("ticket-socket ")
+                .unwrap_or_else(|| panic!("first line names the socket: {first:?}"))
+                .to_string();
+            assert!(named.starts_with(runtime.join("punar-reauth").to_str().unwrap()));
+            let mut stream = UnixStream::connect(&named).expect("connect to the rendezvous");
+            stream.write_all(relay.as_bytes()).unwrap();
+            drop(stream);
+            path = Some(named);
+        }
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
+        let status = child.wait().unwrap();
+        let mut err = String::new();
+        std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+        if let Some(path) = &path {
+            assert!(
+                !std::path::Path::new(path).exists(),
+                "no name is left behind"
+            );
+        }
+        (status.code(), err)
+    };
+
+    let (code, err) = run(
+        "--ticket-from-parent",
+        Some(&format!("ok {POLICY_TICKET}\n")),
+    );
+    assert_eq!(code, Some(0), "the relayed ticket reached punard: {err}");
+
+    let (code, err) = run("--ticket-from-parent", Some("denied\n"));
+    assert_eq!(code, Some(3), "{err}");
+    assert!(err.contains("was not accepted"), "{err}");
+
+    let (code, err) = run("--ticket-from-parent", Some("unavailable\n"));
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("could not check your password"), "{err}");
+    assert!(!err.contains("not accepted"), "{err}");
+
+    let (code, err) = run("--password-from-parent", None);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("--ticket-from-parent"), "{err}");
+    let _ = fs::remove_dir_all(&runtime);
+}
+
+/// F0 review (the role before the password): a caller punard says is not a
+/// device administrator is never asked for a password, and no source it named
+/// is read — punard's own refusal, naming who can act, is what prints.
+#[test]
+fn a_person_without_the_role_is_never_asked_for_a_password() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let socket = start_mock_with(not_an_administrator_respond);
+    let runtime = std::env::temp_dir().join(format!("punarctl-xdg-na-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&runtime);
+    fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
         .args([
             "policy",
             "set",
@@ -3270,40 +3355,52 @@ fn the_password_comes_from_the_parent_over_a_private_socket() {
             "disabled",
             "--reason",
             "lab bench",
-            "--password-from-parent",
+            "--ticket-from-parent",
         ])
         .env("PUNARD_SOCKET", &socket)
         .env("PUNAR_AGENTD_SOCKET", no_agentd())
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("NO_COLOR", "1")
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn punarctl");
-    let mut out = BufReader::new(child.stdout.take().unwrap());
-    let mut first = String::new();
-    out.read_line(&mut first).unwrap();
-    let path = first
-        .trim_end()
-        .strip_prefix("password-socket ")
-        .unwrap_or_else(|| panic!("first line names the socket: {first:?}"))
-        .to_string();
-    assert!(path.starts_with(runtime.join("punar-reauth").to_str().unwrap()));
-    let mut stream = UnixStream::connect(&path).expect("connect to the rendezvous");
-    stream.write_all(b"three amber rivers\n").unwrap();
-    drop(stream);
-    let status = child.wait().unwrap();
-    let mut err = String::new();
-    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
-    assert_eq!(status.code(), Some(1), "{err}");
-    assert!(err.contains("could not check your password"), "{err}");
-    assert!(!err.contains("not accepted"), "{err}");
+        .output()
+        .expect("run punarctl");
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = stderr(&output);
     assert!(
-        !std::path::Path::new(&path).exists(),
-        "no name is left behind"
+        !out.contains("ticket-socket"),
+        "no rendezvous is offered to a person who cannot act: {out}"
+    );
+    assert_eq!(output.status.code(), Some(3), "{err}");
+    assert!(
+        err.contains("alice"),
+        "punard's refusal names who can act: {err}"
     );
     let _ = fs::remove_dir_all(&runtime);
+}
+
+/// A punard for whom the caller, bob, is not an administrator.
+fn not_an_administrator_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("admins.list") => Ok(json!({
+            "mode": "local", "administrators": ["alice"], "accounts": [], "group": "punar-admin",
+            "source": null,
+            "caller": {"user": "bob", "root": false, "administrator": false}
+        })),
+        Some("policy.set") => {
+            assert!(
+                request["params"].get("ticket").is_none(),
+                "no ticket is gathered for a person without the role"
+            );
+            Err(json!({
+                "code": "denied",
+                "message": "Changing device policy reaches everyone who uses this device, so \
+                            it needs a device administrator, and bob is not one.\n\
+                            Administrators: alice.",
+                "details": {"decision": "deny", "reason": "device_admin_required"}
+            }))
+        }
+        _ => respond(request),
+    }
 }
 
 /// **Exit 4 is real.** An agent-originated mutation the AI policy gates

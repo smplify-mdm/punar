@@ -749,7 +749,8 @@ impl IdentityStore {
     /// existed has an owner and no administrator, and an update must not
     /// leave it that way — nobody could change its policy, updates or
     /// enrollment again. So on every boot, before the account is published:
-    /// when no account on the device holds the role, the device owner gets it.
+    /// when no account a person can sign in as holds the role, the device
+    /// owner gets it.
     ///
     /// WHO THE OWNER IS. The account onboarding recorded as completing first
     /// run (`completed.json`), which is the account this materializer
@@ -759,10 +760,18 @@ impl IdentityStore {
     /// record to rank them by, so this names the recorded owner and nobody
     /// else — never the most recent sign-in, never the lowest uid.
     ///
-    /// ONCE, NOT ALWAYS. When any account already holds the role this does
-    /// nothing, so an administrator who hands the role to someone else and
-    /// then gives up their own is not overruled at the next boot. The
-    /// persisted record is written — as the document it was read as, so
+    /// COUNTING ONLY WHO CAN SIGN IN (F0 review). The question is whether an
+    /// account this boot PUBLISHES holds the role — one a person can sign in
+    /// as. This materializer publishes the device owner and nobody else, so
+    /// another account's record that lists the role is an administrator
+    /// nobody can sign in as after this boot; counting it once let a device
+    /// whose owner had handed the role on and given up their own come up with
+    /// no usable administrator at all. When more accounts are published at
+    /// boot, they are counted here too. punard's last-administrator rule
+    /// counts the same way (`admins.rs`, `signs_in`), so the two cannot
+    /// disagree about whether a device has one.
+    ///
+    /// The persisted record is written — as the document it was read as, so
     /// every field this build does not model survives — and the grant
     /// survives with it; if the write fails the owner still holds the role
     /// for this boot, and the next boot tries again.
@@ -781,9 +790,6 @@ impl IdentityStore {
         if !matches!(self.platform.lookup("group", ADMIN_GROUP), Ok(Some(_))) {
             return account;
         }
-        if self.any_account_administers() {
-            return account;
-        }
         account.groups.push(ADMIN_GROUP.to_string());
         match stored
             .get_mut("groups")
@@ -800,22 +806,6 @@ impl IdentityStore {
             );
         }
         account
-    }
-
-    /// Whether any readable account record on this device holds the role. A
-    /// corrupt record is skipped: one damaged file must not make every other
-    /// account's role invisible, and "none" here only ever adds a role.
-    fn any_account_administers(&self) -> bool {
-        let Ok(entries) = fs::read_dir(self.paths.accounts_dir()) else {
-            return false;
-        };
-        entries
-            .flatten()
-            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-            .any(|entry| {
-                read_json::<AccountRecord>(&entry.path().join("account.json"))
-                    .is_ok_and(|record| record.groups.iter().any(|group| group == ADMIN_GROUP))
-            })
     }
 
     fn materialize_account(
@@ -1756,7 +1746,7 @@ mod tests {
     /// administrator, and its first boot on an image with the role must fix
     /// that without anyone asking — and must not fix it twice.
     #[test]
-    fn an_upgraded_device_gives_its_owner_the_role_once() {
+    fn an_upgraded_device_gives_its_owner_the_role_when_nobody_usable_holds_it() {
         let temp = TempDir::new().unwrap();
         let paths = paths(&temp);
         fs::create_dir_all(&paths.home_root).unwrap();
@@ -1778,8 +1768,10 @@ mod tests {
         );
         assert!(edge.is_file());
 
-        // Another account already administers the device: the owner is left
-        // as they chose to be.
+        // Another account's record says it administers the device, but boot
+        // publishes only the owner, so nobody can sign in as it: the owner is
+        // given the role again rather than leaving the device with no
+        // administrator anyone can use (F0 review).
         set_account_groups(&paths, &["punar"]);
         fs::remove_file(&edge).unwrap();
         let other = paths.accounts_dir().join("acct_00000000000000bb");
@@ -1801,8 +1793,16 @@ mod tests {
         write_json_atomic(&other.join("account.json"), &bob, 0o600).unwrap();
         store.materialize().unwrap();
         assert!(
-            !edge.exists(),
-            "an existing administrator is never overruled"
+            edge.is_file(),
+            "an administrator nobody can sign in as does not count"
+        );
+        assert!(account_groups(&paths).iter().any(|g| g == ADMIN_GROUP));
+        assert!(
+            !paths
+                .runtime_userdb
+                .join(format!("bob:{ADMIN_GROUP}.membership"))
+                .exists(),
+            "and an account boot does not publish gets no drop-in"
         );
     }
 
