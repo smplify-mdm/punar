@@ -1944,6 +1944,19 @@ or path other than the confirmed target device. An installed system returns
   - The GUI runs these same verbs: the overview, the command center, the
     workspace store, WindowActions, SessionMenu and System Control's Power
     actions.
+- **`punarctl notifications list|dismiss <id>|clear|action <id>
+  <key>|dnd on|off|status`** (client-side, over the shell's own IPC): these
+  run `qs -p /usr/share/punar/shell ipc call notifications …`.
+  - `list` returns the records newest first, read through the notification
+    daemon's sanitising accessors, so a terminal sees exactly the words the
+    centre draws. Sender text is also printed through the terminal-safe
+    filter.
+  - Each record is `{id, source, summary, detail, urgency, sticky,
+    arrived_at, actions: [{key, label}]}`, plus `dnd`.
+  - The shell is the notification server, so the centre keeps its direct
+    binding.
+  - Exit codes: 5 when the shell is not running, 2 for an id that is not
+    the daemon's number.
 - **App parity (client-side, no new method):** `punarctl app list` joins
   `apps.catalog {}` for category, trust tier and catalog version, and its
   `--json` is still `apps.list` verbatim. `app list --all` adds every

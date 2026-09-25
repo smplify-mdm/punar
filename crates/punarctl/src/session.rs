@@ -83,6 +83,23 @@ pub enum SessionCommand {
 }
 
 #[derive(Subcommand)]
+pub enum NotificationsCommand {
+    /// Every notification, newest first, with the actions it offers.
+    List,
+    /// Dismiss one notification, by the id `list` shows.
+    Dismiss { id: String },
+    /// Dismiss every notification.
+    Clear,
+    /// Invoke one of a notification's own actions, by the key `list` shows.
+    Action { id: String, key: String },
+    /// Do not disturb: on, off, or status.
+    Dnd {
+        #[arg(value_parser = ["on", "off", "status"])]
+        mode: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum DisplayCommand {
     /// Every connected display: mode, scale and position.
     List,
@@ -721,6 +738,183 @@ fn done(style: &Style, json_output: bool, what: &str) -> ExitCode {
     }
     print!("{}", fmt::verdict(style, Slot::Ok, what));
     ExitCode::SUCCESS
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+/// The installed shell's config path: the `-p` every `qs ipc call` uses.
+const SHELL_PATH: &str = "/usr/share/punar/shell";
+
+/// `qs -p <shell> ipc call <target> <function> [args]`, from PATH as the
+/// compositor binds run it. The shell answers with the function's return
+/// value on stdout; a shell that is not running is not reachable.
+fn shell_call(target: &str, function: &str, args: &[&str]) -> Result<String, String> {
+    match Command::new("qs")
+        .args(["-p", SHELL_PATH, "ipc", "call", target, function])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        }
+        Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        Err(error) => Err(format!("qs could not start ({error})")),
+    }
+}
+
+fn shell_unreachable(why: &str) -> ExitCode {
+    refuse(
+        &format!(
+            "The desktop shell is not reachable.
+Why: {}.
+             Next step: run this inside your desktop session, where punar-shell is running.",
+            if why.is_empty() {
+                "qs gave no reason"
+            } else {
+                why
+            }
+        ),
+        crate::ipc::EXIT_UNREACHABLE,
+    )
+}
+
+/// A notification id is the daemon's own number.
+fn valid_notification_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 10 && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+pub fn notifications(command: NotificationsCommand, style: &Style, json_output: bool) -> ExitCode {
+    let id_of = |id: &str| -> Option<ExitCode> {
+        (!valid_notification_id(id)).then(|| {
+            refuse(
+                &format!(
+                    "{id:?} is not a notification id, so nothing was changed.
+                     Next step: `punarctl notifications list` shows each id."
+                ),
+                2,
+            )
+        })
+    };
+    match command {
+        NotificationsCommand::List => {
+            let answer = match shell_call("notifications", "list", &[]) {
+                Ok(answer) => answer,
+                Err(why) => return shell_unreachable(&why),
+            };
+            let Ok(document) = serde_json::from_str::<Value>(&answer) else {
+                return refuse("The shell's notification list could not be read.", 1);
+            };
+            if json_output {
+                return print_json(&document);
+            }
+            let mut out = fmt::masthead(style, "Notifications", "this session");
+            let rows: Vec<Row> = document
+                .get("notifications")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|n| {
+                    let urgency = text(n, "urgency");
+                    let mut detail =
+                        format!("{} · {}", safe(text(n, "source")), safe(text(n, "summary")));
+                    let actions: Vec<String> = n
+                        .get("actions")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(|a| safe(text(a, "key")))
+                        .collect();
+                    if !actions.is_empty() {
+                        detail.push_str(&format!(" · actions {}", actions.join(", ")));
+                    }
+                    Row::new(
+                        text(n, "id"),
+                        urgency,
+                        if urgency == "critical" {
+                            Slot::Bad
+                        } else {
+                            Slot::Neutral
+                        },
+                        &detail,
+                    )
+                })
+                .collect();
+            if rows.is_empty() {
+                out.push_str(&fmt::note(style, "No notification"));
+            } else {
+                out.push_str(&fmt::rows(style, &rows));
+            }
+            let dnd = document.get("dnd").and_then(Value::as_bool) == Some(true);
+            out.push_str(&fmt::note(
+                style,
+                &format!("Do not disturb {}", if dnd { "on" } else { "off" }),
+            ));
+            print!("{out}");
+            ExitCode::SUCCESS
+        }
+        NotificationsCommand::Dismiss { id } => {
+            if let Some(code) = id_of(&id) {
+                return code;
+            }
+            match shell_call("notifications", "dismissId", &[&id]) {
+                Ok(answer) if answer == id => done(style, json_output, "Dismissed"),
+                Ok(_) => refuse(
+                    &format!("No notification has the id {id}, so nothing was dismissed."),
+                    1,
+                ),
+                Err(why) => shell_unreachable(&why),
+            }
+        }
+        NotificationsCommand::Clear => match shell_call("notifications", "clear", &[]) {
+            Ok(count) if json_output => {
+                print_json(&json!({ "cleared": count.parse::<u64>().unwrap_or(0) }))
+            }
+            Ok(count) => {
+                print!(
+                    "{}",
+                    fmt::verdict(style, Slot::Ok, &format!("Cleared · {count}"))
+                );
+                ExitCode::SUCCESS
+            }
+            Err(why) => shell_unreachable(&why),
+        },
+        NotificationsCommand::Action { id, key } => {
+            if let Some(code) = id_of(&id) {
+                return code;
+            }
+            if key.is_empty() || key.chars().count() > 32 || key.chars().any(char::is_control) {
+                return refuse("An action key is the short name `list` shows.", 2);
+            }
+            match shell_call("notifications", "invoke", &[&id, &key]).as_deref() {
+                Ok("ok") => done(style, json_output, "Action invoked"),
+                Ok("no-action") => refuse(
+                    &format!("Notification {id} offers no action {key:?}, so nothing was invoked."),
+                    1,
+                ),
+                Ok(_) => refuse(
+                    &format!("No notification has the id {id}, so nothing was invoked."),
+                    1,
+                ),
+                Err(why) => shell_unreachable(why),
+            }
+        }
+        NotificationsCommand::Dnd { mode } => match shell_call("notifications", "dnd", &[&mode]) {
+            Ok(state) if json_output => print_json(&json!({ "dnd": state == "on" })),
+            Ok(state) => {
+                print!(
+                    "{}",
+                    fmt::verdict(style, Slot::Ok, &format!("Do not disturb · {state}"))
+                );
+                ExitCode::SUCCESS
+            }
+            Err(why) => shell_unreachable(&why),
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -423,3 +423,115 @@ fn audio_volume_runs_wpctl_capped_and_reports_the_level() {
         stderr(&output)
     );
 }
+
+/// A fake `qs` that logs its argv and answers like the shell's IPC.
+fn fake_qs(dir: &Path) -> PathBuf {
+    let bin = dir.join("qsbin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("qs");
+    let list = json!({
+        "notifications": [
+            {"id": "12", "source": "Mail", "summary": "Standup moved to 10:30",
+             "detail": "", "urgency": "normal", "sticky": false,
+             "arrived_at": "2026-09-24T09:00:00.000Z",
+             "actions": [{"key": "open", "label": "Open"}]},
+            {"id": "7", "source": "evil\u{1b}[2J", "summary": "hi",
+             "detail": "", "urgency": "critical", "sticky": true,
+             "arrived_at": null, "actions": []}
+        ],
+        "dnd": false
+    });
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n\
+             case \"$6\" in\n\
+               list) printf '%s\\n' '{list}' ;;\n\
+               dismissId) [ \"$7\" = 12 ] && echo 12 || echo ;;\n\
+               clear) echo 2 ;;\n\
+               invoke) if [ \"$7\" = 12 ] && [ \"$8\" = open ]; then echo ok; else echo no-action; fi ;;\n\
+               dnd) echo on ;;\n\
+             esac\n",
+            log = dir.join("qs.log").display(),
+            list = list.to_string().replace('\'', "")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+/// The shell's own notification IPC, called with the installed shell path;
+/// sender text is printed through the terminal-safe filter.
+#[test]
+fn notifications_verbs_call_the_shells_ipc() {
+    let session = Session::start(desktop);
+    let bin = fake_qs(&session.root);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = |args: &[&str]| session.command(args).env("PATH", &path).output().unwrap();
+
+    let output = run(&["notifications", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("12")
+                && l.contains("Mail · Standup moved to 10:30 · actions open")),
+        "{text}"
+    );
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(text.contains("DO NOT DISTURB OFF"), "{text}");
+
+    assert_eq!(
+        run(&["notifications", "dismiss", "12"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&["notifications", "dismiss", "99"]).status.code(),
+        Some(1)
+    );
+    assert_eq!(
+        run(&["notifications", "dismiss", "12;rm"]).status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        run(&["notifications", "action", "12", "open"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run(&["notifications", "action", "12", "nope"])
+            .status
+            .code(),
+        Some(1)
+    );
+    let output = run(&["--json", "notifications", "dnd", "on"]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&output)).unwrap(),
+        json!({"dnd": true})
+    );
+
+    let log = fs::read_to_string(session.root.join("qs.log")).unwrap();
+    assert!(
+        log.lines()
+            .all(|l| l.starts_with("-p /usr/share/punar/shell ipc call notifications ")),
+        "{log}"
+    );
+    assert!(
+        log.contains("ipc call notifications invoke 12 open"),
+        "{log}"
+    );
+
+    // No shell: exit 5.
+    let output = session
+        .command(&["notifications", "list"])
+        .env("PATH", "/nonexistent")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+}

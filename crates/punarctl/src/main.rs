@@ -166,6 +166,12 @@ enum Command {
         #[command(subcommand)]
         command: session::SessionCommand,
     },
+    /// Notifications of this session: list, dismiss, clear, invoke an
+    /// action, or do not disturb.
+    Notifications {
+        #[command(subcommand)]
+        command: session::NotificationsCommand,
+    },
     /// Connected displays.
     Display {
         #[command(subcommand)]
@@ -4502,6 +4508,7 @@ fn main() -> ExitCode {
         Command::Window { command } => session::window(command, &style, json),
         Command::Session { command } => session::session(command, &style, json),
         Command::Display { command } => session::display(command, &style, json),
+        Command::Notifications { command } => session::notifications(command, &style, json),
         Command::Audio { command } => session::audio(command, &style, json),
         Command::Device { command } => match client.call("device.posture", None) {
             // `--json` is the device.posture result verbatim for both verbs.
