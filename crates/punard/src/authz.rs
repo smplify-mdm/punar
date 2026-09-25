@@ -92,6 +92,36 @@ pub fn agent_session_of_peer(proc_root: &Path, peer: &Peer) -> Option<String> {
     punar_common::principal::agent_session_of_pid(proc_root, peer.pid)
 }
 
+/// Where logind records seat0's state; its `ACTIVE_UID=` line names the
+/// user of the session in the foreground on the local seat.
+pub const SEAT0_STATE: &str = "/run/systemd/seats/seat0";
+
+/// Capabilities a person may set for themselves from the active local
+/// session, with no administrator and no grant (SMP-1405 WP-02). Only
+/// person-scoped preferences belong here, never a security setting: the
+/// keyboard layout is the tool someone types with, and a password prompt
+/// between a person and their own keyboard helps no one. Everything else
+/// about the call is unchanged: typed validation, the audit event, the agent
+/// refusal that runs first, and an organization's pin, which still wins.
+pub const PERSON_SCOPED: &[&str] = &[punar_common::keymap::CAPABILITY_ID];
+
+/// The uid logind reports as active on seat0, if any.
+///
+/// This is the file sd-login's `sd_seat_get_active` reads. A remote session
+/// has no seat and never appears here; the greeter does while it is on
+/// screen, but it is not admitted to punard's socket at all.
+pub fn seat_active_uid(seat_file: &Path) -> Option<u32> {
+    let text = std::fs::read_to_string(seat_file).ok()?;
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("ACTIVE_UID="))
+        .and_then(|uid| uid.trim().parse().ok())
+}
+
+/// Whether `peer` is the person in the active local session.
+pub fn is_active_local_person(seat_file: &Path, peer: &Peer) -> bool {
+    peer.uid != 0 && seat_active_uid(seat_file) == Some(peer.uid)
+}
+
 /// The M3 mutation rule: uid 0 only. Reads are open to any admitted peer and
 /// never reach this function.
 pub fn authorize_mutation(peer: &Peer) -> Decision {
@@ -120,6 +150,38 @@ mod tests {
             pid: Some(0),
         };
         assert_eq!(agent_session_of_peer(root, &ghost), None);
+    }
+
+    #[test]
+    fn the_active_local_person_is_read_from_seat0() {
+        let dir = std::env::temp_dir().join(format!("punard-seat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let seat = dir.join("seat0");
+        let person = Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: None,
+        };
+        assert!(!is_active_local_person(&seat, &person), "no seat file");
+        std::fs::write(
+            &seat,
+            "# This is private data. Do not parse.\nIS_SEAT0=1\nACTIVE=3\nACTIVE_UID=1000\n",
+        )
+        .unwrap();
+        assert_eq!(seat_active_uid(&seat), Some(1000));
+        assert!(is_active_local_person(&seat, &person));
+        let other = Peer {
+            uid: 1001,
+            gid: 1001,
+            pid: None,
+        };
+        assert!(!is_active_local_person(&seat, &other));
+        // Root never needs this rule, and never gets it from a file.
+        std::fs::write(&seat, "ACTIVE_UID=0\n").unwrap();
+        assert!(!is_active_local_person(&seat, &Peer::root()));
+        std::fs::write(&seat, "ACTIVE=3\n").unwrap();
+        assert_eq!(seat_active_uid(&seat), None, "a seat nobody is using");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -421,6 +421,15 @@ preference/organization-policy machinery governs `stable`, `dev`, or `edge`.
 `browser.policy` is the fifth: its only desired states are `managed` and
 `unmanaged`; live observation returns `drifted` when Chromium's root-owned
 mandatory-policy file does not match the freshly rendered effective policy.
+`security.credential_isolation` is observed only (the image decides it).
+`system.keymap` (SMP-1405 WP-02) is the keyboard layout: one to four XKB
+layouts, comma-separated, each with an optional `+variant` (`us`,
+`de+nodeadkeys`, `us,ru`), validated first by syntax and then against the
+image's own `/usr/share/X11/xkb/rules/evdev.lst`, and written as the
+`XKBLAYOUT`/`XKBVARIANT` lines of `/etc/vconsole.conf`. Its OS default is the
+installer's choice from `/var/lib/punar/install/seed.json` when that names an
+installed layout, else the first observation. It is the one **person-scoped**
+capability: see section 5.4.
 
 ### 5.3 `capabilities.get`
 
@@ -478,6 +487,21 @@ Two amendments, both additive:
   <source name> (<policy id>) · effective: <state>"). The root caller's
   exit code is `0` — the preference was recorded and outranked, not
   forbidden (spec section 39); `--json` output was already complete in M4.
+
+**SMP-1405 WP-02: person-scoped capabilities.** `system.keymap` may also
+be set by the person in the **active local session**: a non-root peer whose
+uid logind names as `ACTIVE_UID` of seat0 (`/run/systemd/seats/seat0`, the
+file sd-login reads). The rest of the ladder is unchanged and runs first: an
+agent-attributed peer takes the AI authority path (which names no rule for
+`system.keymap`, so it is refused), root is allowed, a live grant is honoured.
+The call is validated, recorded as the person's preference, applied through
+the typed backend and audited under the person's name exactly like a root
+call; an organization's pin still outranks it in the merge (the result then
+carries `overridden`). A remote session has no seat, so it never qualifies;
+the greeter is on the seat before anyone signs in but is not admitted to the
+socket. A keyboard layout is the tool a person types with, not a security
+setting, and a password prompt between someone and their own keyboard would
+protect nothing. No other capability is person-scoped.
 
 ### 5.5 `audit.tail`
 

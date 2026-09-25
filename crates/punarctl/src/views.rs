@@ -406,6 +406,7 @@ fn compliance_label(capability: &str) -> &str {
         "system.hostname" => "Hostname",
         "time.timezone" => "Timezone",
         "system.update_channel" => "Update channel",
+        "system.keymap" => "Keyboard",
         other => other,
     }
 }

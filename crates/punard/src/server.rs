@@ -374,6 +374,11 @@ pub struct DaemonConfig {
     /// What one reconcile pass may spend on the control plane
     /// ([`RECONCILE_CONTROL_PLANE_BUDGET`]); shorter in tests.
     pub reconcile_control_plane_budget: Duration,
+    /// logind's record of seat0 (`ACTIVE_UID=`), which names the person in
+    /// the active local session. A person-scoped capability such as
+    /// `system.keymap` is theirs to set (SMP-1405 WP-02); injectable so
+    /// tests can seat someone without a logind.
+    pub seat_state_file: PathBuf,
 }
 
 impl DaemonConfig {
@@ -431,6 +436,7 @@ impl DaemonConfig {
             pi_update_sources,
             inventory_retry_base: INVENTORY_RETRY_BASE,
             reconcile_control_plane_budget: RECONCILE_CONTROL_PLANE_BUDGET,
+            seat_state_file: PathBuf::from(crate::authz::SEAT0_STATE),
         }
     }
 }
@@ -3919,7 +3925,9 @@ impl Inner {
             // `details` field; M9 does not extend it, and inventing one to
             // carry a grant id would be the tail wagging the schema.)
             MutationAuthority::Grant { grant_id } => vec![grant_id.clone()],
-            MutationAuthority::Root | MutationAuthority::AiAllowed { .. } => Vec::new(),
+            MutationAuthority::Root
+            | MutationAuthority::ActiveLocalPerson
+            | MutationAuthority::AiAllowed { .. } => Vec::new(),
         };
         self.execute_capability_set(&actor, cap, params, &extra_policy_ids)
             .0

@@ -24,6 +24,9 @@ pub(super) enum MutationAuthority {
     Root,
     /// A live section 48 grant for exactly this capability.
     Grant { grant_id: String },
+    /// The person in the active local session, on a person-scoped
+    /// capability ([`crate::authz::PERSON_SCOPED`], SMP-1405 WP-02).
+    ActiveLocalPerson,
     /// AI authority policy said `allow`. **No shipped M9 policy does** —
     /// the personal defaults are `approval_required` or `deny` across the
     /// board — but the value is part of SPEC section 20 and is implemented
@@ -365,6 +368,8 @@ impl Inner {
     /// 2. otherwise HUMAN PATH:
     ///      uid == 0                                 -> allow (unchanged)
     ///      live grant for (uid, capability)          -> allow (new)
+    ///      person-scoped capability, and the peer is
+    ///        the active local session's person      -> allow (SMP-1405 WP-02)
     ///      otherwise                                 -> deny  (unchanged)
     /// ```
     ///
@@ -401,6 +406,16 @@ impl Inner {
                     grant_id: grant.grant_id.clone(),
                 });
             }
+        }
+
+        // SMP-1405 WP-02: the keyboard layout is the person's own tool. The
+        // person at the machine may set it without an administrator; an
+        // agent never reaches this line (step 1), and an organization's pin
+        // still wins in the merge that follows.
+        if crate::authz::PERSON_SCOPED.contains(&id)
+            && crate::authz::is_active_local_person(&self.cfg.seat_state_file, peer)
+        {
+            return Ok(MutationAuthority::ActiveLocalPerson);
         }
 
         // The unchanged M3/M5 denial. M5 amendment (contract section 5.4):
