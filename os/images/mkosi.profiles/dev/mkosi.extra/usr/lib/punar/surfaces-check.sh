@@ -112,15 +112,26 @@ for retired_group in input video; do
         *) note "ok   the desktop user is not in the ${retired_group} group" ;;
     esac
 done
+# One class of node is the seat's by design: systemd's 70-uaccess.rules gives
+# the active session game controllers (udev's ID_INPUT_JOYSTICK), so a
+# gamepad attached to a real machine is openable and that is not a leak. A
+# node udev also calls a keyboard is never excused, joystick or not: that is
+# the misclassification that would hand out keystrokes.
 input_nodes=0
 input_opened=""
+input_controllers=""
 for input_node in /dev/input/event*; do
     [ -e "${input_node}" ] || continue
     input_nodes=$((input_nodes + 1))
     # A subshell, so a refused open ends only the subshell: `:` is a special
     # builtin, and a redirection error on one may end the whole script.
     if (: < "${input_node}") 2>/dev/null; then
-        input_opened="${input_opened} ${input_node}"
+        input_class="$(udevadm info --query=property --name="${input_node}" 2>/dev/null)"
+        case "${input_class}" in
+            *ID_INPUT_KEYBOARD=1*) input_opened="${input_opened} ${input_node}(keyboard)" ;;
+            *ID_INPUT_JOYSTICK=1*) input_controllers="${input_controllers} ${input_node}" ;;
+            *) input_opened="${input_opened} ${input_node}" ;;
+        esac
     fi
 done
 if [ "${input_nodes}" -eq 0 ]; then
@@ -129,6 +140,8 @@ if [ "${input_nodes}" -eq 0 ]; then
 elif [ -n "${input_opened}" ]; then
     note "FAIL the desktop user can open input devices directly:${input_opened}"
     FAILED=1
+elif [ -n "${input_controllers}" ]; then
+    note "ok   the desktop user can open no /dev/input node but the seat's game controllers:${input_controllers}"
 else
     note "ok   the desktop user can open none of the ${input_nodes} /dev/input/event* nodes"
 fi
@@ -1904,23 +1917,30 @@ fi
 # do with what those groups test.
 check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state | tr -d '[:space:]"')"
 
-# --- group 8k: a password sign-in leaves the login keyring encrypted ---------
+# --- group 8k: signing in with the password keeps the keyring encrypted -----
 #
 # THE WEAKNESS THIS GUARDS AGAINST. A gnome-keyring collection created with an
 # empty password is written as a PLAINTEXT `[keyring]` INI file: every stored
 # secret, browser keys included, readable by anything that can read the home
 # directory, on disk and in every backup. Omarchy's default keyring is exactly
-# that. Punar's greetd stack hands the sign-in password to pam_gnome_keyring
-# (etc/pam.d/greetd), which unlocks the login keyring with it or creates it
-# encrypted under it, so the file on disk is the binary format.
+# that. Punar's sign-in PAM stack (etc/pam.d/greetd) hands the password to
+# pam_gnome_keyring, which unlocks the login keyring with it or creates it
+# encrypted under it.
 #
-# WHAT THIS GATE CAN AND CANNOT EXERCISE. This image's session autologins, so
-# no PAM password stage ever runs for it. The gate therefore performs the one
-# step pam_gnome_keyring's auth stage performs at a password sign-in, the
-# daemon's unlock-or-create with the account's password
-# (`gnome-keyring-daemon --unlock`, password on stdin), and then reads the
-# file's format. The classifier is proven on both formats first, so a check
-# that could not tell them apart fails instead of passing.
+# WHAT RUNS. This image's session autologins, so no sign-in ever ran a
+# password through PAM. Where pamtester is installed (the Debian lanes' dev
+# profile) the gate drives the sign-in stack itself: `pamtester greetd`
+# authenticates and opens a session as this user with the password, through
+# every line of etc/pam.d/greetd that does not need root, with the session's
+# keyring daemon already running, as it is at a real sign-in. Remove the
+# pam_gnome_keyring auth line and no keyring appears, which fails below.
+# pamtester is not packaged for Arch, so that lane falls back to the one step
+# the module performs, the daemon's unlock-or-create with the password
+# (`gnome-keyring-daemon --unlock`), and says so; release gate A21 checks the
+# PAM lines themselves on every lane. The classifier is proven on both formats
+# first, so a check that could not tell them apart fails instead of passing,
+# and every keyring on disk is classified, not only the login one: a second
+# collection created with an empty password is the same leak.
 keyring_format() {
     if [ ! -f "$1" ]; then
         echo absent
@@ -1941,21 +1961,52 @@ check_eq "the keyring check reads an encrypted keyring as encrypted" "encrypted"
     "$(keyring_format "${keyring_fixtures}/sealed.keyring")"
 rm -rf "${keyring_fixtures}"
 
-login_keyring="${HOME:-/home/$(id -un)}/.local/share/keyrings/login.keyring"
+keyring_dir="${HOME:-/home/$(id -un)}/.local/share/keyrings"
+login_keyring="${keyring_dir}/login.keyring"
 if command -v gnome-keyring-daemon >/dev/null 2>&1; then
-    printf '%s' "${lock_password}" \
-        | DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus" \
-            timeout 20 gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1 || true
+    keyring_bus="unix:path=${XDG_RUNTIME_DIR}/bus"
+    if command -v pamtester >/dev/null 2>&1; then
+        keyring_route="the greetd sign-in stack (pamtester)"
+        # The session's daemon, running and locked, as D-Bus activation
+        # leaves it; the stack's auth line finds it and unlocks it.
+        DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+            timeout 20 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 || true
+        pam_result=0
+        printf '%s\n' "${lock_password}" \
+            | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+                timeout 30 pamtester greetd "$(id -un)" authenticate open_session close_session \
+                >/dev/null 2>&1 || pam_result=$?
+        check_eq "the greetd sign-in stack accepts the password (pamtester exit)" "0" "${pam_result}"
+    else
+        keyring_route="gnome-keyring's own unlock; pamtester is not on this image"
+        printf '%s' "${lock_password}" \
+            | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+                timeout 20 gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1 || true
+    fi
     keyring_waited=0
     while [ "${keyring_waited}" -lt 10 ] && [ ! -f "${login_keyring}" ]; do
         sleep 1
         keyring_waited=$((keyring_waited + 1))
     done
-    check_eq "after a password sign-in the login keyring on disk is" "encrypted" \
-        "$(keyring_format "${login_keyring}")"
+    check_eq "after the password went through ${keyring_route}, the login keyring on disk is" \
+        "encrypted" "$(keyring_format "${login_keyring}")"
     if [ -f "${login_keyring}" ]; then
         check_eq "the login keyring is readable only by its owner (mode)" "600" \
             "$(stat -c '%a' "${login_keyring}" 2>/dev/null)"
+    fi
+    keyring_plain=""
+    for keyring_file in "${keyring_dir}"/*.keyring; do
+        [ -f "${keyring_file}" ] || continue
+        case "$(keyring_format "${keyring_file}")" in
+            encrypted) ;;
+            *) keyring_plain="${keyring_plain} ${keyring_file##*/}" ;;
+        esac
+    done
+    if [ -n "${keyring_plain}" ]; then
+        note "FAIL a keyring on disk is not encrypted:${keyring_plain}"
+        FAILED=1
+    else
+        note "ok   every keyring on disk is encrypted"
     fi
 else
     note "FAIL gnome-keyring-daemon is not installed, so no login keyring exists to hold a secret"
