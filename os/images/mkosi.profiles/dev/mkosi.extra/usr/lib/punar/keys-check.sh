@@ -14,6 +14,8 @@
 #     that terminal receives Cyrillic, and a letter bind (PUNAR+M) still
 #     fires while Russian is the active group;
 #   * a workspace keeps its own layout preset, live and across sessions;
+#   * the brightness, microphone and media keys' verbs say "not present"
+#     (exit 6) for hardware this VM lacks, and no brightness row is drawn;
 #   * the login screen's choice, as session start adopts it, becomes the
 #     device's layout under the signed-in person's name;
 #   * the keys do what the grammar says, pressed as REAL KEYS: Alt+Tab, the
@@ -274,6 +276,48 @@ if wait_for 5 tiled_is "${session_algorithm}"; then
     note "ok   default gave the workspace back to the session preset (${session_algorithm})"
 else
     fail "default left tiledLayout '$(tiled)', not the session's ${session_algorithm}"
+fi
+
+# --- 1c. keys whose hardware this VM does not have --------------------------
+# The brightness, microphone and media keys run punarctl verbs that say when
+# what they drive is absent (exit 6, "not present") and draw nothing. This VM
+# has no backlight, no sound card and no media player; if one ever appears,
+# the verb must work instead, so each branch is read from the machine.
+if ls /sys/class/backlight/* >/dev/null 2>&1; then
+    "${CTL}" display brightness get >/dev/null 2>&1
+    check_eq "display brightness reads the backlight this machine has" 0 "$?"
+else
+    "${CTL}" display brightness +5% > /run/punar/keys-brightness.txt 2>&1
+    check_eq "the brightness key with no backlight exits 6 (not present)" 6 "$?"
+    if grep -q 'has no display backlight' /run/punar/keys-brightness.txt; then
+        note "ok   and says the machine has no display backlight"
+    else
+        fail "the brightness refusal does not say why: $(head -c 200 /run/punar/keys-brightness.txt)"
+    fi
+    if [ "$(ipc osd state)" = brightness ]; then
+        fail "the OSD drew a brightness row for a backlight that does not exist"
+    else
+        note "ok   no brightness row was drawn (the OSD is '$(ipc osd state)')"
+    fi
+fi
+if wpctl inspect @DEFAULT_AUDIO_SOURCE@ >/dev/null 2>&1; then
+    "${CTL}" audio mute --input >/dev/null 2>&1
+    check_eq "the microphone key mutes the microphone this machine has" 0 "$?"
+    "${CTL}" audio mute --input >/dev/null 2>&1 || fail "the microphone key did not unmute"
+else
+    "${CTL}" audio mute --input > /run/punar/keys-mic.txt 2>&1
+    check_eq "the microphone key with no microphone exits 6 (not present)" 6 "$?"
+    if grep -q 'no microphone' /run/punar/keys-mic.txt; then
+        note "ok   and says there is no microphone, not that PipeWire is down"
+    else
+        fail "the microphone refusal does not say why: $(head -c 200 /run/punar/keys-mic.txt)"
+    fi
+fi
+if busctl --user list 2>/dev/null | grep -q '^org\.mpris\.MediaPlayer2\.'; then
+    note "# a media player is running; the media key's absent case is not exercised"
+else
+    "${CTL}" media play-pause > /run/punar/keys-media.txt 2>&1
+    check_eq "the play/pause key with no media player exits 6 (not present)" 6 "$?"
 fi
 
 # --- 2. the lock screen names the layout -------------------------------------
