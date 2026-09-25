@@ -399,6 +399,26 @@ state word. Never a value.
 | `systemInfo.hardware.serialNumber` | `identifiers.serial_number` | organization-owned |
 | `supportedActions: []` | slice 1 honours no remote command | every |
 
+**Patch posture is device state — decided 2026-09-24.** `osPatchStatus` and
+`rebootRequired` come from the device's staged update and nothing else
+(`patch_posture` in `crates/punard/src/inventory.rs`). A release staged and
+waiting for a restart reads `"updates-available"` with a reboot required;
+otherwise the status is `"unknown"` and no reboot is required. Today only a
+person stages a release (`punarctl update apply`); nothing updates on its own
+schedule. The inventory changes when a release is staged and again when the
+device restarts into it, and each change is sent within one pass. So the
+organization sees, to within two minutes, when an update was staged and when
+the device began running it.
+
+The owner accepts that as posture an organization may see, as every MDM
+reports pending updates and a required reboot. It is not a privacy leak:
+it reflects the device's update state (whether the device runs the release
+it has installed), not what the person does with the device. A person's own
+check changes nothing: nothing from `punarctl update check` feeds the
+status, so it stays `"unknown"` whether or not anyone looked. Only a change
+to the device itself moves it. Whether and when anyone checked for updates,
+and what a channel check found, never leave.
+
 **Never, in any tier:** a `network` or `identity` section; the hostname
 (sent once, at `/enroll`); any capability's value (the hostname string, the
 timezone); timezone, uptime, boot time or `machineId`; addresses of any
