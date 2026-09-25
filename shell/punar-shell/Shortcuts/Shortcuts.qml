@@ -186,11 +186,49 @@ DeferredSurfaceBase {
 
     // ---- layout (Sect II·06) ----------------------------------------
 
+    // Every word typed must appear somewhere in the row — its description,
+    // its chord, its section — so "move mon" finds "Move window to left
+    // monitor" and "alt tab" finds the window switcher.
     function matches(row: var, q: string): bool {
         if (q === "")
             return true;
-        return (row.label + " " + row.chord + " " + row.dispatcher)
-            .toLowerCase().indexOf(q) >= 0;
+        var haystack = (row.label + " " + row.chord + " " + row.keyText + " " + row.section)
+            .toLowerCase();
+        var words = q.split(/\s+/);
+        for (var i = 0; i < words.length; i++) {
+            if (words[i] !== "" && haystack.indexOf(words[i]) < 0)
+                return false;
+        }
+        return true;
+    }
+
+    // Up to three chords this person has not tried yet, in teaching order,
+    // found in the live table by their description (Services/ShortcutUsage.qml
+    // says what "tried" means and why it is kept on this machine only). A
+    // family whose bind is gone from the table simply drops out.
+    readonly property var untriedRows: {
+        var out = [];
+        var families = ShortcutUsage.untried();
+        var rows = Local.BindTable.rows;
+        for (var f = 0; f < families.length && out.length < 3; f++) {
+            for (var i = 0; i < rows.length; i++) {
+                if (rows[i].label.indexOf(families[f]) === 0) {
+                    out.push({
+                        "chord": rows[i].chord,
+                        "label": rows[i].label
+                    });
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
+    function untriedText(): string {
+        var parts = [];
+        for (var i = 0; i < root.untriedRows.length; i++)
+            parts.push(root.untriedRows[i].chord + "  " + root.untriedRows[i].label);
+        return parts.join("   ·   ");
     }
 
     // Three real columns, not a multi-column flow: a multi-column body
@@ -548,7 +586,7 @@ DeferredSurfaceBase {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: queryRow.bottom
-                anchors.bottom: footRule.top
+                anchors.bottom: untriedRow.top
                 anchors.leftMargin: 20
                 anchors.rightMargin: 20
                 anchors.topMargin: 12
@@ -690,6 +728,45 @@ DeferredSurfaceBase {
                 }
             }
 
+            // NOT TRIED YET — shown only on the unfiltered reference, and
+            // only while there is something to suggest.
+            Item {
+                id: untriedRow
+
+                readonly property bool shown: root.query.trim() === "" && root.untriedRows.length > 0
+
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: 20
+                anchors.rightMargin: 20
+                anchors.bottom: footRule.top
+                anchors.bottomMargin: untriedRow.shown ? 8 : 0
+                height: untriedRow.shown ? 18 : 0
+                visible: untriedRow.shown
+
+                Meta {
+                    id: untriedLabel
+
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Theme.shellFg
+                    text: "Not tried yet"
+                }
+
+                Text {
+                    anchors.left: untriedLabel.right
+                    anchors.leftMargin: 12
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    font.family: Theme.fontMono
+                    font.pixelSize: 11
+                    color: Theme.shellInk2
+                    textFormat: Text.PlainText
+                    text: root.untriedText()
+                }
+            }
+
             Rectangle {
                 id: footRule
 
@@ -738,7 +815,7 @@ DeferredSurfaceBase {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     font.weight: 500
-                    text: "Source · hyprctl binds -j · cached at session start"
+                    text: "Source · punarctl keys list · cached at session start"
                 }
             }
         }

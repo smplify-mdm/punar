@@ -21,7 +21,7 @@ PROBE_PATH=/usr/share/punar/shell/surface-probe.qml
 PROBE_CMD="qs -p ${PROBE_PATH}"
 PROBE_LOG=/run/punar/surface-probe.log
 IPC_ERRORS=/run/punar/surface-probe-ipc-errors.log
-SURFACES="commandcenter systemcontrol shortcuts aipanel overview notifications"
+SURFACES="commandcenter systemcontrol shortcuts aipanel overview notifications windowswitcher"
 SAMPLES=3
 MIN_PROBE_PSS_KIB=16384
 FAILED=0
@@ -336,5 +336,32 @@ for surface in ${SURFACES}; do
     median_first_map="$(awk -F '\t' -v s="${surface}" '$1 == s {print $9}' "${REPORT}" | sort -n | sed -n '2p')"
     note "median ${surface}: resident_delta_kib=${median_delta} construct_ms=${median_construct} shell_map_ms=${median_shell_map} first_map_ms=${median_first_map}"
 done
+
+# THE SWITCHER'S BUDGET (SMP-1405 WP-02). Alt+Tab is a strip of the
+# overview's own wireframes, one per window, so it must never cost more to
+# keep than the overview's full grid, nor take longer to first appear:
+# whatever the overview's measured numbers are on this machine, the
+# switcher stays inside them. A relative budget, because the absolute
+# numbers move with the VM's renderer and are not a product promise; this
+# relation is.
+median_of() {
+    awk -F '\t' -v s="$1" -v c="$2" '$1 == s && $2 ~ /^[0-9]+$/ {print $c}' "${REPORT}" | sort -n | sed -n '2p'
+}
+switcher_delta="$(median_of windowswitcher 5)"
+overview_delta="$(median_of overview 5)"
+switcher_map="$(median_of windowswitcher 9)"
+overview_map="$(median_of overview 9)"
+case "${switcher_delta}${overview_delta}${switcher_map}${overview_map}" in
+    ''|*[!0-9-]*)
+        note "FAIL windowswitcher budget: medians unavailable (switcher ${switcher_delta:-?}/${switcher_map:-?}, overview ${overview_delta:-?}/${overview_map:-?})"
+        FAILED=1 ;;
+    *)
+        if [ "${switcher_delta}" -le "${overview_delta}" ] && [ "${switcher_map}" -le "${overview_map}" ]; then
+            note "ok windowswitcher budget: resident ${switcher_delta} <= ${overview_delta} KiB and first map ${switcher_map} <= ${overview_map} ms (overview)"
+        else
+            note "FAIL windowswitcher budget: resident ${switcher_delta} KiB / first map ${switcher_map} ms exceeds the overview's ${overview_delta} KiB / ${overview_map} ms"
+            FAILED=1
+        fi ;;
+esac
 
 finish

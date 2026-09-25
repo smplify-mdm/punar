@@ -442,7 +442,18 @@ fn list(
             .iter()
             .map(|(name, description)| json!({ "name": name, "description": description }))
             .collect();
-        println!("{}", json!({ "layouts": rows }));
+        let mut document = json!({ "layouts": rows });
+        // The layouts that get a Latin first group, and whether this image
+        // ships each: the in-VM keys check holds the list to the image.
+        if layout.is_none() {
+            document["non_latin"] = Value::Array(
+                keymap::NON_LATIN
+                    .iter()
+                    .map(|name| json!({ "layout": name, "installed": catalog.layouts.contains_key(*name) }))
+                    .collect(),
+            );
+        }
+        println!("{document}");
         return ExitCode::SUCCESS;
     }
     let mut out = fmt::masthead(

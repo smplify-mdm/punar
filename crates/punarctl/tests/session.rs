@@ -1011,6 +1011,16 @@ fn keyboard_layout_status_reports_the_device_the_session_and_what_is_typing() {
     assert_eq!(status["switch_chord"], "both Alt keys together");
 
     let output = session
+        .command(&["--json", "keyboard", "layout", "list"])
+        .env("PUNAR_XKB_LIST", &xkb)
+        .output()
+        .unwrap();
+    let list: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let non_latin = list["non_latin"].as_array().unwrap();
+    assert!(non_latin.contains(&json!({"layout": "ru", "installed": true})));
+    assert!(non_latin.contains(&json!({"layout": "gr", "installed": false})));
+
+    let output = session
         .command(&["--json", "keyboard", "layout", "list", "de"])
         .env("PUNAR_XKB_LIST", &xkb)
         .output()

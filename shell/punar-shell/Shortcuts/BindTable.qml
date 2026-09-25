@@ -4,7 +4,8 @@ pragma ComponentBehavior: Bound
 // docs/design/mockups/shortcuts.html Sect I and Sect V·05).
 //
 // THE ANTI-DRIFT RULE, and it is the whole reason this file exists: the
-// shell renders `hyprctl binds -j` and NOTHING ELSE. Not a QML array, not
+// shell renders the compositor's `j/binds` table (read through `punarctl
+// keys list`, the same bytes `hyprctl binds -j` prints) and NOTHING ELSE. Not a QML array, not
 // a Markdown table, not a generated header — the live table the
 // compositor is currently dispatching from. A hardcoded list is a second
 // source of truth, and a second source of truth is a promise to be wrong
@@ -162,8 +163,12 @@ Singleton {
     // one worth keeping.
     readonly property var byDescription: [
         ["Move window to workspace ", "WORKSPACES AND PROJECTS"],
+        ["Move window quietly to workspace ", "WORKSPACES AND PROJECTS"],
+        ["Move workspace to ", "WORKSPACES AND PROJECTS"],
         ["Workspace ", "WORKSPACES AND PROJECTS"],
         ["Previous workspace", "WORKSPACES AND PROJECTS"],
+        ["Next workspace", "WORKSPACES AND PROJECTS"],
+        ["Scroll to the ", "WORKSPACES AND PROJECTS"],
         ["Project overview", "WORKSPACES AND PROJECTS"],
         ["Move window into group ", "LAYOUTS"],
         ["Move window out of group", "LAYOUTS"],
@@ -172,10 +177,15 @@ Singleton {
         ["Move window to upper monitor", "WINDOWS"],
         ["Move window to lower monitor", "WINDOWS"],
         ["Move window ", "WINDOWS"],
+        ["Swap window ", "WINDOWS"],
         ["Focus status cluster", "SURFACES"],
         ["Focus ", "WINDOWS"],
         ["Close window", "WINDOWS"],
         ["Window actions", "WINDOWS"],
+        ["Switch windows", "WINDOWS"],
+        ["Copy", "WINDOWS"],
+        ["Paste", "WINDOWS"],
+        ["Cut", "WINDOWS"],
         ["Enter resize mode", "WINDOWS"],
         ["Exit resize mode", "WINDOWS"],
         ["Resize ", "WINDOWS"],
@@ -186,11 +196,18 @@ Singleton {
         ["Toggle floating", "LAYOUTS"],
         ["Pin floating window", "LAYOUTS"],
         ["Center floating window", "LAYOUTS"],
+        ["Toggle maximize", "LAYOUTS"],
+        ["Pop window out", "LAYOUTS"],
+        ["Toggle split direction", "LAYOUTS"],
+        ["Toggle window transparency", "LAYOUTS"],
+        ["Toggle window gaps", "LAYOUTS"],
+        ["Toggle square shape for a lone window", "LAYOUTS"],
         ["Previous layout preset", "LAYOUTS"],
         ["Next layout preset", "LAYOUTS"],
         ["Open command center", "SURFACES"],
         ["Open terminal", "SURFACES"],
         ["Open browser", "SURFACES"],
+        ["Open files", "SURFACES"],
         ["AI on this device", "SURFACES"],
         ["Privacy and network activity", "SURFACES"],
         ["Toggle scratchpad terminal", "SURFACES"],
@@ -202,6 +219,12 @@ Singleton {
         ["Screenshot ", "SESSION"],
         ["Volume ", "MEDIA"],
         ["Toggle mute", "MEDIA"],
+        ["Toggle microphone mute", "MEDIA"],
+        ["Play or pause", "MEDIA"],
+        ["Next track", "MEDIA"],
+        ["Previous track", "MEDIA"],
+        ["Brightness ", "MEDIA"],
+        ["Keyboard light ", "MEDIA"],
         ["End session", "SESSION"],
         ["Lock session", "SESSION"],
         ["Session menu", "SESSION"]
@@ -228,7 +251,20 @@ Singleton {
             "slash": "/",
             "XF86AudioRaiseVolume": "Vol +",
             "XF86AudioLowerVolume": "Vol −",
-            "XF86AudioMute": "Mute"
+            "XF86AudioMute": "Mute",
+            "XF86AudioMicMute": "Mic mute",
+            "XF86AudioPlay": "Play",
+            "XF86AudioPause": "Pause",
+            "XF86AudioNext": "Next",
+            "XF86AudioPrev": "Prev",
+            "XF86MonBrightnessUp": "Bright +",
+            "XF86MonBrightnessDown": "Bright −",
+            "XF86KbdBrightnessUp": "Kbd light +",
+            "XF86KbdBrightnessDown": "Kbd light −",
+            "mouse:272": "Drag",
+            "mouse:273": "Right-drag",
+            "mouse_down": "Wheel ↓",
+            "mouse_up": "Wheel ↑"
         })
 
     function keyLabel(key: string, keycode: int): string {
@@ -338,6 +374,12 @@ Singleton {
                 skipped++;
                 continue;
             }
+            // A release bind is the second half of a chord already listed —
+            // Alt+Tab's "choose on release" — and a row of its own would
+            // teach a key nobody presses. It is counted in the footer's
+            // binds, never hidden from them.
+            if (b.release === true)
+                continue;
             described.push({
                 "modmask": typeof b.modmask === "number" ? b.modmask : 0,
                 "key": typeof b.key === "string" ? b.key : "",
@@ -369,13 +411,19 @@ Singleton {
             var r = described[j];
             var m = /^(.*?) (\d+)$/.exec(r.label);
             var isDigit = /^\d$/.test(r.key);
+            // The number the row is about: the label's, whose key is that
+            // number's last digit — so the tenth workspace, on the 0 key
+            // after 9 on the number row, continues the run 1…9 (SMP-1405
+            // WP-02). A label whose digit disagrees with its key never folds.
+            var index = m !== null ? Number(m[2]) : -1;
+            var keyMatches = isDigit && index >= 0 && Number(r.key) === index % 10;
 
-            if (m !== null && isDigit && prev !== null && prev.foldBase === m[1]
+            if (m !== null && keyMatches && prev !== null && prev.foldBase === m[1]
                     && prev.modmask === r.modmask && prev.dispatcher === r.dispatcher
                     && prev.submap === r.submap
-                    && Number(r.key) === prev.foldLast + 1) {
-                prev.foldLast = Number(r.key);
-                prev.keyText = prev.foldFirst + "…" + prev.foldLast;
+                    && index === prev.foldLast + 1) {
+                prev.foldLast = index;
+                prev.keyText = (prev.foldFirst % 10) + "…" + (prev.foldLast % 10);
                 prev.label = prev.foldBase + " " + prev.foldFirst + "…" + prev.foldLast;
                 prev.folded = prev.foldLast - prev.foldFirst + 1;
                 prev.chord = table.chordText(prev);
@@ -411,10 +459,10 @@ Singleton {
                 "foldLast": 0,
                 "chord": ""
             };
-            if (m !== null && isDigit) {
+            if (m !== null && keyMatches) {
                 row.foldBase = m[1];
-                row.foldFirst = Number(r.key);
-                row.foldLast = Number(r.key);
+                row.foldFirst = index;
+                row.foldLast = index;
             }
             row.chord = table.chordText(row);
 
@@ -456,9 +504,12 @@ Singleton {
     Process {
         id: binds
 
-        // `hyprctl` reads HYPRLAND_INSTANCE_SIGNATURE from the
-        // environment the shell was started in by Hyprland's exec-once.
-        command: ["hyprctl", "binds", "-j"]
+        // `punarctl keys list`, the verb a terminal uses, which prints the
+        // compositor's own `j/binds` answer verbatim (terminal parity: the
+        // reference and a terminal read one table one way). It reaches the
+        // compositor through HYPRLAND_INSTANCE_SIGNATURE, set in the
+        // environment Hyprland started the shell with.
+        command: ["punarctl", "--json", "keys", "list"]
 
         stdout: StdioCollector {
             id: out
@@ -469,7 +520,7 @@ Singleton {
             }
         }
 
-        // The process ending without a parsed table means hyprctl is not
+        // The process ending without a parsed table means punarctl is not
         // there, or answered nothing. Named plainly rather than dressed
         // up: this surface is a reference, and a reference that invents
         // rows is worse than one that admits it has none.
@@ -480,7 +531,7 @@ Singleton {
             if (table.loaded)
                 return;
             table.resetEmpty();
-            table.problem = "hyprctl could not be reached — no compositor binding table.";
+            table.problem = "punarctl keys list could not reach the compositor — no binding table.";
             table.loaded = true;
         }
     }

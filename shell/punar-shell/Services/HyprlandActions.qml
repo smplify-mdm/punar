@@ -77,11 +77,17 @@ Singleton {
         root.run(["punarctl", "window", "focus", "--class", appClass]);
     }
 
+    // Raise one exact window by its address (the Alt+Tab switcher); punarctl
+    // checks the address is 0x-hex before it builds the selector.
+    function focusWindowAddress(address: string): void {
+        root.run(["punarctl", "window", "focus", "--address", address]);
+    }
+
     // A layout preset: `punarctl layout`, which runs punar-layout.sh, the
     // presets' one implementation, and refuses first when no compositor is
     // reachable.
     function applyLayout(preset: string): void {
-        root.run(["punarctl", "layout", preset]);
+        root.run(["punarctl", "layout", preset, "--workspace", "active"]);
     }
 
     // An empty name clears the workspace's name.

@@ -267,16 +267,19 @@ therefore unfalsifiable rather than enforced by a check that could rot.
 **OSD:** volume is real — it follows the PipeWire sink's own change event
 and draws the level the sink *settled on*, whoever moved it, so it cannot
 show a level the machine does not hold. With no audio server it reports
-`unavailable` and never draws. **Brightness is dashed** with the plate's
-`SIM · VM` tag and reachable only by IPC, because no backlight capability
-ships — which is also why **no brightness key is bound** (spec §1.22).
+`unavailable` and never draws. **Brightness is real or absent** (SMP-1405
+WP-02): the brightness keys run `punarctl display brightness`, which writes
+through logind's `SetBrightness` on the session's own object and raises the
+row with the value it read back from sysfs. A machine with no backlight
+(every VM) exits 6 before the OSD is called, so nothing is drawn; the
+dashed `SIM · VM` row is gone.
 
 **Try it:**
 ```sh
 notify-send "Deploy finished" "atlas · 4m 12s"      # a toast, then PUNAR+SHIFT+N
 qs -p /usr/share/punar/shell ipc call notifications dnd toggle
 qs -p /usr/share/punar/shell ipc call notifications owner   # punar | foreign | unverified
-qs -p /usr/share/punar/shell ipc call osd brightness 60      # the dashed row
+qs -p /usr/share/punar/shell ipc call osd brightness 60 display   # what the keys raise
 ```
 
 ---

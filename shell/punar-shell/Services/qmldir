@@ -10,6 +10,7 @@ singleton LocalTime 1.0 LocalTime.qml
 singleton Network 1.0 Network.qml
 singleton Notifications 1.0 Notifications.qml
 singleton SafeText 1.0 SafeText.qml
+singleton ShortcutUsage 1.0 ShortcutUsage.qml
 singleton Status 1.0 Status.qml
 singleton SurfaceTiming 1.0 SurfaceTiming.qml
 singleton WallpaperState 1.0 WallpaperState.qml

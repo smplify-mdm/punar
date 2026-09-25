@@ -52,9 +52,6 @@ HELPERS = {
                       "formats the bar clock; reads nothing a daemon owns"),
     "busctl": (("Services/Notifications.qml",),
                "the notification server checks which process owns its own bus name"),
-    "hyprctl": (("Shortcuts/BindTable.qml",),
-                "read-only `hyprctl binds -j` for the shortcuts sheet: a session-local "
-                "fact (parity plan section 3B); no punarctl verb reads key binds yet"),
     "rm": (("Theme/Theme.qml", "Services/WallpaperState.qml"),
            "drops the person's own theme or wallpaper preference file when the shell's "
            "own reset is asked for; `punarctl theme reset` removes the same file"),

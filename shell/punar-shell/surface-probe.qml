@@ -47,6 +47,8 @@ ShellRoot {
             return Qt.resolvedUrl("Overview/Overview.qml");
         case "notifications":
             return Qt.resolvedUrl("Notifications/NotificationCenter.qml");
+        case "windowswitcher":
+            return Qt.resolvedUrl("WindowSwitcher/WindowSwitcher.qml");
         default:
             return "";
         }

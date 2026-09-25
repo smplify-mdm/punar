@@ -175,12 +175,13 @@ return function(ctx)
     bind(mod .. " + ALT + down", hl.dsp.workspace.move({ monitor = "d" }), "Move workspace to lower monitor")
 
     -- ALT+TAB: THE WINDOW SWITCHER. The compositor counts the Tab presses of
-    -- one Alt hold and the shell draws them: every press sends the gesture's
-    -- number and its running count, and the release of Alt sends a commit
-    -- with the same two numbers. Because each call carries the whole state,
-    -- the shell reaches the same answer whatever order two quick processes
-    -- land in; a quick tap is `show 1` and `commit 1` and switches to the
-    -- previous window, like every Alt+Tab. The shell focuses the chosen
+    -- one Alt hold and the shell draws them: every press sends `step` with
+    -- the gesture's number and its running count, and the release of Alt
+    -- sends `commit` with the same two numbers. Because each call carries the
+    -- whole state, the shell reaches the same answer whatever order two quick
+    -- processes land in; a quick tap is `step 1` and `commit 1` and switches
+    -- to the previous window, like every Alt+Tab. (Not `show`: `qs ipc`
+    -- parses that word as its own subcommand wherever it appears.) The shell focuses the chosen
     -- window with `punarctl window focus --address`. Alt released while Shift
     -- is still held is covered by the SHIFT release binds.
     local switching = false
@@ -199,7 +200,7 @@ return function(ctx)
                 steps = 0
             end
             steps = steps + delta
-            switcher("show")
+            switcher("step")
         end
     end
     local function switch_done()
