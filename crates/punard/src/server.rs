@@ -713,11 +713,27 @@ impl Daemon {
                 journal_detail(unmapped)
             );
         }
-        persist_rendered_browser_policy(
+        // The browser document for what was just loaded. A document that
+        // cannot be written (a full disk) is logged, not fatal: refusing to
+        // start would leave the device without its control plane, its
+        // reconcile and its management, and the document on disk stays the
+        // last one written either way. The next policy refresh writes it
+        // again (nothing is named as loaded below), and until then
+        // `browser.policy` observes the difference.
+        let rendered = match persist_rendered_browser_policy(
             &cfg.browser_policy_source,
             &loaded.applications,
             &loaded.browsers,
-        )?;
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!(
+                    "punard: could not write the rendered browser policy ({e}); starting \
+                     with the document already on disk"
+                );
+                false
+            }
+        };
 
         let effective = compute_effective(
             &registry,
@@ -746,13 +762,11 @@ impl Daemon {
                 policy_set::Settled::default()
             }
         };
-        let mut saved = true;
         if settled.changed {
             if let Some(record) = &enrollment {
-                if let Err(e) =
+                if let Err(e) = policy_set::step(policy_set::Step::RecordSettled).and_then(|()| {
                     save_enrollment_durable(&cfg.state_dir.join("enrollment.json"), record)
-                {
-                    saved = false;
+                }) {
                     eprintln!(
                         "punard: could not save the settled policy record ({e}); \
                          it is settled again at the next start"
@@ -762,9 +776,13 @@ impl Daemon {
         }
         // A change that landed before the crash is audited as the refresh
         // would have, under the event id it fixed before the swap: once,
-        // whether the refresh got as far as writing it or not. Only once the
-        // settled record is saved, or the next start settles it again.
-        if let (Some(change), true) = (&settled.landed, saved) {
+        // whether the refresh got as far as writing it or not. Whether or not
+        // the settled record could be saved: this daemon keeps running on the
+        // settled record in memory, and the next sync pass saves it without
+        // the pending change, so waiting for "the next start" would lose the
+        // event the moment the disk recovers. The event id makes a second
+        // start that settles it again find it already written.
+        if let Some(change) = &settled.landed {
             if audit_log_holds(&cfg.audit_path, &change.event_id) {
                 eprintln!(
                     "punard: the organization's policy was {} ({}) before the last stop",
@@ -796,7 +814,7 @@ impl Daemon {
         // What the in-memory layers below were loaded from, as far as the
         // organization's files go: a refresh that finds the same set commits
         // nothing only while this still names it.
-        let org_policy_loaded = enrollment.as_ref().and_then(|record| {
+        let org_policy_loaded = enrollment.as_ref().filter(|_| rendered).and_then(|record| {
             CanonicalSet::read_owned(&cfg.state_dir.join("policy.d"), &record.policy_files)
                 .ok()
                 .map(|owned| owned.revision())
@@ -5890,12 +5908,14 @@ impl Inner {
             Some(token) => client.compliance_report(token, &report).is_ok(),
             None => false,
         };
-        // The link is back. The waits an inventory built up while nothing
-        // got through say nothing about the inventory, and would hold a
-        // changed one back for up to half an hour after the device is
-        // online again.
+        // The link is back. The waits an inventory and the policy refresh
+        // built up while nothing got through say nothing about either, and
+        // would hold a changed inventory back, and a policy the organization
+        // changed meanwhile (a tightening, a withdrawal) unfetched, for up to
+        // half an hour after the device is online again.
         if compliance_ok && link_was_down {
             *self.inventory_retry.lock().unwrap() = None;
+            *self.policy_refresh_backoff.lock().unwrap() = RefreshBackoff::default();
         }
 
         // Inventory: device facts, which capabilities are supported, posture
@@ -6722,6 +6742,29 @@ mod tests {
             fs::read(state.join("policy.d/local.note")).unwrap(),
             b"root's own"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every start renders the browser document again, and one that cannot
+    /// be written (a full disk; here a directory where the file goes) is
+    /// logged, not a reason to refuse to start: the device keeps its control
+    /// plane and its management, and the document on disk stays the last
+    /// one written either way.
+    #[test]
+    fn a_browser_document_that_cannot_be_written_does_not_stop_a_start() {
+        let root = std::env::temp_dir().join(format!(
+            "punard-rendered-unwritable-{}-{}",
+            std::process::id(),
+            next_event_id()
+        ));
+        let state = root.join("state");
+        let config = DaemonConfig::new(
+            root.join("punard.sock"),
+            state.clone(),
+            root.join("audit.jsonl"),
+        );
+        fs::create_dir_all(config.browser_policy_source.join("in-the-way")).unwrap();
+        assert!(Daemon::new(config, Registry::new(Vec::new())).is_ok());
         let _ = fs::remove_dir_all(&root);
     }
 

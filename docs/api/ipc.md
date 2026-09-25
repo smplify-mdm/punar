@@ -820,7 +820,7 @@ authenticated, bounded, explained and recorded.
 
 Params: `{"org_domain": "acme.com", "code": "…", "ticket": "…", "accept_non_removable": true, "accept_organization_owned": true}` — `accept_non_removable` and `accept_organization_owned` optional, default `false` (step 6 below); `code` optional on the wire (the dev/CI mock needs none; the built-in Smplify agent refuses to register without one), read by punarctl from stdin or a hidden prompt, never argv, never audited or returned. Mutating, always
 audited (`action: "enroll.start"`, `resource: "enrollment"`; success cites
-the fetched policy ids in `policy_ids`). Processed under the 60 s bound
+the fetched policy ids in `policy_ids`). Processed under the 70 s bound
 (section 2).
 
 **Who may enroll: root, or a person who has just confirmed their password.**

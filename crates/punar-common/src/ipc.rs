@@ -4043,6 +4043,45 @@ mod tests {
         assert!(RECONCILE_PROCESS_TIMEOUT > SERVER_PROCESS_TIMEOUT);
     }
 
+    /// The contract states `enroll.start`'s processing bound in two places,
+    /// section 2 and section 5.9, and both are the constant punard enforces:
+    /// a raised bound once left section 5.9 saying 60 s while section 2 and
+    /// the code said 70 s.
+    #[test]
+    fn the_contract_states_the_enroll_start_bound_the_daemon_enforces() {
+        let contract = include_str!("../../../docs/api/ipc.md");
+        let bound = ENROLL_START_PROCESS_TIMEOUT.as_secs();
+        let section = |heading: &str| {
+            let start = contract.find(heading).expect(heading);
+            let rest = &contract[start + heading.len()..];
+            let end = ["\n## ", "\n### "]
+                .iter()
+                .filter_map(|next| rest.find(next))
+                .min()
+                .unwrap_or(rest.len());
+            &rest[..end]
+        };
+        assert!(
+            section("## 2. Framing").contains(&format!(
+                "`enroll.start` (section 5.9) is processed\n  under a **{bound} s** bound"
+            )),
+            "section 2 must state the {bound} s bound"
+        );
+        let start = section("### 5.9 `enroll.start` (M5)");
+        let stated: Vec<&str> = start
+            .match_indices("Processed under the ")
+            .map(|(at, found)| {
+                let tail = &start[at + found.len()..];
+                &tail[..tail.find(' ').unwrap()]
+            })
+            .collect();
+        assert_eq!(
+            stated,
+            [bound.to_string().as_str()],
+            "section 5.9 must state the same bound"
+        );
+    }
+
     // -- M4 typed results (contract sections 5.1, 5.6–5.8) ------------------
 
     #[test]

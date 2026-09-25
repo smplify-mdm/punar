@@ -97,6 +97,11 @@ struct ControlPlaneState {
     /// Take every request and answer none: a link that drops everything past
     /// the connection.
     black_hole: AtomicBool,
+    /// Answer every call that needs the organization's server as the
+    /// built-in agent does while the device is offline: with its own
+    /// `internal` error, promptly. The calls it answers from the device alone
+    /// still work.
+    offline: AtomicBool,
     /// Serve a desired state that turns local policy editing off
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
@@ -143,6 +148,11 @@ impl ControlPlaneState {
         let late = self.answer_late.lock().unwrap().get(method).copied();
         if let Some(delay) = late {
             std::thread::sleep(delay);
+        }
+        if self.offline.load(Ordering::SeqCst)
+            && !matches!(method, "identity.status" | "enroll.unregister")
+        {
+            return Err(("internal", "transport failed (connecting timed out)".into()));
         }
         match method {
             "org.discover" => {
@@ -4029,6 +4039,79 @@ fn a_refused_fetch_backs_off_and_keeps_policy() {
     let events = policy_events(&daemon);
     assert_eq!(events.len(), 2);
     assert_eq!(events[1]["result"], "unchanged");
+}
+
+/// A refusal that depends on this device's own files is remembered with
+/// them and not staged again, so asking again costs one fetch and nothing
+/// else: the fetch is not backed off, and the organization's correction is
+/// enforced on the very next pass rather than up to half an hour later.
+#[test]
+fn a_remembered_local_refusal_is_asked_about_again_on_every_pass() {
+    let dir = test_dir("refresh-remembered");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = &control_plane.state;
+    // Root's drop, and a changed set from the organization that cannot be
+    // loaded beside it.
+    write_file(
+        &daemon.state_path("policy.d/clash.json"),
+        json!({"policy_id": "eng-baseline-v12", "source_kind": "organization_role_policy",
+               "precedence_rank": 3, "source_name": "root's"})
+        .to_string(),
+    );
+    *state.firewall_enabled.lock().unwrap() = Some(false);
+    let fetched_before = fetch_count(state);
+    for _ in 0..6 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(fetch_count(state) - fetched_before, 6, "every pass asked");
+    let refresh = last_refresh(&daemon);
+    assert_eq!(refresh["result"], "failed", "{refresh}");
+    assert_eq!(
+        refresh["reason"], "conflicts_with_local_policy",
+        "{refresh}"
+    );
+    let failed = policy_events(&daemon)
+        .iter()
+        .filter(|e| e["result"] == "failed")
+        .count();
+    assert_eq!(failed, 1, "recorded once");
+
+    // The organization takes its change back: enforced on the next pass.
+    *state.firewall_enabled.lock().unwrap() = None;
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["result"], "unchanged");
+}
+
+/// While the device is offline every fetch fails, and the refresh backs off
+/// as it would from a refusing server. Once a report gets through the link is
+/// back, and what the outage built up says nothing about the organization's
+/// server: a policy it changed meanwhile is fetched on the next pass, not up
+/// to half an hour later.
+#[test]
+fn a_policy_changed_during_an_outage_is_fetched_once_the_link_is_back() {
+    let dir = test_dir("refresh-after-outage");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = &control_plane.state;
+    state.offline.store(true, Ordering::SeqCst);
+    for _ in 0..8 {
+        daemon.result("reconcile", None);
+    }
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["result"], "unreachable", "{status}");
+
+    *state.firewall_enabled.lock().unwrap() = Some(false);
+    state.offline.store(false, Ordering::SeqCst);
+    // The reports get through; the fetch was still backed off.
+    daemon.result("reconcile", None);
+    assert_eq!(
+        daemon.result("enroll.status", None)["last_sync"]["result"],
+        "success"
+    );
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["result"], "applied");
+    assert_eq!(daemon.mock.state(), json!("disabled"));
 }
 
 /// An answer longer than punard reads is the organization's to fix, not a

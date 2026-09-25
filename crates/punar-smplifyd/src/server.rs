@@ -63,9 +63,10 @@ pub struct Daemon {
     /// memory only: a restart costs one early check-in, not a stale schedule
     /// on disk.
     pin_retry: Mutex<Option<PinRetry>>,
-    /// Whether the last status POST failed, so that one getting through
-    /// says the link is back ([`Daemon::after_post`]).
-    post_failed: AtomicBool,
+    /// Whether the last compliance report could not reach Smplify at all,
+    /// so that one getting through says the link is back
+    /// ([`Daemon::after_compliance_post`]).
+    link_down: AtomicBool,
 }
 
 /// A tenant-key check-in that failed, for the identity it was made for.
@@ -89,7 +90,7 @@ impl Daemon {
             #[cfg(test)]
             pin_overrun: Duration::ZERO,
             pin_retry: Mutex::new(None),
-            post_failed: AtomicBool::new(false),
+            link_down: AtomicBool::new(false),
         }
     }
 
@@ -412,11 +413,18 @@ impl Daemon {
             ));
         }
         let body = compose(&record.device_id, payload);
+        let mut reached = None;
         let posted = self.api(left).and_then(|api| {
-            api.status(&record.device_id, &body)
-                .map_err(upstream_refusal)
+            let posted = api.status(&record.device_id, &body);
+            reached = Some(posted.as_ref().map_or_else(reached_smplify, |_| true));
+            posted.map_err(upstream_refusal)
         });
-        self.after_post(posted.is_ok());
+        // Only the compliance report, which every pass sends first, speaks
+        // for the link: an inventory is larger and may fail where a report
+        // gets through, and a refusal is Smplify answering.
+        if let (PinTenantKey::First, Some(reached)) = (pin, reached) {
+            self.after_compliance_post(reached);
+        }
         posted?;
         // What left, exactly as it left. punard keeps it as the person's
         // record of what their organization received (SPEC section 24.2), so
@@ -483,15 +491,17 @@ impl Daemon {
         });
     }
 
-    /// A status POST that gets through after one that did not means the link
-    /// is back. A check-in the outage backed off (doubling up to half an hour,
-    /// with nothing getting through at all) is then tried again at the next
-    /// compliance report, instead of after the wait the outage built up; the
-    /// backoff still spares a link that carries reports but not the
+    /// A compliance report that reaches Smplify after one that could not
+    /// means the link is back. A check-in the outage backed off (doubling up
+    /// to half an hour, with nothing getting through at all) is then tried
+    /// again at the next compliance report, instead of after the wait the
+    /// outage built up. Nothing else moves this: an inventory that cannot get
+    /// through while reports do, or a report Smplify refuses, is no outage,
+    /// and the backoff still spares a link that carries reports but not the
     /// check-in.
-    fn after_post(&self, posted: bool) {
-        let was_down = self.post_failed.swap(!posted, Ordering::SeqCst);
-        if posted && was_down {
+    fn after_compliance_post(&self, reached: bool) {
+        let was_down = self.link_down.swap(!reached, Ordering::SeqCst);
+        if reached && was_down {
             *self.pin_retry.lock().unwrap() = None;
         }
     }
@@ -607,6 +617,19 @@ fn upstream_refusal(error: UpstreamError) -> CallError {
         Some(404) => CallError::new(ErrorCode::NotFound, "Smplify no longer knows this device"),
         _ => CallError::new(ErrorCode::Internal, error.to_string()),
     }
+}
+
+/// Whether a failed request reached Smplify: it answered, if only with a
+/// refusal or something this agent cannot read. A failure to connect,
+/// resolve, finish a handshake or hear back at all did not.
+fn reached_smplify(error: &UpstreamError) -> bool {
+    use crate::http::HttpError;
+    !matches!(
+        error,
+        UpstreamError::Transport(
+            HttpError::Timeout | HttpError::Io(_) | HttpError::Resolve | HttpError::Tls
+        )
+    )
 }
 
 fn peer_is_root(stream: &UnixStream) -> bool {
@@ -1005,9 +1028,82 @@ mod tests {
         assert_eq!(arrived(), 3, "the check-in waits");
         // A POST gets through: the silent Smplify cannot answer one, so the
         // agent is told as a report that got through would tell it.
-        d.after_post(true);
+        d.after_compliance_post(true);
         report();
         assert_eq!(arrived(), 5, "the check-in is tried again at once");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Only a compliance report speaks for the link, and only one that could
+    /// not reach Smplify at all says it is down. An inventory that cannot get
+    /// through while reports do is no outage, so a compliance report that
+    /// gets through afterwards does not cut short the wait of a check-in that
+    /// keeps failing; and a refusal is Smplify answering.
+    #[test]
+    fn only_a_compliance_report_that_could_not_reach_smplify_says_the_link_is_down() {
+        const BUDGET: Duration = Duration::from_millis(300);
+        let (d, root) = daemon();
+        let d = d
+            .with_call_budget(BUDGET)
+            .with_pin_budget(BUDGET, Duration::from_secs(600));
+        let (port, arrivals) = silent_smplify();
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let (token, token_sha256) = identity::new_device_token().unwrap();
+        d.store
+            .save(
+                &Record {
+                    device_id: "dev-1".into(),
+                    server: format!("https://127.0.0.1:{port}"),
+                    org_id: "acme".into(),
+                    org_name: "Acme".into(),
+                    os_identifier: "punar".into(),
+                    not_after: None,
+                    tenant_public_key: None,
+                    token_sha256,
+                    enrolled_at: "2026-09-24T00:00:00Z".into(),
+                },
+                &Zeroizing::new(key.serialize_pem()),
+                &cert.pem(),
+                &cert.pem(),
+            )
+            .unwrap();
+        let waiting = Instant::now() + Duration::from_secs(600);
+        *d.pin_retry.lock().unwrap() = Some(PinRetry {
+            device_id: "dev-1".into(),
+            failures: 3,
+            not_before: waiting,
+        });
+        let d = Arc::new(d);
+        let (_, line) = answer_apart(
+            &d,
+            json!({"v": 1, "id": "r", "method": "inventory.report",
+                   "params": {"device_token": &*token, "inventory": {}}}),
+            BUDGET * 20,
+        );
+        assert!(line.contains(r#""error""#), "{line}");
+        assert_eq!(arrivals.lock().unwrap().len(), 1);
+        // A compliance report gets through.
+        d.after_compliance_post(true);
+        assert!(
+            d.pin_retry
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|retry| retry.not_before == waiting),
+            "the check-in keeps its wait"
+        );
+
+        assert!(!reached_smplify(&UpstreamError::Transport(
+            crate::http::HttpError::Timeout
+        )));
+        assert!(reached_smplify(&UpstreamError::Status {
+            status: 422,
+            detail: String::new(),
+        }));
         let _ = std::fs::remove_dir_all(root);
     }
 
