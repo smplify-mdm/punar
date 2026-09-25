@@ -862,17 +862,28 @@ keep their earlier `reason` text):
 
 | Rule | `reason` |
 | --- | --- |
+| the answer carrying it is at most 4 MiB | `answer_too_large` |
 | at most 64 envelopes | `too_many_policies` |
 | each is a JSON object | `envelope_not_an_object` |
 | `policy_id`: 1–128 of `[A-Za-z0-9._-]`, not starting with `.` | `unusable_policy_id` |
 | no two envelopes share a `policy_id` | `duplicate_policy_id` |
+| each nests objects and arrays at most 32 deep, itself the first level | `envelope_too_deep` |
 | each at most 256 KiB in canonical form | `envelope_too_large` |
+| together at most 1 MiB in canonical form | `set_too_large` |
 | `source_kind` is `organization_baseline`, `organization_role_policy`, `temporary_approved_exception` or `device_specific_override` — never a rung that belongs to the OS or the person | `source_kind_not_organizational` |
 | a `device_specific_override` ranks 2 or below, never with the OS's hard safety constraints | `rank_not_organizational` |
 | `none`/`unusable` with a non-empty list | `inconsistent_assignment` |
 | the M4 loader accepts the set, alone | `invalid_envelope` |
 | its browser policy renders into the allowlisted document | `browser_policy_refused` |
 | it names no file a root administrator dropped into `policy.d` | `foreign_file_collision` |
+
+Sizes are measured before anything is built from them: nesting first, then
+each envelope's compact form counted without being kept, then its canonical
+form written into a buffer that refuses to grow past 256 KiB. The answer
+bound is four times the set bound, so a set within the rules always arrives
+(canonical form is never shorter than the same JSON written compactly); an
+answer past it is refused as `answer_too_large` — the control plane answered
+— never read as an unreachable one.
 
 The set is written as each envelope's canonical bytes (pretty JSON, keys
 sorted) to `<policy_id>.json`, 0600, in a staging directory beside

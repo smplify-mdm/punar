@@ -110,7 +110,9 @@ mod m9;
 mod policy_refresh;
 
 use m9::MutationAuthority;
-use policy_refresh::{REASON_UNUSABLE_ASSIGNMENT, RefreshBackoff, RefreshResult};
+use policy_refresh::{
+    REASON_ANSWER_TOO_LARGE, REASON_UNUSABLE_ASSIGNMENT, RefreshBackoff, RefreshResult,
+};
 
 /// Audit `resource` for the M5 enrollment mutations (ipc.md section 6).
 pub const RESOURCE_ENROLLMENT: &str = "enrollment";
@@ -4725,6 +4727,21 @@ impl Inner {
                 ),
                 json!({ "stage": stage }),
             ),
+            // It answered, with more than this device reads: asking again
+            // gets the same answer, so it is not reported as unreachable.
+            UpstreamError::TooLarge => IpcError::with_details(
+                ErrorCode::InvalidParams,
+                format!(
+                    "The control plane's answer to the {stage} step is larger than this \
+                     device reads ({} MiB).\n\
+                     Policy: os default — punard bounds what it reads from the control plane \
+                     (docs/api/ipc.md section 5.9), and enrollment is all-or-nothing; nothing \
+                     was changed.\n\
+                     Next step: report this to your administrator.",
+                    crate::enroll::MAX_ANSWER_BYTES / (1024 * 1024)
+                ),
+                json!({ "stage": stage, "reason": REASON_ANSWER_TOO_LARGE }),
+            ),
         }
     }
 
@@ -5951,6 +5968,13 @@ impl Inner {
         let pending = match client.queries_pending(token) {
             Ok(pending) => pending,
             Err(UpstreamError::Unreachable(_)) => return None,
+            Err(UpstreamError::TooLarge) => {
+                eprintln!(
+                    "punard: queries.pending answered with more than this device reads; \
+                     nothing is answered this pass"
+                );
+                return None;
+            }
             Err(UpstreamError::Refused { code, message }) => {
                 // `unknown_method` here means the control plane predates
                 // M10; anything else is a refusal on its side. Either way
@@ -5989,6 +6013,7 @@ impl Inner {
                 let why = match e {
                     UpstreamError::Unreachable(why) => why,
                     UpstreamError::Refused { code, message } => format!("{code}: {message}"),
+                    UpstreamError::TooLarge => "its answer was too large".to_string(),
                 };
                 eprintln!(
                     "punard: could not post the answer to query {}: {why} — it stays \

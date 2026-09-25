@@ -88,6 +88,9 @@ struct ControlPlaneState {
     serve_duplicate_ids: AtomicBool,
     /// Refuse `policy.fetch` with this error code.
     refuse_policy_fetch: Mutex<Option<&'static str>>,
+    /// Pad the `policy.fetch` answer with this many bytes of text: an answer
+    /// longer than punard reads.
+    pad_policy_answer: AtomicUsize,
     /// Serve a desired state that turns local policy editing off
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
@@ -212,6 +215,10 @@ impl ControlPlaneState {
                     policies.extend(self.extra_envelopes.lock().unwrap().iter().cloned());
                 }
                 let mut result = json!({ "policies": policies });
+                let pad = self.pad_policy_answer.load(Ordering::SeqCst);
+                if pad > 0 {
+                    result["padding"] = json!("x".repeat(pad));
+                }
                 if !self.omit_assignment.load(Ordering::SeqCst) {
                     let implied = if policies.is_empty() {
                         "none"
@@ -3831,6 +3838,42 @@ fn a_refused_fetch_backs_off_and_keeps_policy() {
     let events = policy_events(&daemon);
     assert_eq!(events.len(), 2);
     assert_eq!(events[1]["result"], "unchanged");
+}
+
+/// An answer longer than punard reads is the organization's to fix, not a
+/// link to wait out: a refresh records it as refused by that rule, once,
+/// keeps the last good policy and asks again on the very next pass, and
+/// enroll.start refuses it by the same name rather than as an unreachable
+/// control plane.
+#[test]
+fn an_answer_too_large_to_read_is_refused_by_name_and_not_backed_off() {
+    let dir = test_dir("refresh-too-large");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let bytes = policy_d_bytes(&daemon);
+    let state = &control_plane.state;
+    let fetched_before = fetch_count(state);
+
+    state
+        .pad_policy_answer
+        .store(punard::enroll::MAX_ANSWER_BYTES as usize, Ordering::SeqCst);
+    for _ in 0..3 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(fetch_count(state) - fetched_before, 3, "never backed off");
+    assert_eq!(policy_d_bytes(&daemon), bytes);
+    let refresh = last_refresh(&daemon);
+    assert_eq!(refresh["result"], "rejected", "{refresh}");
+    assert_eq!(refresh["reason"], "answer_too_large", "{refresh}");
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["result"], "rejected");
+
+    daemon.result("enroll.stop", None);
+    let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(error["code"], "invalid_params", "{error}");
+    assert_eq!(error["details"]["reason"], "answer_too_large", "{error}");
+    assert!(!daemon.state_path("enrollment.json").exists());
 }
 
 /// The common case costs one request and nothing else: no file in policy.d

@@ -94,8 +94,10 @@ pub const BOOTSTRAP_SECRET_BYTES: usize = 32;
 /// included. A policy fetch now runs on every reconcile pass, as root, and an
 /// answer is read whole into memory before it is parsed: without a bound, a
 /// control plane that never ends its line could grow punard until the kernel
-/// stopped it. Sixty-four envelopes of the 256 KiB each one may be
-/// (`crate::policy_set`) fit with room to spare.
+/// stopped it. Four times the most a policy set may be in canonical form
+/// (`crate::policy_set::MAX_SET_BYTES`), so every set the rules allow
+/// arrives; a longer answer is [`UpstreamError::TooLarge`], never
+/// "unreachable".
 pub const MAX_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -112,6 +114,10 @@ pub enum UpstreamError {
     Unreachable(String),
     /// The control plane answered with a structured error.
     Refused { code: String, message: String },
+    /// The control plane answered with more than [`MAX_ANSWER_BYTES`]. It is
+    /// up and answering; what it sent is more than this device reads, and
+    /// asking again sooner or later changes nothing.
+    TooLarge,
 }
 
 /// The automatic escrow path has only two failure domains: the authenticated
@@ -198,12 +204,10 @@ impl ControlPlaneClient {
             ));
         }
         if read as u64 > MAX_ANSWER_BYTES {
-            return Err(UpstreamError::Unreachable(format!(
-                "the control plane's answer was too large (over {MAX_ANSWER_BYTES} bytes)"
-            )));
+            return Err(UpstreamError::TooLarge);
         }
 
-        let value: Value = serde_json::from_str(response.trim_end()).map_err(|_| {
+        let mut value: Value = serde_json::from_str(response.trim_end()).map_err(|_| {
             UpstreamError::Unreachable("the control plane answered with a malformed line".into())
         })?;
         if value.get("v") != Some(&json!(1)) {
@@ -225,7 +229,7 @@ impl ControlPlaneClient {
                     .to_string(),
             });
         }
-        value.get("result").cloned().ok_or_else(|| {
+        value.get_mut("result").map(Value::take).ok_or_else(|| {
             UpstreamError::Unreachable(
                 "the control plane answered with neither result nor error".into(),
             )
@@ -293,16 +297,19 @@ impl ControlPlaneClient {
     /// carrying its embedded `DeviceDesiredState` as `policy`), and what the
     /// control plane says the list is ([`Assignment`]).
     pub fn policy_fetch(&self, token: &Redacted<String>) -> Result<FetchedPolicy, UpstreamError> {
-        let result = self.call(
+        let mut result = self.call(
             "policy.fetch",
             json!({ "device_token": token.expose_secret() }),
         )?;
-        match result.get("policies").and_then(Value::as_array) {
-            Some(policies) => Ok(FetchedPolicy {
-                policies: policies.clone(),
-                assignment: Assignment::from_wire(result.get("assignment")),
+        let assignment = Assignment::from_wire(result.get("assignment"));
+        // Taken out of the answer, not copied: an answer near its bound is
+        // tens of megabytes as a parsed tree.
+        match result.get_mut("policies").map(Value::take) {
+            Some(Value::Array(policies)) => Ok(FetchedPolicy {
+                policies,
+                assignment,
             }),
-            None => Err(UpstreamError::Unreachable(
+            _ => Err(UpstreamError::Unreachable(
                 "policy.fetch answered without a policies array".into(),
             )),
         }

@@ -81,6 +81,11 @@ fn is_current(result: &str) -> bool {
 /// turn into Punar policy.
 pub(super) const REASON_UNUSABLE_ASSIGNMENT: &str = "unusable_assignment";
 
+/// `rejected`: the answer carrying the set was longer than punard reads
+/// (`crate::enroll::MAX_ANSWER_BYTES`). The control plane is up, and serves a
+/// set no device will take.
+pub(super) const REASON_ANSWER_TOO_LARGE: &str = "answer_too_large";
+
 /// `held`: an empty list from a control plane that does not say what it
 /// means. It may be "nothing assigned"; it may be a bundle it could not read.
 const REASON_UNSTATED_EMPTY: &str = "unstated_empty";
@@ -195,10 +200,23 @@ fn journal_detail(text: &str) -> String {
 }
 
 /// A digest of a list that was refused before it could be put in canonical
-/// form, so the same list is audited once.
+/// form, so the same list is audited once. Hashed as it is written, never
+/// held: a list refused for its size is not copied whole to be named.
 fn offered_list_hash(policies: &[Value]) -> String {
-    let bytes = serde_json::to_vec(policies).expect("fetched envelopes re-serialize");
-    format!("sha256:{}", sha256_hex(&bytes))
+    use sha2::{Digest, Sha256};
+    struct Digesting(Sha256);
+    impl std::io::Write for Digesting {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.update(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut digest = Digesting(Sha256::new());
+    serde_json::to_writer(&mut digest, policies).expect("fetched envelopes re-serialize");
+    format!("sha256:{:x}", digest.0.finalize())
 }
 
 /// What a committed set changed, for the audit and the in-memory swap.
@@ -228,41 +246,50 @@ impl Inner {
         // The network call holds no lock and no guard: an enrollment change
         // may run meanwhile, and is caught below by its epoch.
         let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
-        let fetched = match client.policy_fetch(&token) {
+        let failed = match client.policy_fetch(&token) {
             Ok(fetched) => {
                 self.policy_refresh_backoff.lock().unwrap().answered();
-                fetched
-            }
-            Err(error) => {
-                self.policy_refresh_backoff.lock().unwrap().failed();
-                let mut outcome = match &error {
-                    UpstreamError::Unreachable(why) => {
-                        let mut outcome = Outcome::new(RefreshResult::Unreachable, None);
-                        outcome.detail = Some(why.clone());
-                        outcome
-                    }
-                    UpstreamError::Refused { code, message } => {
-                        let mut outcome =
-                            Outcome::new(RefreshResult::Refused, Some(refused_reason(code)));
-                        outcome.detail = Some(format!("{code}: {message}"));
-                        outcome
-                    }
+                // Checking and committing hold the enrollment guard, and
+                // never wait for it: an enroll.start or enroll.stop in
+                // progress will leave nothing this answer is for, and the
+                // next pass asks again.
+                let Some(_guard) = EnrollGuard::acquire(&self.enroll_in_progress) else {
+                    return;
                 };
-                outcome.detail = outcome.detail.map(|detail| {
-                    format!("{detail}; the next attempt is backed off to spare the server")
-                });
+                self.refresh_under_guard(actor, epoch, fetched);
+                return;
+            }
+            // An answer, and the organization's to fix: recorded once, like
+            // any refused set, and asked for again on the next pass without
+            // backing off, because nothing about the link is wrong.
+            Err(UpstreamError::TooLarge) => {
+                self.policy_refresh_backoff.lock().unwrap().answered();
+                let mut outcome =
+                    Outcome::new(RefreshResult::Rejected, Some(REASON_ANSWER_TOO_LARGE));
+                outcome.detail = Some(format!(
+                    "an answer larger than {} MiB",
+                    crate::enroll::MAX_ANSWER_BYTES / (1024 * 1024)
+                ));
                 self.record_refresh(actor, epoch, outcome);
                 return;
             }
+            Err(UpstreamError::Unreachable(why)) => {
+                let mut outcome = Outcome::new(RefreshResult::Unreachable, None);
+                outcome.detail = Some(why);
+                outcome
+            }
+            Err(UpstreamError::Refused { code, message }) => {
+                let mut outcome = Outcome::new(RefreshResult::Refused, Some(refused_reason(&code)));
+                outcome.detail = Some(format!("{code}: {message}"));
+                outcome
+            }
         };
-
-        // Checking and committing hold the enrollment guard, and never wait
-        // for it: an enroll.start or enroll.stop in progress will leave
-        // nothing this answer is for, and the next pass asks again.
-        let Some(_guard) = EnrollGuard::acquire(&self.enroll_in_progress) else {
-            return;
-        };
-        self.refresh_under_guard(actor, epoch, fetched);
+        self.policy_refresh_backoff.lock().unwrap().failed();
+        let mut outcome = failed;
+        outcome.detail = outcome
+            .detail
+            .map(|detail| format!("{detail}; the next attempt is backed off to spare the server"));
+        self.record_refresh(actor, epoch, outcome);
     }
 
     fn refresh_under_guard(&self, actor: &AuditActor, epoch: u64, fetched: FetchedPolicy) {

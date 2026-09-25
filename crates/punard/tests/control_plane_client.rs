@@ -48,8 +48,9 @@ fn answer(result: Value) -> Vec<u8> {
 }
 
 /// The fetch runs as root on every pass: an answer longer than the bound is
-/// refused as unreachable rather than read into memory whole, and one that
-/// fits is read as before.
+/// refused rather than read into memory whole, as too large and not as an
+/// unreachable control plane (it answered, and will answer the same again),
+/// and one that fits is read as before.
 #[test]
 fn an_answer_past_the_bound_is_refused_and_one_within_it_is_read() {
     let within = answer(json!({"policies": [], "assignment": "none"}));
@@ -60,8 +61,8 @@ fn an_answer_past_the_bound_is_refused_and_one_within_it_is_read() {
     let client = ControlPlaneClient::new(&socket);
     let token = Redacted::new("tok_x".to_string());
     match client.policy_fetch(&token) {
-        Err(UpstreamError::Unreachable(why)) => assert!(why.contains("too large"), "{why}"),
-        other => panic!("expected Unreachable, got {other:?}"),
+        Err(UpstreamError::TooLarge) => {}
+        other => panic!("expected TooLarge, got {other:?}"),
     }
     assert_eq!(
         client.policy_fetch(&token).unwrap(),

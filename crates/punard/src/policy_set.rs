@@ -53,10 +53,25 @@ pub const MAX_POLICIES: usize = 64;
 /// A policy id is at most this many characters.
 pub const MAX_POLICY_ID_CHARS: usize = 128;
 
-/// One canonical envelope is at most this many bytes. With
-/// [`MAX_POLICIES`], it bounds a set well inside the client's answer bound
-/// (`crate::enroll::MAX_ANSWER_BYTES`).
+/// One canonical envelope is at most this many bytes.
 pub const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
+
+/// A whole set, its canonical envelopes together, is at most this many
+/// bytes. Sixty-four envelopes of [`MAX_ENVELOPE_BYTES`] would be 16 MiB,
+/// four times the client's answer bound (`crate::enroll::MAX_ANSWER_BYTES`),
+/// so a set the rules allowed could still never arrive, and would read as an
+/// unreachable control plane. The answer bound is four times this one: a set
+/// within the rules fits in an answer however its control plane spaces and
+/// escapes the JSON, short of writing most of its characters as `\u`
+/// escapes, since canonical form (pretty, sorted keys) is never shorter than
+/// the same JSON written compactly.
+pub const MAX_SET_BYTES: usize = 1024 * 1024;
+
+/// An envelope nests objects and arrays at most this deep. The loader's own
+/// documents go about ten deep; the bound keeps a payload made of nesting
+/// alone (a few bytes per level, and one indented line per level in
+/// canonical form) from costing more than it is worth to check.
+pub const MAX_ENVELOPE_DEPTH: usize = 32;
 
 /// The source kinds an organization may publish (SPEC section 39). The other
 /// three rungs belong to the OS and the person: an `os_hard_safety_constraint`
@@ -84,6 +99,8 @@ pub enum Rejection {
     UnusablePolicyId,
     DuplicatePolicyId,
     EnvelopeTooLarge,
+    EnvelopeTooDeep,
+    SetTooLarge,
     SourceKindNotOrganizational,
     RankNotOrganizational,
     /// `assignment: none` or `unusable` alongside a non-empty list.
@@ -105,6 +122,8 @@ impl Rejection {
             Rejection::UnusablePolicyId => "unusable_policy_id",
             Rejection::DuplicatePolicyId => "duplicate_policy_id",
             Rejection::EnvelopeTooLarge => "envelope_too_large",
+            Rejection::EnvelopeTooDeep => "envelope_too_deep",
+            Rejection::SetTooLarge => "set_too_large",
             Rejection::SourceKindNotOrganizational => "source_kind_not_organizational",
             Rejection::RankNotOrganizational => "rank_not_organizational",
             Rejection::InconsistentAssignment => "inconsistent_assignment",
@@ -125,6 +144,12 @@ impl Rejection {
             Rejection::DuplicatePolicyId => "two envelopes with the same policy_id".to_string(),
             Rejection::EnvelopeTooLarge => {
                 format!("an envelope larger than {} KiB", MAX_ENVELOPE_BYTES / 1024)
+            }
+            Rejection::EnvelopeTooDeep => {
+                format!("an envelope nested more than {MAX_ENVELOPE_DEPTH} deep")
+            }
+            Rejection::SetTooLarge => {
+                format!("policies larger than {} KiB together", MAX_SET_BYTES / 1024)
             }
             Rejection::SourceKindNotOrganizational => {
                 "a policy whose source kind is not one an organization may publish".to_string()
@@ -238,6 +263,7 @@ impl CanonicalSet {
             return Err(Rejection::TooManyPolicies);
         }
         let mut files = BTreeMap::new();
+        let mut total = 0usize;
         for envelope in envelopes {
             let Some(object) = envelope.as_object() else {
                 return Err(Rejection::NotAnObject);
@@ -253,14 +279,32 @@ impl CanonicalSet {
             if files.contains_key(&name) {
                 return Err(Rejection::DuplicatePolicyId);
             }
+            // The size is measured before anything is built from it:
+            // canonical form indents every nested line, so an envelope of a
+            // few megabytes of nested zeros would otherwise grow to hundreds
+            // of megabytes in a root daemon before it could be refused. The
+            // compact form is counted without being kept, then the canonical
+            // bytes are written into a buffer that refuses to grow past the
+            // bound.
+            if nested_deeper_than(envelope, MAX_ENVELOPE_DEPTH) {
+                return Err(Rejection::EnvelopeTooDeep);
+            }
+            let mut compact = Bounded::counting(MAX_ENVELOPE_BYTES);
+            if serde_json::to_writer(&mut compact, envelope).is_err() {
+                return Err(Rejection::EnvelopeTooLarge);
+            }
             // serde_json's map is ordered by key unless its `preserve_order`
             // feature is on, which no workspace manifest enables; a unit test
             // pins it, because a dependency switching it on would make every
             // fetch look like a change.
-            let bytes =
-                serde_json::to_vec_pretty(envelope).expect("fetched envelopes re-serialize");
-            if bytes.len() > MAX_ENVELOPE_BYTES {
+            let mut canonical = Bounded::keeping(MAX_ENVELOPE_BYTES);
+            if serde_json::to_writer_pretty(&mut canonical, envelope).is_err() {
                 return Err(Rejection::EnvelopeTooLarge);
+            }
+            let bytes = canonical.bytes;
+            total += bytes.len();
+            if total > MAX_SET_BYTES {
+                return Err(Rejection::SetTooLarge);
             }
             let kind = object.get("source_kind").and_then(Value::as_str);
             if !kind.is_some_and(|kind| ORGANIZATIONAL_SOURCE_KINDS.contains(&kind)) {
@@ -337,6 +381,62 @@ impl CanonicalSet {
             framed.extend_from_slice(bytes);
         }
         format!("sha256:{}", sha256_hex(&framed))
+    }
+}
+
+/// Whether `value` nests objects and arrays more than `limit` deep (the
+/// envelope itself is the first level). serde_json already stopped parsing at
+/// 128 levels, so the recursion is bounded.
+fn nested_deeper_than(value: &Value, limit: usize) -> bool {
+    let deeper = |child: &Value| nested_deeper_than(child, limit - 1);
+    match value {
+        Value::Array(items) => limit == 0 || items.iter().any(deeper),
+        Value::Object(map) => limit == 0 || map.values().any(deeper),
+        _ => false,
+    }
+}
+
+/// A writer that fails, rather than grow, once more than `limit` bytes have
+/// been written to it; it keeps them, or only counts them.
+struct Bounded {
+    bytes: Vec<u8>,
+    written: usize,
+    limit: usize,
+    keep: bool,
+}
+
+impl Bounded {
+    fn counting(limit: usize) -> Bounded {
+        Bounded {
+            bytes: Vec::new(),
+            written: 0,
+            limit,
+            keep: false,
+        }
+    }
+
+    fn keeping(limit: usize) -> Bounded {
+        Bounded {
+            keep: true,
+            ..Bounded::counting(limit)
+        }
+    }
+}
+
+impl io::Write for Bounded {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.written = self.written.saturating_add(buf.len());
+        if self.written > self.limit {
+            return Err(io::Error::other("past the bound"));
+        }
+        if self.keep {
+            self.bytes.extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -740,6 +840,91 @@ mod tests {
             );
             assert!(CanonicalSet::from_envelopes(&[], assignment).is_ok());
         }
+    }
+
+    /// An envelope `depth` levels deep, itself the first: `inner`, a number,
+    /// under `depth - 1` levels of arrays.
+    fn nested(depth: usize, inner: Value) -> Value {
+        let mut value = inner;
+        for _ in 1..depth {
+            value = json!([value]);
+        }
+        let mut envelope = envelope("deep", "organization_baseline", 2);
+        envelope["x"] = value;
+        envelope
+    }
+
+    /// Nesting is measured before anything is rendered: in canonical form
+    /// every level indents every line inside it, so a payload of nesting
+    /// alone would cost far more to render than it is worth to check.
+    #[test]
+    fn an_envelope_nested_past_the_bound_is_refused_before_it_is_rendered() {
+        let deepest = nested(MAX_ENVELOPE_DEPTH, json!(0));
+        assert!(CanonicalSet::from_envelopes(&[deepest], Assignment::Policies).is_ok());
+        let deeper = nested(MAX_ENVELOPE_DEPTH + 1, json!(0));
+        assert_eq!(
+            rejection(&[deeper], Assignment::Policies),
+            "envelope_too_deep"
+        );
+        // Well inside every size rule, and 120 levels deep: accepted before.
+        assert_eq!(
+            rejection(&[nested(120, json!([0, 0, 0]))], Assignment::Policies),
+            "envelope_too_deep"
+        );
+    }
+
+    /// The canonical bytes are written into a buffer that refuses to grow
+    /// past the bound, however much the indentation multiplies a compact
+    /// envelope that fits.
+    #[test]
+    fn canonical_form_is_never_held_past_its_bound() {
+        let mut bounded = Bounded::keeping(8);
+        use std::io::Write;
+        assert!(bounded.write_all(b"12345678").is_ok());
+        assert!(bounded.write_all(b"9").is_err());
+        assert_eq!(bounded.bytes, b"12345678");
+        let mut counting = Bounded::counting(8);
+        assert!(counting.write_all(&[0; 9]).is_err());
+        assert!(counting.bytes.is_empty(), "counted, not kept");
+
+        // 60 000 zeros are about 120 KiB compact, and each is a line of its
+        // own some 60 spaces in when rendered.
+        let wide = nested(MAX_ENVELOPE_DEPTH - 1, json!(vec![0; 60_000]));
+        assert!(!nested_deeper_than(&wide, MAX_ENVELOPE_DEPTH));
+        assert!(serde_json::to_vec(&wide).unwrap().len() < MAX_ENVELOPE_BYTES);
+        assert_eq!(
+            rejection(&[wide], Assignment::Policies),
+            "envelope_too_large"
+        );
+    }
+
+    /// Every set the rules allow fits in an answer punard reads, so a valid
+    /// set can never read as an unreachable control plane: the envelopes
+    /// together are bounded, not only each one.
+    #[test]
+    fn a_set_the_rules_allow_fits_in_an_answer() {
+        assert!(MAX_SET_BYTES * 4 <= crate::enroll::MAX_ANSWER_BYTES as usize);
+        let sized = |id: &str, bytes: usize| {
+            let mut sized = envelope(id, "organization_baseline", 2);
+            sized["source_name"] = json!("x".repeat(bytes));
+            sized
+        };
+        // Twenty envelopes each well inside its own bound: 4.3 MiB together.
+        let many: Vec<Value> = (0..20)
+            .map(|i| sized(&format!("p{i}"), 220 * 1024))
+            .collect();
+        assert_eq!(rejection(&many, Assignment::Policies), "set_too_large");
+
+        // The largest set the rules allow, as a control plane answers it.
+        let per = MAX_SET_BYTES / 5 - 200;
+        let largest: Vec<Value> = (0..5).map(|i| sized(&format!("q{i}"), per)).collect();
+        let set = CanonicalSet::from_envelopes(&largest, Assignment::Policies).unwrap();
+        let canonical: usize = set.files().values().map(Vec::len).sum();
+        assert!(canonical > MAX_SET_BYTES - 1024, "{canonical}");
+        let answer = json!({"v": 1, "id": "punard-1", "result": {
+            "policies": largest, "assignment": "policies"}})
+        .to_string();
+        assert!(answer.len() < crate::enroll::MAX_ANSWER_BYTES as usize);
     }
 
     fn write(path: &Path, bytes: &[u8]) {
