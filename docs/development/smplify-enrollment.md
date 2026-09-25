@@ -79,9 +79,17 @@ untouched.
 `{device_token, attestation: "none", organization}`; the device token is
 random, and only its SHA-256 is kept. The first check-in, which pins
 `tenantPublicKeyX509Base64`, is the first compliance report's.
-`policy.fetch` → `GET /devices/{id}/bundle`: 204 and any bundle without a
-Punar payload both answer `{policies: []}` (slice 2 adds the signed
-`punar-policy` payload). `compliance.report` / `inventory.report` → `POST
+`policy.fetch` → `GET /devices/{id}/bundle`: 204 answers `{policies: [],
+assignment: "none"}`, the one answer that lets punard withdraw an
+organization's policy; a bundle without a Punar payload answers
+`{policies: [], assignment: "unusable"}`, which punard holds, keeping the
+policy it enforces (docs/api/ipc.md §5.6, §5.9). The two must never look
+alike: one unreadable bundle would otherwise wipe the organization's policy
+on its next refresh. punard now asks on every reconcile pass while enrolled,
+so this is one `GET` per device every two minutes, the rate of the
+compliance POST. Slice 2 adds the signed `punar-policy` payload, and with it
+the rule that a payload which fails its signature check is an **error**
+(punard records `refused` and keeps its policy), never an empty list. `compliance.report` / `inventory.report` → `POST
 /devices/{id}/status`: the compliance states as `facts`, and the inventory
 translated key by key into `systemInfo` (§3.3) — nothing else. Both answer
 punard `{sent: <the body posted>}`. `queries.*` → empty until the backend has
@@ -171,11 +179,13 @@ device can, and the person enrolling had to say yes to that first.
    `enrollment.removable` (boolean). punard reads it once, in `enroll.start`
    after `org.discover` and before `enroll.register`, and fixes it in
    `enrollment.json` beside `remote_query_scopes`. It is never re-read from
-   a policy fetch. Policy arrives after enrollment and may legitimately be
-   empty, so a term carried there would be absent in exactly the window it
-   matters, and would move with every fetch. Fixed at enrollment, an
-   organization cannot tighten it after the person agreed, and a confused
-   control plane cannot loosen it. `punar-smplifyd` passes the document
+   a policy fetch, and the live policy refresh never calls `org.discover`:
+   it writes only the policy fields of `enrollment.json`, through one
+   function that has no way to name a term. Policy arrives after enrollment
+   and may legitimately be empty, so a term carried there would be absent
+   in exactly the window it matters, and would move with every fetch. Fixed
+   at enrollment, an organization cannot tighten it after the person
+   agreed, and a confused control plane cannot loosen it. `punar-smplifyd` passes the document
    through untouched.
 2. **Absent means removable.** An organization that states no term has no
    opinion, and the device's owner administers the device; an ordinary

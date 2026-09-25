@@ -96,7 +96,10 @@ each direction. No length prefixes, no binary framing.
   under a **60 s** bound — its pipeline contains upstream calls plus a full
   reconcile pass, which TCG runs make slow — and `punarctl` uses a 90 s
   response timeout for the `enroll start`/`enroll stop` verbs. Every other
-  method keeps the 10 s/15 s bounds unchanged.
+  method keeps the 10 s/15 s bounds unchanged. On an enrolled device a
+  `reconcile` also fetches the organization's policy first (section 5.6),
+  one control-plane call of at most 5 s, so the pass still fits `punarctl`'s
+  15 s.
   **Application amendment:** `apps.catalog` may spend 30 s verifying remote
   metadata (`punarctl`: 45 s), while `apps.install`, `apps.update`, and
   `apps.remove` have bounded 30-minute/30-minute/10-minute per-app backend
@@ -481,7 +484,44 @@ per capability; then the capability is `non_compliant`, one audit event with
 `result: "attempts_exhausted"` is emitted on the transition, and further
 attempts are suppressed until the effective value changes, a manual
 `capabilities.set` succeeds, or the daemon restarts. A successful verify
-resets the counter.
+resets the counter. "The effective value changes" means its value or its
+classification: every recompute of the effective document (a
+`capabilities.set`, an enrollment transition, a policy refresh that changes
+the set) lifts suppression for exactly the paths that changed.
+
+**M5 amendment — live organization-policy refresh.** On an enrolled device
+each `reconcile` call first asks the control plane for the organization's
+policy (`policy.fetch`), before the pass takes its snapshot of the effective
+document, so a changed set is enforced and reported by **that same pass**
+(spec section 42: load desired state, then diff). The two-minute
+`punard-reconcile.timer` is therefore the refresh cadence; there is no new
+timer. The boot reconcile and the passes `enroll.start` and `enroll.stop`
+run do not refresh. The outcome is recorded in `enroll.status.policy`
+(section 5.10) and audited as `enroll.policy` (section 6); it never changes
+the reconcile result's shape.
+
+- **All or nothing.** The fetched set is checked by the rules of section
+  5.9 and, only if it passes all of them, replaces `policy.d` whole; the
+  rendered browser document, the policy layers, the AI authority and the
+  effective document follow. Anything short of that — a set that fails a
+  check (`rejected`), a device that cannot install it (`failed`), a control
+  plane that does not answer (`unreachable`) or answers with an error
+  (`refused`) — leaves all of them exactly as they were: the last valid
+  policy stays enforced (spec section 55).
+- **Only `"assignment": "none"` withdraws.** An empty list withdraws the
+  organization's policy (`withdrawn`; the device stays enrolled) only when
+  the control plane says nothing is assigned. An empty list marked
+  `unusable`, marked `policies`, or not marked at all is `held`: the last
+  good policy stays enforced.
+- **Unchanged costs one call.** The fetched set is compared byte for byte
+  with the files the enrollment owns; if they match (`unchanged`), nothing
+  is written or audited.
+- **Backoff.** After the n-th consecutive failed fetch, the next
+  `2^(n-1) - 1` passes (at most 15) do not fetch: 0, 1, 3, 7, 15, 15, …
+  passes. Any answer, a refused set included, resets it; so does a restart.
+- **Terms are fixed.** A refresh never reads the organization document
+  again and changes no enrollment term (`removable`, `organization_owned`,
+  `remote_query_scopes`).
 
 Each remediation **attempt** is audited individually: `action:
 "reconcile.remediate"`, `resource: <capability id>`, `decision: "allow"`,
@@ -782,16 +822,63 @@ Pipeline (spec section 49 mapped to the mock control plane; design and the
 honest-labeling rules: milestone-5.md sections 3, 5.1): guard (already
 enrolled → `conflict`) → `org.discover` → `enroll.register` with the
 persistent `device_id` and a fresh in-memory bootstrap secret →
-store the returned device token (`/var/lib/punar/device-token`, `0600`,
-`Redacted` in memory) → `policy.fetch` → strict-parse each policy-source
-envelope (the M4 loader's validation) → write them to
-`/var/lib/punar/policy.d/` → recompute the section 39 merge → one full
-section 42 reconcile pass → first compliance + inventory report (failures
-queue per section 55; they do not fail enrollment) → persist
-`/var/lib/punar/enrollment.json` (`0600`) → rewrite the section 9 status
-file. All-or-nothing up through the policy.d write: any failure before
-that point removes everything this call created and returns
-`upstream_unreachable` / `invalid_params` with local state untouched.
+`policy.fetch` → check the set (below) and stage it beside `policy.d` →
+store the device token (`/var/lib/punar/device-token`, `0600`, `Redacted`
+in memory) and `/var/lib/punar/enrollment.json` (`0600`, written and
+`fsync`ed **before** `policy.d` changes, so a crash never leaves
+organization policy enforced on a device that reads as personal) → swap the
+staged set in as `policy.d` → render the browser document → recompute the
+section 39 merge → one full section 42 reconcile pass → first compliance +
+inventory report (failures queue per section 55; they do not fail
+enrollment) → rewrite the section 9 status file. All-or-nothing up through
+the swap: any failure before that point removes everything this call
+created, releases the identity `enroll.register` issued, and returns
+`upstream_unreachable` / `invalid_params` / `internal` with local state
+untouched.
+
+**The policy set.** `policy.fetch` answers `{"policies": [<envelope>, …],
+"assignment": "policies" | "none" | "unusable"}`. The marker says what the
+list is: `none`, the organization assigns this device nothing; `unusable`,
+something is assigned that the control plane could not turn into Punar
+policy (`punar-smplifyd` answers it for a Smplify bundle without a Punar
+payload); `policies`, the list is the policy. A missing or unrecognised
+marker reads as unstated. `enroll.start` enrolls with an empty set for any
+empty list, and records `unusable` as a `held` refresh so the person sees
+why; after enrollment only `none` may empty the set (section 5.6). The set
+`enroll.start` and every refresh accept is checked by one set of rules,
+whole, and the first failure refuses all of it (`invalid_params`,
+`details: {"param": "policy", "reason": <code>}`; the two pre-existing cases
+keep their earlier `reason` text):
+
+| Rule | `reason` |
+| --- | --- |
+| at most 64 envelopes | `too_many_policies` |
+| each is a JSON object | `envelope_not_an_object` |
+| `policy_id`: 1–128 of `[A-Za-z0-9._-]`, not starting with `.` | `unusable_policy_id` |
+| no two envelopes share a `policy_id` | `duplicate_policy_id` |
+| each at most 256 KiB in canonical form | `envelope_too_large` |
+| `source_kind` is `organization_baseline`, `organization_role_policy`, `temporary_approved_exception` or `device_specific_override` — never a rung that belongs to the OS or the person | `source_kind_not_organizational` |
+| a `device_specific_override` ranks 2 or below, never with the OS's hard safety constraints | `rank_not_organizational` |
+| `none`/`unusable` with a non-empty list | `inconsistent_assignment` |
+| the M4 loader accepts the set, alone | `invalid_envelope` |
+| its browser policy renders into the allowlisted document | `browser_policy_refused` |
+| it names no file a root administrator dropped into `policy.d` | `foreign_file_collision` |
+
+The set is written as each envelope's canonical bytes (pretty JSON, keys
+sorted) to `<policy_id>.json`, 0600, in a staging directory beside
+`policy.d` (`/var/lib/punar/.policy.d.next`); every other entry of
+`policy.d` — a root drop such as an AI authority `.yaml`, or a local
+envelope — is carried over as a hard link to the same file (an empty
+directory as an empty directory), never overwritten, never taken over. The
+staging directory is loaded again with those files beside the set, exactly
+as the next start will load it; a failure there is the device's, not the
+organization's (`internal`). Only then does it replace `policy.d` in one
+`renameat2(RENAME_EXCHANGE)`: there is no moment, crash included, when
+`policy.d` holds part of two sets or a set that does not load (punard
+refuses to start on one). A filesystem that cannot exchange directories
+fails the change; there is no non-atomic fallback. At the next start, a
+staging directory left by a crash is removed and the enrollment's record
+trimmed to the files `policy.d` holds.
 
 ```json
 {"v":1,"id":"1","result":{
@@ -810,7 +897,10 @@ that point removes everything this call created and returns
 `attestation` is the literal honesty label: the spec 49 attestation step is
 **simulated** by the mock and reported as such wherever enrollment state
 appears. Errors: `conflict`, `upstream_unreachable`, `invalid_params`
-(malformed domain / envelope failed the loader's validation), `denied`.
+(malformed domain / a policy set that fails a rule above), `internal` (the
+device could not stage or install a set), `denied`. `enroll.start` and
+`enroll.stop` wait up to 2 s for a policy refresh that is committing before
+answering `conflict`.
 
 ### 5.10 `enroll.status` (M5)
 
@@ -838,11 +928,38 @@ Params: none. Read-only, any connected peer, not audited.
                                           "installedPackagesHash", "smplifydVersion"],
        "counts": {"installedPackages": 2}}
     ]
+  },
+  "policy": {
+    "revision": "sha256:5c1e…",
+    "fetched_at": "2026-08-26T11:40:02Z",
+    "changed_at": "2026-08-26T09:00:00Z",
+    "last_refresh": {"at": "2026-08-26T11:42:02Z", "result": "rejected",
+                     "reason": "duplicate_policy_id"}
   }
 }}
 ```
 
 Unenrolled: `{"enrolled": false}` with the org-shaped fields absent.
+`policy_ids` are the ids of the organization's set the device enforces
+**now**: a refresh that adds, removes or withdraws policies changes them.
+`policy` (present exactly when enrolled) says which set that is and how the
+last check for a newer one went (section 5.6). `revision` is `sha256:` over
+the set's files in name order (name, a NUL byte, the length as a big-endian
+u64, the bytes), so it can be recomputed from `policy.d`; `null` for an
+enrollment made before refresh existed, until its first refresh.
+`fetched_at` is when the device fetched the answer it enforces — a refresh
+that was `rejected`, `held`, `unreachable`, `refused` or `failed` does not
+move it, so it says how fresh the enforced policy is — and `changed_at` when
+the set last changed; both fall back to `enrolled_at`. `last_refresh` is
+`null` before the first refresh; `result` ∈ `unchanged | applied |
+withdrawn` (enforcing what the organization serves) `| rejected | held |
+unreachable | refused | failed` (enforcing the last good set), and `reason`,
+absent for the first three, is a closed code: a rule of section 5.9 for
+`rejected`; `unusable_assignment | unstated_empty | empty_policies` for
+`held`; `unauthorized | not_found | internal | other` for `refused`;
+`io | unsupported_entry | conflicts_with_local_policy | swap_unsupported`
+for `failed`. The control plane's and the loader's own words never appear
+here; they go to the journal, escaped and cut to 512 characters.
 `organization_view` is what the organization can see of this device (SPEC
 section 24.2), read from the inventory body that last left it
 (`/var/lib/punar/organization-view.json`, root:`punar` 0640) — never from a
@@ -882,7 +999,7 @@ answer does not depend on who is asking and `enroll.status.removable`
 already says it to anyone. Only erasing and reinstalling the device ends
 such an enrollment; a signed release from the organization is not built.
 punarctl reads `enroll.status` first and asks for neither a yes nor a
-password in that case. Guard: not enrolled → `conflict`. Removes exactly the policy.d files recorded at enrollment,
+password in that case. Guard: not enrolled → `conflict`. Removes exactly the policy.d files the enrollment currently owns (the last refresh's set; a root drop stays),
 deletes `enrollment.json` and the device token, recomputes the merge, runs
 one reconcile pass (recorded user preferences resurface as the winning
 layer per spec section 39), rewrites the section 9 status file. Result:
@@ -1625,6 +1742,20 @@ or path other than the confirmed target device. An installed system returns
   "applications_withheld"` once when the inventory's application list starts
   going out as `null` (over its row or size cap, or unreadable — never
   truncated), `"success"` once when a full list goes out again.
+- **Live policy refresh:** `enroll.policy` (resource `"control_plane"`,
+  decision `allow`, the pass's actor) — not an IPC method, like
+  `enroll.sync` and `enroll.inventory` (`policy.*` names this socket's own
+  methods, and there is no `policy.refresh`). `result` is the refresh
+  outcome of section 5.10, emitted only when it is news: `applied` and
+  `withdrawn` on every commit (`policy_ids`: the ids now enforced, or, for
+  `withdrawn`, the ids taken away); `rejected` once per distinct refused
+  set; `held`, `unreachable`, `refused` and `failed` when the result or its
+  reason changes; `unchanged` only as the recovery from one of those. Every
+  event but a commit cites the ids still enforced — never ids from a set
+  that was refused, which are the control plane's untrusted strings. An
+  empty list becomes `personal-defaults`, as for the other enrollment
+  events. The reason is in `enroll.status`, not here: the audit schema has
+  no free-text field, and none is added.
 - **Installer planning addition:** `install.plan` is audited even though it
   is read-only, because it is the first attributable step of a destructive
   workflow. Its resource is `system_disk`; success is `success`, a safety or
@@ -1705,8 +1836,9 @@ or path other than the confirmed target device. An installed system returns
   There is also **no generic write-side `policy.*` method**, and that
   wording is the whole of the promise: the policy mutations are
   `capabilities.set` (user preference), the enrollment-managed `policy.d`
-  drop since M5 (`enroll.start`/`enroll.stop` — which write only whole
-  fetched envelopes, never accept policy content as params), and
+  drop since M5 (`enroll.start`/`enroll.stop`, and the refresh a
+  `reconcile` runs while enrolled — which write only whole fetched sets,
+  never accept policy content as params), and
   `policy.set` (section 5.8a), which takes **one registered capability and
   one value that capability validates** and can express nothing else. A
   method that accepted a path expression, a document or a merge patch would
