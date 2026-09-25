@@ -71,8 +71,23 @@ struct ControlPlaneState {
     /// fixed rank) so the all-or-nothing abort path can be exercised.
     serve_bad_policy: AtomicBool,
     /// Serve no policy at all — a fresh Smplify tenant that has not assigned
-    /// anything to this device yet (`policy.fetch` answers `{policies: []}`).
+    /// anything to this device yet (`policy.fetch` answers `{policies: []}`
+    /// with `assignment: "none"`).
     serve_no_policy: AtomicBool,
+    /// Serve this as the baseline's `spec.security.firewall.enabled`; the
+    /// fixture's own value when `None`.
+    firewall_enabled: Mutex<Option<bool>>,
+    /// Serve these envelopes after the baseline.
+    extra_envelopes: Mutex<Vec<Value>>,
+    /// Serve this `assignment` marker instead of the one the answer implies
+    /// (`policies`, or `none` for an empty list).
+    assignment: Mutex<Option<&'static str>>,
+    /// Serve no `assignment` marker at all: a control plane that predates it.
+    omit_assignment: AtomicBool,
+    /// Serve the baseline twice.
+    serve_duplicate_ids: AtomicBool,
+    /// Refuse `policy.fetch` with this error code.
+    refuse_policy_fetch: Mutex<Option<&'static str>>,
     /// Serve a desired state that turns local policy editing off
     /// (spec section 44.5; docs/api/ipc.md section 5.7 `local_admin`).
     deny_local_admin: AtomicBool,
@@ -169,23 +184,44 @@ impl ControlPlaneState {
             }
             "policy.fetch" => {
                 self.device_for(params)?;
-                if self.serve_no_policy.load(Ordering::SeqCst) {
-                    return Ok(json!({ "policies": [] }));
+                if let Some(code) = *self.refuse_policy_fetch.lock().unwrap() {
+                    return Err((code, "the organization's server refused".into()));
                 }
-                let mut envelope: Value = serde_json::from_str(ACME_ENVELOPE).unwrap();
-                if self.serve_bad_policy.load(Ordering::SeqCst) {
-                    envelope["precedence_rank"] = json!(5); // fixed rank is 2
+                let mut policies = Vec::new();
+                if !self.serve_no_policy.load(Ordering::SeqCst) {
+                    let mut envelope: Value = serde_json::from_str(ACME_ENVELOPE).unwrap();
+                    if self.serve_bad_policy.load(Ordering::SeqCst) {
+                        envelope["precedence_rank"] = json!(5); // fixed rank is 2
+                    }
+                    let mut desired = serde_json::from_str::<Value>(ACME_DESIRED).unwrap();
+                    if self.deny_local_admin.load(Ordering::SeqCst) {
+                        desired["spec"]["security"]["localAdmin"] =
+                            json!({ "policyEditing": "denied" });
+                    }
+                    if let Some(enabled) = *self.firewall_enabled.lock().unwrap() {
+                        desired["spec"]["security"]["firewall"]["enabled"] = json!(enabled);
+                    }
+                    envelope
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("policy".to_string(), desired);
+                    if self.serve_duplicate_ids.load(Ordering::SeqCst) {
+                        policies.push(envelope.clone());
+                    }
+                    policies.push(envelope);
+                    policies.extend(self.extra_envelopes.lock().unwrap().iter().cloned());
                 }
-                let mut desired = serde_json::from_str::<Value>(ACME_DESIRED).unwrap();
-                if self.deny_local_admin.load(Ordering::SeqCst) {
-                    desired["spec"]["security"]["localAdmin"] =
-                        json!({ "policyEditing": "denied" });
+                let mut result = json!({ "policies": policies });
+                if !self.omit_assignment.load(Ordering::SeqCst) {
+                    let implied = if policies.is_empty() {
+                        "none"
+                    } else {
+                        "policies"
+                    };
+                    let marker = self.assignment.lock().unwrap().unwrap_or(implied);
+                    result["assignment"] = json!(marker);
                 }
-                envelope
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("policy".to_string(), desired);
-                Ok(json!({ "policies": [envelope] }))
+                Ok(result)
             }
             "compliance.report" => {
                 let device_id = self.device_for(params)?;
@@ -662,6 +698,23 @@ impl Drop for TestDaemon {
 
 fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// A second organization envelope: a rank-3 role policy with a payload of
+/// its own.
+fn role_envelope(id: &str) -> Value {
+    json!({
+        "policy_id": id,
+        "source_kind": "organization_role_policy",
+        "precedence_rank": 3,
+        "source_name": "Acme SRE role",
+        "policy": {
+            "apiVersion": "smplify.io/v1alpha1",
+            "kind": "DeviceDesiredState",
+            "metadata": {"organization": "acme"},
+            "spec": {"update": {"channel": "stable"}}
+        }
+    })
 }
 
 fn policy_d_files(daemon: &TestDaemon) -> Vec<String> {
@@ -3180,4 +3233,171 @@ fn the_organization_view_changes_only_when_a_send_succeeds() {
         daemon.result("enroll.status", None)["organization_view"],
         json!({"sent_at": null, "categories": []})
     );
+}
+
+// ---------------------------------------------------------------------------
+// The organization's policy set: the checks enroll.start shares with refresh
+// ---------------------------------------------------------------------------
+
+/// Enroll against `control_plane` and return the daemon.
+fn enrolled(dir: &Path, control_plane: &ControlPlane, firewall_state: &str) -> TestDaemon {
+    let daemon = TestDaemon::start(dir, Peer::root(), &control_plane.socket, firewall_state);
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    daemon
+}
+
+/// An organization publishes only organization layers, and a set is checked
+/// as a whole: a layer claiming the OS's hard-safety rung, by kind or by
+/// rank, and two envelopes with one id are each refused by name before
+/// anything is written, and the identity register issued is released.
+#[test]
+fn enrollment_refuses_a_set_no_organization_may_publish() {
+    let dir = test_dir("org-kinds");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let refused = |reason: &str| {
+        let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+        assert_eq!(error["code"], "invalid_params", "{error}");
+        assert_eq!(error["details"]["reason"], reason, "{error}");
+        assert!(policy_d_files(&daemon).is_empty());
+        assert!(!daemon.state_path("enrollment.json").exists());
+        assert!(!daemon.state_path(".policy.d.next").exists());
+        assert!(
+            state.devices.lock().unwrap().is_empty(),
+            "identity released"
+        );
+        error
+    };
+
+    *state.extra_envelopes.lock().unwrap() = vec![json!({
+        "policy_id": "acme-safety",
+        "source_kind": "os_hard_safety_constraint",
+        "precedence_rank": 1
+    })];
+    let error = refused("source_kind_not_organizational");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("not one an organization may publish"),
+        "{error}"
+    );
+    *state.extra_envelopes.lock().unwrap() = vec![json!({
+        "policy_id": "acme-override",
+        "source_kind": "device_specific_override",
+        "precedence_rank": 1
+    })];
+    refused("rank_not_organizational");
+    state.extra_envelopes.lock().unwrap().clear();
+    state.serve_duplicate_ids.store(true, Ordering::SeqCst);
+    refused("duplicate_policy_id");
+
+    state.serve_duplicate_ids.store(false, Ordering::SeqCst);
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(policy_d_files(&daemon), ["eng-baseline-v12.json"]);
+}
+
+/// What a root administrator dropped into policy.d stays: enrolling carries
+/// it into the new directory as the same file, keeps its layer in force (the
+/// daemon enforces what its next start would load, not the organization's
+/// files alone), and refuses a set that would take one over.
+#[test]
+fn enrollment_keeps_a_root_drop_and_refuses_to_take_one_over() {
+    let dir = test_dir("root-drop");
+    let policy_d = dir.join("state/policy.d");
+    write_file(
+        &policy_d.join("local-lab.json"),
+        json!({
+            "policy_id": "local-lab",
+            "source_kind": "organization_role_policy",
+            "precedence_rank": 3,
+            "policy": {"spec": {"security": {"localAdmin": {"policyEditing": "denied"}}}}
+        })
+        .to_string(),
+    );
+    write_file(&policy_d.join("local-lab.yaml"), "kind: note\n");
+    let inode = |name: &str| {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(policy_d.join(name)).unwrap().ino()
+    };
+    let before = (inode("local-lab.json"), inode("local-lab.yaml"));
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+
+    let mut files = policy_d_files(&daemon);
+    files.sort();
+    assert_eq!(
+        files,
+        ["eng-baseline-v12.json", "local-lab.json", "local-lab.yaml"]
+    );
+    assert_eq!(
+        (inode("local-lab.json"), inode("local-lab.yaml")),
+        before,
+        "carried over, not copied"
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(
+        status["policy_ids"],
+        json!(["eng-baseline-v12"]),
+        "not owned"
+    );
+    let effective = daemon.result("policy.effective", None);
+    assert_eq!(effective["local_admin"]["allowed"], false, "{effective}");
+    assert_eq!(effective["local_admin"]["source"]["policy_id"], "local-lab");
+
+    // Unenrolling removes the organization's files and nothing else.
+    daemon.result("enroll.stop", None);
+    let mut files = policy_d_files(&daemon);
+    files.sort();
+    assert_eq!(files, ["local-lab.json", "local-lab.yaml"]);
+
+    // A set naming a root drop is refused, and the drop is untouched.
+    let squatted = fs::read(policy_d.join("local-lab.json")).unwrap();
+    *control_plane.state.extra_envelopes.lock().unwrap() = vec![role_envelope("local-lab")];
+    let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+    assert_eq!(
+        error["details"]["reason"], "foreign_file_collision",
+        "{error}"
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("policy.d/local-lab.json"),
+        "{error}"
+    );
+    assert_eq!(fs::read(policy_d.join("local-lab.json")).unwrap(), squatted);
+    assert!(!daemon.state_path("enrollment.json").exists());
+}
+
+/// A refresh records the files of both sets before it swaps policy.d, so a
+/// crash never leaves a file no record owns. At the next start the staging
+/// directory it left is removed, and the record owns exactly the files
+/// policy.d holds, which is what enroll.status names and unenroll removes.
+#[test]
+fn an_interrupted_policy_change_settles_at_startup() {
+    let dir = test_dir("settle");
+    let control_plane = ControlPlane::start(&dir);
+    enrolled(&dir, &control_plane, "enabled").stop();
+
+    let record_path = dir.join("state/enrollment.json");
+    let mut record = read_json(&record_path);
+    record["policy_files"] = json!(["eng-baseline-v12.json", "eng-role-sre.json"]);
+    fs::write(&record_path, record.to_string()).unwrap();
+    write_file(&dir.join("state/.policy.d.next/eng-role-sre.json"), "{}");
+    write_file(&dir.join("state/.policy.d.enroll-staging/x.json"), "{}");
+
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    assert!(!daemon.state_path(".policy.d.next").exists());
+    assert!(!daemon.state_path(".policy.d.enroll-staging").exists());
+    assert_eq!(
+        read_json(&record_path)["policy_files"],
+        json!(["eng-baseline-v12.json"]),
+        "saved at startup"
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["policy_ids"], json!(["eng-baseline-v12"]));
+    daemon.result("enroll.stop", None);
+    assert!(policy_d_files(&daemon).is_empty());
 }

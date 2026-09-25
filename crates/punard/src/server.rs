@@ -68,7 +68,7 @@ use zeroize::Zeroizing;
 use crate::approvals::{self, ApprovalStore};
 use crate::apps::{AppError, AppManager};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
-use crate::browser_policy::{persist_rendered_browser_policy, render_effective_browser_policy};
+use crate::browser_policy::persist_rendered_browser_policy;
 use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
@@ -77,7 +77,7 @@ use crate::enroll::{
     OrgRecord, OrganizationViewRecord, StatusSummary, UpstreamError, compliance_report_body,
     inventory_body, inventory_resend_due, load_device_token, load_enrollment,
     load_organization_view, organization_view_summary, save_device_token, save_enrollment,
-    save_organization_view, write_status_summary,
+    save_enrollment_durable, save_organization_view, write_status_summary,
 };
 use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
@@ -91,6 +91,7 @@ use crate::policy::{
     EffectiveDocument, Layer, LocalAdminLayer, compute_effective, evaluate_application_policy,
     evaluate_webapp_policy, load_policy_dir, resolve_local_admin, write_effective_debug_copy,
 };
+use crate::policy_set::{self, CanonicalSet, PrepareError, Rejection};
 use crate::state::{
     ADMIN_POLICY_FILE, AdminPolicyEntry, AdminPolicyStore, MigrationOutcome, OsDefaultsStore,
     PreferenceEntry, PreferencesStore, load_or_create_device_id, migrate_m3_store,
@@ -100,7 +101,9 @@ use crate::update_status::{UpdateStatusEngine, UpdateStatusSources};
 use crate::update_transaction::{
     UpdateTransactionEngine, UpdateTransactionError, UpdateTransactionSources,
 };
-use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
+use crate::util::{
+    lookup_gid, lookup_username, random_hex, remove_synced, sha256_hex, write_atomic_synced,
+};
 use crate::webapps::{WebAppError, WebAppManager};
 
 mod m9;
@@ -180,15 +183,35 @@ pub const SCAN_TRIGGER_ENROLL: &str = "enroll";
 /// Audit `resource` for the M5 `enroll.sync` transition events.
 pub const RESOURCE_CONTROL_PLANE: &str = "control_plane";
 
-/// RAII guard serializing enrollment transitions (compare-exchange on a
-/// flag; released on drop).
+/// RAII guard serializing enrollment transitions and the commit of a policy
+/// refresh (compare-exchange on a flag; released on drop).
 struct EnrollGuard<'a>(&'a AtomicBool);
+
+/// How long `enroll.start` and `enroll.stop` wait for the guard. A policy
+/// refresh holds it only while it checks and commits files on this device,
+/// and a person who already spent their password confirmation must not be
+/// told "conflict" because a background pass happened to be committing.
+const ENROLL_GUARD_PATIENCE: Duration = Duration::from_secs(2);
 
 impl<'a> EnrollGuard<'a> {
     fn acquire(flag: &'a AtomicBool) -> Option<Self> {
         flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .ok()
             .map(|_| EnrollGuard(flag))
+    }
+
+    /// [`EnrollGuard::acquire`], retried every 10 ms for up to `patience`.
+    fn acquire_within(flag: &'a AtomicBool, patience: Duration) -> Option<Self> {
+        let deadline = Instant::now() + patience;
+        loop {
+            if let Some(guard) = Self::acquire(flag) {
+                return Some(guard);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -675,7 +698,27 @@ impl Daemon {
         // same posture as the layer stores; a missing token on an enrolled
         // device degrades to unreachable syncs, never to a silent
         // unenroll.
-        let enrollment = load_enrollment(&cfg.state_dir.join("enrollment.json"))?;
+        let mut enrollment = load_enrollment(&cfg.state_dir.join("enrollment.json"))?;
+        // An enroll.start or policy refresh that was interrupted leaves its
+        // staging directory beside policy.d, and a refresh may leave a record
+        // naming files the directory it left live does not hold. Both are
+        // settled before anything reads them (policy_set::settle).
+        match policy_set::settle(&cfg.state_dir, enrollment.as_mut()) {
+            Ok(true) => {
+                if let Some(settled) = &enrollment {
+                    if let Err(e) =
+                        save_enrollment_durable(&cfg.state_dir.join("enrollment.json"), settled)
+                    {
+                        eprintln!(
+                            "punard: could not save the settled policy record ({e}); \
+                             it is saved again by the next sync"
+                        );
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("punard: could not clear an interrupted policy change: {e}"),
+        }
         let device_token = load_device_token(&cfg.state_dir.join("device-token"))?;
         if enrollment.is_some() && device_token.is_none() {
             eprintln!(
@@ -1698,8 +1741,14 @@ impl Inner {
     }
 
     /// Recompute the effective document from the layers (startup, every
-    /// `capabilities.set`, and the M5 enrollment transitions) and refresh
-    /// the debug copy.
+    /// `capabilities.set`, the M5 enrollment transitions and every policy
+    /// refresh that changes the set) and refresh the debug copy.
+    ///
+    /// A capability whose effective value or classification changed leaves
+    /// remediation suppression here: the loop-protection promise is "until the
+    /// effective value changes" (contract section 5.6), and a new value is a
+    /// new thing to try, not the fourth attempt at the old one. The two locks
+    /// are taken one after the other, never together.
     fn recompute_effective(&self) {
         let doc = {
             let org_layers = self.org_layers.lock().unwrap();
@@ -1713,7 +1762,18 @@ impl Inner {
             )
         };
         let _ = write_effective_debug_copy(&self.cfg.state_dir.join("effective.json"), &doc);
-        *self.effective.lock().unwrap() = doc;
+        let changed = {
+            let mut effective = self.effective.lock().unwrap();
+            let changed = changed_effective_paths(&effective, &doc);
+            *effective = doc;
+            changed
+        };
+        if !changed.is_empty() {
+            let mut tracker = self.tracker.lock().unwrap();
+            for path in changed {
+                tracker.fail_counts.remove(&path);
+            }
+        }
     }
 
     /// M9: re-read the AI authority documents (SPEC section 20) after an
@@ -4897,18 +4957,19 @@ impl Inner {
         )?;
         // Serialize enrollment transitions without holding the state lock
         // across the network/reconcile pipeline.
-        let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
-            Some(guard) => guard,
-            None => {
-                return Err(self.conflict(
-                    "changing",
-                    "An enrollment change is already in progress.\n\
+        let _guard =
+            match EnrollGuard::acquire_within(&self.enroll_in_progress, ENROLL_GUARD_PATIENCE) {
+                Some(guard) => guard,
+                None => {
+                    return Err(self.conflict(
+                        "changing",
+                        "An enrollment change is already in progress.\n\
                      Policy: os default — enrollment transitions run one at a time.\n\
                      Next step: retry in a moment."
-                        .to_string(),
-                ));
-            }
-        };
+                            .to_string(),
+                    ));
+                }
+            };
         let current = self
             .enrollment
             .lock()
@@ -5102,81 +5163,31 @@ impl Inner {
         // The attestation step is SIMULATED (milestone-5.md section 5.2):
         // the label is stored and surfaced verbatim; nothing was measured.
 
-        // Fetch and validate the policy envelopes with the M4 loader's own
-        // strict parse, over a staging directory — enrollment is
-        // all-or-nothing up through the policy.d write.
-        let envelopes = client
+        // Fetch the organization's policy and check it by the rules every
+        // later refresh applies too (crate::policy_set): the set is staged
+        // beside policy.d, loaded and rendered there exactly as startup would
+        // load it, together with any file a root administrator dropped, and
+        // only a set that passed all of it replaces policy.d, whole.
+        // Enrollment is all-or-nothing up to that swap.
+        let fetched = client
             .policy_fetch(&token)
-            .map(|fetched| fetched.policies)
             .map_err(|e| fail_audit(self.upstream_error("policy.fetch", e)))?;
-        let staging = self.cfg.state_dir.join(".policy.d.enroll-staging");
-        let cleanup_staging = || {
-            let _ = std::fs::remove_dir_all(&staging);
+        let set = CanonicalSet::from_envelopes(&fetched.policies, fetched.assignment)
+            .map_err(|rejection| fail_audit(enroll_policy_refusal(&rejection)))?;
+        let prepared = match policy_set::prepare(&self.cfg.state_dir, &set, &[]) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                policy_set::discard_staging(&self.cfg.state_dir);
+                return Err(fail_audit(match error {
+                    PrepareError::Rejected(rejection) => enroll_policy_refusal(&rejection),
+                    PrepareError::Local(failure) => {
+                        self.internal(&format!("staging the organization's policy: {failure}"))
+                    }
+                }));
+            }
         };
-        cleanup_staging();
-        std::fs::create_dir_all(&staging)
-            .map_err(|e| fail_audit(self.internal(&format!("staging dir: {e}"))))?;
-        let mut policy_files: Vec<String> = Vec::new();
-        for envelope in &envelopes {
-            let policy_id = envelope
-                .get("policy_id")
-                .and_then(Value::as_str)
-                .filter(|id| {
-                    !id.is_empty()
-                        && id
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-                })
-                .ok_or_else(|| {
-                    cleanup_staging();
-                    fail_audit(IpcError::with_details(
-                        ErrorCode::InvalidParams,
-                        "The control plane served a policy envelope without a usable \
-                         policy_id.\n\
-                         Policy: os default — enrollment writes only validated envelopes \
-                         (docs/api/ipc.md section 5.9).\n\
-                         Next step: report this to your administrator; nothing was changed."
-                            .to_string(),
-                        json!({ "param": "policy", "reason": "envelope without policy_id" }),
-                    ))
-                })?;
-            let file = format!("{policy_id}.json");
-            let bytes =
-                serde_json::to_vec_pretty(envelope).expect("fetched envelopes re-serialize");
-            crate::util::write_atomic(&staging.join(&file), &bytes, 0o600).map_err(|e| {
-                cleanup_staging();
-                fail_audit(self.internal(&format!("staging write: {e}")))
-            })?;
-            policy_files.push(file);
-        }
-        let loaded = load_policy_dir(&staging).map_err(|e| {
-            cleanup_staging();
-            fail_audit(IpcError::with_details(
-                ErrorCode::InvalidParams,
-                format!(
-                    "A fetched policy envelope failed validation: {e}.\n\
-                     Policy: os default — enrollment is all-or-nothing; nothing was \
-                     written (docs/api/ipc.md section 5.9).\n\
-                     Next step: report this to your administrator."
-                ),
-                json!({ "param": "policy", "reason": "envelope failed the loader's validation" }),
-            ))
-        })?;
-        // Validate the complete effective Chromium document before the
-        // enrollment commit point. Unknown or weakening policy therefore
-        // cannot leave a partially enrolled device or touch /etc.
-        render_effective_browser_policy(&loaded.applications, &loaded.browsers).map_err(|e| {
-            cleanup_staging();
-            fail_audit(IpcError::with_details(
-                ErrorCode::InvalidParams,
-                format!(
-                    "The fetched browser policy could not be rendered safely: {e}.\n\
-                     Policy: browser/integration/policy-allowlist.json — enrollment is all-or-nothing.\n\
-                     Next step: correct the browser policy in Smplify; nothing was changed."
-                ),
-                json!({ "param": "policy.spec.browser", "reason": "browser policy refused" }),
-            ))
-        })?;
+        let staging = prepared.staging().to_path_buf();
+        let loaded = prepared.loaded;
         for unmapped in &loaded.unmapped {
             eprintln!(
                 "punard: enrollment policy: no registered capability for {unmapped}; \
@@ -5184,48 +5195,17 @@ impl Inner {
             );
         }
 
-        // Commit point: move the validated envelopes into policy.d, then
-        // persist token + enrollment and flip the in-memory state.
-        let policy_dir = self.cfg.state_dir.join("policy.d");
-        if let Err(e) = std::fs::create_dir_all(&policy_dir) {
-            cleanup_staging();
-            return Err(fail_audit(self.internal(&format!("policy.d: {e}"))));
-        }
-        for file in &policy_files {
-            if let Err(e) = std::fs::rename(staging.join(file), policy_dir.join(file)) {
-                // Roll back anything moved so far — all-or-nothing.
-                for moved in &policy_files {
-                    let _ = std::fs::remove_file(policy_dir.join(moved));
-                }
-                cleanup_staging();
-                return Err(fail_audit(self.internal(&format!("policy.d write: {e}"))));
-            }
-        }
-        cleanup_staging();
-
-        let rollback_files = |files: &[String]| {
-            for file in files {
-                let _ = std::fs::remove_file(policy_dir.join(file));
-            }
-        };
-
-        if let Err(e) = persist_rendered_browser_policy(
-            &self.cfg.browser_policy_source,
-            &loaded.applications,
-            &loaded.browsers,
-        ) {
-            rollback_files(&policy_files);
-            return Err(fail_audit(
-                self.internal(&format!("rendered browser policy store: {e}")),
-            ));
-        }
-
+        // Commit point. The record goes first, durably, so no crash can leave
+        // the organization's files enforced on a device whose record says it
+        // is personal or owns none of them; then policy.d is swapped in whole;
+        // then the browser document. Each step undoes the ones before it.
+        let enrolled_at = utc_now_rfc3339();
         let enrollment = Enrollment {
             version: 1,
             org,
-            enrolled_at: utc_now_rfc3339(),
+            enrolled_at: enrolled_at.clone(),
             attestation,
-            policy_files: policy_files.clone(),
+            policy_files: set.names(),
             last_sync: LastSyncRecord::default(),
             last_inventory_hash: None,
             remote_query_scopes,
@@ -5233,29 +5213,63 @@ impl Inner {
             removable,
             organization_owned,
             last_inventory_sent_at: None,
-            policy_hash: None,
-            policy_fetched_at: None,
-            policy_changed_at: None,
+            policy_hash: Some(set.revision()),
+            policy_fetched_at: Some(enrolled_at.clone()),
+            policy_changed_at: Some(enrolled_at.clone()),
             policy_refresh: None,
         };
-        if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token) {
-            rollback_files(&policy_files);
-            let _ = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]);
+        let enrollment_path = self.cfg.state_dir.join("enrollment.json");
+        let token_path = self.cfg.state_dir.join("device-token");
+        let unwind_stores = || {
+            let _ = remove_synced(&token_path);
+            let _ = crate::enroll::remove_terms(&enrollment_path);
+            let _ = remove_synced(&enrollment_path);
+        };
+        if let Err(e) = save_device_token(&token_path, &token) {
+            policy_set::discard_staging(&self.cfg.state_dir);
             return Err(fail_audit(
                 self.internal(&format!("device token store: {e}")),
             ));
         }
-        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), &enrollment) {
-            rollback_files(&policy_files);
-            let _ = std::fs::remove_file(self.cfg.state_dir.join("device-token"));
-            let _ = crate::enroll::remove_terms(&self.cfg.state_dir.join("enrollment.json"));
-            let _ = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]);
+        if let Err(e) = save_enrollment_durable(&enrollment_path, &enrollment) {
+            unwind_stores();
+            policy_set::discard_staging(&self.cfg.state_dir);
             return Err(fail_audit(self.internal(&format!("enrollment store: {e}"))));
+        }
+        let policy_dir = self.cfg.state_dir.join(policy_set::POLICY_DIR);
+        let swapped = match policy_set::swap_in(&staging, &policy_dir) {
+            Ok(swapped) => swapped,
+            Err(failure) => {
+                unwind_stores();
+                policy_set::discard_staging(&self.cfg.state_dir);
+                return Err(fail_audit(
+                    self.internal(&format!("policy.d swap: {failure}")),
+                ));
+            }
+        };
+        let previous_rendered = read_if_present(&self.cfg.browser_policy_source);
+        if let Err(e) = persist_rendered_browser_policy(
+            &self.cfg.browser_policy_source,
+            &loaded.applications,
+            &loaded.browsers,
+        ) {
+            if let Err(undo) = swapped.roll_back() {
+                eprintln!("punard: enroll.start could not restore policy.d: {undo}");
+            }
+            restore_rendered(&self.cfg.browser_policy_source, previous_rendered);
+            unwind_stores();
+            return Err(fail_audit(
+                self.internal(&format!("rendered browser policy store: {e}")),
+            ));
+        }
+        if let Err(e) = swapped.finish() {
+            // The previous directory is left beside policy.d, where the next
+            // start removes it (policy_set::settle).
+            eprintln!("punard: enroll.start could not remove the replaced policy.d: {e}");
         }
 
         let policy_ids = enrollment.policy_ids();
         let org_result = org_info(&enrollment.org);
-        let enrolled_at = enrollment.enrolled_at.clone();
         let attestation_label = enrollment.attestation.clone();
         registration.commit();
         *self.device_token.lock().unwrap() = Some(token);
@@ -5264,6 +5278,8 @@ impl Inner {
             *slot = Some(enrollment);
             self.enrollment_epoch.fetch_add(1, Ordering::SeqCst);
         }
+        // What startup would load from the new policy.d: the organization's
+        // set with every root drop beside it, not the set alone.
         *self.org_layers.lock().unwrap() = loaded.layers;
         *self.local_admin.lock().unwrap() = loaded.local_admin;
         *self.application_policy.lock().unwrap() = loaded.applications;
@@ -5414,18 +5430,19 @@ impl Inner {
             retry,
         )?;
         self.spend_enrollment_ticket(peer, &actor, "enroll.stop", params.ticket.as_deref(), retry)?;
-        let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
-            Some(guard) => guard,
-            None => {
-                return Err(self.conflict(
-                    "changing",
-                    "An enrollment change is already in progress.\n\
+        let _guard =
+            match EnrollGuard::acquire_within(&self.enroll_in_progress, ENROLL_GUARD_PATIENCE) {
+                Some(guard) => guard,
+                None => {
+                    return Err(self.conflict(
+                        "changing",
+                        "An enrollment change is already in progress.\n\
                      Policy: os default — enrollment transitions run one at a time.\n\
                      Next step: retry in a moment."
-                        .to_string(),
-                ));
-            }
-        };
+                            .to_string(),
+                    ));
+                }
+            };
         // The authoritative check: under the guard no enrollment can be
         // committed or ended, so what is taken next is what was judged.
         self.refuse_kept_enrollment(&actor)?;
@@ -6003,6 +6020,101 @@ impl Inner {
     }
 }
 
+/// `enroll.start`'s refusal of a policy set the organization served. The
+/// two cases enrollment always refused keep their words; the rules the live
+/// refresh brought (docs/api/ipc.md section 5.9) say which one failed.
+fn enroll_policy_refusal(rejection: &Rejection) -> IpcError {
+    match rejection {
+        Rejection::UnusablePolicyId => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            "The control plane served a policy envelope without a usable \
+             policy_id.\n\
+             Policy: os default — enrollment writes only validated envelopes \
+             (docs/api/ipc.md section 5.9).\n\
+             Next step: report this to your administrator; nothing was changed."
+                .to_string(),
+            json!({ "param": "policy", "reason": "envelope without policy_id" }),
+        ),
+        Rejection::InvalidEnvelope(e) => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!(
+                "A fetched policy envelope failed validation: {e}.\n\
+                 Policy: os default — enrollment is all-or-nothing; nothing was \
+                 written (docs/api/ipc.md section 5.9).\n\
+                 Next step: report this to your administrator."
+            ),
+            json!({ "param": "policy", "reason": "envelope failed the loader's validation" }),
+        ),
+        Rejection::BrowserPolicyRefused(e) => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!(
+                "The fetched browser policy could not be rendered safely: {e}.\n\
+                 Policy: browser/integration/policy-allowlist.json — enrollment is all-or-nothing.\n\
+                 Next step: correct the browser policy in Smplify; nothing was changed."
+            ),
+            json!({ "param": "policy.spec.browser", "reason": "browser policy refused" }),
+        ),
+        other => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!(
+                "The control plane served a policy set this device refuses: {}.\n\
+                 Policy: os default — enrollment writes only a set that passes every \
+                 policy check, and nothing was written (docs/api/ipc.md section 5.9).\n\
+                 Next step: report this to your administrator.",
+                other.describe()
+            ),
+            json!({ "param": "policy", "reason": other.reason() }),
+        ),
+    }
+}
+
+/// A file's bytes, or `None` when it is absent or unreadable: what to put
+/// back if a change after this point has to be undone.
+fn read_if_present(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+/// Put the rendered browser document back as it was before a policy change
+/// that is being undone: the same bytes, or no file.
+fn restore_rendered(path: &Path, previous: Option<Vec<u8>>) {
+    let restored = match previous {
+        Some(bytes) => write_atomic_synced(path, &bytes, 0o600),
+        None => remove_synced(path),
+    };
+    if let Err(e) = restored {
+        eprintln!(
+            "punard: could not restore the rendered browser policy ({e}); the next start \
+             renders it again from policy.d"
+        );
+    }
+}
+
+/// The capability paths whose effective value or classification differs
+/// between two documents, including a path only one of them has. Provenance
+/// alone moving (the same value, now from another layer) is not a change a
+/// capability could act on.
+fn changed_effective_paths(old: &EffectiveDocument, new: &EffectiveDocument) -> Vec<String> {
+    let differs = |a: &EffectiveEntry<Value>, b: &EffectiveEntry<Value>| {
+        a.value != b.value || a.classification != b.classification
+    };
+    let mut changed: BTreeSet<String> = BTreeSet::new();
+    for (path, entry) in &new.entries {
+        if old
+            .entries
+            .get(path)
+            .is_none_or(|before| differs(before, entry))
+        {
+            changed.insert(path.clone());
+        }
+    }
+    for path in old.entries.keys() {
+        if !new.entries.contains_key(path) {
+            changed.insert(path.clone());
+        }
+    }
+    changed.into_iter().collect()
+}
+
 fn effective_update_channel(value: &Value) -> Option<UpdateChannel> {
     match value.as_str()? {
         "stable" => Some(UpdateChannel::Stable),
@@ -6018,6 +6130,71 @@ fn to_value<T: serde::Serialize>(value: T) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// Suppression lifts when the value a capability is asked to reach
+    /// changes, or how it is classified; the same value from another source
+    /// is not a change.
+    #[test]
+    fn a_changed_effective_value_or_classification_is_a_change() {
+        use punar_policy::SourceKind;
+        let entry = |value: &str, classification: Classification, policy_id: &str| EffectiveEntry {
+            value: json!(value),
+            provenance: Provenance {
+                kind: SourceKind::OrganizationBaseline,
+                rank: 2,
+                policy_id: policy_id.to_string(),
+                source_name: policy_id.to_string(),
+            },
+            classification,
+            user_override_permitted: false,
+        };
+        let doc = |entries: Vec<(&str, EffectiveEntry<Value>)>| EffectiveDocument {
+            computed_at: "2026-09-24T00:00:00Z".to_string(),
+            entries: entries
+                .into_iter()
+                .map(|(path, entry)| (path.to_string(), entry))
+                .collect(),
+        };
+        let old = doc(vec![
+            ("a", entry("x", Classification::AutoRemediate, "p1")),
+            ("b", entry("x", Classification::AutoRemediate, "p1")),
+            ("c", entry("x", Classification::AutoRemediate, "p1")),
+            ("gone", entry("x", Classification::AutoRemediate, "p1")),
+        ]);
+        let new = doc(vec![
+            ("a", entry("x", Classification::AutoRemediate, "p2")),
+            ("b", entry("y", Classification::AutoRemediate, "p1")),
+            ("c", entry("x", Classification::AlertOnly, "p1")),
+            ("new", entry("x", Classification::AutoRemediate, "p1")),
+        ]);
+        assert_eq!(
+            changed_effective_paths(&old, &new),
+            ["b", "c", "gone", "new"]
+        );
+        assert!(changed_effective_paths(&old, &old).is_empty());
+    }
+
+    /// enroll.start and enroll.stop wait a moment for a refresh that is
+    /// committing, rather than answer "conflict", and no longer.
+    #[test]
+    fn the_enrollment_guard_waits_briefly_for_a_commit_in_progress() {
+        let flag = AtomicBool::new(false);
+        let held = EnrollGuard::acquire(&flag).unwrap();
+        let started = Instant::now();
+        assert!(EnrollGuard::acquire_within(&flag, Duration::from_millis(60)).is_none());
+        assert!(started.elapsed() >= Duration::from_millis(60));
+        let waited = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                drop(held);
+            });
+            EnrollGuard::acquire_within(&flag, Duration::from_secs(2))
+        });
+        assert!(waited.is_some(), "released within its patience");
+        assert!(flag.load(Ordering::SeqCst), "held by the waiter");
+        drop(waited);
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
     /// The refusal that asks for the organization's terms states every one of
     /// them in words the organization cannot tamper with: its display name is
     /// its own choice, and an escape sequence in it must not be able to

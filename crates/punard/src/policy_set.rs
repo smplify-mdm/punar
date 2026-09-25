@@ -114,6 +114,38 @@ impl Rejection {
         }
     }
 
+    /// What was wrong, in words, for the journal and `enroll.start`'s
+    /// refusal: fixed text, plus the colliding file's name, which passed the
+    /// policy-id rules.
+    pub fn describe(&self) -> String {
+        match self {
+            Rejection::TooManyPolicies => format!("more than {MAX_POLICIES} policies"),
+            Rejection::NotAnObject => "an envelope that is not a JSON object".to_string(),
+            Rejection::UnusablePolicyId => "an envelope without a usable policy_id".to_string(),
+            Rejection::DuplicatePolicyId => "two envelopes with the same policy_id".to_string(),
+            Rejection::EnvelopeTooLarge => {
+                format!("an envelope larger than {} KiB", MAX_ENVELOPE_BYTES / 1024)
+            }
+            Rejection::SourceKindNotOrganizational => {
+                "a policy whose source kind is not one an organization may publish".to_string()
+            }
+            Rejection::RankNotOrganizational => {
+                "a device-specific override ranked with the OS's hard safety constraints"
+                    .to_string()
+            }
+            Rejection::InconsistentAssignment => {
+                "policies alongside an answer saying none are usable or assigned".to_string()
+            }
+            Rejection::InvalidEnvelope(_) => "an envelope the policy loader refuses".to_string(),
+            Rejection::ForeignFileCollision(name) => {
+                format!("a policy named like the local file policy.d/{name}")
+            }
+            Rejection::BrowserPolicyRefused(_) => {
+                "browser policy that does not render safely".to_string()
+            }
+        }
+    }
+
     /// The loader's or renderer's own words, or the colliding file, when
     /// there are any. For the journal and `enroll.start`'s refusal only: the
     /// audit trail has no free-text field.
@@ -703,7 +735,7 @@ mod tests {
         }
         for assignment in [Assignment::NoneAssigned, Assignment::Unusable] {
             assert_eq!(
-                rejection(&[ok.clone()], assignment),
+                rejection(std::slice::from_ref(&ok), assignment),
                 "inconsistent_assignment"
             );
             assert!(CanonicalSet::from_envelopes(&[], assignment).is_ok());
