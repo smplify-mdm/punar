@@ -515,9 +515,14 @@ option D of the activation design, with the review's corrections.
 - **Never enrolled.** systemd holds `punar-smplifyd.socket` (root 0600 in a
   0700 directory, `Accept=no`, `FileDescriptorName=api`, a manual stop
   refused, no `[Install]`); `punard.service` `Wants=` it. No agent process
-  exists: punard calls the agent only for `enroll.start` and while enrolled.
-  The CI image proves it at stabilized idle: `PUNAR_SMPLIFYD_PROCS=0` with
-  the socket active is a release gate (`tests/performance/check-budgets.sh`).
+  exists: punard calls the agent only for `enroll.start`, while enrolled,
+  and to finish a release its record asks for. Two gates hold it. The CI
+  image at stabilized idle: the agent never started this boot
+  (`PUNAR_SMPLIFYD_START_MONOTONIC_US=0`), no process, and the socket active
+  (`tests/performance/check-budgets.sh`), which catches anything on the image
+  that starts it; and punard's own test that a device that never enrolled
+  makes no connection to the agent's socket at all, since on the CI image
+  punard dials the mock control plane and the image gate cannot see it.
 - **`enroll.start`.** Its first call starts the agent through the socket. An
   enrollment that fails or is declined leaves nothing of an identity, and the
   agent exits with status 75 (`DORMANT_EXIT_STATUS`) after 30 s without a

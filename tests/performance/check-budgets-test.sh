@@ -98,6 +98,25 @@ if "${CHECKER}" "${WORK}/no-count.txt" >/dev/null 2>&1; then
     echo "FAIL: a report without the Smplify agent's process count passed" >&2
     exit 1
 fi
+# An agent something started during boot, dormant again by the time of the
+# count: no process, and still a failure, since it ran. Even under TCG.
+sed 's/^PUNAR_SMPLIFYD_START_MONOTONIC_US=0$/PUNAR_SMPLIFYD_START_MONOTONIC_US=41250331/' \
+    "${PASS_REPORT}" > "${WORK}/started-then-dormant.txt"
+if "${CHECKER}" "${WORK}/started-then-dormant.txt" >/dev/null 2>&1; then
+    echo "FAIL: a report whose Smplify agent started this boot and went dormant passed" >&2
+    exit 1
+fi
+sed 's/^PUNAR_SMPLIFYD_START_MONOTONIC_US=0$/PUNAR_SMPLIFYD_START_MONOTONIC_US=9/' \
+    "${TCG_REPORT}" > "${WORK}/tcg-started.txt"
+if "${CHECKER}" "${WORK}/tcg-started.txt" >/dev/null 2>&1; then
+    echo "FAIL: an agent started on an unenrolled image was downgraded under TCG" >&2
+    exit 1
+fi
+grep -v '^PUNAR_SMPLIFYD_START_MONOTONIC_US=' "${PASS_REPORT}" > "${WORK}/no-start.txt"
+if "${CHECKER}" "${WORK}/no-start.txt" >/dev/null 2>&1; then
+    echo "FAIL: a report that does not say whether the Smplify agent started passed" >&2
+    exit 1
+fi
 sed 's/^PUNAR_SMPLIFYD_SOCKET=active$/PUNAR_SMPLIFYD_SOCKET=failed/' "${PASS_REPORT}" > "${WORK}/no-socket.txt"
 if "${CHECKER}" "${WORK}/no-socket.txt" >/dev/null 2>&1; then
     echo "FAIL: a report whose Smplify agent socket is not listening passed" >&2
@@ -131,6 +150,35 @@ if "${CHECKER}" "${WORK}/bad-source.txt" >/dev/null 2>&1; then
     echo "FAIL: a device total from an unnamed source passed" >&2
     exit 1
 fi
+# The realistic double count inflates the device total itself (root plus
+# children) and computes the remainder from it consistently: only the disks'
+# own diskstats total, in the same report, shows it.
+sed -e 's/^PUNAR_IDLE_WRITE_DEVICE_BYTES=.*/PUNAR_IDLE_WRITE_DEVICE_BYTES=5619712/' \
+    -e 's/^PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=.*/PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=4411392/' \
+    "${PASS_REPORT}" > "${WORK}/device-double-count.txt"
+if "${CHECKER}" "${WORK}/device-double-count.txt" >/dev/null 2>&1; then
+    echo "FAIL: a device total of root plus children passed" >&2
+    exit 1
+fi
+# A cgroup sum far ahead of the device (nested cgroups summed, another
+# device's writes) is not writes in flight, and a zero remainder does not
+# excuse it.
+sed -e 's/^PUNAR_IDLE_WRITE_CGROUPS_BYTES=.*/PUNAR_IDLE_WRITE_CGROUPS_BYTES=44113920/' \
+    -e 's/^PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=.*/PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=0/' \
+    "${PASS_REPORT}" > "${WORK}/cgroups-far-ahead.txt"
+if "${CHECKER}" "${WORK}/cgroups-far-ahead.txt" >/dev/null 2>&1; then
+    echo "FAIL: top-level cgroups ten times the device passed" >&2
+    exit 1
+fi
+# Writes in flight at a window edge put the root's counter (at submission)
+# a little apart from diskstats (at completion): within the slack.
+sed -e 's/^PUNAR_IDLE_WRITE_DEVICE_BYTES=.*/PUNAR_IDLE_WRITE_DEVICE_BYTES=4542464/' \
+    -e 's/^PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=.*/PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=3334144/' \
+    "${PASS_REPORT}" > "${WORK}/device-in-flight.txt"
+if ! "${CHECKER}" "${WORK}/device-in-flight.txt" >/dev/null 2>&1; then
+    echo "FAIL: a device total 128 KiB from diskstats was rejected" >&2
+    exit 1
+fi
 # Counters flushed at different moments can put the cgroups a few pages
 # ahead of the disk: the remainder is then zero, which is consistent.
 sed -e 's/^PUNAR_IDLE_WRITE_CGROUPS_BYTES=.*/PUNAR_IDLE_WRITE_CGROUPS_BYTES=4415488/' \
@@ -141,4 +189,4 @@ if ! "${CHECKER}" "${WORK}/cgroups-ahead.txt" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "PASS: stabilized-idle checker gates KVM/HVF CPU+writes + connected five-minute idle + zram + the dormant Smplify agent + write attribution without a double count, rejects missing facts, and TCG-downgrades numeric evidence"
+echo "PASS: stabilized-idle checker gates KVM/HVF CPU+writes + connected five-minute idle + zram + the dormant Smplify agent (never started) + write attribution without a double count in the remainder, the device total or the cgroup sum, rejects missing facts, and TCG-downgrades numeric evidence"

@@ -37,12 +37,15 @@
 #
 # The built-in Smplify agent is dormant until enrolled
 # (docs/development/smplify-enrollment.md section 3.4), so it is not summed
-# above. On the measured image, which never enrolls, it must not be running
-# at all, and its socket must be listening for the day it does:
+# above. On the measured image, which never enrolls, it must never have
+# started this boot (an agent started during boot and dormant thirty seconds
+# later leaves no process to count), must not be running, and its socket must
+# be listening for the day it does:
 #
+#   PUNAR_SMPLIFYD_START_MONOTONIC_US != 0     ::error:: -> exit 1
 #   PUNAR_SMPLIFYD_PROCS != 0                  ::error:: -> exit 1
 #   PUNAR_SMPLIFYD_SOCKET != active            ::error:: -> exit 1
-#   either absent or malformed                 ::error:: -> exit 1
+#   any of them absent or malformed            ::error:: -> exit 1
 #                                              (all EVEN under TCG: a
 #                                              resident agent on a device that
 #                                              never enrolled is a privacy
@@ -61,10 +64,21 @@
 # together, and the kernel/filesystem metadata no cgroup was charged for,
 # which is the device total minus the cgroups. The sampler's arithmetic is
 # checked, because a remainder computed as root PLUS children counts every
-# charged byte twice:
+# charged byte twice, and so is the device total itself, against the
+# diskstats total the same report carries for the same disks (a device total
+# that is itself root plus children agrees with its own remainder, and only
+# the independent figure shows it):
 #
 #   attribution facts missing or malformed      ::error:: -> exit 1
 #   kernel/fs != device - cgroups (floor 0)     ::error:: -> exit 1
+#   |device - diskstats| > slack                ::error:: -> exit 1
+#   cgroups - device > slack                    ::error:: -> exit 1
+#
+# slack = 512 KiB + 1/32 of the diskstats total: the root's io.stat counts a
+# write when it is submitted and diskstats when it completes, so writes in
+# flight at either edge of the window may be in one and not yet the other.
+# The measured window's two totals were identical (8,616 sectors each); a
+# double count is at least every charged byte (1,208,320 in that window).
 #
 # CPU is stored in hundredths of a percentage point (`bps`): 50 is 0.50%.
 # The write ceiling is the engineering interpretation recorded after two
@@ -173,6 +187,7 @@ ZRAM_DISKSIZE_MB="$(get_field PUNAR_ZRAM_DISKSIZE_MB)"
 ZRAM_ALGORITHM="$(get_field PUNAR_ZRAM_ALGORITHM)"
 ZRAM_SWAP_ACTIVE="$(get_field PUNAR_ZRAM_SWAP_ACTIVE)"
 SMPLIFYD_PROCS="$(get_field PUNAR_SMPLIFYD_PROCS)"
+SMPLIFYD_STARTED="$(get_field PUNAR_SMPLIFYD_START_MONOTONIC_US)"
 SMPLIFYD_SOCKET="$(get_field PUNAR_SMPLIFYD_SOCKET)"
 require_number PUNAR_RAM_MEAN_MB "${MEAN_MB}"
 require_number PUNAR_RAM_MAX_MB "${MAX_MB}"
@@ -259,6 +274,19 @@ case "${SMPLIFYD_PROCS:-missing}" in
         fail=1
         ;;
 esac
+case "${SMPLIFYD_STARTED:-missing}" in
+    0)
+        echo "==> OK: the Smplify agent never started this boot"
+        ;;
+    ''|missing|*[!0-9]*)
+        annotate error "PUNAR_SMPLIFYD_START_MONOTONIC_US is '${SMPLIFYD_STARTED:-missing}' — the sampler did not report whether the Smplify agent started this boot (docs/development/smplify-enrollment.md section 3.4)"
+        fail=1
+        ;;
+    *)
+        annotate error "the Smplify agent started this boot (at ${SMPLIFYD_STARTED} us) on a device that never enrolled — something called it; it must stay dormant until enrollment (docs/development/smplify-enrollment.md section 3.4)"
+        fail=1
+        ;;
+esac
 if [ "${SMPLIFYD_SOCKET:-missing}" != active ]; then
     annotate error "punar-smplifyd.socket is '${SMPLIFYD_SOCKET:-missing}', not active — enrollment could not start the agent (docs/development/smplify-enrollment.md section 3.4)"
     fail=1
@@ -318,6 +346,19 @@ if is_number "${WRITE_DEVICE_BYTES}" && is_number "${WRITE_CGROUPS_BYTES}" \
     if [ "${WRITE_KERNEL_FS_BYTES}" -ne "${expected_kernel_fs}" ]; then
         annotate error "the idle-write attribution does not add up: kernel/filesystem metadata ${WRITE_KERNEL_FS_BYTES} bytes, but the device wrote ${WRITE_DEVICE_BYTES} and the top-level cgroups ${WRITE_CGROUPS_BYTES} (expected ${expected_kernel_fs}; a remainder of root plus children counts every charged byte twice)"
         fail=1
+    fi
+    if is_number "${IDLE_BLOCK_WRITE_BYTES}"; then
+        slack=$((524288 + IDLE_BLOCK_WRITE_BYTES / 32))
+        apart=$((WRITE_DEVICE_BYTES - IDLE_BLOCK_WRITE_BYTES))
+        [ "${apart}" -lt 0 ] && apart=$((-apart))
+        if [ "${apart}" -gt "${slack}" ]; then
+            annotate error "the idle-write device total (${WRITE_DEVICE_BYTES} bytes, ${WRITE_DEVICE_SOURCE:-?}) is ${apart} bytes from the disks' own diskstats total (${IDLE_BLOCK_WRITE_BYTES}), more than writes in flight explain (${slack}): a device total of root plus children counts every charged byte twice"
+            fail=1
+        fi
+        if [ "${WRITE_CGROUPS_BYTES}" -gt $((WRITE_DEVICE_BYTES + slack)) ]; then
+            annotate error "the top-level cgroups report $((WRITE_CGROUPS_BYTES - WRITE_DEVICE_BYTES)) bytes more than the device wrote (${WRITE_DEVICE_BYTES}), more than writes in flight explain (${slack}): the cgroup sum counts something twice (nested cgroups summed, or another device's writes)"
+            fail=1
+        fi
     fi
     other_cgroups=$((WRITE_CGROUPS_BYTES - WRITE_JOURNALD_BYTES))
     if is_number "${IDLE_SERVICE_WRITE_BYTES}"; then

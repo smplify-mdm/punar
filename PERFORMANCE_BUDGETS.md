@@ -56,8 +56,8 @@ CLI and is excluded while not running).
 The built-in Smplify agent (`punar-smplifyd`) is not part of this idle total
 on a device that never enrolled, because it does not run there at all: it is
 dormant until enrolled (`docs/development/smplify-enrollment.md` §3.4), and
-the gate holds its process count at zero (§2.3). Its resident cost on an
-enrolled device is **unmeasured** until it is measured on one.
+the gate holds it to never having started this boot (§2.3). Its resident
+cost on an enrolled device is **unmeasured** until it is measured on one.
 
 ### 1.3 Idle CPU
 
@@ -211,14 +211,22 @@ at the 10-minute mark, and the reported value is the mean over the window
 - **`punar-smplifyd` is not summed, and its absence is gated instead.** The
   built-in Smplify agent is dormant until enrolled
   (`docs/development/smplify-enrollment.md` §3.4): systemd holds its socket,
-  and nothing behind it runs until punard's first call, which a device that
-  never enrolls never makes. The measured image never enrolls, so summing the
-  agent would make `PUNAR_SERVICES_RSS_MB` `absent` rather than say anything
-  true. The sampler instead reports `PUNAR_SMPLIFYD_PROCS` (the agent's
+  and nothing behind it runs until a call arrives. The measured image never
+  enrolls, so summing the agent would make `PUNAR_SERVICES_RSS_MB` `absent`
+  rather than say anything true. The sampler instead reports
+  `PUNAR_SMPLIFYD_START_MONOTONIC_US` (when systemd last started the agent's
+  main process this boot, 0 for never), `PUNAR_SMPLIFYD_PROCS` (the agent's
   cgroup, a missing cgroup counting as none) and `PUNAR_SMPLIFYD_SOCKET`, and
   `tests/performance/check-budgets.sh` fails the image, on every accelerator,
-  unless the count is 0 and the socket is `active`. Leaving the agent out of
-  the sum is honest only together with that gate. Its cost on an enrolled
+  unless the agent never started, has no process, and the socket is
+  `active`. The start time is the one that matters: an agent something
+  started during boot exits thirty seconds later and leaves no process to
+  count. Leaving the agent out of the sum is honest only together with that
+  gate, and the gate proves only the image's side: on the measured image
+  punard dials the development mock control plane, not the agent's socket,
+  so that an unenrolled punard never connects to the agent is held by
+  punard's own test, which counts connections
+  (`a_device_that_never_enrolled_never_calls_the_agent`). Its cost on an enrolled
   device is **unmeasured** until it is measured on one: the container figures
   in the activation design (about 1 MiB PSS idle, measured outside socket
   activation and before any TLS or check-in) are not a budget number.
@@ -291,14 +299,23 @@ at the 10-minute mark, and the reported value is the mean over the window
   total minus the cgroups, floored at zero. The device total
   (`PUNAR_IDLE_WRITE_DEVICE_BYTES`) is the root cgroup's `io.stat`, which is
   the whole disk's own counter and not a sum of its children, or diskstats
-  when that is unreadable (`PUNAR_IDLE_WRITE_DEVICE_SOURCE`); every figure
-  covers the same physical disks, so zram and loop devices are in none.
-  Adding the root to its children would count every charged byte twice, and
-  `check-budgets.sh` fails a report whose remainder is not the subtraction.
-  The figures are context, not a budget. One arm64 release-image window
-  (2026-09-24, greeter idle, 4 GiB, HVF; not the CI lane) split 4,411,392
-  bytes into 1,134,592 of journal, 73,728 of punard's audit, and 3,203,072
-  of btrfs metadata and writeback. The journal and the audit log stay
+  when that is unreadable (`PUNAR_IDLE_WRITE_DEVICE_SOURCE`); every figure,
+  the first-party services' write counter included, covers the same physical
+  disks by `MAJ:MIN`, so zram and loop devices are in none. Adding the root
+  to its children would count every charged byte twice, and
+  `check-budgets.sh` fails a report whose remainder is not the subtraction,
+  whose device total is further from the disks' own diskstats total in the
+  same report than writes in flight at the window's edges explain (512 KiB
+  plus 1/32 of it; the root's counter is charged at submission, diskstats at
+  completion), or whose cgroup sum exceeds the device by more than that. The
+  remainder is measured as "bytes no top-level cgroup was charged for"; that
+  it is the kernel's and the filesystem's own writes (metadata commits,
+  writeback of pages whose writer has gone) is the reading of it, inferred,
+  not measured. The figures are context, not a budget. One arm64
+  release-image window (2026-09-24, greeter idle, 4 GiB, HVF; not the CI
+  lane) split 4,411,392 bytes into 1,134,592 of journal, 73,728 of punard's
+  audit, and 3,203,072 no cgroup was charged for; its root `io.stat` and
+  diskstats totals were identical (8,616 sectors). The journal and the audit log stay
   persistent: making either volatile would trade audit durability for
   writes, which is not a trade Punar makes.
 - **Quieter timers, no record lost.** Much of that journal traffic was

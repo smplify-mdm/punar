@@ -58,19 +58,11 @@ capture_cgroup_counters() {
     if [ -r "${cgroup}/cpu.stat" ]; then
         cpu_usec="$(awk '$1 == "usage_usec" {print $2; exit}' "${cgroup}/cpu.stat")"
     fi
-    if [ -r "${cgroup}/io.stat" ]; then
-        write_bytes="$(awk '
-            {
-                for (i = 1; i <= NF; i++) {
-                    if ($i ~ /^wbytes=/) {
-                        split($i, pair, "=")
-                        total += pair[2]
-                    }
-                }
-            }
-            END {printf "%.0f\n", total + 0}
-        ' "${cgroup}/io.stat")"
-    fi
+    # The same physical disks as every whole-guest figure below (BLOCK_DEVICES,
+    # by MAJ:MIN): swap-out to zram and a loop device's traffic are no disk's
+    # wear, and summing them here made "every other cgroup" in the breakdown
+    # mix a filtered counter with an unfiltered one.
+    write_bytes="$(io_write_bytes "${cgroup}/io.stat")"
     case "${cpu_usec}" in ''|*[!0-9]*) cpu_usec=absent ;; esac
     case "${write_bytes}" in ''|*[!0-9]*) write_bytes=absent ;; esac
     printf '%s %s %s\n' "${label}" "${cpu_usec}" "${write_bytes}" >> "${destination}"
@@ -91,10 +83,14 @@ capture_cgroup_counters() {
 # own counter (the kernel keeps it there for the root, it is not a sum of the
 # children), or the diskstats figure when the root's is unreadable. Adding
 # the root and its children would count every charged byte twice; the
-# remainder is a subtraction and nothing else. Every figure covers the same
-# physical disks block_write_sectors counts, by MAJ:MIN, so zram and loop
-# devices are in none of them. A top-level cgroup created inside the window
-# is counted from zero; one removed inside it falls into the remainder.
+# remainder is a subtraction and nothing else. Every figure, the first-party
+# services' included, covers the same physical disks block_write_sectors
+# counts, by MAJ:MIN, so zram and loop devices are in none of them. A
+# top-level cgroup created inside the window is counted from zero; one
+# removed inside it falls into the remainder. The remainder is what no
+# top-level cgroup was charged for; that this is the kernel's and the
+# filesystem's own writes (metadata commits, writeback of pages whose writer
+# has gone) is the reading of it, not something the sampler measures.
 block_devices() {
     for dev in /sys/block/vd* /sys/block/sd* /sys/block/nvme*n* /sys/block/mmcblk*; do
         [ -r "${dev}/dev" ] || continue
@@ -351,8 +347,10 @@ kernel_fs_write_bytes=0
 if [ "${cgroups_write_bytes}" -le "${device_write_bytes}" ]; then
     kernel_fs_write_bytes=$((device_write_bytes - cgroups_write_bytes))
 else
-    # The cgroups' counters are flushed lazily and can run a few pages
-    # ahead of the disk's; the remainder is then nothing, not negative.
+    # The cgroups' counters are charged at submission and the disk's at
+    # completion, so writes in flight at a window edge can put them a little
+    # ahead; the remainder is then nothing, not negative. check-budgets.sh
+    # bounds "a little": far ahead is a sum that counts something twice.
     echo "punar: idle-runtime: top-level cgroups report $((cgroups_write_bytes - device_write_bytes)) bytes more than the device" >&2
 fi
 case "${journald_write_bytes}" in
@@ -430,18 +428,29 @@ echo "punar: idle-ram: summed PSS over: ${PUNAR_SERVICE_UNITS}"
 
 # DORMANT UNTIL ENROLLED, observed on the running machine at the same moment.
 # A device that never enrolled runs no Smplify code: systemd holds the agent's
-# listening socket and nothing behind it runs until punard's first call, which
-# an unenrolled punard never makes. The count is of the agent's own cgroup (a
-# missing cgroup is none), and the socket's state says the door is there for
-# the day the device does enroll. check-budgets.sh fails the image unless the
-# count is 0 and the socket is active; the agent's enrolled cost is measured on
-# an enrolled device, never inferred from this image.
+# listening socket and nothing behind it runs until a call arrives. Two facts:
+# the process count of the agent's own cgroup now (a missing cgroup is none),
+# and when systemd last started the agent's main process this boot, on the
+# monotonic clock, 0 for never. The second is the one that matters: an agent
+# something started during boot has exited 75 thirty seconds later and left
+# no process to count. The socket's state says the door is there for the day
+# the device does enroll. check-budgets.sh fails the image unless the agent
+# never started and the socket is active.
+#
+# What this image cannot show is punard's side: here punard dials the mock
+# control plane (punard.service.d/10-mock-control-plane.conf), never the
+# agent's socket, so a punard that called the agent while unenrolled would
+# not start it on this image. That is held by punard's own test
+# (a_device_that_never_enrolled_never_calls_the_agent counts connections, not
+# calls). The agent's enrolled cost is measured on an enrolled device, never
+# inferred from this image.
 smplifyd_procs=0
 smplifyd_cgroup=/sys/fs/cgroup/system.slice/punar-smplifyd.service/cgroup.procs
 if [ -r "${smplifyd_cgroup}" ]; then
     smplifyd_procs="$(awk 'END { print NR }' "${smplifyd_cgroup}")"
 fi
 emit_fact "PUNAR_SMPLIFYD_PROCS=${smplifyd_procs}"
+emit_fact "PUNAR_SMPLIFYD_START_MONOTONIC_US=$(systemctl show -p ExecMainStartTimestampMonotonic --value punar-smplifyd.service 2>/dev/null || true)"
 emit_fact "PUNAR_SMPLIFYD_SOCKET=$(systemctl is-active punar-smplifyd.socket 2>/dev/null || true)"
 
 # WHO IS ACTUALLY HOLDING THE MEMORY. The whole-system idle figure has drifted

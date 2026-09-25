@@ -29,8 +29,8 @@
 #       the Smplify lab installs the socket rather than an enablement;
 #   S5  the idle-RAM sampler no longer sums the agent into the resident
 #       services (it is not resident on the measured image) and reports its
-#       process count instead, which tests/performance/check-budgets.sh gates
-#       to zero;
+#       process count and whether it started this boot instead, which
+#       tests/performance/check-budgets.sh gates to zero and never;
 #   S6  each check rejects a fixture tree that breaks it, so a check that
 #       silently stopped matching cannot pass for a working one.
 #
@@ -282,6 +282,8 @@ check_tree() (
     esac
     grep -q 'PUNAR_SMPLIFYD_PROCS=' "${sampler}" \
         || violation "S5: idle-ram.sh does not report the agent's process count"
+    grep -q 'PUNAR_SMPLIFYD_START_MONOTONIC_US=.*ExecMainStartTimestampMonotonic' "${sampler}" \
+        || violation "S5: idle-ram.sh does not report whether the agent started this boot"
 
     [ "${violations}" -eq 0 ]
 )
@@ -381,6 +383,9 @@ rejects "the sampler sums the agent as resident"
 fixture; edit os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
     '/PUNAR_SMPLIFYD_PROCS=/d'
 rejects "the sampler does not report the agent's process count"
+fixture; edit os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
+    '/PUNAR_SMPLIFYD_START_MONOTONIC_US=/d'
+rejects "the sampler does not report whether the agent started"
 fixture; edit "${UNITS}/punar-smplifyd.socket" 's|^SocketUser=root|SocketUser=punar|'
 rejects "the socket belongs to another user"
 fixture; edit "${UNITS}/punar-smplifyd.socket" 's|^SocketGroup=root|SocketGroup=punar|'

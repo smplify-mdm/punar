@@ -56,6 +56,11 @@ if grep -Eq 'device_write_bytes *\+ *cgroups_write_bytes|cgroups_write_bytes *\+
         "${IDLE_RAM}"; then
     fail 'the device total is added to the cgroups: every charged byte counted twice'
 fi
+# The first-party services' write counter covers the same disks as every
+# whole-guest figure: summing every device in their io.stat (zram swap-out,
+# loop devices) made the breakdown mix a filtered and an unfiltered counter.
+require_literal "${IDLE_RAM}" "write_bytes=\"\$(io_write_bytes \"\${cgroup}/io.stat\")\"" \
+    'the first-party write counter is not filtered to the same disks'
 for fact in DEVICE_BYTES DEVICE_SOURCE JOURNALD_BYTES CGROUPS_BYTES KERNEL_FS_BYTES; do
     require_literal "${IDLE_RAM}" "emit_fact \"PUNAR_IDLE_WRITE_${fact}=" \
         "the sampler does not report PUNAR_IDLE_WRITE_${fact}"
