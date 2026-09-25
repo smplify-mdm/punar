@@ -1904,7 +1904,7 @@ fi
 # do with what those groups test.
 check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state | tr -d '[:space:]"')"
 
-# --- group 8c: a password sign-in leaves the login keyring encrypted ---------
+# --- group 8k: a password sign-in leaves the login keyring encrypted ---------
 #
 # THE WEAKNESS THIS GUARDS AGAINST. A gnome-keyring collection created with an
 # empty password is written as a PLAINTEXT `[keyring]` INI file: every stored
