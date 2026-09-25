@@ -78,16 +78,17 @@ if command -v punarctl >/dev/null 2>&1; then
     fi
 fi
 
-# The keyboard layout, as data (SMP-1405 WP-02). punarctl reads the device's
-# layout (punard's system.keymap, /etc/vconsole.conf), checks it against the
-# image's XKB list, and writes three validated values to
-# $XDG_RUNTIME_DIR/punar/session/input.lua, which hyprland.lua reads with a
-# pattern and never runs. PUNAR_KEYMAP is the layout chosen on the login
-# screen, set by punar-greet only for a successful sign-in; `--adopt` makes it
-# the device's layout through the same audited capability, and if punard will
-# not take it this session still types what was chosen. A failure here never
-# keeps anyone out of the desktop: without the file the session types US
-# English, and the reason is in the session log.
+# The keyboard layout, as data (SMP-1405 WP-02). punarctl picks this
+# session's layout — the login screen's choice for this sign-in, else the
+# person's own (~/.config/punar/keyboard.json), else the device's (punard's
+# system.keymap, /etc/vconsole.conf) — checks it against the image's XKB list,
+# and writes three validated values to $XDG_RUNTIME_DIR/punar/session/input.lua,
+# which hyprland.lua reads with a pattern and never runs. PUNAR_KEYMAP is the
+# layout chosen on the login screen, set by punar-greet only for a successful
+# sign-in; `--adopt` makes it this session's, never the device's (that is a
+# device administrator's change, docs/api/ipc.md section 5.4). A failure here
+# never keeps anyone out of the desktop: without the file the session types
+# US English, and the reason is in the session log.
 if command -v punarctl >/dev/null 2>&1; then
     if [ -n "${PUNAR_KEYMAP:-}" ]; then
         timeout 10 punarctl keyboard layout render --adopt "${PUNAR_KEYMAP}" \

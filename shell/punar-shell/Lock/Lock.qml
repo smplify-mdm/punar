@@ -214,8 +214,12 @@ Scope {
             root.keyboardName = live.active_keymap;
             return;
         }
-        if (Array.isArray(status.layouts) && status.layouts.length > 0 && typeof status.layouts[0].description === "string")
-            root.keyboardName = status.layouts[0].description;
+        // Without a live answer: the person's own layout when they have one,
+        // else the device's (the order session start renders them in).
+        var layouts = Array.isArray(status.your_layouts) && status.your_layouts.length > 0
+            ? status.your_layouts : status.layouts;
+        if (Array.isArray(layouts) && layouts.length > 0 && typeof layouts[0].description === "string")
+            root.keyboardName = layouts[0].description;
     }
 
     Process {

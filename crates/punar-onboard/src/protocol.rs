@@ -75,6 +75,13 @@ pub struct CreateAccountWire {
     /// `America/Los_Angeles`.
     #[serde(default)]
     pub timezone: Option<String>,
+    /// The keyboard layout chosen on the first-run form, when one was
+    /// (`us`, `de+nodeadkeys`, `us,ru`). The password above was typed in it,
+    /// so it becomes the device's layout, which the login screen types in
+    /// next time (SMP-1405 WP-02 merged with F0). `None` leaves the device's
+    /// layout as it is.
+    #[serde(default)]
+    pub keymap: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,6 +96,9 @@ pub struct SuccessResponse<'a> {
     pub timezone_automatic: bool,
     pub timezone_applied: bool,
     pub timezone_warning: Option<&'a str>,
+    /// Whether the first-run form's keyboard layout is now the device's;
+    /// `false` also when none was chosen.
+    pub keymap_applied: bool,
 }
 
 #[derive(Debug, Serialize)]

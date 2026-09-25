@@ -24,9 +24,12 @@ pub(super) enum MutationAuthority {
     Root,
     /// A live section 48 grant for exactly this capability.
     Grant { grant_id: String },
-    /// The person in the active local session, on a person-scoped
-    /// capability ([`crate::authz::PERSON_SCOPED`], SMP-1405 WP-02).
-    ActiveLocalPerson,
+    /// A device administrator who has just confirmed their password, on a
+    /// capability they may set directly
+    /// ([`crate::authz::ADMINISTRATOR_DIRECT`]: the keyboard layout; SMP-1405
+    /// WP-02, F0, contract section 23.2). The ticket was spent before this
+    /// was returned.
+    DeviceAdministrator,
     /// AI authority policy said `allow`. **No shipped M9 policy does** —
     /// the personal defaults are `approval_required` or `deny` across the
     /// board — but the value is part of SPEC section 20 and is implemented
@@ -420,8 +423,10 @@ impl Inner {
     /// 2. otherwise HUMAN PATH:
     ///      uid == 0                                 -> allow (unchanged)
     ///      live grant for (uid, capability)          -> allow (new)
-    ///      person-scoped capability, and the peer is
-    ///        the active local session's person      -> allow (SMP-1405 WP-02)
+    ///      administrator-direct capability (the
+    ///        keyboard layout): not org-pinned, then
+    ///        a device administrator, then a fresh
+    ///        ticket for this call and process      -> allow (WP-02, F0)
     ///      otherwise                                 -> deny  (unchanged)
     /// ```
     ///
@@ -499,28 +504,8 @@ impl Inner {
             return Ok(MutationAuthority::Grant { grant_id });
         }
 
-        // SMP-1405 WP-02: the keyboard layout is the person's own tool. The
-        // person at the machine may set it without an administrator, from
-        // their own session on the seat (not merely as the seated uid: a
-        // user service, an SSH login or an escaped agent helper runs as that
-        // uid too); an agent never reaches this line (step 1), and an
-        // organization's pin still wins in the merge that follows.
-        if crate::authz::PERSON_SCOPED.contains(&id)
-            && crate::authz::is_active_local_person(
-                crate::authz::SeatSources {
-                    seat_file: &self.cfg.seat_state_file,
-                    sessions_dir: &self.cfg.sessions_dir,
-                    proc_root: &self.cfg.proc_root,
-                },
-                peer,
-            )
-        {
-            return Ok(MutationAuthority::ActiveLocalPerson);
-        }
-
-        // The unchanged M3/M5 denial. M5 amendment (contract section 5.4):
-        // when the target path is org-pinned, the citation names the pinning
-        // source — "personal defaults" would be a false citation there.
+        // Whether an organization pins this path: the one thing about the
+        // request below that does not depend on who is asking.
         let pinning = {
             let doc = self.effective.lock().unwrap();
             doc.get(id).and_then(|entry| {
@@ -532,6 +517,38 @@ impl Inner {
                 })
             })
         };
+
+        // SMP-1405 WP-02 and F0: the device's keyboard layout is
+        // /etc/vconsole.conf, what the login screen, the console and every
+        // account that has not chosen its own layout type in. That is
+        // device-wide state (contract section 23.1), so a person sets it as a
+        // device administrator with a fresh password, directly, without a
+        // privilege request. In F0's order: an organization's pin first (no
+        // password is spent on a value that would not take effect), then the
+        // role, then the ticket. A person's own layout never reaches punard.
+        if crate::authz::ADMINISTRATOR_DIRECT.contains(&id) {
+            if let Some((source_name, policy_id)) = &pinning {
+                let mut event = AuditEvent::denial(&self.device_id, actor, "capabilities.set", id);
+                event.policy_ids = vec![policy_id.clone()];
+                self.log_audit(event);
+                return Err(IpcError::denied_org_pinned(id, source_name, policy_id));
+            }
+            self.admit_device_change(
+                peer,
+                actor,
+                "capabilities.set",
+                "capabilities.set",
+                id,
+                params.ticket.as_deref(),
+                "Changing this device's keyboard layout",
+                &format!("punarctl keyboard layout set --device {state_hint}"),
+            )?;
+            return Ok(MutationAuthority::DeviceAdministrator);
+        }
+
+        // The unchanged M3/M5 denial. M5 amendment (contract section 5.4):
+        // when the target path is org-pinned, the citation names the pinning
+        // source — "personal defaults" would be a false citation there.
         let mut denial_event = AuditEvent::denial(&self.device_id, actor, "capabilities.set", id);
         if let Some((_, policy_id)) = &pinning {
             denial_event.policy_ids = vec![policy_id.clone()];

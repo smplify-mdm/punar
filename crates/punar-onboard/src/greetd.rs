@@ -114,8 +114,10 @@ pub fn start_session(
         return Err(GreetError::Authentication);
     }
     // Only a successful sign-in carries the login screen's keyboard layout
-    // into the session, where the signed-in person may make it the device's
-    // (SMP-1405 WP-02). Nobody who has not signed in changes anything.
+    // into the session, as that session's layout (SMP-1405 WP-02). It never
+    // becomes the device's from here: that is a device administrator's
+    // change (docs/api/ipc.md section 5.4). Nobody who has not signed in
+    // changes anything.
     let mut env = vec![
         "XDG_SESSION_TYPE=wayland".to_string(),
         "XDG_CURRENT_DESKTOP=Hyprland".to_string(),

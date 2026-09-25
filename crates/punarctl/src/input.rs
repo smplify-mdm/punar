@@ -1,11 +1,20 @@
 //! `punarctl keyboard` and `punarctl keys` (SMP-1405 WP-02).
 //!
-//! **Keyboard layout.** The device's layout is punard's `system.keymap`
-//! capability (`/etc/vconsole.conf`); the person in the active local session
-//! may set it, and the change is audited. This session loads it from a data
-//! file, `$XDG_RUNTIME_DIR/punar/session/input.lua`, which `render` writes
-//! at session start and `set` rewrites before applying the same three values
-//! to the live compositor. The file is under the person's own runtime
+//! **Two layouts: the device's and the person's own.** The device's layout
+//! is punard's `system.keymap` capability (`/etc/vconsole.conf`): what the
+//! login screen, the console and every account without a layout of its own
+//! type in. That is device-wide state, so it takes a device administrator
+//! with a fresh password (`set --device`, docs/api/ipc.md sections 5.4 and
+//! 23), and the change is audited. A person's own layout is theirs: `set`
+//! without `--device` keeps it in `~/.config/punar/keyboard.json` and never
+//! asks punard, and every session of theirs types in it. (WP-02 first let the
+//! person at the machine set the device's layout with no administrator; F0's
+//! rule for device-wide state replaced that with this split.)
+//!
+//! This session loads its layout from a data file,
+//! `$XDG_RUNTIME_DIR/punar/session/input.lua`, which `render` writes at
+//! session start and `set` and `reset` rewrite before applying the same three
+//! values to the live compositor. The file is under the person's own runtime
 //! directory rather than `/run/punar`, which is root's and which no desktop
 //! process may write. Its values pass [`keymap`]'s grammar and the installed
 //! XKB list first; the compositor matches them with a pattern and never runs
@@ -13,9 +22,11 @@
 //!
 //! **The greeter's choice.** The layout a person picks at the login screen
 //! travels into the session as `PUNAR_KEYMAP` (set only on a successful
-//! sign-in), and `render --adopt` makes it the device's layout through the
-//! same audited capability. Nobody who has not signed in can change the
-//! device: an unauthenticated login screen only chooses what it types with.
+//! sign-in), and `render --adopt` makes it this session's layout: the person
+//! typed their password in it, so the lock screen must type in it too. It
+//! changes neither the device's layout nor the person's saved one. Nobody
+//! who has not signed in changes anything but what the login screen types
+//! with.
 //!
 //! **Clipboard keys.** An optional grammar: PUNAR+C, V and X copy, paste and
 //! cut, as on a Mac, and the two floating-window binds they displace move to
@@ -48,19 +59,14 @@ const XKB_LIST_ENV: &str = "PUNAR_XKB_LIST";
 /// The session file, below the person's runtime directory.
 const SESSION_INPUT: &str = "punar/session/input.lua";
 
-/// The person's keyboard preferences.
+/// The person's keyboard preferences: their own layout (`layout`) and the
+/// clipboard-key grammar (`clipboardKeys`).
 const PREFERENCES: &str = "punar/keyboard.json";
-
-/// How long session start waits for the seat to name the person before the
-/// greeter's choice is adopted: greetd hands the seat over while the
-/// session's first process is already running.
-const ADOPT_ATTEMPTS: u32 = 10;
-const ADOPT_PAUSE: Duration = Duration::from_millis(300);
 
 #[derive(Subcommand)]
 pub enum KeyboardCommand {
-    /// The keyboard layout: this device's, this session's, and every one
-    /// installed. Without a subcommand, `status`.
+    /// The keyboard layout: this device's, your own, this session's, and
+    /// every one installed. Without a subcommand, `status`.
     Layout {
         #[command(subcommand)]
         command: Option<LayoutCommand>,
@@ -75,7 +81,8 @@ pub enum KeyboardCommand {
 
 #[derive(Subcommand)]
 pub enum LayoutCommand {
-    /// The device's layout, what this session loaded, and the switch chord.
+    /// The device's layout, your own, what this session loaded, and the
+    /// switch chord.
     Status,
     /// Every installed layout, or one layout's variants.
     List {
@@ -85,10 +92,27 @@ pub enum LayoutCommand {
         #[arg(long)]
         filter: Option<String>,
     },
-    /// Set the device's layout: one to four layouts, comma-separated, each
-    /// with an optional `+variant`, like `de`, `de+nodeadkeys` or `us,ru`.
-    /// The person at the machine may; the change is audited.
-    Set { layouts: String },
+    /// Set your own layout, for every session of yours: one to four layouts,
+    /// comma-separated, each with an optional `+variant`, like `de`,
+    /// `de+nodeadkeys` or `us,ru`. It is yours alone and needs no password.
+    ///
+    /// With --device, set the device's layout instead: the login screen's,
+    /// the console's, and the one every account without its own types in.
+    /// That reaches everyone on the device, so it needs a device
+    /// administrator (`punarctl admins list`), asks for your password on the
+    /// terminal unless you are root, and is recorded in the audit log.
+    /// Scripts hand the password over on a socket (--password-fd,
+    /// --ticket-fd), never on a pipe or as an argument.
+    Set {
+        layouts: String,
+        /// The device's layout, not your own.
+        #[arg(long)]
+        device: bool,
+        #[command(flatten)]
+        confirm: crate::Confirm,
+    },
+    /// Forget your own layout: your sessions type in the device's again.
+    Reset,
     /// Write this session's input file (run by session start).
     #[command(hide = true)]
     Render {
@@ -172,6 +196,37 @@ pub(crate) fn config_home() -> Option<PathBuf> {
                 .filter(|path| path.is_absolute())
                 .map(|home| home.join(".config"))
         })
+}
+
+/// The person's keyboard preferences document; empty when there is none or
+/// it cannot be read as one.
+fn preferences() -> serde_json::Map<String, Value> {
+    config_home()
+        .and_then(|dir| std::fs::read_to_string(dir.join(PREFERENCES)).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|doc| match doc {
+            Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Write the preferences document back, every other key kept.
+fn save_preferences(mut document: serde_json::Map<String, Value>) -> Result<(), String> {
+    let path = config_home()
+        .map(|dir| dir.join(PREFERENCES))
+        .ok_or_else(|| "neither XDG_CONFIG_HOME nor HOME is set".to_string())?;
+    document.insert("version".to_string(), json!(1));
+    write_private(&path, &format!("{:#}\n", Value::Object(document)), 0o644)
+        .map_err(|e| format!("{} could not be written ({e})", path.display()))
+}
+
+/// The person's own layout as they saved it, if they did.
+fn own_layout() -> Option<String> {
+    preferences()
+        .get("layout")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Write a file the person owns, atomically, private to them.
@@ -262,18 +317,20 @@ fn render_session(
     Ok((input, live_error))
 }
 
-/// Ask punard to make `value` the device's layout. The effective value
-/// comes back: an organization's pin can outrank the person.
+/// Ask punard to make `value` the device's layout, with the administrator's
+/// confirmation when there is one. The effective value comes back: an
+/// organization's pin can outrank the administrator.
 fn set_device(
     client: &Client,
     value: &str,
+    ticket: Option<&str>,
     timeout: Duration,
 ) -> Result<String, crate::ipc::CallError> {
-    let result = client.call_with_timeout(
-        "capabilities.set",
-        Some(json!({ "capability": keymap::CAPABILITY_ID, "desired_state": value })),
-        timeout,
-    )?;
+    let mut params = json!({ "capability": keymap::CAPABILITY_ID, "desired_state": value });
+    if let Some(ticket) = ticket {
+        params["ticket"] = json!(ticket);
+    }
+    let result = client.call_with_timeout("capabilities.set", Some(params), timeout)?;
     Ok(result
         .get("effective_state")
         .and_then(Value::as_str)
@@ -323,6 +380,7 @@ fn status(style: &Style, json_output: bool) -> ExitCode {
     let catalog = catalog().ok();
     let device = device_layout();
     let chosen = keymap::parse(&device).unwrap_or_else(|_| vec![Layout::new(keymap::DEFAULT, "")]);
+    let yours = own_layout().and_then(|value| keymap::parse(&value).ok());
     let session = session_input_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| keymap::parse_input_file(&text));
@@ -330,13 +388,15 @@ fn status(style: &Style, json_output: bool) -> ExitCode {
     let switchable = session
         .as_ref()
         .map(|s| s.kb_layout.contains(','))
-        .unwrap_or_else(|| keymap::session_groups(&chosen).len() > 1);
+        .unwrap_or_else(|| keymap::session_groups(yours.as_deref().unwrap_or(&chosen)).len() > 1);
     if json_output {
         println!(
             "{}",
             json!({
                 "device": device,
                 "layouts": layouts_json(catalog.as_ref(), &chosen),
+                "yours": yours.as_deref().map(keymap::format),
+                "your_layouts": yours.as_deref().map(|own| layouts_json(catalog.as_ref(), own)),
                 "session": session.as_ref().map(|s| json!({
                     "kb_layout": s.kb_layout,
                     "kb_variant": s.kb_variant,
@@ -348,13 +408,13 @@ fn status(style: &Style, json_output: bool) -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-    let mut out = fmt::masthead(style, "Keyboard", "this device");
+    let mut out = fmt::masthead(style, "Keyboard", "this device and you");
     let mut rows: Vec<Row> = chosen
         .iter()
         .enumerate()
         .map(|(index, layout)| {
             Row::new(
-                if index == 0 { "Layout" } else { "" },
+                if index == 0 { "Device" } else { "" },
                 &layout.to_string(),
                 Slot::Neutral,
                 &catalog
@@ -364,6 +424,14 @@ fn status(style: &Style, json_output: bool) -> ExitCode {
             )
         })
         .collect();
+    if let Some(own) = &yours {
+        rows.push(Row::new(
+            "Yours",
+            &keymap::format(own),
+            Slot::Neutral,
+            "your sessions type in this; the login screen in the device's",
+        ));
+    }
     if let Some(session) = &session {
         rows.push(Row::new(
             "Session",
@@ -394,7 +462,8 @@ fn status(style: &Style, json_output: bool) -> ExitCode {
     out.push_str(&fmt::rows(style, &rows));
     out.push_str(&fmt::note(
         style,
-        "punarctl keyboard layout list · punarctl keyboard layout set <layouts>",
+        "punarctl keyboard layout list · punarctl keyboard layout set <layouts> (yours) · \
+         punarctl keyboard layout set --device <layouts> (an administrator)",
     ));
     print!("{out}");
     ExitCode::SUCCESS
@@ -475,7 +544,48 @@ fn list(
     ExitCode::SUCCESS
 }
 
-fn set(layouts: &str, socket: Option<&Path>, style: &Style, json_output: bool) -> ExitCode {
+/// The session keys a `set`, `reset` or `render` answer carries.
+fn session_json(session: Option<&keymap::SessionInput>) -> Value {
+    session.map_or(Value::Null, |s| {
+        json!({
+            "kb_layout": s.kb_layout,
+            "kb_variant": s.kb_variant,
+            "kb_options": s.kb_options,
+        })
+    })
+}
+
+/// Render `layouts` into this session's file and apply it live; the input
+/// and why the live compositor did not take it, if it did not.
+fn apply_to_session(layouts: &[Layout]) -> (Option<keymap::SessionInput>, Option<String>) {
+    match session_input_path() {
+        Some(path) => match render_session(layouts, &path, true) {
+            Ok((input, live_error)) => (Some(input), live_error),
+            Err(why) => (None, Some(why)),
+        },
+        None => (None, None),
+    }
+}
+
+fn set(
+    layouts: &str,
+    device: bool,
+    confirm: &crate::Confirm,
+    socket: Option<&Path>,
+    style: &Style,
+    json_output: bool,
+) -> ExitCode {
+    // A confirmation is for the device's layout; one's own needs none.
+    if !device && confirm.named() {
+        return refuse(
+            "The keyboard layout was not changed.\n\
+             Why: a password or ticket confirms a change to the device's layout, and this \
+             command sets only yours.\n\
+             Next step: add --device to change the device's layout, or leave the \
+             confirmation out to set your own.",
+            2,
+        );
+    }
     let catalog = match catalog() {
         Ok(catalog) => catalog,
         Err(why) => {
@@ -495,51 +605,43 @@ fn set(layouts: &str, socket: Option<&Path>, style: &Style, json_output: bool) -
         }
     };
     let value = keymap::format(&chosen);
-    let client = Client::for_target(Target::Punard, socket);
-    let effective = match set_device(&client, &value, Duration::from_secs(15)) {
-        Ok(effective) => effective,
-        Err(error) => {
-            eprintln!("{}", error.message());
-            return ExitCode::from(error.exit_code());
-        }
-    };
-    let effective_layouts = keymap::parse(&effective).unwrap_or(chosen);
-    let (session, live_error) = match session_input_path() {
-        Some(path) => match render_session(&effective_layouts, &path, true) {
-            Ok((input, live_error)) => (Some(input), live_error),
-            Err(why) => (None, Some(why)),
-        },
-        None => (None, None),
-    };
-    if let Some(why) = &live_error {
-        eprintln!(
-            "The device's layout is saved, but this session did not take it yet.\nWhy: {why}.\n\
-             Next step: sign out and back in, or run `punarctl keyboard layout set {effective}` again."
+    if device {
+        return set_device_layout(&value, chosen, confirm, socket, style, json_output);
+    }
+
+    // The person's own: their file, this session, never punard.
+    let mut document = preferences();
+    document.insert("layout".to_string(), json!(value));
+    if let Err(why) = save_preferences(document) {
+        return refuse(
+            &format!("Your keyboard layout was not changed.\nWhy: {why}."),
+            1,
         );
     }
+    let (session, live_error) = apply_to_session(&chosen);
+    if let Some(why) = &live_error {
+        eprintln!(
+            "Your layout is saved, but this session did not take it yet.\nWhy: {why}.\n\
+             Next step: sign out and back in, or run `punarctl keyboard layout set {value}` again."
+        );
+    }
+    let device_value = device_layout();
     if json_output {
         println!(
             "{}",
             json!({
-                "device": effective,
-                "requested": value,
-                "overridden": effective != value,
-                "session": session.as_ref().map(|s| json!({
-                    "kb_layout": s.kb_layout,
-                    "kb_variant": s.kb_variant,
-                    "kb_options": s.kb_options,
-                })),
+                "yours": value,
+                "device": device_value,
+                "session": session_json(session.as_ref()),
                 "session_applied": session.is_some() && live_error.is_none() && in_hyprland(),
             })
         );
         return ExitCode::SUCCESS;
     }
-    let what = if effective == value {
-        format!("Keyboard · {effective}")
-    } else {
-        format!("Keyboard · {effective} · your organization's choice; {value} is recorded")
-    };
-    print!("{}", fmt::verdict(style, Slot::Ok, &what));
+    print!(
+        "{}",
+        fmt::verdict(style, Slot::Ok, &format!("Keyboard · {value} · yours"))
+    );
     if session.as_ref().is_some_and(|s| s.kb_layout.contains(',')) {
         print!(
             "{}",
@@ -549,17 +651,164 @@ fn set(layouts: &str, socket: Option<&Path>, style: &Style, json_output: bool) -
             )
         );
     }
+    if device_value != value {
+        print!(
+            "{}",
+            fmt::note(
+                style,
+                &format!(
+                    "The login screen types in this device's layout, {device_value}; a device \
+                     administrator changes it with `punarctl keyboard layout set --device <layouts>`"
+                )
+            )
+        );
+    }
     ExitCode::SUCCESS
 }
 
-/// Session start. Adoption failing never blocks the session: the greeter's
-/// choice is then used for this session only, and the reason is logged.
-fn render(
-    output: Option<PathBuf>,
-    adopt: Option<String>,
+/// `set --device`: the device's layout, which reaches everyone who uses it,
+/// so punard needs a device administrator with a fresh password (root needs
+/// neither). The role is asked about first, so a person without it is never
+/// asked for a password (F0-S1), and punard's refusal names who can act.
+fn set_device_layout(
+    value: &str,
+    chosen: Vec<Layout>,
+    confirm: &crate::Confirm,
     socket: Option<&Path>,
+    style: &Style,
     json_output: bool,
 ) -> ExitCode {
+    let client = Client::for_target(Target::Punard, socket);
+    let mut ticket = None;
+    if crate::caller_may_administer(&client) {
+        match crate::confirmation(
+            confirm,
+            &format!(
+                "make {} this device's keyboard layout, the login screen's included",
+                safe(value)
+            ),
+            "capabilities.set",
+        ) {
+            Ok(confirmed) => ticket = confirmed,
+            Err(exit) => return exit,
+        }
+    }
+    let effective = match set_device(
+        &client,
+        value,
+        ticket.as_ref().map(|t| t.as_str()),
+        Duration::from_secs(15),
+    ) {
+        Ok(effective) => effective,
+        Err(error) => {
+            eprintln!("{}", error.message());
+            return ExitCode::from(error.exit_code());
+        }
+    };
+    let effective_layouts = keymap::parse(&effective).unwrap_or(chosen);
+    // This session follows the device's layout only when its person has no
+    // layout of their own.
+    let yours = own_layout();
+    let (session, live_error) = if yours.is_none() {
+        apply_to_session(&effective_layouts)
+    } else {
+        (None, None)
+    };
+    if let Some(why) = &live_error {
+        eprintln!(
+            "The device's layout is saved, but this session did not take it yet.\nWhy: {why}.\n\
+             Next step: sign out and back in."
+        );
+    }
+    if json_output {
+        println!(
+            "{}",
+            json!({
+                "device": effective,
+                "requested": value,
+                "overridden": effective != value,
+                "yours": yours,
+                "session": session_json(session.as_ref()),
+                "session_applied": session.is_some() && live_error.is_none() && in_hyprland(),
+            })
+        );
+        return ExitCode::SUCCESS;
+    }
+    let what = if effective == value {
+        format!("Keyboard · {effective} · this device")
+    } else {
+        format!("Keyboard · {effective} · your organization's choice; {value} is recorded")
+    };
+    print!("{}", fmt::verdict(style, Slot::Ok, &what));
+    if let Some(own) = &yours {
+        print!(
+            "{}",
+            fmt::note(
+                style,
+                &format!(
+                    "Your own layout, {}, still applies to your sessions; \
+                     `punarctl keyboard layout reset` follows the device's",
+                    safe(own)
+                )
+            )
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+/// `reset`: forget the person's own layout; this session goes back to the
+/// device's.
+fn reset(style: &Style, json_output: bool) -> ExitCode {
+    let mut document = preferences();
+    if document.remove("layout").is_some() {
+        if let Err(why) = save_preferences(document) {
+            return refuse(
+                &format!("Your keyboard layout was not reset.\nWhy: {why}."),
+                1,
+            );
+        }
+    }
+    let device = device_layout();
+    let layouts = catalog()
+        .ok()
+        .and_then(|catalog| catalog.validate(&device).ok())
+        .or_else(|| keymap::parse(&device).ok())
+        .unwrap_or_else(|| vec![Layout::new(keymap::DEFAULT, "")]);
+    let (session, live_error) = apply_to_session(&layouts);
+    if let Some(why) = &live_error {
+        eprintln!(
+            "Your own layout is forgotten, but this session did not take the device's yet.\n\
+             Why: {why}.\nNext step: sign out and back in."
+        );
+    }
+    if json_output {
+        println!(
+            "{}",
+            json!({
+                "yours": Value::Null,
+                "device": device,
+                "session": session_json(session.as_ref()),
+                "session_applied": session.is_some() && live_error.is_none() && in_hyprland(),
+            })
+        );
+        return ExitCode::SUCCESS;
+    }
+    print!(
+        "{}",
+        fmt::verdict(
+            style,
+            Slot::Ok,
+            &format!("Keyboard · {device} · this device's, as yours")
+        )
+    );
+    ExitCode::SUCCESS
+}
+
+/// Session start: the login screen's choice for this sign-in, else the
+/// person's own layout, else the device's. Nothing here changes the device
+/// or the person's saved layout, and nothing fails the session: an unusable
+/// value is logged and the next one down is used.
+fn render(output: Option<PathBuf>, adopt: Option<String>, json_output: bool) -> ExitCode {
     let Some(output) = output.or_else(session_input_path) else {
         return refuse(
             "The session's keyboard file was not written.\nWhy: XDG_RUNTIME_DIR is not set.",
@@ -575,47 +824,29 @@ fn render(
     };
     let device = device_layout();
     let mut chosen = valid(&device).unwrap_or_else(|| vec![Layout::new(keymap::DEFAULT, "")]);
-    let mut adopted = false;
+    let mut source = "device";
+    if let Some(own) = own_layout() {
+        match valid(&own) {
+            Some(layouts) => {
+                chosen = layouts;
+                source = "yours";
+            }
+            None => eprintln!(
+                "punar-session: your keyboard layout {own:?} is not installed; using {device}"
+            ),
+        }
+    }
     if let Some(wanted) = adopt.as_deref().filter(|w| !w.is_empty()) {
         match valid(wanted) {
-            None => eprintln!(
-                "punar-session: the login screen's keyboard layout {wanted:?} is not installed; using {device}"
-            ),
-            Some(layouts) if keymap::format(&layouts) == device => {}
             Some(layouts) => {
-                let value = keymap::format(&layouts);
-                let client = Client::for_target(Target::Punard, socket);
-                let mut last = String::new();
-                for attempt in 0..ADOPT_ATTEMPTS {
-                    match set_device(&client, &value, Duration::from_secs(3)) {
-                        Ok(effective) => {
-                            chosen = valid(&effective).unwrap_or_else(|| layouts.clone());
-                            adopted = true;
-                            break;
-                        }
-                        // The seat may not name the person yet: wait for it,
-                        // briefly. Any other answer is final.
-                        Err(error) if error.exit_code() == crate::ipc::EXIT_DENIED => {
-                            last = error.message();
-                            if attempt + 1 < ADOPT_ATTEMPTS {
-                                std::thread::sleep(ADOPT_PAUSE);
-                            }
-                        }
-                        Err(error) => {
-                            last = error.message();
-                            break;
-                        }
-                    }
-                }
-                if !adopted {
-                    eprintln!(
-                        "punar-session: this session uses {value} from the login screen; the device \
-                         keeps {device}: {}",
-                        last.lines().next().unwrap_or("punard did not answer")
-                    );
-                    chosen = layouts;
-                }
+                chosen = layouts;
+                source = "login_screen";
             }
+            None => eprintln!(
+                "punar-session: the login screen's keyboard layout {wanted:?} is not installed; \
+                 using {}",
+                keymap::format(&chosen)
+            ),
         }
     }
     match render_session(&chosen, &output, false) {
@@ -626,7 +857,8 @@ fn render(
                     json!({
                         "file": output,
                         "chosen": keymap::format(&chosen),
-                        "adopted": adopted,
+                        "source": source,
+                        "device": device,
                         "kb_layout": input.kb_layout,
                         "kb_variant": input.kb_variant,
                         "kb_options": input.kb_options,
@@ -648,15 +880,7 @@ fn render(
 
 /// `standard` or `mac`, from the preferences file; `standard` when absent.
 pub fn clipboard_mode() -> &'static str {
-    let mode = config_home()
-        .and_then(|dir| std::fs::read_to_string(dir.join(PREFERENCES)).ok())
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|doc| {
-            doc.get("clipboardKeys")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-    match mode.as_deref() {
+    match preferences().get("clipboardKeys").and_then(Value::as_str) {
         Some("mac") => "mac",
         _ => "standard",
     }
@@ -670,19 +894,12 @@ fn clipboard_keys(mode: Option<String>, style: &Style, json_output: bool) -> Exi
     };
     let mut reloaded = None;
     if let Some(wanted) = wanted {
-        let Some(path) = config_home().map(|dir| dir.join(PREFERENCES)) else {
+        // The same file keeps the person's own layout: every other key stays.
+        let mut document = preferences();
+        document.insert("clipboardKeys".to_string(), json!(wanted));
+        if let Err(why) = save_preferences(document) {
             return refuse(
-                "The clipboard keys were not changed.\nWhy: neither XDG_CONFIG_HOME nor HOME is set.",
-                1,
-            );
-        };
-        let document = json!({ "version": 1, "clipboardKeys": wanted });
-        if let Err(e) = write_private(&path, &format!("{document:#}\n"), 0o644) {
-            return refuse(
-                &format!(
-                    "The clipboard keys were not changed.\nWhy: {} could not be written ({e}).",
-                    path.display()
-                ),
+                &format!("The clipboard keys were not changed.\nWhy: {why}."),
                 1,
             );
         }
@@ -762,8 +979,13 @@ pub fn keyboard(
         KeyboardCommand::Layout { command } => match command.unwrap_or(LayoutCommand::Status) {
             LayoutCommand::Status => status(style, json_output),
             LayoutCommand::List { layout, filter } => list(layout, filter, style, json_output),
-            LayoutCommand::Set { layouts } => set(&layouts, socket, style, json_output),
-            LayoutCommand::Render { output, adopt } => render(output, adopt, socket, json_output),
+            LayoutCommand::Set {
+                layouts,
+                device,
+                confirm,
+            } => set(&layouts, device, &confirm, socket, style, json_output),
+            LayoutCommand::Reset => reset(style, json_output),
+            LayoutCommand::Render { output, adopt } => render(output, adopt, json_output),
         },
         KeyboardCommand::ClipboardKeys { mode } => clipboard_keys(mode, style, json_output),
     }

@@ -116,6 +116,9 @@ Scope {
     //
     // "" | "reason" | "password"
     property string adminStage: ""
+    // "policy" (pin or withdraw a device-policy value: reason, then
+    // password) or "keymap" (the device's keyboard layout: password only).
+    property string adminKind: "policy"
     property string adminPath: ""
     /// The value to pin, already a JSON scalar as a string. Empty means the
     /// entry is being withdrawn.
@@ -910,10 +913,15 @@ Scope {
             // anything is sent. Esc cancels; Enter submits.
             data.reasonForCapability = String(a.path);
         } else if (kind === "keyboardLayout") {
-            // The person-scoped capability: punarctl asks punard, which lets
-            // the person at this machine set it and audits the change, then
-            // applies it to this session live.
+            // The person's own layout: kept in their own preferences and
+            // applied to this session live. It never reaches punard and needs
+            // no password; the device's layout is the administrator's
+            // (keyboardDevice below).
             data.runMutation(["punarctl", "keyboard", "layout", "set", String(a.value)]);
+        } else if (kind === "keyboardReset") {
+            data.runMutation(["punarctl", "keyboard", "layout", "reset"]);
+        } else if (kind === "keyboardDevice") {
+            data.beginDeviceKeymap(String(a.value));
         } else if (kind === "clipboardKeys") {
             data.runMutation(["punarctl", "keyboard", "clipboard-keys", String(a.value)]);
         } else if (kind === "capset") {
@@ -947,6 +955,7 @@ Scope {
             data.lastActionError = DeviceAdmin.refusal("Changing device policy");
             return;
         }
+        data.adminKind = "policy";
         data.adminPath = path;
         data.adminValue = value;
         data.adminReason = "";
@@ -954,8 +963,30 @@ Scope {
         data.lastActionError = "";
     }
 
+    /// The device's keyboard layout is what the login screen and every
+    /// account without its own type in (docs/api/ipc.md §5.4, §23.2): a
+    /// device administrator's change, confirmed with their password. A
+    /// person without the role is told who can make it instead.
+    function beginDeviceKeymap(value: string): void {
+        if (mutation.running || adminRun.running)
+            return;
+        if (!DeviceAdmin.mayAdminister) {
+            data.lastActionArgv = "punarctl keyboard layout set --device " + data.shellWord(value);
+            data.lastActionExit = 3;
+            data.lastActionError = DeviceAdmin.refusal("Changing this device's keyboard layout");
+            return;
+        }
+        data.adminKind = "keymap";
+        data.adminPath = "system.keymap";
+        data.adminValue = value;
+        data.adminReason = "";
+        data.adminStage = "password";
+        data.lastActionError = "";
+    }
+
     function cancelAdminEdit(): void {
         data.adminStage = "";
+        data.adminKind = "policy";
         data.adminPath = "";
         data.adminValue = "";
         data.adminReason = "";
@@ -989,9 +1020,30 @@ Scope {
         // and punar-authd would count the attempt against the account's
         // faillock tally for nothing.
         if (password === "") {
-            data.lastActionArgv = "punarctl policy set " + data.adminPath;
+            data.lastActionArgv = data.adminKind === "keymap"
+                ? "punarctl keyboard layout set --device " + data.shellWord(data.adminValue)
+                : "punarctl policy set " + data.adminPath;
             data.lastActionExit = 2;
             data.lastActionError = "Enter your password to confirm this change.";
+            return;
+        }
+        if (data.adminKind === "keymap") {
+            // The device's keyboard layout: `capabilities.set` on
+            // system.keymap, with a ticket bound to that method and to this
+            // punarctl, exactly as a terminal's `--device` run gets one.
+            var keymapValue = data.adminValue;
+            data.cancelAdminEdit();
+            data.lastActionArgv = "punarctl keyboard layout set --device " + data.shellWord(keymapValue);
+            data.lastActionExit = -1;
+            data.lastActionError = "";
+            data.lastActionPending = true;
+            data.pendingTimeZone = "";
+            if (!adminRun.start(["/usr/bin/punarctl", "keyboard", "layout", "set", "--device",
+                        keymapValue, "--ticket-from-parent"], password, "capabilities.set")) {
+                data.lastActionPending = false;
+                data.lastActionExit = 127;
+                data.lastActionError = "punarctl could not be started on this machine.";
+            }
             return;
         }
         var argv = data.adminValue === ""
@@ -1031,6 +1083,8 @@ Scope {
             data.lastActionExit = exitCode;
             data.lastActionError = said;
             data.refreshProbes();
+            if (data.selectedId === "keyboard")
+                data.refreshKeyboard();
         }
     }
 
@@ -1662,16 +1716,22 @@ Scope {
             };
         }
         var device = data.str(status, "device", "us");
+        var yours = data.str(status, "yours", "");
         var kv = [];
         var layouts = Array.isArray(status.layouts) ? status.layouts : [];
         for (var i = 0; i < layouts.length; i++) {
             kv.push({
-                k: i === 0 ? "Layout" : "Also",
+                k: i === 0 ? "This device" : "Also",
                 v: data.str(layouts[i], "description", "") + " · " + data.str(layouts[i], "layout", "")
                     + (data.str(layouts[i], "variant", "") !== "" ? "+" + data.str(layouts[i], "variant", "") : ""),
                 mono: false
             });
         }
+        kv.push({
+            k: "Yours",
+            v: yours !== "" ? yours : "THE DEVICE'S · none of your own",
+            mono: yours !== ""
+        });
         var session = data.obj(status.session);
         if (session !== null)
             kv.push({
@@ -1700,14 +1760,17 @@ Scope {
             mono: false
         });
 
+        // A choice here is the person's own layout; the device's is an
+        // administrator's, offered below with a password.
         var rows = [];
-        var first = device.split(",")[0].split("+")[0];
+        var mine = yours !== "" ? yours : device;
+        var first = mine.split(",")[0].split("+")[0];
         for (var c = 0; c < data.keyboardChoices.length; c++) {
             var choice = data.keyboardChoices[c];
             var current = choice.code === first;
             var row = {
                 name: choice.name,
-                meta: current ? "This device's layout" : "Select to use · " + choice.code,
+                meta: current ? (yours !== "" ? "Your layout" : "This device's layout, and yours") : "Select to use · " + choice.code,
                 tone: current ? "ok" : "",
                 tag: current ? "Current" : ""
             };
@@ -1719,21 +1782,37 @@ Scope {
             }
             rows.push(row);
         }
+        var actions = [
+            {
+                hotkey: "C",
+                label: mac ? "Use standard clipboard keys" : "Use Mac-style clipboard keys",
+                tone: "ghost",
+                kind: "clipboardKeys",
+                value: mac ? "off" : "on"
+            }
+        ];
+        if (yours !== "" && yours !== device) {
+            actions.push({
+                hotkey: "D",
+                label: "Make " + yours + " this device's layout · administrator",
+                tone: "ghost",
+                kind: "keyboardDevice",
+                value: yours
+            });
+            actions.push({
+                hotkey: "R",
+                label: "Use this device's layout, " + device,
+                tone: "ghost",
+                kind: "keyboardReset"
+            });
+        }
         return {
             title: "Keyboard",
             sub: "System · layout, switch chord and clipboard keys",
             kv: kv,
             rows: rows,
-            actions: [
-                {
-                    hotkey: "C",
-                    label: mac ? "Use standard clipboard keys" : "Use Mac-style clipboard keys",
-                    tone: "ghost",
-                    kind: "clipboardKeys",
-                    value: mac ? "off" : "on"
-                }
-            ],
-            note: "The layout is the device's, shared by the login screen, the desktop and the lock screen. As the person at this machine you may change it without an administrator, and the change is recorded in the audit log; an organization can still set it for a managed device. A layout that cannot type Latin letters is led by US English with both Alt keys as the switch, so every Punar key chord keeps working. Mac-style clipboard keys make Punar + C, V and X copy, paste and cut, and move floating and centring to Punar + Alt + V and C. Terminal: punarctl keyboard layout set <layouts> · punarctl keyboard clipboard-keys on|off."
+            actions: actions,
+            note: "A layout chosen here is yours: every session of yours types in it, and nobody else's changes. This device's layout is what the login screen, the console and everyone without a layout of their own type in, so changing it needs a device administrator's password and is recorded in the audit log; an organization can still set it for a managed device. A layout that cannot type Latin letters is led by US English with both Alt keys as the switch, so every Punar key chord keeps working. Mac-style clipboard keys make Punar + C, V and X copy, paste and cut, and move floating and centring to Punar + Alt + V and C. Terminal: punarctl keyboard layout set <layouts> · punarctl keyboard layout set --device <layouts> · punarctl keyboard layout reset · punarctl keyboard clipboard-keys on|off."
         };
     }
 

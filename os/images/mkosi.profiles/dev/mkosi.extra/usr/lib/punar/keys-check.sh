@@ -3,15 +3,18 @@
 # WP-02).
 #
 # WHAT IT PROVES, on the running desktop:
-#   * the keyboard layout is one device setting: the person at the machine
-#     sets it with `punarctl keyboard layout set` from their own session
-#     (punard's person-scoped system.keymap, audited under their name),
-#     /etc/vconsole.conf records it, the session's data file and the live
-#     compositor load it, and the lock screen names it; the same uid from
-#     OUTSIDE the seat session (this very service) is refused;
-#   * the login screen's choice, as session start adopts it, becomes the
-#     device's layout, and a configuration load (the path session start
-#     takes) reads it: live input:kb_layout and the lock screen follow;
+#   * two layouts (SMP-1405 WP-02 merged with F0): the person's own, which
+#     `punarctl keyboard layout set` keeps in their preferences without
+#     punard and without a password, and which the session's data file, the
+#     live compositor and the lock screen load; and the device's
+#     (/etc/vconsole.conf, punard's system.keymap), which `set --device`
+#     changes only with the administrator's password: refused without one,
+#     taken and audited under their name with one, typed on a
+#     pseudo-terminal as at a keyboard;
+#   * the login screen's choice, as session start renders it, is this
+#     session's layout and not the device's, and a configuration load (the
+#     path session start takes) reads it: live input:kb_layout and the lock
+#     screen follow;
 #   * a layout that cannot type Latin letters (Russian, the plan's
 #     acceptance case) is loaded behind a US first group with the both-Alt
 #     switch chord, so PUNAR+Return still opens a terminal, after the chord
@@ -45,12 +48,12 @@
 # /run/punar/keys-report.txt (PUNAR_KEYS_OK / PUNAR_KEYS_FAIL), hard-gated by
 # tools/boot-test.sh, including a missing report.
 #
-# It leaves the session as it found it: the device's layout is set back, the
-# probe windows are closed and workspace 1 is focused again. (Setting the
-# layout back records it as the person's preference; its value is the one
-# the device had, and the OS default it stands in for is persisted once and
-# never changes, so nothing a person sees differs. The VM is discarded after
-# the gate.)
+# It leaves the session as it found it: the device's layout is set back with
+# the password, the person's own layout is forgotten, the probe windows are
+# closed and workspace 1 is focused again. (Setting the device's layout back
+# records it as a preference at punard; its value is the one the device had,
+# and the OS default it stands in for is persisted once and never changes, so
+# nothing a person sees differs. The VM is discarded after the gate.)
 #
 # Predicates below are invoked indirectly through `wait_for` (shellcheck
 # cannot see that; the surfaces-check.sh precedent).
@@ -120,6 +123,7 @@ note "# instance=${HIS:-none} wayland=${WAYLAND_DISPLAY:-none} uid=$(id -u) user
 ipc() { ${SHELL_CMD} ipc call "$@" 2>/dev/null | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
 
 ORIGINAL_LAYOUT=""
+OWN_LAYOUT_SET=no
 PROBES=""
 cleanup() {
     for probe_address in ${PROBES}; do
@@ -127,8 +131,12 @@ cleanup() {
     done
     PROBES=""
     if [ -n "${ORIGINAL_LAYOUT}" ]; then
-        in_session keyboard layout set "${ORIGINAL_LAYOUT}" >/dev/null 2>&1 || true
+        device_layout_set "${ORIGINAL_LAYOUT}" /run/punar/keys-restore.txt || true
         ORIGINAL_LAYOUT=""
+    fi
+    if [ "${OWN_LAYOUT_SET}" = yes ]; then
+        "${CTL}" keyboard layout reset >/dev/null 2>&1 || true
+        OWN_LAYOUT_SET=no
     fi
     if [ "${CLIPBOARD_KEYS_ON}" = yes ]; then
         "${CTL}" keyboard clipboard-keys off >/dev/null 2>&1 || true
@@ -143,13 +151,12 @@ cleanup() {
 CLIPBOARD_KEYS_ON=no
 TEST_MIC=""
 
-# RUN FROM THE SEAT SESSION. This check is a system service running as the
-# person's uid; the keyboard layout is granted only to a call from the
-# person's own session on the seat (punard's seat-presence check), which is
-# where their terminal and System Control run it. So the compositor starts
-# the command, in the session's scope, as a key bind would; its output and
-# exit status come back through files. Arguments are layout values and
-# flags, checked against a fixed character set before they are written.
+# RUN FROM THE SESSION. This check is a system service running as the
+# person's uid; the layout verbs are run where their terminal and System
+# Control run them, in the session's scope, started by the compositor as a
+# key bind would; output and exit status come back through files. Arguments
+# are layout values and flags, checked against a fixed character set before
+# they are written.
 SESSION_RUN_N=0
 in_session() {
     SESSION_RUN_N=$((SESSION_RUN_N + 1))
@@ -175,6 +182,22 @@ in_session() {
     cat "${sr_dir}/err" >&2
     return "$(cat "${sr_dir}/rc")"
 }
+
+# device_layout_set <layouts> <output-file> — the device's layout, as its
+# administrator: the dev user holds the role (a first account's), and
+# punarctl reads the password only from a terminal or a socket (F0-S4), so it
+# is answered on a pseudo-terminal from script(1), the m9-check pattern. The
+# answer arrives two seconds in, after punarctl has asked punard for the role
+# and turned echo off. The exit status is punarctl's.
+PUNAR_PASSWORD="punar"
+device_layout_set() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_+,-]*) note "# device_layout_set: refusing '$1'"; return 2 ;;
+    esac
+    { sleep 2; printf '%s\n' "${PUNAR_PASSWORD}"; sleep 12; } \
+        | script -qec "${CTL} keyboard layout set --device $1" /dev/null > "$2" 2>&1
+}
+vconsole_layout() { grep '^XKBLAYOUT=' /etc/vconsole.conf 2>/dev/null; }
 
 if [ -z "${HIS}" ] || [ -z "${WAYLAND_DISPLAY}" ]; then
     fail "no Hyprland session (instance='${HIS}', wayland='${WAYLAND_DISPLAY}')"
@@ -252,7 +275,7 @@ resized_from() {
 abs() { printf '%s %s\n' "$1" "$2" | awk '{printf "%d", $1 * 32767 / $2}'; }
 tiled_is() { [ "$(hyprctl -j activeworkspace 2>/dev/null | jq -r '.tiledLayout // ""')" = "$1" ]; }
 
-# --- 1. the device's layout, set by the person at the machine ----------------
+# --- 1. two layouts: the person's own, and the device's ----------------------
 ORIGINAL="$("${CTL}" --json keyboard layout status 2>/dev/null | jq -r '.device // ""')"
 note "# layout before the exercise: ${ORIGINAL:-unknown}"
 case "${ORIGINAL}" in
@@ -268,36 +291,32 @@ else
     fail "non-Latin layouts missing from the image's XKB list: '${non_latin_missing}' (of ${non_latin_count:-0})"
 fi
 
-# --- 1a. the login screen's choice, as session start adopts it -------------
+# --- 1a. the login screen's choice, as session start renders it -------------
 # greetd starts a session with PUNAR_KEYMAP only after a successful sign-in
 # (punar-onboard's greetd tests), and session.sh then runs exactly this
 # command, in the session, before the compositor reads the file. The dev
 # image signs in without the login screen, so the check makes session
-# start's own call from the seated session and follows the choice to the
-# device, the audit log, the session's data file, and then through a
-# configuration load (what the compositor does at start) to the live
-# compositor and the lock screen.
+# start's own call and follows the choice to the session's data file, and
+# then through a configuration load (what the compositor does at start) to
+# the live compositor and the lock screen. It is this session's layout only:
+# the device's does not move.
+DEVICE_LINE="$(vconsole_layout)"
 case "${ORIGINAL}" in
     de|de[+,]*) GREETER_CHOICE=fr; GREETER_NAME=French ;;
     *) GREETER_CHOICE=de; GREETER_NAME=German ;;
 esac
 adopt="$(in_session --json keyboard layout render --adopt "${GREETER_CHOICE}" 2>/run/punar/keys-adopt.txt)"
-if [ "$(printf '%s' "${adopt}" | jq -r '.adopted // false' 2>/dev/null)" = true ]; then
-    ORIGINAL_LAYOUT="${ORIGINAL}"
-    note "ok   session start adopted the login screen's ${GREETER_CHOICE} as the device's layout"
+if [ "$(printf '%s' "${adopt}" | jq -r '.source // ""' 2>/dev/null)" = login_screen ]; then
+    note "ok   session start rendered the login screen's ${GREETER_CHOICE} as this session's layout"
 else
-    fail "session start did not adopt the login screen's ${GREETER_CHOICE}: $(printf '%s' "${adopt}" | head -c 200) $(head -c 200 /run/punar/keys-adopt.txt)"
+    fail "session start did not render the login screen's ${GREETER_CHOICE}: $(printf '%s' "${adopt}" | head -c 200) $(head -c 200 /run/punar/keys-adopt.txt)"
 fi
-check_eq "XKBLAYOUT after the login screen's choice" "XKBLAYOUT=${GREETER_CHOICE}" \
-    "$(grep '^XKBLAYOUT=' /etc/vconsole.conf 2>/dev/null)"
+check_eq "the device's layout after the login screen's choice (unchanged)" "${DEVICE_LINE}" "$(vconsole_layout)"
 if grep -q "^    kb_layout = \"${GREETER_CHOICE}\",\$" "${XDG_RUNTIME_DIR}/punar/session/input.lua" 2>/dev/null; then
     note "ok   the session's data file carries ${GREETER_CHOICE}"
 else
     fail "the session's data file does not carry ${GREETER_CHOICE}: $(tr '\n' ' ' < "${XDG_RUNTIME_DIR}/punar/session/input.lua" 2>/dev/null | head -c 200)"
 fi
-adopter="$("${CTL}" --json audit tail -n 20 2>/dev/null \
-    | jq -r '[.events[]? | select(.action == "capabilities.set" and .resource == "system.keymap" and .decision == "allow")] | last | .user_id // ""')"
-check_eq "the adoption is audited under the person's name" "$(id -un)" "${adopter}"
 # The compositor reads that file when it loads its configuration, at start
 # and on every reload; a reload is the same path, taken now. (A compositor
 # that ignored the file would still pass everything above.)
@@ -322,17 +341,16 @@ else
     fail "the session did not lock"
 fi
 
-# --- 1. (cont.) the person sets the device's layout from their session ------
+# --- 1. (cont.) the person's own layout: no punard, no password ---------------
 if in_session keyboard layout set ru > /run/punar/keys-set.txt 2>&1; then
-    ORIGINAL_LAYOUT="${ORIGINAL}"
-    note "ok   punarctl keyboard layout set ru, from $(id -un)'s session, without an administrator"
+    OWN_LAYOUT_SET=yes
+    note "ok   punarctl keyboard layout set ru, the person's own, without a password"
 else
     fail "punarctl keyboard layout set ru was refused: $(head -c 300 /run/punar/keys-set.txt)"
 fi
-check_eq "XKBLAYOUT in /etc/vconsole.conf" "XKBLAYOUT=ru" "$(grep '^XKBLAYOUT=' /etc/vconsole.conf 2>/dev/null)"
-audited="$("${CTL}" --json audit tail -n 20 2>/dev/null \
-    | jq -r '[.events[]? | select(.action == "capabilities.set" and .resource == "system.keymap" and .decision == "allow")] | last | .user_id // ""')"
-check_eq "the change is audited under the person's name" "$(id -un)" "${audited}"
+check_eq "the person's own layout is kept in their preferences" "ru" \
+    "$(jq -r '.layout // ""' "${HOME}/.config/punar/keyboard.json" 2>/dev/null)"
+check_eq "and the device's layout did not move" "${DEVICE_LINE}" "$(vconsole_layout)"
 if grep -q '^    kb_layout = "us,ru",$' "${XDG_RUNTIME_DIR}/punar/session/input.lua" 2>/dev/null; then
     note "ok   the session's data file carries us,ru"
 else
@@ -341,13 +359,29 @@ fi
 check_eq "live input:kb_layout (Latin first)" "us,ru" "$(option input:kb_layout)"
 check_eq "live input:kb_options (the switch chord)" "grp:alts_toggle" "$(option input:kb_options)"
 
-# The same uid, OUTSIDE the seat session: this check is a system service, as
-# a user service, a D-Bus-activated app or an agent's escaped helper would be
-# a process that is not the person's session. It must be refused, and the
-# device must not change.
-"${CTL}" keyboard layout set us+dvorak > /run/punar/keys-outside.txt 2>&1
-check_eq "the same uid outside the seat session is refused (exit 3)" 3 "$?"
-check_eq "and the device's layout did not change" "XKBLAYOUT=ru" "$(grep '^XKBLAYOUT=' /etc/vconsole.conf 2>/dev/null)"
+# --- 1. (cont.) the device's layout: the administrator's password ------------
+# No terminal and no socket: punarctl has no password to give, and punard
+# refuses the device-wide change (F0: a device administrator who has just
+# confirmed their password). The device does not move.
+case "${ORIGINAL}" in
+    ru|ru[+,]*) DEVICE_CHOICE=de ;;
+    *) DEVICE_CHOICE=ru ;;
+esac
+"${CTL}" keyboard layout set --device "${DEVICE_CHOICE}" < /dev/null > /run/punar/keys-device-nopass.txt 2>&1
+check_eq "the device's layout without a password is refused (exit 3)" 3 "$?"
+check_eq "and the device's layout did not change" "${DEVICE_LINE}" "$(vconsole_layout)"
+# With it, typed on a terminal as at a keyboard.
+if device_layout_set "${DEVICE_CHOICE}" /run/punar/keys-device.txt; then
+    ORIGINAL_LAYOUT="${ORIGINAL}"
+    note "ok   punarctl keyboard layout set --device ${DEVICE_CHOICE}, with the administrator's password"
+else
+    fail "punarctl keyboard layout set --device ${DEVICE_CHOICE} with the password failed: $(tr '\n' ' ' < /run/punar/keys-device.txt | head -c 300)"
+fi
+check_eq "XKBLAYOUT in /etc/vconsole.conf" "XKBLAYOUT=${DEVICE_CHOICE}" "$(vconsole_layout)"
+audited="$("${CTL}" --json audit tail -n 20 2>/dev/null \
+    | jq -r '[.events[]? | select(.action == "capabilities.set" and .resource == "system.keymap" and .decision == "allow")] | last | .user_id // ""')"
+check_eq "the device's change is audited under the administrator's name" "$(id -un)" "${audited}"
+check_eq "and this session keeps the person's own layout" "us,ru" "$(option input:kb_layout)"
 
 # --- 1b. a workspace keeps its own layout preset -----------------------------
 # The rule is applied live with one hl.workspace_rule; the compositor's own
@@ -838,8 +872,10 @@ else
     fail "the French layout did not load: live '$(option input:kb_layout)' $(head -c 200 /run/punar/keys-fr.txt)"
 fi
 
-# --- 10. the layout goes back, and the compositor follows ----------------------
+# --- 10. the layouts go back, and the compositor follows ----------------------
 cleanup
 check_eq "the device's layout after the exercise" "${ORIGINAL}" \
     "$("${CTL}" --json keyboard layout status 2>/dev/null | jq -r '.device // ""')"
+check_eq "and the person has no layout of their own again" "null" \
+    "$("${CTL}" --json keyboard layout status 2>/dev/null | jq -r '.yours')"
 finish

@@ -9,12 +9,15 @@
 //! is data read by systemd-vconsole-setup and by the session's renderer
 //! (`punarctl keyboard layout render`); nothing evaluates it.
 //!
-//! **Who may set it** is decided in `server::m9`: root, a grant holder, or
-//! the person in the active local session. A keyboard layout is the
-//! person's own tool, not a security setting, and asking for an
-//! administrator to change it would put a password prompt between someone
-//! and typing. It is still a typed, audited capability, still refused to an
-//! agent, and still pinnable by an organization.
+//! **Who may set it** is decided in `server::m9`: root, a grant holder, or a
+//! device administrator presenting a fresh `punar-authd` ticket for this
+//! call. This file is what the login screen, the console and every account
+//! without a layout of its own type in, so it is device-wide state (F0,
+//! docs/api/ipc.md section 23). A person's own layout is not this
+//! capability: it lives in their own preferences and never reaches punard
+//! (`punarctl keyboard layout set` without `--device`). It is still a typed,
+//! audited capability, still refused to an agent, and still pinnable by an
+//! organization.
 //!
 //! **The installer's choice is the first default, on a new device only.**
 //! When the install seed (`/var/lib/punar/install/seed.json`) names a valid

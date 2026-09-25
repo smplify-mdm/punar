@@ -817,8 +817,9 @@ fn without_a_backlight_brightness_exits_six_and_says_why() {
 const XKB_FIXTURE: &str = "! layout\n  us  English (US)\n  de  German\n  ru  Russian\n\
                            ! variant\n  nodeadkeys  de: German (no dead keys)\n  phonetic  ru: Russian (phonetic)\n";
 
-/// A fake punard answering `capabilities.set` (and logging the request),
-/// with `deny` choosing a refusal instead.
+/// A fake punard answering `capabilities.set` (and logging every request),
+/// with `deny` choosing a refusal instead, and `admins.list` naming someone
+/// else as the administrator.
 fn fake_punard(dir: &Path, deny: bool) -> PathBuf {
     use std::io::{BufRead, BufReader};
     fs::create_dir_all(dir).unwrap();
@@ -840,7 +841,13 @@ fn fake_punard(dir: &Path, deny: bool) -> PathBuf {
                 .open(&log)
                 .unwrap();
             writeln!(file, "{request}").unwrap();
-            let answer = if deny {
+            // Who administers the device: not this caller, so punarctl never
+            // asks for a password and punard's own answer is what prints.
+            let answer = if request["method"] == "admins.list" {
+                json!({"v": 1, "id": request["id"], "result": {
+                    "mode": "local", "administrators": ["alice"],
+                    "caller": {"user": "punar", "root": false, "administrator": false}}})
+            } else if deny {
                 json!({"v": 1, "id": request["id"], "error": {"code": "denied",
                     "message": "Setting system.keymap requires an administrator.",
                     "details": {"capability": "system.keymap"}}})
@@ -879,12 +886,13 @@ fn keyboard_env(session: &Session) -> (PathBuf, PathBuf) {
     (xkb, vconsole)
 }
 
-/// The person sets their layout: punard is asked (the capability, the
-/// canonical value), the session file is rewritten as data with the Latin
-/// lead and the switch chord, and the live compositor gets the same three
-/// values, each quoted as a Lua string.
+/// The person's own layout is theirs (SMP-1405 WP-02, F0): `set` keeps it in
+/// their own preferences, rewrites this session's data file with the Latin
+/// lead and the switch chord, and gives the live compositor the same three
+/// values, each quoted as a Lua string. punard is never asked, the device's
+/// layout does not move, and `reset` goes back to it.
 #[test]
-fn keyboard_layout_set_asks_punard_renders_and_applies_live() {
+fn keyboard_layout_set_is_the_persons_own_and_never_asks_punard() {
     let session = Session::start(desktop);
     let (xkb, vconsole) = keyboard_env(&session);
     let punard = fake_punard(&session.root, false);
@@ -902,24 +910,18 @@ fn keyboard_layout_set_asks_punard_renders_and_applies_live() {
     let output = run(&["--json", "keyboard", "layout", "set", "ru"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
-    assert_eq!(result["device"], "ru");
+    assert_eq!(result["yours"], "ru");
+    assert_eq!(result["device"], "us");
     assert_eq!(result["session"]["kb_layout"], "us,ru");
     assert_eq!(result["session"]["kb_options"], "grp:alts_toggle");
     assert_eq!(result["session_applied"], true);
-
-    let request: Value = serde_json::from_str(
-        fs::read_to_string(session.root.join("punard.log"))
-            .unwrap()
-            .lines()
-            .last()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(request["method"], "capabilities.set");
-    assert_eq!(
-        request["params"],
-        json!({"capability": "system.keymap", "desired_state": "ru"})
+    assert!(
+        !session.root.join("punard.log").exists(),
+        "a person's own layout never reaches punard"
     );
+    let preferences = session.root.join("home/.config/punar/keyboard.json");
+    let saved: Value = serde_json::from_str(&fs::read_to_string(&preferences).unwrap()).unwrap();
+    assert_eq!(saved, json!({"version": 1, "layout": "ru"}));
     let file = fs::read_to_string(session.root.join("run/punar/session/input.lua")).unwrap();
     assert!(file.contains("kb_layout = \"us,ru\","), "{file}");
     assert!(file.contains("DATA ONLY"), "{file}");
@@ -932,27 +934,110 @@ fn keyboard_layout_set_asks_punard_renders_and_applies_live() {
         )
     );
 
-    // Not installed, or not a layout at all: refused before punard is asked.
-    let asked = fs::read_to_string(session.root.join("punard.log")).unwrap();
+    // The clipboard keys share the file and keep the layout.
+    let output = run(&["keyboard", "clipboard-keys", "on"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let saved: Value = serde_json::from_str(&fs::read_to_string(&preferences).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        json!({"version": 1, "layout": "ru", "clipboardKeys": "mac"})
+    );
+
+    // Not installed, or not a layout at all: refused, nothing saved.
     for bad in ["fr", "us+nodeadkeys", "us'); os.execute('x", "us,de,ru,us"] {
         let output = run(&["keyboard", "layout", "set", bad]);
         assert_eq!(output.status.code(), Some(2), "{bad}: {}", stderr(&output));
     }
-    assert_eq!(
-        fs::read_to_string(session.root.join("punard.log")).unwrap(),
-        asked
-    );
+    // A confirmation is for the device's layout, never one's own.
+    let output = run(&["keyboard", "layout", "set", "de", "--ticket-from-parent"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("--device"), "{}", stderr(&output));
+    let saved: Value = serde_json::from_str(&fs::read_to_string(&preferences).unwrap()).unwrap();
+    assert_eq!(saved["layout"], "ru");
+
+    // Reset: the device's layout again, in the file and live.
+    let output = run(&["--json", "keyboard", "layout", "reset"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(result["yours"], Value::Null);
+    assert_eq!(result["session"]["kb_layout"], "us");
+    let saved: Value = serde_json::from_str(&fs::read_to_string(&preferences).unwrap()).unwrap();
+    assert_eq!(saved, json!({"version": 1, "clipboardKeys": "mac"}));
+    assert!(!session.root.join("punard.log").exists());
 }
 
-/// A refusal from punard is the answer: exit 3, nothing rendered.
+/// `set --device` is the device's layout: punard is asked for
+/// `system.keymap` (it decides who may; a device administrator with a fresh
+/// password), and this session follows the device only while its person has
+/// no layout of their own.
 #[test]
-fn keyboard_layout_set_refused_by_punard_changes_nothing() {
+fn keyboard_layout_set_device_asks_punard_and_follows_only_without_ones_own() {
+    let session = Session::start(desktop);
+    let (xkb, vconsole) = keyboard_env(&session);
+    let punard = fake_punard(&session.root, false);
+    let hypr = fake_hyprctl(&session.root);
+    let run = |args: &[&str]| {
+        session
+            .command(args)
+            .env("PATH", with_path(&[&hypr]))
+            .env("PUNARD_SOCKET", &punard)
+            .env("PUNAR_XKB_LIST", &xkb)
+            .env("PUNAR_VCONSOLE_CONF", &vconsole)
+            .output()
+            .unwrap()
+    };
+    let output = run(&["--json", "keyboard", "layout", "set", "--device", "de"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(result["device"], "de");
+    assert_eq!(result["yours"], Value::Null);
+    assert_eq!(result["session"]["kb_layout"], "de");
+    let requests: Vec<Value> = fs::read_to_string(session.root.join("punard.log"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        requests[0]["method"], "admins.list",
+        "the role is asked first"
+    );
+    let set = requests.last().unwrap();
+    assert_eq!(set["method"], "capabilities.set");
+    assert_eq!(
+        set["params"],
+        json!({"capability": "system.keymap", "desired_state": "de"})
+    );
+
+    // With a layout of one's own, the device changes and the session stays.
+    let output = run(&["keyboard", "layout", "set", "ru"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let output = run(&[
+        "--json",
+        "keyboard",
+        "layout",
+        "set",
+        "--device",
+        "de+nodeadkeys",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(result["device"], "de+nodeadkeys");
+    assert_eq!(result["yours"], "ru");
+    assert_eq!(result["session"], Value::Null);
+    let file = fs::read_to_string(session.root.join("run/punar/session/input.lua")).unwrap();
+    assert!(file.contains("kb_layout = \"us,ru\","), "{file}");
+}
+
+/// A refusal from punard is the answer: exit 3, nothing rendered, nothing
+/// saved as the person's own.
+#[test]
+fn keyboard_layout_set_device_refused_by_punard_changes_nothing() {
     let session = Session::start(desktop);
     let (xkb, vconsole) = keyboard_env(&session);
     let punard = fake_punard(&session.root, true);
     let hypr = fake_hyprctl(&session.root);
     let output = session
-        .command(&["keyboard", "layout", "set", "de"])
+        .command(&["keyboard", "layout", "set", "--device", "de"])
         .env("PATH", with_path(&[&hypr]))
         .env("PUNARD_SOCKET", &punard)
         .env("PUNAR_XKB_LIST", &xkb)
@@ -962,64 +1047,78 @@ fn keyboard_layout_set_refused_by_punard_changes_nothing() {
     assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
     assert!(!session.root.join("run/punar/session/input.lua").exists());
     assert!(!session.root.join("hyprctl.log").exists());
+    assert!(
+        !session
+            .root
+            .join("home/.config/punar/keyboard.json")
+            .exists()
+    );
 }
 
-/// Session start: the device's layout from vconsole; the greeter's choice
-/// adopted through punard when it is given; used for this session alone when
-/// punard will not take it.
+/// Session start: the login screen's choice for this sign-in, else the
+/// person's own layout, else the device's. None of it asks punard or
+/// changes the device: the login screen's choice is this session's, because
+/// the person typed their password in it.
 #[test]
-fn keyboard_layout_render_adopts_the_login_screens_choice() {
+fn keyboard_layout_render_prefers_the_login_screen_then_ones_own_then_the_device() {
     let session = Session::start(desktop);
     let (xkb, vconsole) = keyboard_env(&session);
     fs::write(&vconsole, "XKBLAYOUT=de\nXKBVARIANT=nodeadkeys\n").unwrap();
-    let render = |punard: &Path, adopt: Option<&str>| {
+    let punard = fake_punard(&session.root, false);
+    let render = |adopt: Option<&str>| {
         let mut args = vec!["--json", "keyboard", "layout", "render"];
         if let Some(adopt) = adopt {
             args.extend(["--adopt", adopt]);
         }
-        session
+        let output = session
             .command(&args)
-            .env("PUNARD_SOCKET", punard)
+            .env("PUNARD_SOCKET", &punard)
             .env("PUNAR_XKB_LIST", &xkb)
             .env("PUNAR_VCONSOLE_CONF", &vconsole)
             .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
             .output()
-            .unwrap()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        serde_json::from_str::<Value>(&stdout(&output)).unwrap()
     };
-    let nowhere = session.root.join("no-punard.sock");
-    let output = render(&nowhere, None);
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let result = render(None);
     assert_eq!(result["kb_layout"], "de");
     assert_eq!(result["kb_variant"], "nodeadkeys");
-    assert_eq!(result["adopted"], false);
+    assert_eq!(result["source"], "device");
 
-    let accepting = fake_punard(&session.root.join("ok"), false);
-    let output = render(&accepting, Some("ru"));
-    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let result = render(Some("ru"));
     assert_eq!(
-        (result["kb_layout"].as_str(), result["adopted"].as_bool()),
-        (Some("us,ru"), Some(true))
+        (result["kb_layout"].as_str(), result["source"].as_str()),
+        (Some("us,ru"), Some("login_screen"))
     );
 
-    // punard unreachable: this session still types what was chosen.
-    let output = render(&nowhere, Some("ru"));
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let preferences = session.root.join("home/.config/punar");
+    fs::create_dir_all(&preferences).unwrap();
+    fs::write(
+        preferences.join("keyboard.json"),
+        r#"{"version": 1, "layout": "ru+phonetic"}"#,
+    )
+    .unwrap();
+    let result = render(None);
     assert_eq!(
-        (result["kb_layout"].as_str(), result["adopted"].as_bool()),
-        (Some("us,ru"), Some(false))
+        (result["kb_variant"].as_str(), result["source"].as_str()),
+        (Some(",phonetic"), Some("yours"))
     );
+    // This sign-in's choice outranks one's own for this session only.
+    let result = render(Some("de"));
+    assert_eq!(result["source"], "login_screen");
+    // A value nobody installed is never rendered.
+    let result = render(Some("xx"));
+    assert_eq!(result["source"], "yours");
+
     assert!(
-        stderr(&output).contains("the device keeps de+nodeadkeys"),
-        "{}",
-        stderr(&output)
+        !session.root.join("punard.log").exists(),
+        "session start never asks punard"
     );
-
-    // A value nobody installed is never adopted or rendered.
-    let output = render(&accepting, Some("xx"));
-    let result: Value = serde_json::from_str(&stdout(&output)).unwrap();
-    assert_eq!(result["kb_layout"], "de");
+    assert_eq!(
+        fs::read_to_string(&vconsole).unwrap(),
+        "XKBLAYOUT=de\nXKBVARIANT=nodeadkeys\n"
+    );
 }
 
 fn keyboards(request: &str) -> String {

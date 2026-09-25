@@ -517,6 +517,14 @@ pub struct CapabilitiesSetParams {
     /// capability's `allowed_desired_states` / `state_schema` and syntax
     /// rules; never interpreted as a command (SPEC sections 10, 60).
     pub desired_state: Value,
+    /// A single-use `punar-authd` ticket minted for this call
+    /// (`capabilities.set`) and this caller's process (F0; contract sections
+    /// 5.4 and 23.2). Read only on a capability a device administrator sets
+    /// directly — the device's keyboard layout — and never recorded, audited,
+    /// forwarded or returned. Absent is legitimate for uid 0 and on the grant
+    /// path. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Params for `policy.set` — the device administrator's layer
@@ -2907,6 +2915,7 @@ mod tests {
             Method::CapabilitiesSet(CapabilitiesSetParams {
                 capability: CapabilityId::new("system.hostname").unwrap(),
                 desired_state: json!("punar-m3"),
+                ticket: None,
             }),
             Method::AuditTail(AuditTailParams { n: 50 }),
             Method::Reconcile,
@@ -3091,6 +3100,32 @@ mod tests {
             let back = Request::parse_json_line(line.trim_end()).unwrap();
             assert_eq!(back.id, "req-1");
             assert_eq!(back.method, method, "round trip for {}", method.name());
+        }
+    }
+
+    /// `capabilities.set` carries an administrator's ticket when one is
+    /// given (the device's keyboard layout, contract section 5.4), and an
+    /// older client's request without one still parses.
+    #[test]
+    fn capabilities_set_carries_an_optional_ticket() {
+        let ticket = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let method = Method::CapabilitiesSet(CapabilitiesSetParams {
+            capability: CapabilityId::new("system.keymap").unwrap(),
+            desired_state: json!("de"),
+            ticket: Some(ticket.to_string()),
+        });
+        let line = Request::new("req-1", method.clone())
+            .unwrap()
+            .to_json_line();
+        assert!(line.contains(ticket));
+        assert_eq!(
+            Request::parse_json_line(line.trim_end()).unwrap().method,
+            method
+        );
+        let older = r#"{"v":1,"id":"req-2","method":"capabilities.set","params":{"capability":"system.keymap","desired_state":"de"}}"#;
+        match Request::parse_json_line(older).unwrap().method {
+            Method::CapabilitiesSet(params) => assert_eq!(params.ticket, None),
+            other => panic!("parsed as {}", other.name()),
         }
     }
 

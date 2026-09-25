@@ -523,7 +523,7 @@ enum PolicyCommand {
 /// pipe or file through /proc/<pid>/fd, or read /proc/<pid>/cmdline, before
 /// punarctl reads it. A socket reopened that way gives ENXIO.
 #[derive(clap::Args, Debug, Default, Clone)]
-struct Confirm {
+pub(crate) struct Confirm {
     /// Read your password from descriptor N, which must be a Unix socket
     /// (for example one end of a socketpair the caller keeps).
     #[arg(long, value_name = "N")]
@@ -602,6 +602,12 @@ impl Command {
             }
             | Command::Enroll {
                 command: EnrollCommand::Start { confirm, .. } | EnrollCommand::Stop { confirm, .. },
+            }
+            | Command::Keyboard {
+                command:
+                    input::KeyboardCommand::Layout {
+                        command: Some(input::LayoutCommand::Set { confirm, .. }),
+                    },
             } => Some(confirm),
             _ => None,
         }
@@ -6083,7 +6089,7 @@ mod tests {
     /// refusal, because punarctl never reads a password from them.
     #[test]
     fn a_removed_secret_source_is_refused_on_every_verb_that_takes_one() {
-        let verbs: [&[&str]; 15] = [
+        let verbs: [&[&str]; 17] = [
             &["punarctl", "app", "install", "spotify"],
             &["punarctl", "app", "remove", "spotify"],
             &["punarctl", "app", "update", "--all"],
@@ -6128,6 +6134,8 @@ mod tests {
             &["punarctl", "enroll", "start", "acme.com"],
             &["punarctl", "enroll", "stop"],
             &["punarctl", "enroll", "stop", "--yes"],
+            &["punarctl", "keyboard", "layout", "set", "--device", "de"],
+            &["punarctl", "keyboard", "layout", "set", "de"],
         ];
         for argv in verbs {
             for (flag, refusal) in [
@@ -6159,6 +6167,8 @@ mod tests {
             &["punarctl", "audit", "tail"],
             &["punarctl", "enroll", "status"],
             &["punarctl", "policy", "effective"],
+            &["punarctl", "keyboard", "layout", "status"],
+            &["punarctl", "keyboard", "layout", "reset"],
         ] {
             let cli = Cli::try_parse_from(argv).unwrap();
             assert!(cli.command.confirm().is_none(), "{argv:?}");

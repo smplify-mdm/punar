@@ -386,22 +386,38 @@ backlight with eight or ten levels never swallows a key press.
 
 ### Keyboard layout
 
-The device's layout is punard's `system.keymap` (`/etc/vconsole.conf`), set by
-the person at the machine, **from their own session on it**, with `punarctl
-keyboard layout set <layouts>`, System Control's Keyboard view, or a
-successful sign-in from the login screen's picker. punard checks the caller's
-own logind session (active, local, on seat0), not only its uid, so a user
-service, an SSH login or a helper started outside an agent's scope cannot
-change it (docs/api/ipc.md section 5.4). Both compositors read it as data from
-`$XDG_RUNTIME_DIR/punar/session/input.lua`. A first layout that cannot type
-Latin letters is led by US English, and **both Alt keys together** switch
-layouts (an XKB option, so it works on the login and lock screens too).
+There are two layouts, and only one of them is everyone's.
+
+- **Your own layout** is yours: `punarctl keyboard layout set <layouts>` or a
+  choice in System Control's Keyboard view keeps it in
+  `~/.config/punar/keyboard.json`, and every session of yours types in it. It
+  needs no password and never reaches punard; `punarctl keyboard layout
+  reset` goes back to the device's.
+- **The device's layout** is punard's `system.keymap` (`/etc/vconsole.conf`):
+  what the login screen, the console and every account without a layout of
+  its own type in. Changing it reaches everyone who uses the device, so it
+  takes a device administrator who has just confirmed their password
+  (`punarctl keyboard layout set --device <layouts>`, or [D] in System
+  Control, which asks for it), as every other device-wide change does
+  (docs/api/ipc.md sections 5.4 and 23). WP-02 first let the person at the
+  machine change it with no administrator; the F0 merge made it this split.
+
+Session start chooses what this session types in: the login screen's choice
+for this sign-in (the person typed their password in it, so the lock screen
+must type in it too), else the person's own layout, else the device's. Both
+compositors read it as data from `$XDG_RUNTIME_DIR/punar/session/input.lua`.
+A first layout that cannot type Latin letters is led by US English, and
+**both Alt keys together** switch layouts (an XKB option, so it works on the
+login and lock screens too). A person whose own layout differs from the
+device's types their password at the login screen in the device's layout
+unless they pick theirs there, and at the lock screen in their own.
 
 The login screen names the device's whole value, variants and all ("US-DVORAK",
 "US RU"), so its label never names a layout it is not typing in, and its plain
-US entry means plain US. A choice made there is carried into the device only
-by a sign-in within ten minutes of it; after that the login screen goes back
-to the device's layout, so the next person does not adopt it unseen. The
+US entry means plain US. A choice made there is carried into a session only
+by a sign-in within ten minutes of it, and only into that session; after that
+the login screen goes back to the device's layout, so the next person does
+not sign in with it unseen. The
 installer's layout is the first default only on a device nobody has signed in
 to yet; an updated device keeps what it types today, so no existing password
 moves under a new layout.

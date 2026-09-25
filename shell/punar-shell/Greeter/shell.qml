@@ -48,15 +48,19 @@ Scope {
     // the screen typed Dvorak, and choosing US re-applied Dvorak: someone
     // typing a QWERTY password failed and could not get QWERTY back.)
     //
-    // A choice made here changes only what this screen types with. It reaches
-    // the device only through a successful sign-in: punar-greet carries it
-    // into the session as PUNAR_KEYMAP, and the signed-in person's session
-    // adopts it through punard's audited system.keymap capability. Nobody who
-    // has not signed in can change the device. `chosenLayout` stays empty
-    // until someone picks, so an untouched picker never rewrites the device.
-    // A choice nobody signs in with for ten minutes is someone else's who
-    // walked away: it is cleared and the screen goes back to the device's
-    // layout, so the next person to sign in does not adopt it unseen.
+    // A choice made here changes only what this screen types with, and then
+    // what one session types with: a successful sign-in carries it into that
+    // session as PUNAR_KEYMAP (punar-greet), whose lock screen must type the
+    // password the same way. It never changes the device's layout, which is
+    // what this screen types in for everyone and a device administrator's to
+    // change (docs/api/ipc.md §5.4, §23). The one exception is first run:
+    // the person creating the device's first account sets the device up and
+    // becomes its administrator, so the layout their new password was typed
+    // in is sent with the account and punar-onboardd makes it the device's.
+    // `chosenLayout` stays empty until someone picks. A choice nobody signs
+    // in with for ten minutes is someone else's who walked away: it is
+    // cleared and the screen goes back to the device's layout, so the next
+    // person does not sign in with it unseen.
     property string deviceValue: "us"
     property var deviceInput: null
     property string chosenLayout: ""
@@ -1191,7 +1195,12 @@ Scope {
                         "username": usernameField.text,
                         "password": passwordField.text,
                         "deviceName": deviceField.text,
-                        "timezone": null
+                        "timezone": null,
+                        // The layout this password was typed in becomes the
+                        // device's, so the login screen types it the same
+                        // way next time (punar-onboardd, as root, through
+                        // punard). Absent when nobody chose one here.
+                        "keymap": root.chosenLayout !== "" ? root.chosenLayout : null
                     }) + "\n");
                     passwordField.clear();
                     confirmField.clear();

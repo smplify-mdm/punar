@@ -578,10 +578,14 @@ keyboard-first operating system cannot honestly defer, and it is small:
   (`punarctl keyboard layout render` →
   `$XDG_RUNTIME_DIR/punar/session/input.lua`, read by `punar-input.lua`
   with a pattern, never run), and `punarctl keyboard layout set` applies it
-  live with one `hyprctl eval`. And the person in the active local session
-  may set it without an administrator (the one person-scoped capability,
-  docs/api/ipc.md section 5.4); it is still validated, audited and
-  pinnable by an organization.
+  live with one `hyprctl eval`. And there are two layouts: a person's own,
+  which `punarctl keyboard layout set` keeps in their preferences with no
+  password and no punard, and the device's, which is device-wide state and
+  so a device administrator's with a fresh password (`set --device`,
+  docs/api/ipc.md section 5.4; WP-02 first let the seated person set the
+  device's, and the F0 merge replaced that). The first-run form's choice is
+  made the device's by punar-onboardd, as root, with the first account. It
+  is still validated, audited and pinnable by an organization.
 
 Timezone needs no new backend. Locale does, plus glibc locale generation
 and font coverage, and that is §5.4's deferral.

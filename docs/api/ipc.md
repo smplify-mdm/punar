@@ -451,8 +451,11 @@ layouts, comma-separated, each with an optional `+variant` (`us`,
 image's own `/usr/share/X11/xkb/rules/evdev.lst`, and written as the
 `XKBLAYOUT`/`XKBVARIANT` lines of `/etc/vconsole.conf`. Its OS default is the
 installer's choice from `/var/lib/punar/install/seed.json` when that names an
-installed layout, else the first observation. It is the one **person-scoped**
-capability: see section 5.4.
+installed layout, else the first observation. It is the **device's** layout —
+what the login screen, the console and every account without a layout of its
+own type in — so it is device-wide state, and a device administrator may set
+it directly with a fresh password (section 5.4). A person's own layout is not
+a capability at all: it is their preference, and never reaches punard.
 
 ### 5.3 `capabilities.get`
 
@@ -511,43 +514,44 @@ Two amendments, both additive:
   exit code is `0` — the preference was recorded and outranked, not
   forbidden (spec section 39); `--json` output was already complete in M4.
 
-**SMP-1405 WP-02: person-scoped capabilities.** `system.keymap` may also
-be set by the person at the machine, **from their own session on it**. Three
-records must agree, each written by root or the kernel:
+**SMP-1405 WP-02 and F0: the device's keyboard layout.** `system.keymap` is
+`/etc/vconsole.conf`: what the login screen, the console and every account
+without a layout of its own type in. That is device-wide state (section
+23.1), so besides root and a live section 48 grant it takes one more path,
+and only this capability does (`ADMINISTRATOR_DIRECT` in punard's authz): **a
+device administrator who has just confirmed their password** may set it
+directly, without a privilege request, by adding the optional `ticket`
+param — a `punar-authd` ticket minted for `capabilities.set` and presented by
+the process it was minted for (section 23.5):
 
-1. logind names the peer's uid as `ACTIVE_UID` of seat0
-   (`/run/systemd/seats/seat0`, the file sd-login reads);
-2. the kernel places the peer's pid (`SO_PEERCRED`) in one of that uid's
-   session scopes, `0::/user.slice/user-<uid>.slice/session-<id>.scope` in
-   `/proc/<pid>/cgroup`;
-3. logind records that session (`/run/systemd/sessions/<id>`) as `UID=<uid>`,
-   `SEAT=seat0`, `ACTIVE=1` and `REMOTE=0`.
+```json
+{"capability": "system.keymap", "desired_state": "de", "ticket": "<64 hex>"}
+```
 
-The uid alone is not enough, because much runs as the seated person's uid
-that is not the person at the machine: a user service or timer, a
-D-Bus-activated app, an SSH login (`REMOTE=1`, no seat), and a helper an
-agent starts outside its scope with `systemd-run --user`. All of those live
-under `user@<uid>.service` or in a remote session, and all are refused. The
-session scope is root's (logind creates it and delegates nothing), so a
-process cannot move itself into it. **What this still cannot see**, the same
-limit section 14.5 states for attribution: a same-uid process that makes the
-session's own compositor or terminal server start a command for it gets a
-process inside the session scope. The check is evidence of where a call came
-from, not a sandbox.
+The ladder keeps F0's order: the agent path first (it names no rule for
+`system.keymap`, so an agent is refused), root, a live grant; then, for this
+capability, an organization's pin (refused with the pinning source cited, so
+no password is spent on a value that would not take effect), then the role
+(`device_admin_required`, naming who can act, with the ticket left unspent),
+then the ticket (`reauthentication_required` without one, naming `punarctl
+keyboard layout set --device <layouts>`; `reauthentication_<why>` when it is
+not good for this call). The call is validated, recorded as a preference,
+applied through the typed backend and audited under the administrator's name
+exactly like a root call. The ticket is never recorded, audited or returned;
+on any other capability it is ignored and the ordinary denial answers.
 
-The rest of the ladder is unchanged and runs first: an agent-attributed peer
-takes the AI authority path (which names no rule for `system.keymap`, so it
-is refused), root is allowed, a live grant is honoured. The call is
-validated, recorded as the person's preference, applied through the typed
-backend and audited under the person's name exactly like a root call; an
-organization's pin still outranks it in the merge (the result then carries
-`overridden`). The greeter is on the seat before anyone signs in but is not
-admitted to the socket. A keyboard layout is the tool a person types with,
-not a security setting, and a password prompt between someone and their own
-keyboard would protect nothing; a device-wide layout change is visible at the
-login screen, which can always choose another layout for itself (section
-"Keyboard layout" of docs/development/keyboard-grammar.md). No other
-capability is person-scoped.
+**A person's own layout is not this capability.** `punarctl keyboard layout
+set <layouts>` without `--device` keeps it in the person's own
+`~/.config/punar/keyboard.json` and applies it to their session; session
+start renders the login screen's choice for that sign-in, else the person's
+own layout, else the device's (docs/development/keyboard-grammar.md). None of
+that asks punard, and none of it changes what anyone else types in.
+
+WP-02 first made `system.keymap` person-scoped: the person at the machine,
+proven by a logind seat-presence check, set it with no administrator. The F0
+merge replaced that with the split above, because the login screen's layout
+is every person's, and F0's rule gives device-wide state to administrators;
+the seat-presence check went with it.
 
 ### 5.5 `audit.tail`
 
@@ -2339,7 +2343,9 @@ or path other than the confirmed target device. An installed system returns
   - SMP-1405 WP-02: `punarctl media play-pause|next|previous|status` (MPRIS
     over `busctl --user`); `punarctl display brightness [get|set N%|N%|±N%]
     [--keyboard]` (logind `Session.SetBrightness` on `session/auto`, exit 6
-    with no backlight); `punarctl keyboard layout [status|list|set]` and
+    with no backlight); `punarctl keyboard layout [status|list|set|reset]`
+    (`set` is the person's own layout; `set --device` the device's, which
+    takes a device administrator's password as the other F0 verbs do) and
     `punarctl keyboard clipboard-keys on|off|status`; `punarctl keys list
     [--filter] [--untried]` (the compositor's `j/binds`); `punarctl window
     pop`; `punarctl layout <preset>|default --workspace <n|active>`.
@@ -3260,11 +3266,11 @@ that deliberately launches a helper outside its own scope escapes
 attribution and would present as the console user; M8 already rests on
 the same foundation. M9 records the resolver's uid/pid/cgroup so an
 escape is visible after the fact, and names the real fixes (a dedicated
-uid per agent session; a logind seat-presence check) as deferred. SMP-1405
-WP-02 applies the seat-presence check to the one person-scoped capability
-(`system.keymap`, section 5.4): a helper started outside an agent scope is
-refused there unless it also runs in the seated person's own session. No M9
-surface claims cryptographic proof of a human.
+uid per agent session; a logind seat-presence check) as deferred. (SMP-1405
+WP-02 applied a seat-presence check to `system.keymap` while it was
+person-scoped; since the F0 merge that capability takes a device
+administrator's ticket, bound to one call and one process, instead — section
+5.4.) No M9 surface claims cryptographic proof of a human.
 
 ### 14.6 Execution ownership follows capability ownership
 
@@ -4448,9 +4454,10 @@ role as well.
 | `enroll.start` | who manages the device | organization's, else the device's | yes (unchanged) |
 | `enroll.stop` | who manages the device | **the device's own list only** | yes (unchanged) |
 | `update.apply`, `update.rollback` | what the operating system runs | organization's, else the device's | yes (unchanged) |
-| `privilege.request` | a window to change a registered capability; every registered capability is device-wide (firewall, hostname, time zone, update channel, browser policy) | organization's, else the device's | no — refused up front so nobody types a password for a request they cannot approve |
+| `privilege.request` | a window to change a registered capability; every registered capability is device-wide (firewall, hostname, time zone, update channel, browser policy, keyboard layout) | organization's, else the device's | no — refused up front so nobody types a password for a request they cannot approve |
 | `approvals.resolve` with `decision: approved` on a `capability_set` or `privilege_request` approval | executes a device-wide change, or mints the grant for one | organization's, else the device's | **yes — new optional `ticket` param**; `reauthentication_required` without one |
 | `capabilities.set` on the grant path (§14.8) | a device-wide change | organization's, else the device's | no — the grant was minted with one; the **role is re-checked at every use**, so taking it away takes the grant's effect away |
+| `capabilities.set` on `system.keymap` without a grant (§5.4, SMP-1405 WP-02 merged with F0) | the device's keyboard layout: what the login screen, the console and every account without its own layout type in | organization's, else the device's | **yes — new optional `ticket` param**; an organization's pin first, then the role, then the ticket. A person's own layout never reaches punard |
 | `admins.set` | who may act on everyone | organization's, else the device's | yes |
 | `apps.install`, `apps.update`, `apps.remove` (F0 review) | what every person on the device runs: the catalog's system-wide packages, installed, moved to a new version, or taken away from everyone who uses them | organization's, else the device's | **yes — new optional `ticket` param**; the organization's application policy is settled first, then the role, then the ticket; `apps.update --all` spends one ticket for the whole request |
 
@@ -4657,7 +4664,8 @@ password, and Yama (F0-S2) keeps other programs from attaching to it.
 
 **The command-line convention** (every `punarctl` verb that needs a password:
 `policy set|clear`, `enroll start|stop`, `update check|apply|rollback`,
-`approvals resolve`, `admins add|remove`, `app install|remove|update`):
+`approvals resolve`, `admins add|remove`, `app install|remove|update`,
+`keyboard layout set --device`):
 
 - **the role first.** A verb that needs a device administrator asks punard
   (`admins.list`) whether the caller is one before it reads any secret; a
