@@ -33,6 +33,8 @@ FAILED=0
 NOTES_JOB=""
 FIXTURE_JOB=""
 BROWSER_JOB=""
+# Made before either context's browser first starts (storage_compacted).
+STORAGE_MARK=""
 
 : > "${REPORT}"
 
@@ -195,10 +197,30 @@ probe_files() {
     grep -ralF "$2" "$1" 2>/dev/null | sed "s#^$1/##" | head -n 6 | tr '\n' ';'
 }
 
+# Both searches read the raw bytes, which is sound only while Local Storage
+# holds what this check wrote in LevelDB's log, byte for byte. Once LevelDB
+# compacts the log into a table, the table's blocks are Snappy-compressed,
+# and a probe value that repeats its own key (punar-ctx-probe-atlas after
+# punar-ctx-probe) is stored as a back-reference: the value is there and
+# grep cannot see it. Measured on Chromium 153 with a page that wrote 190 KB
+# of localStorage, then one reopen: the log became 000003.ldb, and the probe
+# was nowhere a raw search looks. A small log survives reopening untouched
+# (the same probe, reopened twice, even in low-end mode, stayed in
+# 000003.log), so this check never compacts one itself; but a leaked value
+# hidden that way would pass the absence half, so a table is looked for
+# rather than assumed away. The tables under profile $1's Local Storage
+# written after file $2, relative to the profile: a table from before it
+# holds nothing this check wrote.
+storage_compacted() {
+    find "$1/Default/Local Storage" -type f \( -name '*.ldb' -o -name '*.sst' \) \
+        -newer "$2" 2>/dev/null | sed "s#^$1/##" | tr '\n' ';'
+}
+
 # Invoked through EXIT.
 # shellcheck disable=SC2317,SC2329
 cleanup() {
     stop_browsers
+    [ -z "${STORAGE_MARK}" ] || rm -f "${STORAGE_MARK}"
     [ -z "${NOTES_JOB}" ] || wait "${NOTES_JOB}" >/dev/null 2>&1 || true
     [ -z "${FIXTURE_JOB}" ] || wait "${FIXTURE_JOB}" >/dev/null 2>&1 || true
     [ -z "${BROWSER_JOB}" ] || wait "${BROWSER_JOB}" >/dev/null 2>&1 || true
@@ -362,6 +384,9 @@ else
 fi
 
 # 3. Native app window and live Chromium sandbox evidence.
+# The storage-separation step reads raw bytes, which is sound only for what
+# LevelDB has not compacted since this point (storage_compacted).
+STORAGE_MARK="$(mktemp)"
 # Start elsewhere so landing on Atlas proves the rule acted; merely observing
 # an Atlas window while Atlas was already focused would be a false positive.
 as_punar hyprctl dispatch "hl.dsp.focus({ workspace = '2' })" >/dev/null 2>&1 || true
@@ -506,7 +531,9 @@ FIXTURE_JOB=""
 # profiles only after every Chromium process has exited, closed through its
 # browser process (stop_browsers), so this remains deterministic on slower TCG
 # and storage-constrained CI hosts. Each context's own probe must be in its
-# Local Storage; the other context's must be nowhere in its profile at all.
+# Local Storage; the other context's must be nowhere in its profile at all,
+# and neither Local Storage may have been compacted where that search is
+# blind.
 separation=""
 probe_stored "${PERSONAL_PROFILE}" punar-ctx-probe-personal \
     || separation="${separation} the personal Local Storage lacks its own probe;"
@@ -518,6 +545,14 @@ leaked="$(probe_files "${PERSONAL_PROFILE}" punar-ctx-probe-atlas)"
 leaked="$(probe_files "${ATLAS_PROFILE}" punar-ctx-probe-personal)"
 [ -z "${leaked}" ] \
     || separation="${separation} the atlas profile holds the personal probe in ${leaked}"
+# The absence half proves nothing about a table LevelDB wrote since the
+# contexts started: a leaked value inside it is compressed out of sight.
+compacted="$(storage_compacted "${PERSONAL_PROFILE}" "${STORAGE_MARK}")"
+[ -z "${compacted}" ] \
+    || separation="${separation} the personal Local Storage was compacted during the check (${compacted}), where a raw search cannot show the atlas probe absent;"
+compacted="$(storage_compacted "${ATLAS_PROFILE}" "${STORAGE_MARK}")"
+[ -z "${compacted}" ] \
+    || separation="${separation} the atlas Local Storage was compacted during the check (${compacted}), where a raw search cannot show the personal probe absent;"
 if [ -z "${separation}" ]; then
     note "ok   browser storage probe values remain separated by context"
 else

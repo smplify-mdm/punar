@@ -29,7 +29,8 @@ fail() {
 # chromium_pids to the EXIT handler, which has side effects and is left out.
 awk '/^chromium_pids\(\) \{/ { on = 1 } /^# Invoked through EXIT\./ { on = 0 } on' \
     "${M11_CHECK}" > "${work}/helpers.sh"
-for helper in chromium_pids chromium_browser_pids stop_browsers probe_stored probe_files; do
+for helper in chromium_pids chromium_browser_pids stop_browsers probe_stored probe_files \
+        storage_compacted; do
     grep -q "^${helper}() {" "${work}/helpers.sh" \
         || fail "m11-check.sh no longer defines ${helper} where this test reads it"
 done
@@ -64,7 +65,38 @@ fi
 [ -z "$(probe_files "${atlas}" punar-ctx-probe-personal)" ] \
     || fail "probe_files named files for a value that is nowhere in the profile"
 
-# 2. stop_browsers signals the browser process only. Stand-ins carry the
+# 2. A raw search cannot see inside a compacted table, where Snappy stores a
+# probe value that repeats its key as a back-reference, so a table LevelDB
+# wrote into Local Storage while the check ran is named, and fails the
+# separation step; one written before the check began holds nothing it
+# wrote and is not. Explicit times, so nothing here depends on the clock.
+leveldb="${atlas}/Default/Local Storage/leveldb"
+: > "${leveldb}/000002.ldb"
+touch -d '2026-01-01 00:00:00' "${leveldb}/000002.ldb"
+mark="${work}/storage-mark"
+: > "${mark}"
+touch -d '2026-01-02 00:00:00' "${mark}"
+[ -z "$(storage_compacted "${atlas}" "${mark}")" ] \
+    || fail "a table from before the check counted as compacted during it: $(storage_compacted "${atlas}" "${mark}")"
+: > "${leveldb}/000005.ldb"
+touch -d '2026-01-03 00:00:00' "${leveldb}/000005.ldb"
+[ "$(storage_compacted "${atlas}" "${mark}")" = "Default/Local Storage/leveldb/000005.ldb;" ] \
+    || fail "storage_compacted named '$(storage_compacted "${atlas}" "${mark}")', not the table written during the check"
+rm -f "${leveldb}/000002.ldb" "${leveldb}/000005.ldb"
+# And the separation step asks it of both profiles, against a mark made
+# before either context's browser started.
+for profile in PERSONAL_PROFILE ATLAS_PROFILE; do
+    grep -Fq "compacted=\"\$(storage_compacted \"\${${profile}}\" \"\${STORAGE_MARK}\")\"" "${M11_CHECK}" \
+        || fail "the separation step no longer looks for a table compacted in ${profile}"
+done
+# shellcheck disable=SC2016
+mark_line="$(grep -nxF 'STORAGE_MARK="$(mktemp)"' "${M11_CHECK}" | cut -d: -f1)"
+# shellcheck disable=SC2016
+first_launch="$(grep -nE '^as_punar "\$\{CTL\}" web-apps (launch|browse) ' "${M11_CHECK}" | head -n 1 | cut -d: -f1)"
+[ -n "${mark_line}" ] && [ -n "${first_launch}" ] && [ "${mark_line}" -lt "${first_launch}" ] \
+    || fail "the storage mark is not made before the first context's browser starts (mark ${mark_line:-none}, launch ${first_launch:-none})"
+
+# 3. stop_browsers signals the browser process only. Stand-ins carry the
 # real binary's path in their command lines, as chromium_pids requires: a
 # storage service that logs every way it is told to stop, and a browser that
 # closes it half a second after being told to stop itself, so a SIGTERM sent
