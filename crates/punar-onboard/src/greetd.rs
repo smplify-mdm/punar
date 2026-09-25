@@ -29,11 +29,30 @@ pub enum GreetError {
     Start,
 }
 
+/// The keyboard layout chosen on the login screen, as the session's
+/// `PUNAR_KEYMAP`: only the characters a layout list can contain, so the
+/// value can never carry a second variable or a newline into the session's
+/// environment. The session (`punarctl keyboard layout render --adopt`)
+/// checks it against the installed layouts before using it.
+pub fn valid_keymap(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+' | b','))
+}
+
 pub fn start_session(
     socket: &Path,
     username: &str,
     mut password: Option<Zeroizing<String>>,
+    keymap: Option<&str>,
 ) -> Result<(), GreetError> {
+    // Refused before anything is sent: a bad layout must not become a
+    // half-started session.
+    if keymap.is_some_and(|k| !valid_keymap(k)) {
+        return Err(GreetError::Protocol);
+    }
     crate::protocol::validate_username(username).map_err(|_| GreetError::Authentication)?;
     let mut stream = UnixStream::connect(socket).map_err(|_| GreetError::Unavailable)?;
     stream
@@ -81,10 +100,8 @@ pub fn start_session(
                         return Err(GreetError::Unsupported);
                     }
                 }
-                if answered_secret {
-                    if let Some(secret) = password.as_mut() {
-                        secret.zeroize();
-                    }
+                if let Some(secret) = password.as_mut().filter(|_| answered_secret) {
+                    secret.zeroize();
                 }
                 response = receive(&mut stream)?;
             }
@@ -96,16 +113,25 @@ pub fn start_session(
         cancel(&mut stream);
         return Err(GreetError::Authentication);
     }
+    // Only a successful sign-in carries the login screen's keyboard layout
+    // into the session, as that session's layout (SMP-1405 WP-02). It never
+    // becomes the device's from here: that is a device administrator's
+    // change (docs/api/ipc.md section 5.4). Nobody who has not signed in
+    // changes anything.
+    let mut env = vec![
+        "XDG_SESSION_TYPE=wayland".to_string(),
+        "XDG_CURRENT_DESKTOP=Hyprland".to_string(),
+        "XDG_SESSION_DESKTOP=Hyprland".to_string(),
+    ];
+    if let Some(keymap) = keymap {
+        env.push(format!("PUNAR_KEYMAP={keymap}"));
+    }
     send(
         &mut stream,
         &json!({
             "type": "start_session",
             "cmd": ["/usr/lib/punar/session.sh"],
-            "env": [
-                "XDG_SESSION_TYPE=wayland",
-                "XDG_CURRENT_DESKTOP=Hyprland",
-                "XDG_SESSION_DESKTOP=Hyprland"
-            ]
+            "env": env
         }),
     )?;
     let started = receive(&mut stream)?;
@@ -228,9 +254,48 @@ mod tests {
             &socket,
             "alice",
             Some(Zeroizing::new("three amber rivers".to_string())),
+            None,
         )
         .unwrap();
         server.join().unwrap();
+    }
+
+    /// The login screen's layout reaches the session as one variable, and
+    /// only a value that is a layout list gets that far.
+    #[test]
+    fn the_chosen_keyboard_layout_travels_only_into_a_started_session() {
+        let temp = TempDir::new().unwrap();
+        let socket = temp.path().join("greetd.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let create = read_frame(&mut stream);
+            assert!(!create.to_string().contains("PUNAR_KEYMAP"));
+            write_frame(&mut stream, json!({"type":"success"}));
+            let start = read_frame(&mut stream);
+            assert_eq!(start["env"][3], "PUNAR_KEYMAP=us,ru+phonetic");
+            assert_eq!(start["env"].as_array().unwrap().len(), 4);
+            write_frame(&mut stream, json!({"type":"success"}));
+        });
+        start_session(&socket, "alice", None, Some("us,ru+phonetic")).unwrap();
+        server.join().unwrap();
+
+        for bad in [
+            "",
+            "us\nLD_PRELOAD=/x",
+            "us ru",
+            "us=ru",
+            "us;ru",
+            &"a".repeat(161),
+        ] {
+            assert!(!valid_keymap(bad), "{bad:?}");
+            // Refused before a socket is touched.
+            let nowhere = temp.path().join("absent.sock");
+            assert!(matches!(
+                start_session(&nowhere, "alice", None, Some(bad)),
+                Err(GreetError::Protocol)
+            ));
+        }
     }
 
     #[test]
@@ -245,7 +310,7 @@ mod tests {
             let _ = read_frame(&mut stream);
             write_frame(&mut stream, json!({"type":"success"}));
         });
-        start_session(&socket, "alice", None).unwrap();
+        start_session(&socket, "alice", None, None).unwrap();
         server.join().unwrap();
     }
 }

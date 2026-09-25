@@ -17,6 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::engine::EnvError;
 use crate::manifest::FilesystemAccess;
@@ -576,8 +577,13 @@ fn validate_trusted_executable(
 /// Validate all immutable host tools before creating a scope.  Validation is
 /// intentionally repeated on each launch so a damaged update fails closed.
 pub fn require_launch_tools() -> Result<(), EnvError> {
+    // Bubblewrap is the boundary, not merely another executable. In addition
+    // to the immutable-path checks below it has a minimum security version and
+    // must never carry setuid/setgid privilege. Keep this runtime check even
+    // though image construction enforces the same contract: a damaged or
+    // partially updated machine must fail before any adapter code runs.
+    require_bubblewrap(Path::new(BWRAP_PATH))?;
     for (label, path) in [
-        ("bubblewrap", BWRAP_PATH),
         ("systemd-run", SYSTEMD_RUN_PATH),
         ("systemctl", SYSTEMCTL_PATH),
         ("punar-env gate", PUNAR_ENV_PATH),
@@ -602,7 +608,84 @@ fn require_bubblewrap(path: &Path) -> Result<(), EnvError> {
              Next step: repair the Punar bubblewrap package and retry.",
             path.display()
         ))
-    })
+    })?;
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        EnvError::Runtime(format!(
+            "managed AI isolation is unavailable: {} could not be inspected after its immutable tool check: {error}.\n\
+             There is no unsandboxed fallback.\n\
+             Next step: repair the Punar bubblewrap package and retry.",
+            path.display()
+        ))
+    })?;
+    if metadata.permissions().mode() & 0o6000 != 0 {
+        return Err(EnvError::Runtime(format!(
+            "managed AI isolation is unavailable: {} is setuid or setgid (mode {:o}).\n\
+             Bubblewrap 0.12 and later deliberately removed setuid support; Punar will not run a privileged compatibility build.\n\
+             There is no unsandboxed fallback. Next step: repair the signed Punar image.",
+            path.display(),
+            metadata.permissions().mode() & 0o7777
+        )));
+    }
+
+    let output = Command::new(path)
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            EnvError::Runtime(format!(
+                "managed AI isolation is unavailable: {} could not report its version: {error}.\n\
+                 There is no unsandboxed fallback. Next step: repair the signed Punar image.",
+                path.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(EnvError::Runtime(format!(
+            "managed AI isolation is unavailable: {} --version failed.\n\
+             There is no unsandboxed fallback. Next step: repair the signed Punar image.",
+            path.display()
+        )));
+    }
+    let version = std::str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(parse_bubblewrap_version)
+        .ok_or_else(|| {
+            EnvError::Runtime(format!(
+                "managed AI isolation is unavailable: {} returned an unrecognized version string.\n\
+                 Punar requires Bubblewrap 0.12.0 or newer and never guesses at a security boundary.\n\
+                 There is no unsandboxed fallback. Next step: repair the signed Punar image.",
+                path.display()
+            ))
+        })?;
+    if version < (0, 12, 0) {
+        return Err(EnvError::Runtime(format!(
+            "managed AI isolation is unavailable: Bubblewrap {}.{}.{} is below Punar's security floor of 0.12.0.\n\
+             Versions before 0.12.0 are affected by GHSA-pxhw-h44j-8pfx.\n\
+             There is no unsandboxed fallback. Next step: apply a signed Punar security update.",
+            version.0, version.1, version.2
+        )));
+    }
+    Ok(())
+}
+
+fn parse_bubblewrap_version(output: &str) -> Option<(u64, u64, u64)> {
+    let mut fields = output.split_whitespace();
+    if fields.next()? != "bubblewrap" {
+        return None;
+    }
+    let version = fields.next()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
 }
 
 /// Refuse a project mount whose canonical target would expose a broad system
@@ -726,6 +809,126 @@ pub fn validate_project_mount(project: &Path, home: &Path) -> Result<(), EnvErro
         directory = directory.parent().ok_or_else(|| {
             unsafe_project(project, "the ancestor walk did not reach the account home")
         })?;
+    }
+    validate_project_tree(project)?;
+    Ok(())
+}
+
+/// Inspect the complete tree that Bubblewrap is about to expose.
+///
+/// A bind mount is path-scoped but hard links are inode-scoped: a regular file
+/// below the project can be a second name for a same-filesystem file outside
+/// it. A Unix socket or FIFO below the tree similarly connects the sandbox to
+/// a host process even though the user's runtime directory is not mounted.
+/// Count every in-tree name for each regular inode and require it to equal the
+/// kernel link count; reject special files and nested mount devices. Symlinks
+/// are not followed and resolve only against the already-minimized sandbox
+/// root.
+///
+/// A hostile same-UID host peer racing this walk remains outside ADR-004's
+/// current boundary. The adapter itself cannot race it: this walk runs again
+/// in the held, trusted gate immediately before Bubblewrap exec.
+fn validate_project_tree(project: &Path) -> Result<(), EnvError> {
+    use std::collections::BTreeMap;
+
+    #[derive(Debug)]
+    struct LinkRecord {
+        names_in_project: u64,
+        kernel_links: u64,
+        example: PathBuf,
+    }
+
+    let project_device = fs::symlink_metadata(project)
+        .map_err(|error| {
+            unsafe_project(
+                project,
+                &format!("the tree root cannot be inspected: {error}"),
+            )
+        })?
+        .dev();
+    let mut pending = vec![project.to_path_buf()];
+    let mut links: BTreeMap<(u64, u64), LinkRecord> = BTreeMap::new();
+
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory).map_err(|error| {
+            unsafe_project(
+                project,
+                &format!("directory {} cannot be read: {error}", directory.display()),
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                unsafe_project(
+                    project,
+                    &format!(
+                        "directory {} changed while it was inspected: {error}",
+                        directory.display()
+                    ),
+                )
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                unsafe_project(
+                    project,
+                    &format!("entry {} cannot be inspected: {error}", path.display()),
+                )
+            })?;
+            let kind = metadata.file_type();
+            if kind.is_symlink() {
+                continue;
+            }
+            if metadata.dev() != project_device {
+                return Err(unsafe_project(
+                    project,
+                    &format!(
+                        "entry {} crosses onto another filesystem or nested mount",
+                        path.display()
+                    ),
+                ));
+            }
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if kind.is_file() {
+                let record = links
+                    .entry((metadata.dev(), metadata.ino()))
+                    .or_insert(LinkRecord {
+                        names_in_project: 0,
+                        kernel_links: metadata.nlink(),
+                        example: path,
+                    });
+                if record.kernel_links != metadata.nlink() {
+                    return Err(unsafe_project(
+                        project,
+                        "a project inode changed while its hard-link aliases were inspected",
+                    ));
+                }
+                record.names_in_project += 1;
+                continue;
+            }
+            return Err(unsafe_project(
+                project,
+                &format!(
+                    "entry {} is a socket, FIFO, or device rather than a regular file, directory, or symlink",
+                    path.display()
+                ),
+            ));
+        }
+    }
+
+    for record in links.values() {
+        if record.names_in_project != record.kernel_links {
+            return Err(unsafe_project(
+                project,
+                &format!(
+                    "regular file {} has {} hard-link name(s) in the project but {} link(s) on the filesystem; at least one alias is outside the granted tree",
+                    record.example.display(),
+                    record.names_in_project,
+                    record.kernel_links
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1180,6 +1383,24 @@ mod tests {
     }
 
     #[test]
+    fn bubblewrap_security_floor_parser_is_closed_and_ordered() {
+        assert_eq!(
+            parse_bubblewrap_version("bubblewrap 0.12.0\n"),
+            Some((0, 12, 0))
+        );
+        assert_eq!(
+            parse_bubblewrap_version("bubblewrap 0.12.1\n"),
+            Some((0, 12, 1))
+        );
+        assert!(parse_bubblewrap_version("bubblewrap 0.11.2\n").unwrap() < (0, 12, 0));
+        assert!(parse_bubblewrap_version("bubblewrap 0.12\n").is_none());
+        assert!(parse_bubblewrap_version("bubblewrap 0.12.0 extra\n").is_none());
+        assert!(parse_bubblewrap_version("bubblewrap unknown\n").is_none());
+        assert!(parse_bubblewrap_version("bwrap 0.12.0\n").is_none());
+        assert!(parse_bubblewrap_version("").is_none());
+    }
+
+    #[test]
     fn trusted_tool_check_rejects_writable_symlinked_and_unsafe_hierarchies() {
         use std::os::unix::fs::symlink;
 
@@ -1288,6 +1509,45 @@ mod tests {
         fs::set_permissions(&source_root, fs::Permissions::from_mode(0o770)).unwrap();
         let error = validate_project_mount(&project, &home).unwrap_err();
         assert!(error.to_string().contains("writable by group"), "{error}");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn project_mount_rejects_external_hardlink_aliases_and_host_sockets() {
+        use std::os::unix::net::UnixListener;
+
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        let root = base.join(format!("punar-env-project-alias-{}", std::process::id()));
+        let home = root.join("home");
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        for directory in [&root, &home, &project] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let outside = home.join("outside-secret");
+        fs::write(&outside, "outside").unwrap();
+        let alias = project.join("looks-local");
+        fs::hard_link(&outside, &alias).unwrap();
+        let error = validate_project_mount(&project, &home).unwrap_err();
+        assert!(error.to_string().contains("alias is outside"), "{error}");
+
+        fs::remove_file(&alias).unwrap();
+        let original = project.join("original");
+        let inside_alias = project.join("inside-alias");
+        fs::write(&original, "inside").unwrap();
+        fs::hard_link(&original, &inside_alias).unwrap();
+        validate_project_mount(&project, &home).unwrap();
+
+        let socket_path = project.join("host.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let error = validate_project_mount(&project, &home).unwrap_err();
+        assert!(
+            error.to_string().contains("socket, FIFO, or device"),
+            "{error}"
+        );
+        drop(listener);
 
         fs::remove_dir_all(&root).unwrap();
     }

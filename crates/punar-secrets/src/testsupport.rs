@@ -312,6 +312,8 @@ fn answer(state: &Arc<Mutex<MockState>>, method: &str, params: &Value, id: &Valu
                 resolved_by: None,
                 consumed_at: None,
                 execution: None,
+                // A mock: nothing here expires, so there is no window to judge.
+                lifetime: None,
             };
             let value = serde_json::to_value(&envelope).expect("envelope serializes");
             state.approvals.push(value.clone());

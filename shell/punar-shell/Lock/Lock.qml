@@ -67,6 +67,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 
@@ -185,6 +186,68 @@ Scope {
         onLoadFailed: root.hostName = ""
     }
 
+    // ---- keyboard layout (SMP-1405 WP-02) ---------------------------------
+    //
+    // The lock screen says which layout the password field is typing in, and
+    // how to switch: a password that fails only because the layout moved is
+    // the one lock-screen failure the surface can prevent by saying so. Read
+    // once per lock from `punarctl keyboard layout status` (the verb a terminal
+    // uses) and followed through Hyprland's own `activelayout` event, which
+    // the shell already receives on socket2. Nothing polls.
+    property string keyboardName: ""
+    property bool keyboardSwitchable: false
+    readonly property string keyboardText: root.keyboardName === "" ? ""
+        : "Keyboard " + root.keyboardName + (root.keyboardSwitchable ? " · Alt + Alt switches" : "")
+
+    function parseKeyboard(body: string): void {
+        var status = null;
+        try {
+            status = JSON.parse(body);
+        } catch (e) {
+            status = null;
+        }
+        if (status === null || typeof status !== "object")
+            return;
+        root.keyboardSwitchable = typeof status.switch_chord === "string" && status.switch_chord !== "";
+        var live = status.live;
+        if (live !== null && typeof live === "object" && typeof live.active_keymap === "string" && live.active_keymap !== "") {
+            root.keyboardName = live.active_keymap;
+            return;
+        }
+        // Without a live answer: the person's own layout when they have one,
+        // else the device's (the order session start renders them in).
+        var layouts = Array.isArray(status.your_layouts) && status.your_layouts.length > 0
+            ? status.your_layouts : status.layouts;
+        if (Array.isArray(layouts) && layouts.length > 0 && typeof layouts[0].description === "string")
+            root.keyboardName = layouts[0].description;
+    }
+
+    Process {
+        id: keyboardProbe
+        command: ["punarctl", "--json", "keyboard", "layout", "status"]
+        stdout: StdioCollector {
+            id: keyboardOut
+            waitForEnd: true
+            onStreamFinished: root.parseKeyboard(keyboardOut.text)
+        }
+    }
+
+    Connections {
+        target: Hyprland
+
+        function onRawEvent(event: HyprlandEvent): void {
+            // activelayout>>KEYBOARD,LAYOUT — the layout name is everything
+            // after the first comma (a keyboard's name has no comma).
+            if (event.name !== "activelayout")
+                return;
+            var data = String(event.data);
+            var comma = data.indexOf(",");
+            var name = comma >= 0 ? data.substring(comma + 1) : data;
+            if (name !== "")
+                root.keyboardName = name;
+        }
+    }
+
     // ---- PAM stack selection ---------------------------------------------
 
 
@@ -279,6 +342,8 @@ Scope {
         root.busy = false;
         root.now = new Date();
         root.locked = true;
+        if (!keyboardProbe.running)
+            keyboardProbe.running = true;
     }
 
     // NOTE: no `unlock` verb. See the header — an IPC unlock is a bypass.
@@ -292,6 +357,10 @@ Scope {
             if (!root.locked)
                 return "unlocked";
             return sessionLock.secure ? "locked" : "locking";
+        }
+        /// The layout line the lock surface shows ("" before the first lock).
+        function keyboard(): string {
+            return root.keyboardText;
         }
 
         /// Submit a candidate passphrase through the ordinary PAM path.
@@ -329,88 +398,112 @@ Scope {
         root.pending = passphrase;
         root.failure = "";
         root.busy = true;
-        // Re-armed on every attempt: onStarted disables stdin after writing, so
-        // without this a second try would run the verifier with nothing on its
-        // input and be told, correctly, that an empty secret is refused. A lock
-        // screen is retried by definition, which is exactly why this matters
-        // here and not in the greeter's one-shot account creation.
-        verifier.stdinEnabled = true;
-        verifier.running = true;
+        verifier.path = root.authdSocket;
+        verifier.connected = true;
+        // A verifier that never answers must still settle the surface.
+        verifierDeadline.restart();
     }
 
-    /// The verifier, and why the shell no longer runs PAM itself.
+    /// punar-authd's socket: the only place the passphrase is sent.
+    readonly property string authdSocket: "/run/punar-authd/auth.sock"
+
+    /// The verifier, and why the shell neither runs PAM itself nor relays the
+    /// passphrase through a helper any more.
     ///
-    /// It cannot. systemd serves a userdb record's privileged section — where
-    /// the password hash lives — only to a uid-0 caller, and this process is the
-    /// session user. An in-process PamContext therefore rejected every correct
-    /// password on an onboarding-created account while greetd, which is root,
-    /// accepted the same one. See crates/punar-auth/src/lib.rs for the
-    /// measurements on both substrates.
+    /// It cannot run PAM. systemd serves a userdb record's privileged section
+    /// — where the password hash lives — only to a uid-0 caller, and this
+    /// process is the session user. An in-process PamContext therefore
+    /// rejected every correct password on an onboarding-created account while
+    /// greetd, which is root, accepted the same one. See
+    /// crates/punar-auth/src/lib.rs for the measurements on both substrates.
     ///
-    /// The secret crosses one anonymous stdin pipe to a fixed argv, exactly as
-    /// account creation does in the greeter, and `pending` is cleared on the
-    /// next line. It is never an argument and never an environment variable.
-    Process {
+    /// It no longer pipes the passphrase to `/usr/bin/punar-auth` either (F0
+    /// review). This process held the write end of that helper's stdin pipe,
+    /// and any other program running as the same person could open that pipe
+    /// through /proc/<pid>/fd, read the passphrase as it went by and write it
+    /// back, so the unlock still worked and nobody noticed. Hardening the
+    /// helper could not help: the pipe was the exposure. The passphrase now
+    /// goes straight to `punar-authd` over its root-owned socket, as one JSON
+    /// line the daemon answers with one JSON line (`{"v":1,"verdict":"ok"}`);
+    /// a socket opened through /proc gives ENXIO, so there is nothing to
+    /// reopen. The same daemon, the same `punar-lock` PAM stack and the same
+    /// three verdicts decide it; `pending` is cleared the moment it is written.
+    Socket {
         id: verifier
 
-        command: ["/usr/bin/punar-auth"]
-        stdinEnabled: true
-        stdout: StdioCollector {
-            id: verifierOutput
-            waitForEnd: true
-            // The LAST line, not the whole buffer: the verifier prints exactly
-            // one word, but a collector that accumulated across two attempts
-            // would yield "denieddenied", which is not a word this surface knows
-            // and would report a plain wrong password as a device fault.
-            onStreamFinished: root.finishAuth(root.lastLine(verifierOutput.text))
+        parser: SplitParser {
+            onRead: function (line) {
+                root.finishAuth(root.verdictOf(String(line)));
+                verifier.connected = false;
+            }
         }
 
-        onStarted: {
-            verifier.write(root.pending + "\n");
+        onConnectedChanged: {
+            if (!verifier.connected) {
+                // Closed before it answered: the device could not ask.
+                // Deferred one turn so an answer that arrived with the close
+                // is read first; finishAuth ignores whichever comes second.
+                Qt.callLater(function () {
+                    root.finishAuth("");
+                });
+                return;
+            }
+            verifier.write(JSON.stringify({ v: 1, password: root.pending }) + "\n");
+            verifier.flush();
             root.pending = "";
-            verifier.stdinEnabled = false;
         }
 
-        // A VERIFIER THAT NEVER STARTS MUST STILL SETTLE THE SURFACE. A missing
-        // binary or a failed exec would otherwise leave `busy` true forever and
-        // the lock screen accepting no further attempts — the same
-        // unrecoverable shape as the bug this whole change fixes. Whether
-        // Quickshell's StdioCollector emits onStreamFinished for a process that
-        // never ran is not documented, so this does not rely on it: exit is a
-        // terminal outcome too, and finishAuth is idempotent.
-        //
-        // Connected rather than declared as onExited because the signal's second
-        // parameter is a QProcess::ExitStatus, which qmllint cannot resolve in a
-        // declared handler — the Services/WallpaperState.qml idiom.
-        Component.onCompleted: verifier.exited.connect(function (exitCode) {
-            if (exitCode !== 0)
-                console.warn("punar-shell: punar-auth exited " + exitCode);
-            root.finishAuth("");
-        })
+        // A socket that cannot be reached (punar-authd.socket missing or
+        // refusing) settles the surface as "could not ask", never as a wrong
+        // passphrase. Quickshell exposes the C++ QLocalSocket error enum in this
+        // signal, but does not register that enum as a QML type for qmllint;
+        // the handler deliberately ignores the unrepresentable argument.
+        // qmllint disable signal-handler-parameters
+        onError: root.finishAuth("")
+        // qmllint enable signal-handler-parameters
     }
 
-    function lastLine(text: string): string {
-        var lines = String(text).split("\n");
-        for (var i = lines.length - 1; i >= 0; i--) {
-            var line = lines[i].trim();
-            if (line !== "")
-                return line;
+    // punar-authd bounds a transaction itself (RuntimeMaxSec, per-read
+    // timeouts), and a PAM failure may be deliberately slow. This outlasts
+    // both, and exists only so a verifier that never answers cannot leave
+    // the lock accepting no further attempts. It runs only while an attempt
+    // is in flight, on a surface a person is looking at.
+    Timer {
+        id: verifierDeadline
+
+        interval: 90000
+        repeat: false
+        onTriggered: {
+            verifier.connected = false;
+            root.finishAuth("");
         }
+    }
+
+    /// punar-authd's JSON line as one of its three words, or "" for anything
+    /// else (read as "could not ask").
+    function verdictOf(line: string): string {
+        try {
+            var said = JSON.parse(line);
+            if (said !== null && typeof said === "object"
+                    && (said.verdict === "ok" || said.verdict === "denied" || said.verdict === "unavailable"))
+                return said.verdict;
+        } catch (e) {}
         return "";
     }
 
     /// One of three words, and anything else is treated as "could not ask".
     ///
-    /// IDEMPOTENT ON PURPOSE. Both the collector finishing and the process
-    /// exiting are terminal, they arrive in no guaranteed order, and either may
-    /// be the only one that arrives. The first to land decides; the rest are
-    /// dropped, so a verdict can never be overwritten by the exit that followed
-    /// it.
+    /// IDEMPOTENT ON PURPOSE. The answer, the socket closing, an error and the
+    /// deadline are all terminal, they arrive in no guaranteed order, and any
+    /// may be the only one that arrives. The first to land decides; the rest
+    /// are dropped, so a verdict can never be overwritten by the close that
+    /// followed it.
     function finishAuth(verdict: string): void {
         if (!root.busy)
             return;
         root.busy = false;
         root.pending = "";
+        verifierDeadline.stop();
 
         if (verdict === "ok") {
             root.attempts = 0;
@@ -476,6 +569,7 @@ Scope {
             timeText: root.timeText
             dateText: root.dateText
             monthYear: root.monthYear
+            keyboardText: root.keyboardText
             attempts: root.attempts
             busy: root.busy
             failure: root.failure

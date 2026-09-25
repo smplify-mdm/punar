@@ -288,7 +288,8 @@ are four independent reasons it is also the right call:
    silently revoke credentials.
 
 **Not socket-activated.** `Type=simple`, always on, no idle exit: token
-TTLs are wall-clock promises, and a broker that systemd can stop between
+TTLs are promises held in memory (measured on the boot clock since
+SMP-1405, §4.5), and a broker that systemd can stop between
 requests would either lose live tokens or need to persist them — the one
 thing Law 3 forbids. The RAM cost of always-on is paid honestly in §11.
 
@@ -563,11 +564,31 @@ record's `expires_at` is when it occurred, and both are in the trail, so
 the lapse instant is always recoverable. This is the price of having no
 timer, and it is the right price.
 
+**Which clock decides (SMP-1405, trusted time phase P0a).** Not the wall
+clock. Every approval, grant, re-authentication ticket and brokered
+credential carries its TTL as a window on the boot clock —
+`raw_bt = CLOCK_MONOTONIC_RAW + (CLOCK_BOOTTIME − CLOCK_MONOTONIC)`, keyed
+to `/proc/sys/kernel/random/boot_id` (`punar_common::trusted_time`) — and
+is live iff it is the same boot, no suspend has happened since it opened,
+and `elapsed_ms < duration_ms − ceil(duration_ms × 200 / 10⁶)` on
+`CLOCK_MONOTONIC_RAW`. The 200 ppm drift allowance closes a window
+slightly early, never late. A suspend closes it because most x86 hardware
+measures sleep from the RTC in whole seconds, which can under-count it by
+about a second or entirely; the kernel's suspend count and its suspended
+time each mark one. So rolling the wall clock back (DHCP NTP, `timedated`,
+a 1970 RTC) revives nothing; **grants, pending approvals, tickets and
+credentials lapse at reboot and at suspend**; a clock that cannot be read
+keeps nothing live; and a record an older punard wrote, which has no window, is
+expired after the upgrade (the person asks again). `expires_at` stays on
+every record, on the wall clock, for display only. See docs/api/ipc.md
+§14.4.
+
 The **overlay does not depend on the sweep**: it computes its countdown
 from `expires_at` locally and renders `EXPIRED · denied by timeout`
 (D-003's third verdict state) the moment the clock hits zero, whether or
 not punard has swept yet. Pressing `A` on a lapsed card gets `expired`
-from the daemon and the card says so. The socket remains the authority.
+from the daemon and the card says so. The socket remains the authority,
+and it decides on the boot clock: the countdown is display only.
 
 ### 4.6 State machine, complete
 
@@ -696,7 +717,9 @@ does not name.
 
 Policy: personal defaults.
 Next step: add a rule under ai.agents.default.host, or make the change
-yourself: sudo punarctl capabilities set <capability> <state>
+yourself, outside the agent: punarctl privilege request --capability
+<capability> --reason "<why>", then punarctl capabilities set <capability>
+<state>
 ```
 
 `user_package` / `system_package` / `user_management` map to **no
@@ -840,8 +863,9 @@ different and both documented:
   6-second sleep instead of a minute. Both TTLs are legitimate requests,
   not a test-only code path.
 
-**Expiry is enforced on `credential.validate`**, computed from
-`expires_at` against the clock — never from a timer, never from a sweep.
+**Expiry is enforced on `credential.validate`**, on the boot clock (§4.5,
+SMP-1405; `expires_at` is the wall-clock rendering, for display) — never
+from a timer, never from a sweep.
 An expired entry is dropped from the map on the first validate that
 observes it and audited **once** (`action: "credential.expire"`,
 `result: "expired"`). A validate of an *unknown* token is **not
@@ -946,7 +970,10 @@ On approval, punard writes a **grant**:
 {"v": 1, "grant_id": "gnt_2b8e11c4", "approval_id": "apr_…",
  "uid": 1000, "user": "punar", "capability": "security.firewall",
  "reason": "Reproducing the Atlas net bug",
- "granted_at": "…", "expires_at": "…", "revoked_at": null}
+ "granted_at": "…", "expires_at": "…", "revoked_at": null,
+ "lifetime": {"start": {"boot_id": "…", "raw_bt_ms": 5123456,
+                        "sleep_ms": 0, "suspends": 0},
+              "duration_ms": 900000}}
 ```
 
 punard consults live grants in the **human path** of §5.1 step 3: a
@@ -954,9 +981,10 @@ non-root peer whose uid has an unexpired, unrevoked grant for exactly
 that capability is allowed to `capabilities.set` it, audited with
 `decision: allow`, `policy_ids: ["personal-defaults"]` and
 `details.grant_id`. Expiry is **real and lazy**: evaluated against the
-clock on every consult, on `privilege status`, and at each reconcile
-sweep. A lapsed grant is unlinked and audited once
-(`action: "privilege.expire"`, `result: "expired"`).
+boot clock (§4.5, SMP-1405) on every consult, on `privilege status`, and
+at each reconcile sweep. A lapsed grant is unlinked and audited once
+(`action: "privilege.expire"`, `result: "expired"`). **Grants lapse at
+reboot, and at suspend.**
 
 **Hard rules:**
 
@@ -1000,6 +1028,15 @@ So it lives inside the already-root-owned `/run/punard`
 (`0750 root:punar`), mode `0640 root:punar` — exactly the M8 reasoning
 that moved `ledger.json` into `/run/punar-agentd`. The shell (user
 `punar`, group `punar`) reads it; no non-root peer can replace it.
+
+> **Superseded by the F0 review (2026-09-25).** Group `punar` is every
+> account on a device, so on a shared device this one file showed each
+> person every person's approvals and grants. It is now one file per person,
+> `/run/punard/approvals/<uid>.json`, `0640 root:root` with a POSIX ACL entry
+> for that uid alone, holding only the approvals routed to that person and
+> their own grants; `approvals.list`/`approvals.get` are scoped the same way
+> (docs/api/ipc.md §14.2, §15, §23.2). The anti-spoofing argument above is
+> unchanged: the files are root-owned in a root-owned directory.
 
 Content: pending and recently-resolved approvals plus live grants —
 `{v, updated_at, approvals: [{approval_id, kind, status, requester:

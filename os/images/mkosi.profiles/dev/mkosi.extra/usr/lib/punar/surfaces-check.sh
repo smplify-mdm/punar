@@ -94,6 +94,58 @@ else
     FAILED=1
 fi
 
+# --- the person holds no device group ----------------------------------------
+# Every account, this one included, is kept out of `input` and `video`
+# (docs/design/onboarding.md section 1.7). `input` would let any program the
+# person runs open /dev/input and read every keystroke typed on the machine,
+# the lock screen's passphrase included; `video` reads the screen. The desktop
+# does not need either: the compositor takes its keyboard, pointer and DRM
+# devices from logind on the active seat, and every later group in this file
+# drives that same session through them.
+person_groups=" $(id -nG 2>/dev/null) "
+for retired_group in input video; do
+    case "${person_groups}" in
+        *" ${retired_group} "*)
+            note "FAIL the desktop user is in the ${retired_group} group (groups:${person_groups})"
+            FAILED=1
+            ;;
+        *) note "ok   the desktop user is not in the ${retired_group} group" ;;
+    esac
+done
+# One class of node is the seat's by design: systemd's 70-uaccess.rules gives
+# the active session game controllers (udev's ID_INPUT_JOYSTICK), so a
+# gamepad attached to a real machine is openable and that is not a leak. A
+# node udev also calls a keyboard is never excused, joystick or not: that is
+# the misclassification that would hand out keystrokes.
+input_nodes=0
+input_opened=""
+input_controllers=""
+for input_node in /dev/input/event*; do
+    [ -e "${input_node}" ] || continue
+    input_nodes=$((input_nodes + 1))
+    # A subshell, so a refused open ends only the subshell: `:` is a special
+    # builtin, and a redirection error on one may end the whole script.
+    if (: < "${input_node}") 2>/dev/null; then
+        input_class="$(udevadm info --query=property --name="${input_node}" 2>/dev/null)"
+        case "${input_class}" in
+            *ID_INPUT_KEYBOARD=1*) input_opened="${input_opened} ${input_node}(keyboard)" ;;
+            *ID_INPUT_JOYSTICK=1*) input_controllers="${input_controllers} ${input_node}" ;;
+            *) input_opened="${input_opened} ${input_node}" ;;
+        esac
+    fi
+done
+if [ "${input_nodes}" -eq 0 ]; then
+    note "FAIL no /dev/input/event* node exists, so the keystroke boundary went unexercised"
+    FAILED=1
+elif [ -n "${input_opened}" ]; then
+    note "FAIL the desktop user can open input devices directly:${input_opened}"
+    FAILED=1
+elif [ -n "${input_controllers}" ]; then
+    note "ok   the desktop user can open no /dev/input node but the seat's game controllers:${input_controllers}"
+else
+    note "ok   the desktop user can open none of the ${input_nodes} /dev/input/event* nodes"
+fi
+
 # --- session env discovery (m2-check.sh pattern) -----------------------------
 XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR
@@ -160,7 +212,9 @@ systemcontrol_models_ready() {
         && jq -e '.explains | length > 0
             and all(.[]; .stateKey == "Drift" and .compliance == "Matches")' \
             /run/punar/surfaces-systemcontrol-firewall.json >/dev/null 2>&1 \
-        && jq -e --slurpfile catalog /usr/share/punar/catalog/catalog.json '.title == "Applications"
+        && jq -e --slurpfile catalog /usr/share/punar/catalog/catalog.json \
+            --slurpfile hidden /usr/share/punar/catalog/launcher-hidden-entries.json \
+            '.title == "Applications"
             # The summary is user-facing state, not decoration. Prove each
             # advertised count against the live rows and the version against
             # the signed catalog. This intentionally follows the richer
@@ -183,13 +237,13 @@ systemcontrol_models_ready() {
                 | all($available[]; . as $name
                     | any($catalog[0].apps[]; .name == $name)))
             # Package-owned helper launchers are implementation details, not
-            # products. Prove the running image filters the exact known ids
+            # products. Prove the running image filters every id in the
+            # shipped hidden list (the file Apps.qml and punarctl both read)
             # while retaining the useful hardware viewer under a plain name.
+            and ($hidden[0].entries | keys | length > 0)
             and (all(.rows[] | select(.tag == "Installed");
                 .action.entry.id as $id
-                | (["footclient", "foot-server", "thunar-settings",
-                  "thunar-bulk-rename", "xfce4-about", "bssh", "bvnc",
-                  "avahi-discover"] | index($id)) == null))
+                | ($hidden[0].entries | has($id)) | not))
             and all(.rows[] | select(.tag == "Installed"
                 and .action.entry.id == "lstopo"
                 ); .name == "Hardware Information")
@@ -822,7 +876,7 @@ if wait_for 180 chromium_client; then
         | jq -r '[ .[] | select(.class | ascii_downcase | test("chromium")) ][0].pid')"
     if [ -n "${cpid}" ] && [ -r "/proc/${cpid}/cmdline" ]; then
         cargs="$(tr '\0' ' ' < "/proc/${cpid}/cmdline")"
-        for flag in --no-first-run --no-default-browser-check; do
+        for flag in --no-first-run --no-default-browser-check --password-store=basic; do
             case " ${cargs} " in
                 *" ${flag} "*) note "ok   chromium argv carries ${flag}" ;;
                 *) note "FAIL chromium argv missing ${flag} — closed browser defaults were not applied"
@@ -837,6 +891,29 @@ if wait_for 180 chromium_client; then
         printf '%s\n' "${cargs}" > /run/punar/surfaces-chromium-argv.txt
     else
         note "FAIL could not read chromium argv (pid='${cpid}')"
+        FAILED=1
+    fi
+
+    # NO SECRET-SERVICE PROMPT MAY EXIST WHILE THE BROWSER IS UP. A browser
+    # left to ask org.freedesktop.secrets for its safe-storage key gets a
+    # gcr-prompter window from gnome-keyring — which this image ships for
+    # third-party apps, not for Chromium — and that window takes focus from
+    # whatever is asserted next. The menubar check failed exactly that way
+    # once, and the bar was RIGHT: it faithfully named the window that had
+    # focus. Assert the absence here, at the cause, so the flag returning to
+    # `detect` can never again surface as an unrelated-looking focus
+    # disagreement. Matched on the class Hyprland reports, which is what the
+    # failing report named.
+    secret_prompter() {
+        hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class | ascii_downcase
+                       | test("gcr-prompter|gcr-viewer|org.gnome.keyring")) ][0].class // ""'
+    }
+    prompter="$(secret_prompter)"
+    if [ -z "${prompter}" ]; then
+        note "ok   no secret-service prompt window while the browser is up"
+    else
+        note "FAIL a secret-service prompter window exists ('${prompter}') — the browser is asking org.freedesktop.secrets for its safe-storage key"
         FAILED=1
     fi
 
@@ -859,6 +936,10 @@ if wait_for 180 chromium_client; then
         note "ok   the menubar names the focused window ($(ipc bar app | tr -d '[:space:]\"'))"
     else
         note "FAIL menubar/focus disagree — hyprland says '$(hyprctl -j activewindow 2>/dev/null | jq -r '.class // ""')', bar says '$(ipc bar app | tr -d '[:space:]\"')'"
+        # Say WHICH window stole focus when the thief is a known one. The bar
+        # naming a prompter is the bar working, not the bar failing.
+        stealer="$(secret_prompter)"
+        [ -n "${stealer}" ] && note "FAIL   cause: '${stealer}' took focus — a secret-service prompt, not a menubar fault"
         FAILED=1
     fi
 
@@ -1038,6 +1119,723 @@ if wait_for 90 files_client; then
 else
     note "FAIL Files was selected in Command Center but no file-manager window appeared"
     FAILED=1
+fi
+
+# --- group 5f: Punar can open an APPLICATION WINDOW ------------------------
+# THE GATE THE WHOLE MAIL PLAN RESTED ON. docs/design/mail-calendar-contacts.md
+# §4 recorded that no Punar surface had ever been an application window: all
+# seventeen shell surfaces are layer-shell PanelWindows plus the session lock,
+# and FloatingWindow/ApplicationWindow/xdg_toplevel appeared nowhere in the
+# tree. Every estimate past that point was a guess, so the window came before
+# the mail.
+#
+# ASSERTED DIFFERENTLY FROM EVERY OTHER SURFACE HERE, and that difference is
+# the point. The shell's surfaces are driven over IPC and confirmed in
+# `hyprctl -j layers`, because a layer-shell surface is chrome the compositor
+# owns. An application window is an ordinary client: it has no layer, answers
+# no shell IPC, and shows up in `hyprctl -j clients` like Chromium does. So
+# this exercise is the browser exercise's shape — launch it, wait for a real
+# mapped window, prove it is native Wayland, then close it through the
+# compositor's own action and require it to be gone.
+#
+# The class is `org.punar.Mail`, which comes from `//@ pragma AppId` in
+# Mail/shell.qml: quickshell reads that before Qt starts and passes it to
+# setDesktopFileName, which becomes the xdg-toplevel app_id. Without the pragma
+# every Quickshell process reports `org.quickshell`, and this assertion would
+# pass for the SHELL ITSELF — a check that cannot distinguish the thing it is
+# testing from the thing testing it.
+if [ -x /usr/lib/punar/punar-mail.sh ]; then
+    mail_client() {
+        hyprctl -j clients 2>/dev/null \
+            | jq -e '[ .[] | select(.class == "org.punar.Mail") ] | length >= 1' >/dev/null 2>&1
+    }
+    mail_gone() {
+        hyprctl -j clients 2>/dev/null \
+            | jq -e '[ .[] | select(.class == "org.punar.Mail") ] | length == 0' >/dev/null 2>&1
+    }
+    mail_process_gone() {
+        ! pgrep -u "$(id -un)" -f '/usr/share/punar/shell/Mail' >/dev/null 2>&1
+    }
+
+    # KEEP THE LAUNCHER'S OUTPUT. Discarding it to /dev/null cost a full CI
+    # cycle: an id colliding with a property name made QML refuse to load the
+    # component, the window never mapped, and the only evidence the gate could
+    # offer was "never appeared" — the diagnosis had to come from reading the
+    # source instead. A surface that fails to start says why on stderr, and
+    # this is the same lesson the power buttons taught earlier: capture it.
+    setsid /usr/lib/punar/punar-mail.sh >/run/punar/mail-launch.log 2>&1 &
+    if wait_for 120 mail_client; then
+        note "ok   the mail application window opened as an ordinary client"
+
+        # NATIVE WAYLAND, asserted rather than assumed: an xdg-toplevel that
+        # arrived through XWayland would satisfy "a window appeared" while
+        # proving nothing about the path a first-party app will take.
+        mail_xwayland="$(hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].xwayland')"
+        check_eq "the mail window is native Wayland (xwayland=false)" "false" "${mail_xwayland}"
+
+        # It must be a REAL toplevel with a size, not a zero-size surface that
+        # technically exists. A window a person cannot see is not a window.
+        mail_w="$(hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].size[0]')"
+        mail_h="$(hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].size[1]')"
+        if [ "${mail_w:-0}" -gt 200 ] 2>/dev/null && [ "${mail_h:-0}" -gt 200 ] 2>/dev/null; then
+            note "ok   the mail window has a real size (${mail_w}x${mail_h})"
+        else
+            note "FAIL the mail window mapped at ${mail_w:-?}x${mail_h:-?}"
+            FAILED=1
+        fi
+
+        # The title is what a task switcher and the window-actions surface
+        # read, and an untitled toplevel is a product defect rather than a
+        # cosmetic one.
+        mail_title="$(hyprctl -j clients 2>/dev/null \
+            | jq -r '[ .[] | select(.class == "org.punar.Mail") ][0].title')"
+        check_eq "the mail window carries its product title" "Punar Mail" "${mail_title}"
+
+        # IT MUST HAVE PAINTED SOMETHING, not merely mapped. A QML file with a
+        # broken import maps a window and draws an empty rectangle, which every
+        # assertion above passes happily — and Theme resolving to nothing is
+        # EXACTLY that failure, which is why the import path moved into a
+        # pragma. A screenshot is the cheapest evidence that pixels exist, and
+        # it lands in the exported proof so the render can be reviewed without
+        # booting anything.
+        #
+        # Compared against the empty-desktop baseline this script already
+        # captured: identical bytes means the compositor showed the same screen
+        # with the window mapped, which is a window that painted nothing.
+        if grim /run/punar/surfaces-mail.png 2>/dev/null; then
+            mail_png_bytes="$(wc -c < /run/punar/surfaces-mail.png | tr -d ' ')"
+            if [ -z "${BASELINE_BYTES}" ]; then
+                # No baseline was captured, so "differs from the empty desktop"
+                # has nothing to compare against and would pass trivially. Say
+                # what is actually known instead of dressing it up.
+                if [ "${mail_png_bytes}" -gt 0 ] 2>/dev/null; then
+                    note "info mail screenshot captured (${mail_png_bytes} bytes); no baseline to compare, paint not asserted"
+                else
+                    note "FAIL the mail screenshot is empty"
+                    FAILED=1
+                fi
+            elif [ "${mail_png_bytes}" != "${BASELINE_BYTES}" ]; then
+                note "ok   the mail window painted (${mail_png_bytes} bytes, differs from the empty desktop)"
+            else
+                note "FAIL the mail window mapped but the screen is byte-identical to the empty desktop"
+                FAILED=1
+            fi
+        else
+            note "info mail screenshot unavailable (grim failed; paint not asserted)"
+        fi
+
+        # CLOSED THROUGH THE COMPOSITOR, the same action PUNAR+Q is bound to,
+        # so this proves the window participates in the ordinary window grammar
+        # rather than merely existing.
+        # Focus it first, then close the focused window — the exact pair
+        # PUNAR+Q performs. `closewindow class:…` is the LEGACY dispatcher
+        # string and this session is Lua-native: it would have parsed,
+        # returned, and closed nothing, and the assertion below would have
+        # blamed the window. The dispatcher gate caught it, which is the
+        # second time on this branch that rule has caught a silent no-op.
+        hyprctl dispatch "hl.dsp.focus({ window = 'class:^(org\\.punar\\.Mail)$' })" >/dev/null 2>&1 || true
+        hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
+        if wait_for 30 mail_gone; then
+            note "ok   the mail window closed through the compositor"
+        else
+            note "FAIL the mail window did not close on the compositor's close action"
+            FAILED=1
+        fi
+        # The window is gone; the PROCESS must be too. Quickshell only hides a
+        # window the compositor closes, so Mail exits itself (onClosed) — a
+        # hidden, resident Mail is the residency punar-mail@.service forbids,
+        # and it is what broke m2-check's shell restart on 2026-09-23.
+        if wait_for 15 mail_process_gone; then
+            note "ok   the mail process exited with its window"
+        else
+            note "FAIL the mail process stayed resident after its window closed: $(pgrep -u "$(id -un)" -af '/usr/share/punar/shell/Mail' 2>/dev/null | tr '\n' ';')"
+            FAILED=1
+        fi
+    else
+        # The report is what boot-test.sh prints on failure, so the reason has
+        # to land IN it rather than in a file nobody exports.
+        # PREFER THE LINE THAT EXPLAINS. A plain tail caught quickshell's own
+        # "Saving logs to …" banner and said nothing: the process starts, logs,
+        # and then fails to load QML, so the interesting lines are in the
+        # MIDDLE. Same shape as punard's backend_failure_detail — look for a
+        # complaint first, fall back to the tail only when there is none.
+        # ANSI colour is stripped because quickshell colourises its log and the
+        # escapes ate a third of the budget.
+        mail_log="$(tr -d '\r' < /run/punar/mail-launch.log 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^$')"
+        mail_why="$(printf '%s\n' "${mail_log}" \
+            | grep -iE 'error|warning|cannot|unable|no such|not a type|is not|undefined|failed' \
+            | grep -viE 'saving logs|libEGL warning: egl: failed to create dri2' \
+            | tail -n 4 | tr '\n' ' ' | cut -c1-500)"
+        [ -n "${mail_why}" ] || mail_why="$(printf '%s\n' "${mail_log}" \
+            | tail -n 4 | tr '\n' ' ' | cut -c1-500)"
+        note "FAIL the mail application window never appeared in hyprctl clients: ${mail_why:-no output on stderr}"
+        FAILED=1
+    fi
+    # The note is bounded; the log is not. Copy it where boot-test.sh's export
+    # will find it, so a diagnosis never depends on what fitted in 500 bytes.
+    cp /run/punar/mail-launch.log /run/punar/surfaces-mail-launch.txt 2>/dev/null || true
+    pkill -f '/usr/share/punar/shell/Mail' >/dev/null 2>&1 || true
+else
+    note "FAIL /usr/lib/punar/punar-mail.sh is not installed or not executable"
+    FAILED=1
+fi
+
+# --- group 5g: production Mail capability launches work in the real VM -----
+# The fixture above proves the application-window shell independently of the
+# protected PIM stack. These three launches exercise the product path a person
+# actually selects: unprivileged punarctl -> fixed root broker -> dormant,
+# locked service identity -> inherited PIM and Wayland capabilities -> QML.
+#
+# This development image intentionally has no LUKS-backed /var, so this gate
+# MUST NOT submit credentials. It does prove that account entry opens, account
+# management can read an honest empty list, and Mail can present an honest
+# no-account state without demo data. The encrypted installed-image acceptance
+# test owns real credential entry and provider synchronization.
+production_mail_surface() {
+    pms_class="$1"
+    hyprctl -j clients 2>/dev/null \
+        | jq -e --arg class "${pms_class}" \
+            'any(.[]; .class == $class)' >/dev/null 2>&1
+}
+
+production_mail_gone() {
+    pmg_class="$1"
+    ! production_mail_surface "${pmg_class}"
+}
+
+# Every production Mail surface is a transient unit under its own locked
+# service user, with "zero idle residency" written into the unit file. The
+# session user cannot signal it, so the only honest residency check is the
+# unit's own state.
+mail_unit_inactive() {
+    ! systemctl is-active --quiet "$1" 2>/dev/null
+}
+
+check_production_mail_surface() {
+    cps_command="$1"
+    cps_class="$2"
+    cps_title="$3"
+    cps_proof="$4"
+    cps_log="$5"
+    cps_unit="$6"
+
+    setsid punarctl mail "${cps_command}" >"${cps_log}" 2>&1 &
+    if wait_for 60 production_mail_surface "${cps_class}"; then
+        cps_xwayland="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg class "${cps_class}" \
+                '[.[] | select(.class == $class)][0].xwayland')"
+        check_eq "${cps_title} is native Wayland" "false" "${cps_xwayland}"
+
+        cps_window_title="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg class "${cps_class}" \
+                '[.[] | select(.class == $class)][0].title')"
+        check_eq "${cps_title} carries its product title" "${cps_title}" "${cps_window_title}"
+
+        cps_size="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg class "${cps_class}" \
+                '[.[] | select(.class == $class)][0].size | @tsv')"
+        cps_width="$(printf '%s' "${cps_size}" | cut -f1)"
+        cps_height="$(printf '%s' "${cps_size}" | cut -f2)"
+        if [ "${cps_width:-0}" -gt 200 ] 2>/dev/null \
+            && [ "${cps_height:-0}" -gt 200 ] 2>/dev/null; then
+            note "ok   ${cps_title} has a real size (${cps_width}x${cps_height})"
+        else
+            note "FAIL ${cps_title} mapped at ${cps_width:-?}x${cps_height:-?}"
+            FAILED=1
+        fi
+
+        if grim "${cps_proof}" 2>/dev/null; then
+            note "ok   ${cps_title} proof captured ($(wc -c < "${cps_proof}" | tr -d ' ') bytes)"
+        else
+            note "info ${cps_title} screenshot unavailable (grim failed; paint not asserted)"
+        fi
+
+        cps_address="$(hyprctl -j clients 2>/dev/null \
+            | jq -r --arg class "${cps_class}" \
+                '[.[] | select(.class == $class)][0].address')"
+        hyprctl dispatch "hl.dsp.focus({ window = 'address:${cps_address}' })" >/dev/null 2>&1 || true
+        hyprctl dispatch "hl.dsp.window.close()" >/dev/null 2>&1 || true
+        if wait_for 30 production_mail_gone "${cps_class}"; then
+            note "ok   ${cps_title} closed through the compositor"
+        else
+            note "FAIL ${cps_title} did not close through the compositor"
+            FAILED=1
+        fi
+        # The window is gone; the SERVICE must be too. A hidden-but-resident
+        # QML process would hold the mailbox capability with no window and no
+        # way for the person to end it — and it is what m2-check's shell
+        # restart tripped over on 2026-09-23.
+        if wait_for 15 mail_unit_inactive "${cps_unit}"; then
+            note "ok   ${cps_unit} left with its window"
+        else
+            note "FAIL ${cps_unit} stayed resident after its window closed"
+            FAILED=1
+        fi
+    else
+        cps_why="$(tr -d '\r' < "${cps_log}" 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^$' \
+            | tail -n 6 | tr '\n' ' ' | cut -c1-500)"
+        note "FAIL ${cps_title} never appeared through the protected launch: ${cps_why:-no output}"
+        FAILED=1
+    fi
+}
+
+if command -v punarctl >/dev/null 2>&1; then
+    check_production_mail_surface account-add org.punar.MailAccount \
+        "Connect a mail account" /run/punar/surfaces-mail-account.png \
+        /run/punar/mail-account-launch.log "punar-mail-account@$(id -u).service"
+    check_production_mail_surface account-manage org.punar.MailAccounts \
+        "Mail Account Settings" /run/punar/surfaces-mail-accounts.png \
+        /run/punar/mail-accounts-launch.log "punar-mail-accounts@$(id -u).service"
+    check_production_mail_surface open org.punar.Mail \
+        "Punar Mail" /run/punar/surfaces-mail-production.png \
+        /run/punar/mail-production-launch.log "punar-mail@$(id -u).service"
+
+    pim_service="punar-pimd@$(id -u).service"
+    pim_dormant() { ! systemctl is-active --quiet "${pim_service}" 2>/dev/null; }
+    if wait_for 45 pim_dormant; then
+        note "ok   the protected PIM service returned to zero process residency"
+    else
+        note "FAIL the protected PIM service stayed resident after every Mail window closed"
+        FAILED=1
+    fi
+else
+    note "FAIL punarctl is unavailable for protected Mail launch checks"
+    FAILED=1
+fi
+
+# --- group 5e: every application datadir exists BEFORE the shell starts -----
+# A DIRECTORY THAT IS ABSENT AT STARTUP IS INVISIBLE FOR THE WHOLE SESSION, and
+# that is a property of the toolkit rather than of any Punar code. quickshell
+# 0.3.0 src/core/desktopentrymonitor.cpp:46 —
+#
+#     if (!QDir(path).exists()) continue;
+#
+# — inside startMonitoring(), which is private and runs exactly ONCE from the
+# constructor. A datadir missing at that instant is skipped whole (the
+# `continue` also skips addPathAndParents, so not even its parents are watched)
+# and nothing re-arms it: the rescan path never re-monitors, there is no
+# polling, and no QML hook forces one.
+#
+# That is what made the first app a person installed invisible to the
+# freedesktop index for the rest of the session. /var/lib/flatpak does not exist
+# on a fresh device — the image build's flatpak state lives in the root slot and
+# PUNAR-DATA's @var subvolume is mounted over /var and shadows it — so the shell
+# skipped it at boot, flatpak created it minutes later, and nothing was
+# watching. The bar printed the raw app id, and the icon and command-centre
+# search missed it too, because all three read that one model.
+#
+# ASSERTED OVER XDG_DATA_DIRS ITSELF rather than over a list of paths written
+# here, so it covers the datadir somebody adds next. A path in that variable is
+# a promise that applications found there will appear; a promise this desktop
+# can only keep if the directory is present when the shell starts.
+sc_missing=""
+sc_seen=0
+for sc_dir in $(printf '%s' "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" | tr ':' ' '); do
+    [ -n "${sc_dir}" ] || continue
+    sc_seen=$((sc_seen + 1))
+    [ -d "${sc_dir}/applications" ] || sc_missing="${sc_missing} ${sc_dir}/applications"
+done
+if [ "${sc_seen}" -eq 0 ]; then
+    note "FAIL XDG_DATA_DIRS is empty in the session, so no application index exists"
+    FAILED=1
+elif [ -n "${sc_missing}" ]; then
+    note "FAIL application datadirs absent at startup, so anything installed into them stays invisible:${sc_missing}"
+    FAILED=1
+else
+    note "ok   all ${sc_seen} application datadirs exist, so each one is watched"
+fi
+
+# The flatpak export path by name as well as by the sweep above, because it is
+# the one that regressed and the one a person meets first: it is where every
+# catalogue install lands its desktop entry.
+if [ -d /var/lib/flatpak/exports/share/applications ]; then
+    note "ok   the flatpak export directory exists before any app is installed"
+else
+    note "FAIL /var/lib/flatpak/exports/share/applications is absent; the first installed app will be invisible"
+    FAILED=1
+fi
+
+# --- group 5a: typing a workspace number goes there, and renames nothing ----
+# THE OLD BEHAVIOUR WAS DESTRUCTIVE, not merely unhelpful. milestone-2.md §153
+# names the command centre the discoverable surface for go-to-workspace, and
+# spec §13.3 gives 1..9 to workspaces — so "2" means workspace 2. What the
+# shipped surface did with "2": stripped no verb, normalised the digit as a
+# legal PROJECT NAME, failed to match (knownProjects skips unnamed numeric
+# workspaces, which is exactly what a plain workspace 2 is), and offered to
+# CREATE a project called "2" at whatever id happened to be free. Enter on
+# that row renamed an unrelated workspace to "2".
+#
+# Asserted through the live surface rather than the source, because the bug
+# was a fall-through between three functions that each looked right alone.
+ipc commandcenter open >/dev/null 2>&1 || true
+sleep 1
+cc_two="$(ipc commandcenter query 2 | tr -d '\r\n"')"
+case "${cc_two}" in
+    workspace*)
+        note "ok   typing a workspace number offers the workspace (${cc_two})" ;;
+    *)
+        note "FAIL typing 2 offers ${cc_two:-nothing} instead of workspace 2"
+        FAILED=1 ;;
+esac
+case "${cc_two}" in
+    *"New workspace"*|*OpenProject*)
+        note "FAIL typing 2 still offers to create or rename a project: ${cc_two}"
+        FAILED=1 ;;
+    *)
+        note "ok   typing a workspace number offers no rename" ;;
+esac
+cc_switch="$(ipc commandcenter query "switch to 3" | tr -d '\r\n"')"
+case "${cc_switch}" in
+    workspace*)
+        note "ok   a switch verb with a number resolves to that workspace (${cc_switch})" ;;
+    *)
+        note "FAIL 'switch to 3' offers ${cc_switch:-nothing} instead of workspace 3"
+        FAILED=1 ;;
+esac
+ipc commandcenter close >/dev/null 2>&1 || true
+
+# --- group 5b: the shortcut reference is SORTED, not just populated ---------
+# THE SHIPPED SURFACE FAILED THIS AND NOTHING SAID SO. Its own footer read
+# `75 BINDS · 75 ROWS · 0 UNDESCRIBED · 75 UNMAPPED` under one OTHER heading:
+# every bind unclassified, and the digit fold never fired. The cause is that
+# the Lua-native session reports EVERY bind with dispatcher `__lua`, so
+# BindTable's dispatcher-keyed tables — bySection, byIpcTarget and byCommand
+# alike — matched nothing at all.
+#
+# The gate could not have caught it: it asserted that particular rows EXIST
+# (Q/Close window, the guarded Window actions) and rows existed. Row presence
+# is not classification, and the unmapped count the footer prints was not
+# reachable over IPC for anything to read. Both are now.
+#
+# This matters more than a tidy reference. Spec §12.3 names three
+# discoverability mechanisms, D-017 Sect V·03 records that the hold overlay is
+# blocked on an unverified compositor capability and designates the help
+# surface the fallback — so PUNAR+/ is the ONE shipped path by which a person
+# who does not already know a chord can find one. A person who opens it to
+# learn how to reach another workspace must find a WORKSPACES AND PROJECTS
+# heading, not seventy-five rows in an undifferentiated block with that
+# heading absent entirely.
+ipc shortcuts open >/dev/null 2>&1 || true
+sleep 1
+sc_rows="$(ipc shortcuts rows | tr -d '[:space:]"')"
+sc_unmapped="$(ipc shortcuts unmapped | tr -d '[:space:]"')"
+sc_sections="$(ipc shortcuts sections | tr -d '[:space:]"')"
+
+case "${sc_sections}" in
+    *"WORKSPACESANDPROJECTS"*)
+        note "ok   the shortcut reference renders a WORKSPACES AND PROJECTS section" ;;
+    *)
+        note "FAIL the shortcut reference has no WORKSPACES AND PROJECTS section; sections are: ${sc_sections}"
+        FAILED=1 ;;
+esac
+
+# UNMAPPED IS A RATIO, NOT A HEADCOUNT. Pinning zero would go red the day
+# somebody adds a bind before its description is classified, which is a
+# legitimate in-progress state and exactly what OTHER is for. What is never
+# legitimate is the majority of the table falling through: that is the
+# classifier being broken rather than a row being new.
+if [ -n "${sc_rows}" ] && [ "${sc_rows}" -gt 0 ] 2>/dev/null; then
+    if [ "$((sc_unmapped * 2))" -lt "${sc_rows}" ]; then
+        note "ok   the shortcut reference classifies most of its rows (${sc_unmapped} of ${sc_rows} unmapped)"
+    else
+        note "FAIL the shortcut reference left ${sc_unmapped} of ${sc_rows} rows unmapped — the classifier is not matching"
+        FAILED=1
+    fi
+else
+    note "FAIL the shortcut reference reported no rows at all (rows=${sc_rows:-empty})"
+    FAILED=1
+fi
+
+# THE FOLD, asserted as a relation rather than a number. D-017 Sect I·01 says
+# nine workspace binds are one idea; the fold collapses a contiguous digit run
+# into one row, so a working table always has FEWER rows than binds. `75 BINDS
+# · 75 ROWS` is the shape of a fold that never fired.
+sc_binds="$(hyprctl binds -j 2>/dev/null | jq -r '[ .[] | select(.description != "") ] | length' 2>/dev/null || echo "")"
+if [ -n "${sc_binds}" ] && [ "${sc_binds}" -gt 0 ] 2>/dev/null && [ -n "${sc_rows}" ]; then
+    if [ "${sc_rows}" -lt "${sc_binds}" ]; then
+        note "ok   the digit fold fired (${sc_binds} described binds rendered as ${sc_rows} rows)"
+    else
+        note "FAIL the digit fold never fired: ${sc_binds} described binds rendered as ${sc_rows} rows"
+        FAILED=1
+    fi
+else
+    note "ok   no live bind table to compare the fold against; skipping the fold relation"
+fi
+
+# TYPE-TO-FILTER AND THE "NOT TRIED YET" HINT (SMP-1405 WP-02), through the
+# same matches() the surface renders with. Every word must match, so "move
+# mon" keeps only moves between monitors; a filter that matches nothing
+# leaves nothing; and the hint never suggests a surface this session has
+# already opened (group 5 opened the command center above).
+sc_text() { ipc "$@" | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+sc_filter="$(sc_text shortcuts filter 'move mon')"
+case "${sc_filter}" in
+    ''|0*)
+        note "FAIL the shortcut filter 'move mon' kept no rows"
+        FAILED=1 ;;
+    *)
+        if printf '%s\n' "${sc_filter#*: }" | tr '|' '\n' | grep -v -i 'move' | grep -q '[^[:space:]]'; then
+            note "FAIL the shortcut filter 'move mon' kept a row that is not a move: ${sc_filter}"
+            FAILED=1
+        else
+            note "ok   the shortcut filter keeps only matching rows ('move mon' -> ${sc_filter%%:*})"
+        fi ;;
+esac
+if [ "$(sc_text shortcuts filter 'zzqq')" = 0 ]; then
+    note "ok   a shortcut filter that matches nothing leaves no rows"
+else
+    note "FAIL the shortcut filter 'zzqq' kept rows: $(sc_text shortcuts filter 'zzqq')"
+    FAILED=1
+fi
+sc_untried="$(sc_text shortcuts untried)"
+case "${sc_untried}" in
+    *"Open command center"*)
+        note "FAIL the not-tried-yet hint still suggests the command center after it was opened: ${sc_untried}"
+        FAILED=1 ;;
+    *)
+        note "ok   the not-tried-yet hint leaves out what was used (${sc_untried:-empty})" ;;
+esac
+# NOT VACUOUS: an empty hint passes the line above, and so would a surface
+# that failed to load. The terminal's answer is the oracle (terminal parity):
+# the shell writes the family list at its first start, `punarctl keys list
+# --untried` reads the same file, and every row the hint names must be one
+# the terminal also calls untried. Only a person who tried everything gets
+# an empty hint, and then the terminal must agree.
+sc_tried_file="${HOME:-/home/punar}/.local/state/punar/shortcuts-tried.json"
+if jq -e '.version == 1 and (.families | type) == "array" and (.families | length) > 0' \
+        "${sc_tried_file}" >/dev/null 2>&1; then
+    note "ok   the shell wrote the tried-keys file the terminal reads ($(jq '.families | length' "${sc_tried_file}") families)"
+else
+    note "FAIL the shell did not write ${sc_tried_file}, so the terminal cannot give the same hint"
+    FAILED=1
+fi
+sc_cli_untried="$(punarctl --json keys list --untried 2>/dev/null | jq -r '.[].description' 2>/dev/null)"
+if [ -n "${sc_cli_untried}" ] && [ -z "${sc_untried}" ]; then
+    note "FAIL the hint is empty while the terminal still lists untried keys: $(printf '%s' "${sc_cli_untried}" | tr '\n' '|')"
+    FAILED=1
+elif [ -z "${sc_cli_untried}" ] && [ -n "${sc_untried}" ]; then
+    note "FAIL the hint suggests '${sc_untried}' while the terminal lists nothing untried"
+    FAILED=1
+else
+    sc_hint_rows=0
+    sc_hint_bad=""
+    # Entries are "<chord>  <description>", joined by "   ·   ". A folded
+    # row ("Workspace 1…10") stands for its family, so it is matched by the
+    # description it starts with ("Workspace ").
+    sc_hints="$(printf '%s\n' "${sc_untried}" | sed 's/   ·   /\n/g')"
+    while IFS= read -r sc_hint; do
+        sc_label="$(printf '%s' "${sc_hint}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^.*  //')"
+        [ -n "${sc_label}" ] || continue
+        sc_hint_rows=$((sc_hint_rows + 1))
+        sc_base="$(printf '%s' "${sc_label}" | sed 's/[0-9][0-9]*…[0-9][0-9]*$//')"
+        if ! printf '%s\n' "${sc_cli_untried}" \
+                | awk -v b="${sc_base}" 'index($0, b) == 1 { found = 1 } END { exit !found }'; then
+            sc_hint_bad="${sc_hint_bad} '${sc_label}'"
+        fi
+    done <<SC_HINTS
+${sc_hints}
+SC_HINTS
+    if [ -n "${sc_hint_bad}" ]; then
+        note "FAIL the hint suggests keys the terminal does not call untried:${sc_hint_bad}"
+        FAILED=1
+    elif [ "${sc_hint_rows}" -gt 0 ]; then
+        note "ok   the hint's ${sc_hint_rows} suggestion(s) are all untried in the terminal's answer too"
+    else
+        note "ok   every key family was tried, and the terminal agrees"
+    fi
+fi
+
+ipc shortcuts close >/dev/null 2>&1 || true
+
+# --- group 5c: flatpak ACCEPTS the argv punard actually sends ----------------
+# THIS GROUP EXISTS BECAUSE THE UNIT TESTS CANNOT FAIL HERE. punard's flatpak
+# tests drive a shell-script double, and a double ignores options it does not
+# recognise exactly as a stub does and the real program does not. So
+# `install … --or-update --commit=<64 hex>` passed every test in the tree and
+# was rejected outright by flatpak on the person's machine — "error: Unknown
+# option --commit=…" — which meant EVERY catalogue install failed while CI was
+# green. A check that cannot fail is not a check.
+#
+# The real binary is here in the booted image, so ask it. Each argv below is
+# the argv punard builds, aimed at a remote and a ref that do not exist. It is
+# EXPECTED to fail; what is asserted is only that it did not fail in the option
+# parser. That distinction is the whole value: an absent remote, an absent ref
+# and a missing authorisation all produce their own messages, while a bad
+# option produces "Unknown option" and nothing else does. Nothing here touches
+# the network, so the group costs milliseconds and cannot go flaky offline.
+if command -v flatpak >/dev/null 2>&1; then
+    # A ref and remote chosen to be absent everywhere, so resolution fails
+    # before any fetch is attempted.
+    fp_ref="app/org.punar.SurfacesGateAbsent/$(uname -m)/stable"
+    fp_remote="punar-surfaces-gate-absent"
+    fp_commit="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    # Asserts on the OUTPUT, not the exit status, because a correct run here
+    # exits non-zero. `flatpak` prints option-parse failures to stderr.
+    check_flatpak_argv() {
+        cfa_label="$1"; shift
+        # BOUNDED. Every probe below fails on a local lookup — an unconfigured
+        # remote, an absent ref, a missing file — so none of them reaches the
+        # system helper or polkit. `timeout` is here for the day that stops
+        # being true: a probe that blocks on an authorisation dialog would
+        # otherwise eat the whole service start timeout and take every later
+        # group down with it, reporting nothing about the cause.
+        cfa_out="$(timeout 20 flatpak "$@" 2>&1 || true)"
+        case "${cfa_out}" in
+            *"Unknown option"*|*"Unrecognized option"*)
+                note "FAIL flatpak rejects the argv punard sends for ${cfa_label}: ${cfa_out}"
+                FAILED=1 ;;
+            *)
+                note "ok   flatpak accepts the argv punard sends for ${cfa_label}" ;;
+        esac
+    }
+
+    check_flatpak_argv "install" \
+        install --system --noninteractive --or-update "${fp_remote}" "${fp_ref}"
+    check_flatpak_argv "the pinned deploy" \
+        update --system --noninteractive "--commit=${fp_commit}" "${fp_ref}"
+    check_flatpak_argv "reading the deployed commit" \
+        info --system --show-commit org.punar.SurfacesGateAbsent
+    check_flatpak_argv "configuring the remote" \
+        remote-add --system --if-not-exists --from "${fp_remote}" /nonexistent.flatpakrepo
+    check_flatpak_argv "removal" \
+        uninstall --system --noninteractive org.punar.SurfacesGateAbsent
+
+    # The listing punard enumerates with must be accepted AND must succeed:
+    # unlike the others this one names nothing absent, so a non-zero exit is a
+    # real failure. `--columns=application,active` is the pair punard parses.
+    if flatpak list --system --app --columns=application,active >/dev/null 2>&1; then
+        note "ok   flatpak accepts the columns punard parses"
+    else
+        note "FAIL flatpak rejects --columns=application,active, which punard parses"
+        FAILED=1
+    fi
+
+    # THE ABBREVIATION, ASSERTED AGAINST THE REAL PROGRAM. `flatpak list`
+    # ellipsizes the deployment checksum to twelve characters while the
+    # catalogue pins all sixty-four, and comparing the two with `!=` is never
+    # equal — so a successful install verified as WRONG and was uninstalled
+    # again. If a future flatpak stops abbreviating, this line says so rather
+    # than letting the prefix comparison quietly become the only one.
+    fp_first="$(flatpak list --system --app --columns=application,active 2>/dev/null \
+        | head -n 1 | cut -f2)"
+    if [ -z "${fp_first}" ]; then
+        note "ok   nothing is installed, so the listing has no checksum to measure"
+    else
+        fp_len="$(printf '%s' "${fp_first}" | wc -c | tr -d '[:space:]')"
+        if [ "${fp_len}" -eq 12 ] || [ "${fp_len}" -eq 64 ]; then
+            note "ok   the listing checksum is ${fp_len} characters, a form punard reads"
+        else
+            note "FAIL the listing checksum is ${fp_len} characters, which punard does not read"
+            FAILED=1
+        fi
+    fi
+else
+    note "FAIL flatpak is absent, so no catalogue app can be installed"
+    FAILED=1
+fi
+
+# --- group 5d: an install that really happens, with no network --------------
+# Group 5c proves flatpak ACCEPTS punard's argv. It cannot prove what flatpak
+# then SAYS, and the whole of the Evolution failure lived in the answer rather
+# than the question: `flatpak list --columns=…,active` renders the deployment
+# checksum through ellipsize_string() and returns twelve characters, while the
+# catalogue pins sixty-four, so punard's `!=` was unequal for every possible
+# input and deleted apps that had installed perfectly.
+#
+# The relationship punard depends on is therefore asserted against the real
+# program: the listing value is a PREFIX of what `info --show-commit` reports,
+# and the latter is a whole checksum. Nothing here reaches Flathub. A minimal
+# runtime is exported into a temporary repo with flatpak's own build-export,
+# installed from it, measured, and removed — a few seconds, no network, and
+# nothing left behind. It uses --user, so no part of it asks polkit for
+# anything; the rendering code is the same for either installation.
+#
+# This is also the only place anything asserts that `update --commit=<full>`
+# EXITS ZERO when the ref is already at that commit. That is punard's ordinary
+# case — the catalogue is re-pinned against the remote head — and punard treats
+# a non-zero exit as a failed install, so if that verb ever started reporting
+# "nothing to do" as an error, every install in the catalogue would fail.
+if command -v flatpak >/dev/null 2>&1; then
+    fp_arch="$(flatpak --default-arch 2>/dev/null || uname -m)"
+    fp_name=org.punar.SurfacesGateRuntime
+    fp_gate_ref="runtime/${fp_name}/${fp_arch}/1"
+    fp_tmp="$(mktemp -d 2>/dev/null || echo /tmp/punar-fp-gate)"
+    # BOTH DIRECTORIES, and the asymmetry is flatpak's, not a belt-and-braces
+    # habit. `build-export` VALIDATES the tree by checking that `files` and
+    # `metadata` exist — "Build directory %s not initialized" otherwise — but
+    # for a runtime it COMMITS from `usr`. A tree with only `files` therefore
+    # passes validation and then dies on opendir(.../usr), which is exactly
+    # what this group reported on its first real run.
+    mkdir -p "${fp_tmp}/tree/files" "${fp_tmp}/tree/usr"
+    printf 'punar surfaces gate\n' > "${fp_tmp}/tree/usr/marker"
+    printf '[Runtime]\nname=%s\nruntime=%s/%s/1\n' \
+        "${fp_name}" "${fp_name}" "${fp_arch}" > "${fp_tmp}/tree/metadata"
+
+    fp_ready=0
+    if timeout 60 flatpak build-export --runtime "${fp_tmp}/repo" "${fp_tmp}/tree" 1 \
+            >/dev/null 2>"${fp_tmp}/export.err" \
+        && timeout 30 flatpak remote-add --user --no-gpg-verify \
+            punar-surfaces-gate "${fp_tmp}/repo" >/dev/null 2>"${fp_tmp}/add.err" \
+        && timeout 120 flatpak install --user --noninteractive \
+            punar-surfaces-gate "${fp_gate_ref}" \
+            >/dev/null 2>"${fp_tmp}/install.err"; then
+        fp_ready=1
+        note "ok   a flatpak installed from a local repo without touching the network"
+    else
+        note "FAIL could not stage a local flatpak install: $(cat "${fp_tmp}"/*.err 2>/dev/null | tr '\n' ' ')"
+        FAILED=1
+    fi
+
+    if [ "${fp_ready}" -eq 1 ]; then
+        fp_full="$(timeout 20 flatpak info --user --show-commit "${fp_gate_ref}" 2>/dev/null \
+            | tr -d '[:space:]')"
+        fp_full_len="$(printf '%s' "${fp_full}" | wc -c | tr -d '[:space:]')"
+        check_eq "info --show-commit reports a whole checksum" "64" "${fp_full_len}"
+
+        fp_short="$(timeout 20 flatpak list --user --runtime \
+            --columns=application,active 2>/dev/null \
+            | grep -F "${fp_name}" | head -n 1 | cut -f2 | tr -d '[:space:]')"
+        fp_short_len="$(printf '%s' "${fp_short}" | wc -c | tr -d '[:space:]')"
+
+        # THE ASSERTION THE PRODUCT BUG NEEDED. Not "these are equal" — they
+        # are not, and punard believing they were is what deleted a working
+        # Evolution — but "the short one is a prefix of the long one", which is
+        # what makes the app grid's cheap comparison sound and the install's
+        # full comparison necessary.
+        case "${fp_full}" in
+            "${fp_short}"*)
+                note "ok   the listing checksum (${fp_short_len} chars) is a prefix of the whole one" ;;
+            *)
+                note "FAIL the listing checksum ${fp_short} is not a prefix of ${fp_full}"
+                FAILED=1 ;;
+        esac
+        if [ "${fp_short_len}" -lt "${fp_full_len}" ]; then
+            note "ok   the listing abbreviates, so a pin must not be compared against it"
+        else
+            note "ok   the listing is not abbreviated on this flatpak (${fp_short_len} chars)"
+        fi
+
+        # punard runs exactly this after every install, and treats a non-zero
+        # exit as a failed install.
+        if timeout 120 flatpak update --user --noninteractive \
+                "--commit=${fp_full}" "${fp_gate_ref}" >/dev/null 2>&1; then
+            note "ok   deploying the commit already deployed exits zero"
+        else
+            note "FAIL update --commit=<already deployed> exits non-zero, which punard reads as a failed install"
+            FAILED=1
+        fi
+
+        timeout 60 flatpak uninstall --user --noninteractive "${fp_gate_ref}" >/dev/null 2>&1 || true
+    fi
+
+    timeout 30 flatpak remote-delete --user --force punar-surfaces-gate >/dev/null 2>&1 || true
+    rm -rf "${fp_tmp}"
 fi
 
 # --- group 6: the SYSTEM can open a link, not just a human ------------------
@@ -1228,6 +2026,204 @@ fi
 # locked here would fail the rest of the file for a reason that has nothing to
 # do with what those groups test.
 check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state | tr -d '[:space:]"')"
+
+# --- group 8k: signing in with the password keeps the keyring encrypted -----
+#
+# THE WEAKNESS THIS GUARDS AGAINST. A gnome-keyring collection created with an
+# empty password is written as a PLAINTEXT `[keyring]` INI file: every stored
+# secret, browser keys included, readable by anything that can read the home
+# directory, on disk and in every backup. Omarchy's default keyring is exactly
+# that. Punar's sign-in PAM stack (etc/pam.d/greetd) hands the password to
+# pam_gnome_keyring, which unlocks the login keyring with it or creates it
+# encrypted under it.
+#
+# WHAT RUNS. This image's session autologins, and greetd's initial_session
+# skips the whole auth stack, so no sign-in ever ran a password through PAM.
+# The gate signs this account in itself with punar-signin-probe, a harness the
+# development image carries and release-image policy A5 refuses anywhere else:
+# the whole of etc/pam.d/greetd, authenticate through session close, with the
+# password on stdin and the session's keyring daemon already running. Every
+# lane runs that same stack. None stands in for it with the daemon's own
+# `--unlock` any more, which proved the daemon rather than the sign-in, and a
+# lane without the probe fails instead of falling back. Remove the
+# pam_gnome_keyring auth line and no keyring appears, which fails below;
+# release gate A21 checks the PAM lines as well. A mistyped password goes
+# through the stack first and must create no keyring.
+#
+# WHAT IT DOES NOT PROVE. The probe runs the stack as this user, from inside
+# the session; greetd runs it as root, before the session exists. So here
+# pam_unix checks the password through the setuid helper unix_chkpwd, which
+# works only because this account's hash is in /etc/shadow (a userdb account
+# would fail, as the lock screen once did), and pam_gnome_keyring finds the
+# session's daemon at auth, through XDG_RUNTIME_DIR, and unlocks there. Under
+# greetd its auth line finds no daemon and only keeps the password, and its
+# session line hands it over once pam_systemd has named the runtime
+# directory. Both end in the daemon's one login unlock, which is what decides
+# the keyring's format and mode, and that is what this group proves. What it
+# cannot see is greetd's own hand-over at session open: a sign-in whose
+# password never reached the daemon would leave no login keyring, and this
+# probe would still make one. Proving that needs a root sign-in with logind,
+# which this user-session check cannot start. Measured in a container: run as
+# root without a runtime directory, as greetd's worker is, a mistyped
+# password reaches no daemon even under `auth required pam_unix.so`; run as
+# the user, it did, and created a login keyring under the typo, which is
+# what the negative leg below catches.
+#
+# AN ACCOUNT WITH NO LOGIN KEYRING YET, OR A FAIL. The negative leg proves
+# something only where no login keyring exists: a wrong password cannot
+# unlock one that does, so it changes nothing whether or not it reached the
+# daemon, and the leg would pass under the old `required` stack. So a login
+# keyring already here fails the group rather than letting it pass without
+# proving anything: a second run of this check in one boot does (the first
+# run's sign-in made it), and so would anything that made one before the
+# sign-in. Setting the file aside does not help: the daemon keeps the
+# collection it loaded, so, measured in a container, neither the typo nor the
+# correct password then wrote anything. With none before, and none after the
+# typo, the encrypted login keyring checked below is the one this run's
+# correct password created.
+#
+# WAITING FOR THE WRITE, NOT FOR THE NAME. gnome-keyring reserves a new
+# keyring's name by creating the file EMPTY (O_CREAT|O_EXCL, mode 600), then
+# writes the keyring to a temporary file and renames it over the name. A file
+# that merely exists may still be that reservation: the Arch lane read one,
+# found no format in it, and failed a login keyring that was encrypted a
+# moment later. So the wait is for every keyring in the directory to be
+# non-empty, which after the rename means written, and the classifier names an
+# empty file `empty`, which fails like every answer but `encrypted`.
+#
+# The classifier is proven on both formats first, so a check that could not
+# tell them apart fails instead of passing, and every keyring on disk is
+# classified, not only the login one: a second collection created with an
+# empty password is the same leak. tests/desktop/keyring-format-test.sh holds
+# both functions to real gnome-keyring files.
+keyring_format() {
+    if [ ! -e "$1" ]; then
+        echo absent
+    elif [ ! -f "$1" ]; then
+        echo unknown
+    elif [ ! -s "$1" ]; then
+        echo empty
+    else
+        # The binary format's 16-byte magic, then version 0.0 with AES and
+        # MD5, the only one gnome-keyring writes or reads; or the textual
+        # format's first group.
+        case "$(od -An -tx1 -N20 "$1" 2>/dev/null | tr -d ' \n')" in
+            476e6f6d654b657972696e670a0d000a00000000) echo encrypted ;;
+            5b6b657972696e675d*) echo plaintext ;;
+            *) echo unknown ;;
+        esac
+    fi
+}
+
+# Whether every keyring in directory $1 has been written: none is still the
+# empty reservation gnome-keyring makes before it writes a keyring.
+keyrings_written() {
+    for kw_file in "$1"/*.keyring; do
+        [ -f "${kw_file}" ] || continue
+        [ -s "${kw_file}" ] || return 1
+    done
+    return 0
+}
+
+# What a keyring that is not encrypted holds, for a FAIL line: its size and
+# first twenty bytes, which are format markers, never a secret.
+keyring_evidence() {
+    printf 'size %s bytes, begins %s' \
+        "$(stat -c '%s' "$1" 2>/dev/null || echo -)" \
+        "$(od -An -tx1 -N20 "$1" 2>/dev/null | tr -d ' \n')"
+}
+
+keyring_fixtures="$(mktemp -d)"
+printf '[keyring]\ndisplay-name=login\nctime=0\n' > "${keyring_fixtures}/plain.keyring"
+printf 'GnomeKeyring\n\r\000\n\000\000\000\000\000\000\000\005login' \
+    > "${keyring_fixtures}/sealed.keyring"
+: > "${keyring_fixtures}/reserved.keyring"
+check_eq "the keyring check reads a plaintext keyring as plaintext" "plaintext" \
+    "$(keyring_format "${keyring_fixtures}/plain.keyring")"
+check_eq "the keyring check reads an encrypted keyring as encrypted" "encrypted" \
+    "$(keyring_format "${keyring_fixtures}/sealed.keyring")"
+check_eq "the keyring check reads a reserved, unwritten keyring as empty" "empty" \
+    "$(keyring_format "${keyring_fixtures}/reserved.keyring")"
+rm -rf "${keyring_fixtures}"
+
+keyring_dir="${HOME:-/home/$(id -un)}/.local/share/keyrings"
+login_keyring="${keyring_dir}/login.keyring"
+signin_probe=/usr/bin/punar-signin-probe
+if ! command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    note "FAIL gnome-keyring-daemon is not installed, so no login keyring exists to hold a secret"
+    FAILED=1
+elif [ ! -x "${signin_probe}" ]; then
+    note "FAIL ${signin_probe} is not on this image, so no password went through the greetd sign-in stack"
+    FAILED=1
+else
+    keyring_bus="unix:path=${XDG_RUNTIME_DIR}/bus"
+    # The session's daemon, running and locked, as D-Bus activation leaves
+    # it; the stack's auth line finds it and unlocks the login keyring, or
+    # creates it under the password.
+    DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+        timeout 20 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 || true
+    login_before="$(keyring_format "${login_keyring}")"
+    check_eq "no login keyring before the sign-in, so a mistyped password can show whether it makes one (a second run in one boot fails here)" \
+        "absent" "${login_before}"
+    # NEGATIVE LEG FIRST: a mistyped password is refused, and creates no
+    # login keyring. Under `auth required pam_unix.so` the stack ran on into
+    # pam_gnome_keyring with the typo, which created one under whatever had
+    # been typed, and a check of the format alone would have passed it. The
+    # daemon answers the stack before the stack returns, so a keyring the typo
+    # made is on disk by the time the probe exits.
+    login_sum_before="$(sha256sum "${login_keyring}" 2>/dev/null | awk '{print $1}')"
+    typo_result=0
+    printf '%s\n' "${lock_wrong}" \
+        | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+            timeout 30 "${signin_probe}" greetd "$(id -un)" >/dev/null 2>&1 \
+        || typo_result=$?
+    check_eq "the greetd sign-in stack refuses a mistyped password (sign-in probe exit)" \
+        "1" "${typo_result}"
+    check_eq "a mistyped password creates no login keyring and changes none (format, digest)" \
+        "${login_before} ${login_sum_before:-none}" \
+        "$(keyring_format "${login_keyring}") $(sha256sum "${login_keyring}" 2>/dev/null | awk '{print $1}' | grep . || echo none)"
+    signin_result=0
+    signin_errors="$(printf '%s\n' "${lock_password}" \
+        | DBUS_SESSION_BUS_ADDRESS="${keyring_bus}" \
+            timeout 30 "${signin_probe}" greetd "$(id -un)" 2>&1 >/dev/null)" \
+        || signin_result=$?
+    # One line, so the report's FAIL line carries all of it.
+    signin_errors="$(printf '%s' "${signin_errors}" | tr '\n' ' ')"
+    check_eq "the greetd sign-in stack accepts the password (sign-in probe exit${signin_errors:+: ${signin_errors}})" \
+        "0" "${signin_result}"
+    keyring_waited=0
+    while [ "${keyring_waited}" -lt 30 ] \
+            && { [ ! -s "${login_keyring}" ] || ! keyrings_written "${keyring_dir}"; }; do
+        sleep 1
+        keyring_waited=$((keyring_waited + 1))
+    done
+    login_format="$(keyring_format "${login_keyring}")"
+    if [ "${login_format}" = encrypted ]; then
+        note "ok   the password sign-in through the greetd stack left the login keyring encrypted (it was ${login_before} before; written within ${keyring_waited}s)"
+    else
+        note "FAIL the password sign-in through the greetd stack did not leave an encrypted login keyring (expected 'encrypted', got '${login_format}'; it was ${login_before} before; waited ${keyring_waited}s; $(keyring_evidence "${login_keyring}"))"
+        FAILED=1
+    fi
+    if [ -f "${login_keyring}" ]; then
+        check_eq "the login keyring is readable only by its owner (mode)" "600" \
+            "$(stat -c '%a' "${login_keyring}" 2>/dev/null)"
+    fi
+    keyring_plain=""
+    for keyring_file in "${keyring_dir}"/*.keyring; do
+        [ -f "${keyring_file}" ] || continue
+        keyring_class="$(keyring_format "${keyring_file}")"
+        case "${keyring_class}" in
+            encrypted) ;;
+            *) keyring_plain="${keyring_plain} ${keyring_file##*/} (${keyring_class})" ;;
+        esac
+    done
+    if [ -n "${keyring_plain}" ]; then
+        note "FAIL a keyring on disk is not encrypted:${keyring_plain}"
+        FAILED=1
+    else
+        note "ok   every keyring on disk is encrypted"
+    fi
+fi
 
 # --- group 8d: the lock's frosted glass samples the wallpaper ---------------
 #
@@ -1506,7 +2502,7 @@ rm -f "${idle_probe_conf}" "${idle_probe_flag}"
 # service-context answer is kept as an info line: the contrast between the two
 # is the evidence for which subject polkit is judging.
 mkdir -p /run/punar
-rm -f /run/punar/canpower.txt
+rm -f /run/punar/canpower.txt /run/punar/canpower.txt.part
 
 # The facts a failure needs in order to name its own cause, rather than leaving
 # a reader to guess between "no rule", "no authority" and "wrong subject".
@@ -1544,13 +2540,37 @@ cat > /run/punar/canpower.sh <<'POWERPROBE'
 # menu's rows actually run in. logind answers CanReboot/CanPowerOff for the
 # CALLER over the same rules `systemctl reboot` consults, which is how this asks
 # "would the row work" without rebooting the machine to find out.
-exec > /run/punar/canpower.txt 2>&1
+# Written aside and renamed at the end: the checker starts reading as soon
+# as the file has content, and under load it once read only this first line
+# while busctl was still asking logind (every verdict then read as "nothing").
+exec > /run/punar/canpower.txt.part 2>&1
 printf 'session=%s\n' "${XDG_SESSION_ID:-none}"
 for verb in CanReboot CanPowerOff; do
     printf '%s=%s\n' "${verb}" "$(busctl --system call org.freedesktop.login1 \
         /org/freedesktop/login1 org.freedesktop.login1.Manager "${verb}" 2>/dev/null \
         | tr -d '"' | awk '{print $2}')"
 done
+# THE ACTION THE PUNAR RULE ACTUALLY GRANTS, asked by name.
+#
+# CanReboot alone is a weak discriminator: with a single session logind consults
+# org.freedesktop.login1.reboot, whose SHIPPED default is already
+# allow_active=yes, so it answers "yes" on an image carrying no Punar rule at
+# all. Whether the stronger `-multiple-sessions` action is reached depends on
+# another user happening to hold a session — machine state, not a property of
+# the fix. Asking polkit about that action by name removes the dependence: it is
+# auth_admin_keep in the shipped policy (a challenge, pkcheck exit 2) and an
+# explicit NO (exit 1) only because 50-punar-power.rules says so: ending
+# another person's session from the desktop is refused to everyone (F0 review).
+if command -v pkcheck >/dev/null 2>&1; then
+    pkcheck --action-id org.freedesktop.login1.reboot-multiple-sessions \
+        --process "$$" >/dev/null 2>&1
+    printf 'pkcheck_multiple_sessions=%s\n' "$?"
+else
+    printf 'pkcheck_multiple_sessions=absent\n'
+fi
+loginctl list-sessions --no-legend 2>/dev/null | tr -s ' ' | cut -d' ' -f1-4 \
+    | while IFS= read -r row; do printf 'session_row=%s\n' "${row}"; done
+mv /run/punar/canpower.txt.part /run/punar/canpower.txt
 POWERPROBE
 chmod +x /run/punar/canpower.sh
 hyprctl dispatch "hl.dsp.exec_cmd('/run/punar/canpower.sh')" >/dev/null 2>&1
@@ -1586,6 +2606,33 @@ else
                 ;;
         esac
     done
+
+    # The action the Punar rule REFUSES by name. Exit 1 is "not authorized",
+    # the rule's NO; exit 2 is the shipped challenge (the rule is not in
+    # force); exit 0 would mean something granted ending another person's
+    # session from the desktop.
+    pkcheck_result="$(sed -n 's/^pkcheck_multiple_sessions=//p' /run/punar/canpower.txt)"
+    case "${pkcheck_result}" in
+        1)
+            note "ok   polkit refuses reboot-multiple-sessions outright (50-punar-power.rules is in force: nobody ends another person's session from the desktop)"
+            ;;
+        0)
+            note "FAIL polkit authorizes reboot-multiple-sessions for the session: something grants ending another person's session with no fresh password"
+            FAILED=1
+            ;;
+        absent)
+            note "info pkcheck is not installed, so the -multiple-sessions action could not be asked by name; the CanReboot legs above are then only as strong as this machine's session count"
+            ;;
+        "")
+            note "FAIL the in-session probe reported no pkcheck result at all"
+            FAILED=1
+            ;;
+        *)
+            note "FAIL polkit challenges reboot-multiple-sessions (pkcheck exit ${pkcheck_result}) instead of refusing it; the shipped auth_admin_keep default is still in force, so 50-punar-power.rules is absent or is not being applied"
+            FAILED=1
+            ;;
+    esac
+    sed -n 's/^session_row=/# logind session row: /p' /run/punar/canpower.txt >> "${REPORT}"
 fi
 
 # The same question from THIS process, which has no session. Recorded because
@@ -1606,14 +2653,86 @@ else
     FAILED=1
 fi
 
+# --- group 9d: nothing the compositor prints reaches the terminal -----------
+#
+# THE BUG THIS CLOSES was visible to the owner and invisible to every gate: a
+# "terminal like screen" between the greeter and the desktop. greetd connects a
+# session's stdio straight to the VT — that is how the packaged text greeter
+# works at all — so Hyprland's startup log was printed onto tty1. It sat there
+# unseen while the compositor held DRM and was revealed the instant the greeter
+# exited, which is exactly the handover the session scripts clear the terminal
+# to keep black. The clear ran BEFORE the printing, so it tidied away the
+# previous occupant's text and put our own there instead.
+#
+# Asserted on the live process rather than by grepping the script, because what
+# matters is where the descriptors actually point on a running machine.
+hypr_pid="$(pgrep -x Hyprland 2>/dev/null | head -1)"
+if [ -z "${hypr_pid}" ]; then
+    note "FAIL no Hyprland process found; the compositor stdio assertion cannot run"
+    FAILED=1
+else
+    # WHY THIS IS TWO MEASUREMENTS AND NOT ONE. Reading another process's fd
+    # links needs PTRACE_MODE_READ, which the checker — a system service, not a
+    # descendant of the compositor — does not always get even at the same uid.
+    # The first version asserted on the link alone and reported "the assertion
+    # did not run" as a FAILURE, which is a gate failing because it could not
+    # look. So: when the link is readable it is the direct evidence and is
+    # asserted; when it is not, the journal identifier carries the claim,
+    # because output that reached the journal under the session's own tag is
+    # output that did not reach the terminal.
+    hypr_fd_readable=0
+    for hypr_fd in 1 2; do
+        hypr_target="$(readlink "/proc/${hypr_pid}/fd/${hypr_fd}" 2>/dev/null)"
+        [ -n "${hypr_target}" ] && hypr_fd_readable=1
+        case "${hypr_target}" in
+            /dev/tty*|/dev/console|/dev/vc/*)
+                note "FAIL Hyprland fd ${hypr_fd} is ${hypr_target}; its log lands on the terminal and shows through at every session handover"
+                FAILED=1
+                ;;
+            "")
+                note "info Hyprland fd ${hypr_fd} is not readable from this service ($(readlink "/proc/${hypr_pid}/fd/${hypr_fd}" 2>&1 >/dev/null | head -c 80)); the journal leg below carries the claim"
+                ;;
+            *)
+                note "ok   Hyprland fd ${hypr_fd} is ${hypr_target}, not a terminal"
+                ;;
+        esac
+    done
+
+    # The positive evidence, and the only leg that works without ptrace: the
+    # session script execs the compositor through `systemd-cat --identifier=
+    # punar-session`, so entries under that identifier exist if and only if the
+    # compositor's output is going to the journal. An empty journal here means
+    # the redirect is not in force, whatever the file on disk says.
+    hypr_journal="$(journalctl --identifier=punar-session --lines=1 --no-pager 2>/dev/null | grep -c . || true)"
+    if [ "${hypr_journal:-0}" -gt 0 ]; then
+        note "ok   the compositor's output is in the journal under punar-session"
+    elif [ "${hypr_fd_readable}" -eq 1 ]; then
+        note "info no punar-session journal entries yet; the fd assertion above already carries the claim"
+    else
+        note "FAIL neither Hyprland's fds nor the punar-session journal could be read; nothing here proved the compositor is off the terminal"
+        FAILED=1
+    fi
+fi
+
 # --- group 9c: a device policy change needs a password, and then works ------
 #
-# THE PATH THIS COVERS, end to end and as the session user: System Control's
-# Policy view offers an administrator a pin, asks for a reason and a password,
-# and runs /usr/lib/punar/punar-policy-set.sh, which re-authenticates through
-# punar-authd and spends the ticket on `punarctl policy set`. Every piece of
-# that has unit tests; none of them proves the CHAIN, and the chain is where a
-# missing binary, a socket group, a PAM stack or a ticket directory mode fails.
+# THE PATH THIS COVERS, end to end and as the session user: `punarctl policy
+# set` asks for the password on its controlling terminal with echo off, sends
+# it straight to punar-authd's socket (punar-reauth, F0-S4), and spends the
+# ticket on policy.set — which also needs the caller to be a device
+# administrator (F0-S1; the dev user is one, as a product's first account is).
+# System Control runs the same command with --ticket-from-parent: the shell
+# sends the password to punar-authd itself and hands punarctl only a ticket
+# bound to that punarctl and to policy.set; that relay is proven by
+# punar-reauth's, punar-auth's and punarctl's own tests. Every piece has unit
+# tests; none of them proves the CHAIN, and the chain is where a missing
+# binary, a socket group, a PAM stack or a ticket directory mode fails.
+#
+# The terminal is a pseudo-terminal from script(1) (util-linux, or bsdutils on
+# Debian), and the answer arrives two seconds after the command starts:
+# punarctl flushes pending input when it turns echo off, so a line typed
+# before the prompt would be discarded, exactly as at a keyboard. Nothing here
+# is a pipe into punarctl — a pipe is what F0-S4 took away.
 #
 # NEGATIVE LEGS FIRST. If a change went through without a password, the positive
 # leg below would pass on a machine with no authentication at all.
@@ -1631,6 +2750,12 @@ policy_source_kind() {
 policy_effective_value() {
     punarctl policy explain "$1" --json 2>/dev/null \
         | sed -n 's/.*"effective_value":"\([a-z]*\)".*/\1/p'
+}
+# Answer punarctl's password prompt ($1) for a fixed command ($2) on a
+# pseudo-terminal; the command's exit status is the function's.
+policy_by_terminal() {
+    { sleep 2; printf '%s\n' "$1"; sleep 12; } \
+        | script -qec "$2" /dev/null >/dev/null 2>&1
 }
 
 policy_before_kind="$(policy_source_kind "${policy_path}")"
@@ -1654,12 +2779,11 @@ else
             ;;
     esac
 
-    # 2. A wrong password. The helper must stop before punarctl is reached.
-    printf '%s\n' "${policy_wrong}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" "${policy_value}" "gate: wrong password" \
-          >/dev/null 2>&1
+    # 2. A wrong password. punar-authd refuses it before punard is reached.
+    policy_by_terminal "${policy_wrong}" \
+        "punarctl policy set ${policy_path} ${policy_value} --reason 'gate: wrong password'"
     policy_wrong_rc="$?"
-    check_eq "the helper's exit status for a wrong password" "3" "${policy_wrong_rc}"
+    check_eq "punarctl's exit status for a wrong password" "3" "${policy_wrong_rc}"
     check_eq "the winning source after a wrong password" \
         "${policy_before_kind}" "$(policy_source_kind "${policy_path}")"
 
@@ -1667,35 +2791,58 @@ else
     #    nothing about the machine and everything about the provenance, which
     #    is what is being asserted — a gate must not leave a CI VM with its
     #    firewall in a different state than it found it.
-    printf '%s\n' "${policy_password}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" "${policy_value}" "gate: administrator pin" \
-          >/dev/null 2>&1
+    policy_by_terminal "${policy_password}" \
+        "punarctl policy set ${policy_path} ${policy_value} --reason 'gate: administrator pin'"
     policy_set_rc="$?"
-    check_eq "the helper's exit status for a correct password" "0" "${policy_set_rc}"
+    check_eq "punarctl's exit status for a correct password" "0" "${policy_set_rc}"
     check_eq "the winning source after an administrator pin" \
         "device_specific_override" "$(policy_source_kind "${policy_path}")"
     check_eq "the effective value is unchanged by a same-value pin" \
         "${policy_value}" "$(policy_effective_value "${policy_path}")"
 
     # 4. And withdrawing it hands the path back to the layer underneath.
-    printf '%s\n' "${policy_password}" \
-        | /usr/lib/punar/punar-policy-set.sh "${policy_path}" --clear "gate: withdraw" \
-          >/dev/null 2>&1
+    policy_by_terminal "${policy_password}" \
+        "punarctl policy clear ${policy_path} --reason 'gate: withdraw'"
     policy_clear_rc="$?"
-    check_eq "the helper's exit status for a withdrawal" "0" "${policy_clear_rc}"
+    check_eq "punarctl's exit status for a withdrawal" "0" "${policy_clear_rc}"
     check_eq "the winning source after withdrawing the pin" \
         "${policy_before_kind}" "$(policy_source_kind "${policy_path}")"
 
     # 5. THE PROPERTY THE WHOLE DESIGN RESTS ON: a ticket is trustworthy only
     #    because an unprivileged process cannot create one. Counting the files
-    #    would be a vacuous assertion here — this check runs as the session
-    #    user, so a directory it cannot read and an empty directory both count
-    #    zero. Assert the refusal instead, which is the fact that matters.
-    if ls /run/punar-authd/tickets >/dev/null 2>&1; then
+    #    would be vacuous here — this runs as the session user, so an
+    #    unreadable directory and an empty one both count zero.
+    #
+    #    EXISTENCE IS ASSERTED FIRST, and that is the half the earlier version
+    #    was missing: `ls` fails for "no such directory" exactly as it fails for
+    #    "not yours to read", so on a machine where punar-authd had never minted
+    #    anything the leg passed while proving nothing. The successful pin above
+    #    guarantees the directory is there by now, so its absence is a failure.
+    if [ ! -d /run/punar-authd/tickets ]; then
+        note "FAIL /run/punar-authd/tickets does not exist after a successful administrative change; the ticket path was not the one exercised"
+        FAILED=1
+    elif ls /run/punar-authd/tickets >/dev/null 2>&1; then
         note "FAIL the session user can read /run/punar-authd/tickets; a ticket would be forgeable"
         FAILED=1
     else
-        note "ok   the ticket directory is unreadable to the session user"
+        note "ok   the ticket directory exists and is unreadable to the session user"
+    fi
+
+    # LEAVE THE MACHINE AS IT WAS FOUND, whatever happened above. A withdraw leg
+    # that fails partway leaves a device_specific_override pinned on
+    # security.firewall, and every later group that reads policy — m4's merge
+    # assertions, m5's org-precedence ones — then fails for a reason that has
+    # nothing to do with what it is testing. One unconditional attempt, and a
+    # loud line if even that does not take.
+    if [ "$(policy_source_kind "${policy_path}")" = "device_specific_override" ]; then
+        policy_by_terminal "${policy_password}" \
+            "punarctl policy clear ${policy_path} --reason 'gate: cleanup'"
+        if [ "$(policy_source_kind "${policy_path}")" = "device_specific_override" ]; then
+            note "FAIL ${policy_path} is still pinned by this gate; later policy groups will fail for the wrong reason"
+            FAILED=1
+        else
+            note "info the administrator pin was cleaned up after a failed leg"
+        fi
     fi
 fi
 

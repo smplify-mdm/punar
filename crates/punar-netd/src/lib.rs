@@ -8,8 +8,9 @@
 //! [`nft_exec`] is the only installation boundary: bounded direct execution
 //! with fixed argv and a private transaction file. Keeping generation pure
 //! makes the dangerous properties—deny-before-allow, log-before-unlimited-
-//! reject, zone-before-loopback, residual-last, and table-name partitioning—
-//! unit-testable independently of that root-only boundary.
+//! reject, explicit-zone-before-local-infrastructure-reject, residual-last,
+//! and table-name partitioning—unit-testable independently of that root-only
+//! boundary.
 
 #![forbid(unsafe_code)]
 

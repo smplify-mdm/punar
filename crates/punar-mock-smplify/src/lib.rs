@@ -37,7 +37,8 @@
 //! collects questions addressed to it); and the admin surface
 //! `admin.devices`, `admin.device`, `admin.ai_query`, `admin.query_result`,
 //! `admin.fleet` (M10, SPEC section 51), plus the separately permissioned
-//! and audited `admin.recovery_release`, role-gated by [`rbac`].
+//! and audited `admin.recovery_release` and `admin.policy_publish` (which
+//! fixture policy set every `policy.fetch` serves), role-gated by [`rbac`].
 //!
 //! # The law this crate must not break (milestone-10.md law 1)
 //!

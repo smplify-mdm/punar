@@ -38,12 +38,15 @@ while IFS= read -r path; do
         fail "a document cites ${path}, which does not exist"
     fi
 done < <(grep -rhoE 'os/images/mkosi\.profiles/[a-z]+/mkosi\.extra/usr/lib/punar/[A-Za-z0-9_*<>-]+\.sh' \
-            --include='*.md' . 2>/dev/null | sort -u)
+            --include='*.md' --exclude-dir=.git --exclude-dir=.claude --exclude-dir=target . 2>/dev/null | sort -u)
 if [ "${cited}" -eq 0 ]; then
     fail "no concrete check-script path was cited anywhere; this check went vacuous"
 else
     pass "${cited} cited check-script path(s) all exist"
 fi
+
+# (Both scans skip .claude/, where local agent worktrees hold older copies of
+# these documents, and target/.)
 
 # --- 2. The app-catalog size --------------------------------------------------
 catalog_n="$(python3 -c 'import json,sys; print(len(json.load(open("catalog/catalog.json"))["apps"]))')"
@@ -53,7 +56,8 @@ while IFS= read -r n; do
     if [ "${n}" != "${catalog_n}" ]; then
         fail "a document claims ${n} reviewed identities; catalog/catalog.json holds ${catalog_n}"
     fi
-done < <(grep -rhoE '[0-9]+ reviewed (app )?identities' --include='*.md' . 2>/dev/null \
+done < <(grep -rhoE '[0-9]+ reviewed (app )?identities' --include='*.md' \
+            --exclude-dir=.git --exclude-dir=.claude --exclude-dir=target . 2>/dev/null \
             | grep -oE '^[0-9]+' | sort -u)
 if [ "${claimed}" -eq 0 ]; then
     fail "no document states the catalog size; this check went vacuous"

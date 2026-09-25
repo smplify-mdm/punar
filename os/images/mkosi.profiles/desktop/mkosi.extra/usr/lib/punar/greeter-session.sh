@@ -21,6 +21,16 @@ case "${LANG:-}" in
 esac
 export LANG
 
+# The login screen types in the device's keyboard layout (SMP-1405 WP-02):
+# the same renderer the desktop uses writes the greeter user's own runtime
+# file, which punar-greeter.lua reads as data. Nothing here can change the
+# device's layout; only root or a device administrator with a fresh password
+# can (`punarctl keyboard layout set --device`).
+if command -v punarctl >/dev/null 2>&1; then
+    timeout 10 punarctl keyboard layout render \
+        || printf '%s\n' 'punar-greeter: the keyboard layout could not be rendered; typing US English' >&2
+fi
+
 # Aquamarine reads these before Hyprland parses its config. A real GPU stays
 # accelerated; QEMU/virtio without virgl uses the measured software fallback.
 # shellcheck disable=SC1091
@@ -52,4 +62,24 @@ punar_clear_vt() {
 }
 punar_clear_vt
 
-exec Hyprland --config /etc/xdg/hypr/punar-greeter.lua
+# AND NOTHING MAY WRITE TO IT AFTERWARDS, which is the half the clear above was
+# missing. greetd connects a session's stdio straight to the VT — that is how
+# the packaged text greeter works at all — so the compositor's own startup log
+# is printed onto tty1 immediately after this clear runs. It is invisible while
+# the compositor holds DRM and is revealed the instant it exits, which is
+# precisely the handover the clear exists to keep black. Clearing and then
+# printing onto the same terminal removed the previous occupant's text and
+# replaced it with our own.
+#
+# The journal is where a compositor log belongs in any case: `journalctl -t
+# punar-greeter` reads it, and nothing is lost.
+punar_exec_compositor() {
+    if command -v systemd-cat >/dev/null 2>&1; then
+        exec systemd-cat --identifier=punar-greeter --priority=info -- "$@"
+    fi
+    # No systemd-cat: still never the terminal. A session-scoped file keeps the
+    # log reachable on a machine where the journal is not available.
+    exec "$@" >>"${XDG_RUNTIME_DIR:-/tmp}/punar-greeter.log" 2>&1
+}
+
+punar_exec_compositor Hyprland --config /etc/xdg/hypr/punar-greeter.lua

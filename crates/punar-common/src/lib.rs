@@ -45,8 +45,19 @@
 //!   enum in both daemons, and two copies of an authorization boundary are
 //!   two things that can drift.
 //! - [`time`] — RFC 3339 UTC helpers (deliberately no time crate).
+//! - [`trusted_time`] — expiry on the boot clock: a [`trusted_time::BootStamp`]
+//!   is `{boot_id, raw_bt_ms, sleep_ms, suspends}`, and a window lapses at
+//!   reboot and at suspend and never reads the wall clock. Every grant, approval, re-authentication ticket and
+//!   brokered credential decides its expiry here (SMP-1405, phase P0a).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).
+//! - [`keymap`] — the keyboard-layout grammar shared by punard's
+//!   `system.keymap` capability, the session's rendered input file and
+//!   `punarctl keyboard`: syntax, the installed-XKB-list check, and the rule
+//!   that keeps Latin-letter binds working under any layout (SMP-1405 WP-02).
+//! - [`storage`] — kernel-observed storage encryption: whether a path's
+//!   filesystem is backed only by LUKS2 mappings, one implementation shared
+//!   by the PIM credential vault and punard's managed-device posture.
 //! - [`update`] — strict signed release/channel metadata, target admission,
 //!   deterministic privacy-preserving rollout cohorts, and bounded streaming
 //!   SHA-256 verification (update-and-rollback design sections 4–5).
@@ -74,12 +85,16 @@ pub mod device;
 pub mod install;
 pub mod install_answers;
 pub mod ipc;
+pub mod keymap;
 pub mod ledger;
 pub mod network;
 pub mod principal;
 pub mod query;
+pub mod reauth_ticket;
 mod redacted;
+pub mod storage;
 pub mod time;
+pub mod trusted_time;
 pub mod update;
 pub mod webapp;
 

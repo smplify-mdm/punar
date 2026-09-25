@@ -34,6 +34,17 @@ After=punar-agentd.service
 [Service]
 Type=oneshot
 Slice=punar-background.slice
-ExecStart=/usr/bin/punarctl agents scan --trigger timer
+# Quiet: one journal line when the pass changed the detection set, nothing
+# otherwise. Each change is audited by punar-agentd itself, trigger
+# included; the full registry every four minutes said nothing new.
+ExecStart=/usr/bin/punarctl agents scan --trigger timer --quiet
+# This service never sets the clock, and audit times and the deadlines that
+# must outlive a reboot still read it: ProtectClock drops CAP_SYS_TIME and
+# refuses the clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
+ProtectClock=yes
 StandardOutput=journal
 StandardError=journal
+# As punard-reconcile.service: its own lines at notice, systemd's per-run
+# info lines dropped, a failure's lines kept (measured on systemd 261).
+SyslogLevel=notice
+LogLevelMax=notice

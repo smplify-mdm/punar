@@ -1,7 +1,9 @@
 //! Real capability backends (docs/development/milestone-3.md section 4).
 
 pub mod browser_policy;
+pub mod credential_isolation;
 pub mod firewall;
 pub mod hostname;
+pub mod keymap;
 pub mod timezone;
 pub mod update_channel;

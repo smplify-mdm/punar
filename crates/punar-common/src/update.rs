@@ -478,10 +478,16 @@ pub struct UpdateStatusResult {
 /// Strict request payload for `update.check`. A normal check may reuse a
 /// recently verified cache; `force` requires a fresh read from the configured
 /// update source. The caller never supplies an origin or filesystem path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateCheckParams {
     pub force: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// caller (docs/development/update-and-rollback.md section 7.3). Absent is
+    /// legitimate only for uid 0; punard spends it and never forwards, audits
+    /// or returns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Result of one authenticated channel check. `available` names the signed
@@ -508,11 +514,17 @@ pub struct UpdateCheckResult {
 /// Strict request payload for `update.apply`. The version must be the head of
 /// the daemon's verified channel document; callers cannot provide an origin,
 /// path, artifact name, digest, key, slot or command.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateApplyParams {
     pub version: ReleaseVersion,
     pub allow_downgrade: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// caller (docs/development/update-and-rollback.md section 7.3). Absent is
+    /// legitimate only for uid 0; punard spends it and never forwards, audits
+    /// or returns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -524,14 +536,26 @@ pub struct UpdateApplyResult {
     pub requires_reboot: bool,
     pub bytes_written: u64,
     pub verified: bool,
+    /// Raspberry Pi: the candidate boots once, on the next *restart* (punard
+    /// has armed the firmware's one-shot tryboot). Switching off instead
+    /// discards it, and it must be applied again. Absent on UEFI, where the
+    /// new selector is durable across any boot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub one_shot_trial: bool,
 }
 
 /// Strict request payload for `update.rollback`. `None` means the most recent
 /// locally present last-known-good release; no remote release is downloaded.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateRollbackParams {
     pub to_version: Option<ReleaseVersion>,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// caller (docs/development/update-and-rollback.md section 7.3). Absent is
+    /// legitimate only for uid 0; punard spends it and never forwards, audits
+    /// or returns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

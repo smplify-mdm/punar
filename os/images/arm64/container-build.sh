@@ -80,7 +80,8 @@ stage_punar_binaries() {
             cargo build --release --locked \
                 -p punard -p punarctl -p punar-env -p punar-agentd \
                 -p punar-secrets -p punar-netd -p punar-onboard -p punar-auth \
-                -p punar-mock-smplify
+                -p punar-pimd -p punar-smplifyd \
+                -p punar-mock-smplify -p punar-signin-probe
     )
 
     install -d "${extra}/usr/bin"
@@ -96,26 +97,53 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-greet" \
         "${cargo_target}/release/punar-auth" \
         "${cargo_target}/release/punar-authd" \
+        "${cargo_target}/release/punar-pimd" \
+        "${cargo_target}/release/punar-mail-bridge" \
+        "${cargo_target}/release/punar-mail-account-bridge" \
+        "${cargo_target}/release/punar-smplifyd" \
         "${extra}/usr/bin/"
+    install -d "${extra}/usr/lib/punar"
+    install -m 0750 "${cargo_target}/release/punar-pim-launch" \
+        "${extra}/usr/lib/punar/punar-pim-launch"
+    # punard's unprivileged download helper. World-executable because it runs
+    # as punar-fetch@.service's dynamic user, never as root.
+    install -m 0755 "${cargo_target}/release/punar-fetch" \
+        "${extra}/usr/lib/punar/punar-fetch"
+    # The dev/CI harnesses: the mock control plane, and the sign-in probe
+    # surfaces-check.sh group 8k drives the greetd PAM stack with.
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
+        "${cargo_target}/release/punar-signin-probe" \
         "${dev_extra}/usr/bin/"
 
     local binary
     for binary in punard punarctl punar-env punar-agentd punar-secrets \
         punar-netd punar-onboard punar-onboardd punar-greet \
-        punar-auth punar-authd; do
+        punar-auth punar-authd punar-pimd punar-mail-bridge \
+        punar-mail-account-bridge punar-smplifyd; do
         readelf -h "${extra}/usr/bin/${binary}" \
             | grep -q 'Machine:.*AArch64' || {
             echo "error: ${binary} is not an AArch64 binary" >&2
             exit 1
         }
     done
-    readelf -h "${dev_extra}/usr/bin/punar-mock-smplify" \
+    readelf -h "${extra}/usr/lib/punar/punar-pim-launch" \
         | grep -q 'Machine:.*AArch64' || {
-        echo "error: punar-mock-smplify is not an AArch64 binary" >&2
+        echo "error: punar-pim-launch is not an AArch64 binary" >&2
         exit 1
     }
+    readelf -h "${extra}/usr/lib/punar/punar-fetch" \
+        | grep -q 'Machine:.*AArch64' || {
+        echo "error: punar-fetch is not an AArch64 binary" >&2
+        exit 1
+    }
+    for binary in punar-mock-smplify punar-signin-probe; do
+        readelf -h "${dev_extra}/usr/bin/${binary}" \
+            | grep -q 'Machine:.*AArch64' || {
+            echo "error: ${binary} is not an AArch64 binary" >&2
+            exit 1
+        }
+    done
 
     "${REPO_ROOT}/tests/images/check-staged-service-executables.sh" \
         "${extra}" "${dev_extra}" \
@@ -135,7 +163,8 @@ stage_env_base_oci() {
     local pkg_sha256='968d1aa8f579fa1ac59c26afa365454369e13cf29848e6400b50028fed0ffda0'
     local ref='localhost/punar-env-base:m6'
     local max_bytes=$((16 * 1024 * 1024))
-    local created='2026-08-20T00:00:00Z'
+    local created
+    created="$(date -u -d "@${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
 
     install -d "${cache_dir}"
     if ! echo "${pkg_sha256}  ${cache_dir}/${pkg}" \
@@ -244,6 +273,7 @@ reset_staged_architecture_content() {
     rm -rf "${ARM64_DIR}/mkosi.extra/usr/bin" \
            "${ARM64_DIR}/mkosi.extra/usr/share/punar/oci" \
            "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/bin" \
+           "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-pim-launch" \
            "${ARM64_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci" \
            "${ARM64_DIR}/mkosi.profiles/dev/mkosi.extra/usr/bin"
 

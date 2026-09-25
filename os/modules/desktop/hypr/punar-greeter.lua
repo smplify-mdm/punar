@@ -10,11 +10,11 @@ hl.on("hyprland.start", function()
     hl.exec_cmd("qs -p /usr/share/punar/shell/Greeter")
 end)
 
+-- The device's keyboard layout, rendered by greeter-session.sh with the same
+-- `punarctl keyboard layout render` the desktop uses, and read here as data:
+-- the login screen types in the layout the person types in everywhere else.
 hl.config({
-    input = {
-        kb_layout = "us",
-        follow_mouse = 0,
-    },
+    input = require("/etc/xdg/hypr/punar-input.lua").config(),
     cursor = {
         no_hardware_cursors = 2,
         inactive_timeout = 8,

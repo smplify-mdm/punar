@@ -170,7 +170,7 @@ mod tests {
             response["id"] = request["id"].clone();
             *thread_seen.lock().unwrap() = Some(request);
             let mut writer = &stream;
-            writeln!(writer, "{}", response).unwrap();
+            writeln!(writer, "{response}").unwrap();
         });
         (socket, seen)
     }

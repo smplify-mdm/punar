@@ -81,6 +81,7 @@ fn main() -> ExitCode {
     };
     let fixtures = server.fixtures().clone();
     let known_devices = server.device_count();
+    let published = server.published_policy_set();
 
     let handle = match server.spawn() {
         Ok(h) => h,
@@ -91,12 +92,13 @@ fn main() -> ExitCode {
     };
     eprintln!(
         "punar-mock-smplify: dev/CI mock — not a product component; listening on {} \
-         (organization {:?}, domain {}, {} policy file(s), {} known device(s), \
+         (organization {:?}, domain {}, serving policy set {:?} of {}, {} known device(s), \
          {} admin identit(ies) in {} role(s))",
         handle.socket_path().display(),
         fixtures.org_id,
         fixtures.domain,
-        fixtures.policies.len(),
+        published,
+        fixtures.policy_sets.len(),
         known_devices,
         fixtures.admins.admin_count(),
         fixtures.admins.role_count(),

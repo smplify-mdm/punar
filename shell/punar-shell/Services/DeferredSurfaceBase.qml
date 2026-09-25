@@ -83,4 +83,21 @@ Scope {
 
     function showDetection(detectionId: string): void {
     }
+
+    // The window switcher's gesture calls (WindowSwitcher.qml).
+    function ipcStep(gesture: string, steps: string): string {
+        return gesture === "" || steps === "" ? "stale" : "stale";
+    }
+
+    function ipcCommit(gesture: string, steps: string): string {
+        return gesture === "" || steps === "" ? "stale" : "stale";
+    }
+
+    function ipcSelected(): string {
+        return "";
+    }
+
+    // The session menu's PUNAR+SHIFT+E confirmation (SessionMenu.qml).
+    function requestSessionEnd(): void {
+    }
 }

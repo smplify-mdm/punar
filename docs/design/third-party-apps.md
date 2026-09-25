@@ -191,10 +191,12 @@ while you could still act."
 
 `punarctl app doctor` already diffs the running slot against the image manifest
 (app-catalog §1.4). This document makes that diff a **precondition of the OS
-apply path**, not a separate command a user has to know about:
+apply path**, not a separate command a user has to know about. (A person is
+never root on a Punar device; `update apply` asks for their password —
+update-and-rollback.md §7.3.)
 
 ```text
-$ sudo punarctl update apply --reboot
+$ punarctl update apply --reboot
 
 PUNAR · UPDATE · APPLY                                        punar-desktop
 
@@ -318,6 +320,7 @@ Exactly these. Anything else answers with D-014's usage error, exit 2.
 | `punarctl app search <text>` | `apps.catalog` | no | no | no |
 | `punarctl app list [--all]` | `apps.list` | no | no | no |
 | `punarctl app show <id>` | `apps.catalog` | no | no | no |
+| `punarctl app open <id\|desktop-id> [URI…]` | `apps.catalog`, then a local launch | no | no | web apps only |
 | `punarctl app install <id>` | `apps.install` | yes | always | yes |
 | `punarctl app remove <id>` | `apps.remove` | yes | always | no |
 | `punarctl app update [<id>\|--all\|--security]` | `apps.update` | yes | always | yes |
@@ -327,6 +330,24 @@ Exactly these. Anything else answers with D-014's usage error, exit 2.
 | `punarctl app doctor [--forget]` | `apps.doctor` | no | no | no |
 | `punarctl app policy` | `policy.effective` (existing) | no | no | no |
 | `punarctl app request <id> [--image\|--recheck]` | local file write | — | yes | **no** |
+
+`app list --all` adds every visible desktop entry, from the user's
+`$XDG_DATA_HOME` and `$XDG_DATA_DIRS`, with Hidden and NoDisplay entries
+left out. A catalog app's own launcher is its catalog row. The entries the
+launcher leaves out as package helpers are still listed, marked `hidden`
+with their reason from `/usr/share/punar/catalog/launcher-hidden-entries.json`.
+That is the one file the launcher also reads, so the two surfaces differ
+only on purpose. With `--json` it prints `{apps: [{id, name, source:
+catalog|desktop-entry, terminal, hidden_in_launcher, hidden_why?}],
+launcher_hidden_list}`. `launcher_hidden_list` is null, with
+`launcher_hidden_error`, when the file cannot be read, and then nothing is
+marked. `app open` takes either id and, like the launcher, first
+raises a window the app already has (Hyprland's focus dispatcher, matched on
+the same window ids Apps.qml derives). Otherwise a catalog app launches as
+before, and a desktop entry runs its `Exec`, split into argv by the Desktop
+Entry Specification's rules and never through a shell, via
+`punar-terminal-app.sh` when it asks for a terminal. A callback URI always
+goes through the launch path.
 
 `apps.rollback`, `apps.refresh`, `apps.status` and `apps.doctor` are **new**
 methods this document proposes on top of app-catalog §4.1's five. The
@@ -1022,7 +1043,7 @@ SYSTEM
   Channel         stable · metadata 2 h old · rollout 10% · this device is in
   Health          PASS · boot ok · services ok · session ok · capabilities verified
   Rollback        available → 2026.08.19.2 (slot B, blessed 2026-08-25)
-  Next step       Restart to apply, or: sudo punarctl update apply --reboot
+  Next step       Restart to apply
 
 BROWSER
   Engine          chromium 151.0.7922.169-1
@@ -1469,3 +1490,79 @@ the authority and it does not mention any of it.
 ---
 
 *Punar · Field Note design language · `docs/design/third-party-apps.md`*
+
+## Saved passwords, and why this is not a Keychain
+
+Punar ships `gnome-keyring`, which provides `org.freedesktop.secrets`. Without
+it no third-party application on the device can store a credential at all: the
+catalogue's own mail client declares `org.freedesktop.secrets=talk` in its
+Flatpak metadata and re-prompts for its password every launch on an image with
+no provider. That is what shipped, and it is why the package is here.
+
+**It is not an Apple Keychain, and the difference is structural rather than a
+matter of configuration.** Keychain binds an access-control list to each item
+and to a code-signed application identity, and the system asks when a different
+application wants that item. The freedesktop Secret Service protocol has no
+per-application access control of any kind: any process holding the bus name
+can read every item in an unlocked collection. Naming a collection per
+application organises secrets; it does not isolate them.
+
+**The enforcement point Punar actually has is the sandbox, and it acts before
+the secret exists.** A Flatpak reaches `org.freedesktop.secrets` only if its own
+metadata declares it, that declaration is pinned in the catalogue and re-fetched
+by `tools/verify-app-catalog.sh`, and `punard`'s `apps.inspect` renders it on
+the install card as **"Your saved passwords (read and write)"** before a person
+agrees to anything. That is the same shape as macOS's consent prompts — the
+decision is made once, in advance, by the person, with the access named — and
+it is the honest extent of the control. It governs what a catalogue application
+may ask for. It does not constrain a process the person runs from a shell.
+
+Two consequences worth stating plainly rather than discovering:
+
+- An application that has been granted this permission can read secrets saved
+  by a *different* application. Punar cannot prevent that, and no amount of
+  keyring configuration would.
+- The daemon is D-Bus activated and disabled in the user preset
+  (`00-punar-lean.preset`), so nothing runs at idle and it starts the first time
+  an application asks for a secret.
+
+**And the device says so, rather than this paragraph saying so.** The
+`security.credential_isolation` capability observes which provider owns
+`org.freedesktop.secrets` and reports one of `per_application`, `shared` or
+`none`, in the compliance and inventory reports an organization already reads —
+without anyone choosing to disclose it, and without a person having read this
+file.
+
+**Punar reports the fact; the organization decides whether the fact is a
+violation.** The capability has no compiled-in desired state: it takes the
+first-observation seed, so an unenrolled device is compliant with what it is. An
+organization that requires isolation publishes
+`security.credential_isolation: per_application` in its desired-state document,
+and that device then reports non_compliant against its own organization's
+requirement, through the same layer machinery every other capability uses.
+
+The first version of this made `per_application` the compiled-in desired state,
+which put every device into permanent unremediable drift — reconcile never
+converged and a personal machine whose owner had asked for nothing would have
+shown non-compliant forever. A signal that is always on is not a signal; it
+buries the drift that means something. The in-VM M3 exercise caught it, on the
+assertion that a second reconcile is clean.
+
+One property worth keeping: because the desired value is the seed rather than a
+constant, a device whose credential provider LATER disappears drifts against its
+own history and reports it.
+
+It is observed and never applied: the provider is a property of the image, so
+the capability is not mutable and the reconcile loop reports the drift as
+alert-only instead of retrying an apply that could never succeed. An
+unrecognised provider is reported as `shared` rather than given the benefit of
+the doubt, because the two errors are not symmetric — understating isolation
+costs the device nothing, while overstating it tells an organization something
+false about where its credentials are.
+
+Closing the gap properly means Punar brokering credential access itself, with
+per-application policy, rather than shipping a shared bus name — a component to
+build, not a package to install. When it exists it joins the provider list in
+`crates/punard/src/backends/credential_isolation.rs`, the observed value becomes
+`per_application`, and the same report that says non_compliant today starts
+saying compliant without a word of documentation changing.

@@ -355,7 +355,11 @@ struct TestDaemon {
 impl TestDaemon {
     fn start(dir: &Path, control_plane: &Path, agentd_socket: &Path) -> TestDaemon {
         let group_file = dir.join("group");
-        fs::write(&group_file, "root:x:0:\npunar:x:970:\n").unwrap();
+        fs::write(
+            &group_file,
+            "root:x:0:\npunar:x:970:\npunar-admin:x:971:punar\n",
+        )
+        .unwrap();
         let passwd_file = dir.join("passwd");
         fs::write(
             &passwd_file,
@@ -604,6 +608,75 @@ fn owned_listening_unix_paths(owned: &BTreeSet<u64>) -> Vec<String> {
     paths
 }
 
+/// The 1-based lines of `text` that construct a listening socket, outside
+/// `#[cfg(test)]` modules.
+///
+/// A test module is a fixture, not a listener punard constructs:
+/// crate::fetch's tests stand a helper up on a tempdir socket in place of
+/// systemd's punar-fetch.socket. Only a `#[cfg(test)]` *module* is skipped,
+/// from its `mod` line to the closing brace at the same indentation, which
+/// rustfmt guarantees. A `#[cfg(test)]` on anything else, and every line
+/// after a test module, is still scanned. A string line that happens to be
+/// that brace ends the skip early, which scans more, never less.
+fn listener_lines(text: &str) -> Vec<usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.trim() == "#[cfg(test)]" {
+            // Other attributes may stand between the cfg and the item.
+            let mut item = index + 1;
+            while lines
+                .get(item)
+                .is_some_and(|line| line.trim_start().starts_with("#["))
+            {
+                item += 1;
+            }
+            if let Some(module) = lines.get(item) {
+                let head = module.trim_start();
+                let indent = &module[..module.len() - head.len()];
+                let is_module = ["mod ", "pub mod ", "pub(crate) mod ", "pub(super) mod "]
+                    .iter()
+                    .any(|prefix| head.starts_with(prefix))
+                    && head.ends_with('{');
+                let close = format!("{indent}}}");
+                let end = lines[item + 1..]
+                    .iter()
+                    .position(|line| *line == close)
+                    .map(|offset| item + 1 + offset);
+                if let (true, Some(end)) = (is_module, end) {
+                    index = end + 1;
+                    continue;
+                }
+            }
+        }
+        if line.contains("UnixListener::bind") || line.contains("net::listen(") {
+            found.push(index + 1);
+        }
+        index += 1;
+    }
+    found
+}
+
+#[test]
+fn the_listener_scan_skips_test_modules_and_nothing_else() {
+    // A test module is skipped, including a nested one.
+    let tested = "fn run() {}\n#[cfg(test)]\nmod tests {\n    fn f() {\n        rustix::net::listen(&l, 1);\n    }\n}\n";
+    assert!(listener_lines(tested).is_empty());
+    let nested = "mod outer {\n    #[cfg(test)]\n    #[allow(dead_code)]\n    pub(crate) mod testing {\n        fn f() { UnixListener::bind(p); }\n    }\n}\n";
+    assert!(listener_lines(nested).is_empty());
+    // A test-only constant or function near the top does not hide the
+    // production code after it (the regression this scan once had).
+    let constant = "#[cfg(test)]\nconst FIXTURE: &str = \"x\";\n\nfn serve() {\n    UnixListener::bind(p);\n}\n";
+    assert_eq!(listener_lines(constant), [5]);
+    let function = "#[cfg(test)]\nfn helper() {\n}\nfn serve() { rustix::net::listen(&l, 1); }\n";
+    assert_eq!(listener_lines(function), [4]);
+    // Production code after a test module is still scanned.
+    let after = "#[cfg(test)]\nmod tests {\n}\nfn serve() { UnixListener::bind(p); }\n";
+    assert_eq!(listener_lines(after), [4]);
+}
+
 /// The structural assertion behind milestone-10.md law 1.
 ///
 /// Two halves, because either alone is weak. **Source-structural:** the
@@ -646,10 +719,8 @@ fn punard_opens_no_listening_socket_for_admin_traffic() {
                     "{rel} names {forbidden}: punar opens no network surface (law 1)"
                 );
             }
-            for (n, line) in text.lines().enumerate() {
-                if line.contains("UnixListener::bind") || line.contains("net::listen(") {
-                    listener_sites.push(format!("{rel}:{}", n + 1));
-                }
+            for line in listener_lines(&text) {
+                listener_sites.push(format!("{rel}:{line}"));
             }
         }
     }
@@ -1100,4 +1171,58 @@ fn a_down_data_owner_does_not_fail_an_enrollment() {
         .daemon
         .result("enroll.start", Some(json!({ "org_domain": "acme.com" })));
     assert_eq!(result["enrolled"], true, "{result}");
+}
+
+/// Not a query: the live policy refresh, against the same real mock. The
+/// organization publishes another policy set, and the enrolled device
+/// enforces it on its next pass; a set the device must refuse changes
+/// nothing; an explicit "nothing assigned" withdraws the policy and leaves
+/// the device enrolled.
+#[test]
+fn a_policy_published_on_the_real_mock_reaches_the_device_on_its_next_pass() {
+    let rig = rig("policy-refresh");
+    rig.enroll();
+    let publish = |set: &str| {
+        rig.cp
+            .result("admin.policy_publish", json!({"admin": SECOPS, "set": set}))
+    };
+    let status = || rig.daemon.result("enroll.status", None);
+
+    publish("firewall-off");
+    rig.reconcile();
+    assert_eq!(status()["policy"]["last_refresh"]["result"], "applied");
+    assert_eq!(
+        rig.daemon.mock.state(),
+        json!("disabled"),
+        "enforced in that pass"
+    );
+
+    publish("duplicate-id");
+    rig.reconcile();
+    let refused = status();
+    assert_eq!(
+        refused["policy"]["last_refresh"],
+        json!({"at": refused["policy"]["last_refresh"]["at"], "result": "rejected",
+               "reason": "duplicate_policy_id"})
+    );
+    assert_eq!(
+        rig.daemon.mock.state(),
+        json!("disabled"),
+        "the last good set"
+    );
+
+    publish("plus-role");
+    rig.reconcile();
+    assert_eq!(
+        status()["policy_ids"],
+        json!(["eng-baseline-v12", "eng-role-sre"])
+    );
+    assert_eq!(rig.daemon.mock.state(), json!("enabled"));
+
+    publish("none");
+    rig.reconcile();
+    let withdrawn = status();
+    assert_eq!(withdrawn["enrolled"], true);
+    assert_eq!(withdrawn["policy_ids"], json!([]));
+    assert_eq!(withdrawn["policy"]["last_refresh"]["result"], "withdrawn");
 }

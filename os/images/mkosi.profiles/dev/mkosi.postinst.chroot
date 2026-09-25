@@ -3,14 +3,25 @@
 # human account transactionally; this fixed user exists only for CI and demos.
 set -eu
 
-# Dev user for the greetd autologin session. Groups: wheel (admin), video +
-# input (direct DRM/input access safety net; the session normally gets these
-# via logind), uucp (serial ports, dev debugging). Password matches the M0
-# root convention (documented dev convenience, not a secret).
+# Dev user for the greetd autologin session. Groups: wheel (admin), uucp
+# (serial ports, dev debugging). Password matches the M0 root convention
+# (documented dev convenience, not a secret).
+#
+# NOT `input` or `video`, like every account a release image creates
+# (docs/design/onboarding.md section 1.7): the session takes its keyboard,
+# pointer and DRM devices from logind on the active seat. This user is the
+# person the desktop gates act as, so it must hold what a person holds, or a
+# gate proves a device path the product does not have. surfaces-check.sh
+# asserts both absences, and that /dev/input stays closed to it.
 if ! getent group punar >/dev/null 2>&1; then
     groupadd --system punar
 fi
-useradd -m -g punar -G wheel,video,input,uucp -s /bin/bash punar
+# The dev user administers its device (F0-S1), as a product's first account
+# does, so the in-VM gates exercise the role rather than a bypass.
+if ! getent group punar-admin >/dev/null 2>&1; then
+    groupadd --system punar-admin
+fi
+useradd -m -g punar -G wheel,uucp,punar-admin -s /bin/bash punar
 echo 'punar:punar' | chpasswd
 
 # Rootless podman: subordinate uid/gid ranges (spec §76 M1 Podman

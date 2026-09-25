@@ -1,0 +1,17 @@
+[Unit]
+Description=Punar protected Mail account-entry channel for profile UID %i
+Documentation=file:/usr/share/doc/punar/pim-ipc.md
+
+[Socket]
+ListenSequentialPacket=/run/punar-mail-account-control/%i/launch.sock
+FileDescriptorName=launch
+Service=punar-mail-account@%i.service
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Backlog=1
+RemoveOnStop=yes
+
+# Deliberately no [Install]. Only the fixed root broker activates this socket
+# for one verified human desktop request.

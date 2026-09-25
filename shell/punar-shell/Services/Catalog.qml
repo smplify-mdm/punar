@@ -20,7 +20,47 @@ Singleton {
     readonly property string installedIconDir: "/usr/share/punar/catalog/icons"
     readonly property string devIconDir: Quickshell.shellDir + "/../../catalog/icons"
     property var document: ({ "apps": [] })
-    readonly property var entries: root.document && Array.isArray(root.document.apps) ? root.document.apps : []
+
+    /// EVERY APP THIS MACHINE COULD ACTUALLY INSTALL, and only those.
+    ///
+    /// The catalogue file is identical on every architecture — it lists each
+    /// app's per-architecture sources — so an unfiltered read offers apps that
+    /// exist only for another CPU. That is not a hypothetical: Thunderbird has
+    /// no aarch64 build on Flathub, so on an ARM machine this surface offered
+    /// the only mail client in the catalogue and punard refused it the moment
+    /// the person chose it. An offer that cannot be honoured is worse than no
+    /// offer, and the person had already decided by the time they were told.
+    ///
+    /// Fails OPEN when the architecture is not yet known — a shell that has not
+    /// read the summary file yet must show the catalogue, not an empty one, and
+    /// punard's own refusal remains the backstop it always was.
+    readonly property var entries: {
+        var all = root.document && Array.isArray(root.document.apps) ? root.document.apps : [];
+        var arch = Status.architecture;
+        if (arch === "")
+            return all;
+        var usable = [];
+        for (var i = 0; i < all.length; i++) {
+            if (root.buildsFor(all[i], arch))
+                usable.push(all[i]);
+        }
+        return usable;
+    }
+
+    /// Whether any of an entry's sources names this architecture. A source with
+    /// no `architectures` array is treated as architecture-independent, which
+    /// is what a web fallback is.
+    function buildsFor(app: var, arch: string): bool {
+        var sources = app && Array.isArray(app.sources) ? app.sources : [];
+        for (var i = 0; i < sources.length; i++) {
+            var arches = sources[i] && sources[i].architectures;
+            if (!Array.isArray(arches))
+                return true;
+            if (arches.indexOf(arch) >= 0)
+                return true;
+        }
+        return false;
+    }
     readonly property var categoryOrder: ["ai", "developer", "diagnostics", "writing", "files", "security", "browsers", "communication", "media", "graphics", "productivity", "utilities"]
 
     FileView {

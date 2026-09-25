@@ -20,13 +20,15 @@ FIXTURE=/usr/share/punar/fixtures/projects/atlas
 LAUNCH_OUT="${RUN_DIR}/m12-launch.txt"
 PROBE_RESULTS="${ATLAS}/.punar-agent-net-results"
 PROBE_READY="${ATLAS}/.punar-agent-net-ready"
-PROBE_FIFO="${ATLAS}/.punar-agent-net-go"
+PROBE_GATE="${ATLAS}/.punar-agent-net-gate"
+LEGACY_PROBE_FIFO="${ATLAS}/.punar-agent-net-go"
 ISOLATION_RESULTS="${ATLAS}/.punar-agent-isolation-results"
 FAILED=0
 SID=""
 TAG=""
 SCOPE=""
 LAUNCH_PID=""
+GATE_LOCKED=0
 
 : > "${REPORT}"
 note() { printf '%s\n' "$*" >> "${REPORT}"; }
@@ -95,6 +97,11 @@ stop_user_unit() {
 # Invoked indirectly by the EXIT trap.
 # shellcheck disable=SC2329
 cleanup() {
+    if [ "${GATE_LOCKED}" -eq 1 ]; then
+        flock -u 9 >/dev/null 2>&1 || true
+        exec 9>&-
+        GATE_LOCKED=0
+    fi
     [ -n "${SCOPE}" ] && stop_user_unit "${SCOPE}"
     stop_user_unit punar-m12-listener-allow.service
     stop_user_unit punar-m12-listener-deny.service
@@ -167,21 +174,32 @@ check_true "same-user out-of-scope control reaches 127.0.0.7:9418" "$?"
 
 # 4. Launch the real managed-session path with only the dev mock binary
 # substituted. ADR-004's trusted gate now prevents adapter exec until netd has
-# read back the exact kernel rule. The FIFO below schedules the traffic probes
-# deterministically; it is no longer the policy-attachment barrier.
+# read back the exact kernel rule. A lock on a regular project file schedules
+# the traffic probes without putting a FIFO inside the validated project tree.
+# The regular file is safe for the production launcher's closed file-type
+# policy; the held advisory lock is a dev/CI synchronization detail only.
 mkdir -p "${ATLAS}"
 cp "${FIXTURE}/project-environment.yaml" "${FIXTURE}/project-network-policy.json" "${ATLAS}/"
 chown -R punar:punar "${ATLAS}"
-rm -f "${PROBE_FIFO}" "${PROBE_RESULTS}" "${PROBE_READY}" \
+rm -f "${PROBE_GATE}" "${LEGACY_PROBE_FIFO}" \
+    "${PROBE_RESULTS}" "${PROBE_READY}" \
     "${ISOLATION_RESULTS}" "${LAUNCH_OUT}"
-mkfifo -m 600 "${PROBE_FIFO}"
-chown punar:punar "${PROBE_FIFO}"
-as_punar systemd-run --user --pipe --wait --collect --quiet \
-    --unit=punar-m12-launch --setenv=PUNAR_AGENT_MOCK=1 \
-    --setenv=PUNAR_MOCK_AGENT_NET=1 \
-    --setenv=PUNAR_MOCK_AGENT_ISOLATION=1 \
-    -- "${ENV_BIN}" -C "${ATLAS}" agent claude-code \
-    > "${LAUNCH_OUT}" 2>&1 &
+: > "${PROBE_GATE}"
+chmod 600 "${PROBE_GATE}"
+chown punar:punar "${PROBE_GATE}"
+exec 9> "${PROBE_GATE}"
+flock -x 9
+GATE_LOCKED=1
+(
+    # Never leak the root-owned lock into the transient user launch. The
+    # parent shell alone owns it and releases it after the policy checks.
+    exec 9>&-
+    as_punar systemd-run --user --pipe --wait --collect --quiet \
+        --unit=punar-m12-launch --setenv=PUNAR_AGENT_MOCK=1 \
+        --setenv=PUNAR_MOCK_AGENT_NET=1 \
+        --setenv=PUNAR_MOCK_AGENT_ISOLATION=1 \
+        -- "${ENV_BIN}" -C "${ATLAS}" agent claude-code
+) > "${LAUNCH_OUT}" 2>&1 &
 LAUNCH_PID=$!
 
 waited=0
@@ -282,7 +300,9 @@ jq_check "environment JSON reports network enforcement as enforced" \
 # released the adapter: the readiness audit above already proves that event.
 "${CTL}" network apply atlas > "${RUN_DIR}/m12-apply.txt" 2>&1
 check_true "root policy apply succeeds" "$?"
-printf 'go\n' > "${PROBE_FIFO}"
+flock -u 9
+exec 9>&-
+GATE_LOCKED=0
 waited=0
 while [ "${waited}" -lt 30 ] && [ ! -f "${PROBE_READY}" ]; do
     sleep 1
@@ -340,8 +360,21 @@ SIDE_AFTER="$(sha256sum /run/punar-netd/connections.json 2>/dev/null | awk '{pri
 SIDE_MTIME_AFTER="$(stat -c '%y' /run/punar-netd/connections.json 2>/dev/null || echo missing)"
 check_eq "unchanged observation does not rewrite the side file" "${SIDE_BEFORE}" "${SIDE_AFTER}"
 check_eq "unchanged observation preserves the side-file mtime" "${SIDE_MTIME_BEFORE}" "${SIDE_MTIME_AFTER}"
-check_eq "connections side file mode/owner" "640 root punar" \
+# Root only: the side file holds every person's rows (docs/api/ipc.md
+# section 21.3). A person reads their own through network.connections, which
+# says how many of other people's it withheld.
+check_eq "connections side file mode/owner" "600 root punar" \
     "$(stat -c '%a %U %G' /run/punar-netd/connections.json 2>/dev/null || echo absent)"
+if as_punar cat /run/punar-netd/connections.json >/dev/null 2>&1; then
+    note "FAIL the session user can read the device-wide connection side file"
+    FAILED=1
+else
+    note "ok   the session user cannot read the device-wide connection side file"
+fi
+as_punar "${CTL}" privacy connections --json > "${RUN_DIR}/m12-connections-person.json" 2>&1
+jq_check "the session user sees their own managed session and a withheld count" \
+    "${RUN_DIR}/m12-connections-person.json" \
+    "(.withheld | type) == \"number\" and ([.processes[] | select(.session.id == \"${SID}\")] | length >= 1)"
 if systemctl list-timers --all --no-legend 2>/dev/null | grep -q 'punar-netd'; then
     note "FAIL punar-netd installed a polling timer"
     FAILED=1
@@ -380,7 +413,13 @@ jq_check "ledger detail identifies the netd aggregate evidence" "${RUN_DIR}/m12-
 DENY_EVENT="$(jq -r '.event_id // empty' "${RUN_DIR}/m12-audit-deny.json" 2>/dev/null)"
 jq_check "production event joins the immutable audit event id" "${RUN_DIR}/m12-access.json" \
     "[.summary.security_events[] | select(.event_type == \"production_access\" and .event_id == \"${DENY_EVENT}\")] | length >= 1"
-if grep -R -q '9418\|"payload"\|"sni"\|"dns_query"\|"cmdline"' \
+# A port is looked for where one would be recorded — host:port, a "port"
+# field, or the value "9418" — never as four bare digits: event ids,
+# timestamps and sizes in these files are random or monotonic numbers that
+# contain 9418 by coincidence, the same false positive the audit check above
+# already excludes (debian-amd64, run 35944916704, where the identical check
+# passed on the other three lanes of the same commits).
+if grep -R -q -E ':9418([^0-9]|$)|"port"[[:space:]]*:[[:space:]]*"?9418([^0-9]|$)|"9418"|"payload"|"sni"|"dns_query"|"cmdline"' \
         /var/lib/punar/agents/ledger /run/punar-agentd/ledger.json \
         /run/punar-netd/connections.json 2>/dev/null; then
     note "FAIL a privacy-owned file contains a port or forbidden content key"

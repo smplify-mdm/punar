@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "_note": "dev/CI fixture — the Acme baseline plus a rank-3 role policy for SRE engineers, which carries the baseline's own desired state (the role adds a layer, it does not change a value). An enrolled device writes and owns the second file on its next reconcile pass.",
+  "assignment": "policies",
+  "envelopes": [
+    {
+      "envelope": "policy-source-eng-baseline-v12.json",
+      "desired_state": "desired-state-eng-baseline-v12.json"
+    },
+    {
+      "envelope": "policy-source-eng-role-sre.json",
+      "desired_state": "desired-state-eng-baseline-v12.json"
+    }
+  ]
+}

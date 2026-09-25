@@ -1,0 +1,107 @@
+# punar-smplifyd — Punar's built-in Smplify device agent: identity and
+# transport only (docs/development/smplify-enrollment.md). It generates the
+# device key, redeems the enrollment code for a certificate and carries
+# punard's control-plane calls to Smplify over mutually authenticated TLS. It
+# reads five os-release keys and the hostname, applies nothing, decides
+# nothing, and answers only root on its own socket. punard remains the single
+# process that mutates the OS.
+#
+# DORMANT UNTIL ENROLLED (smplify-enrollment.md section 3.4). Nothing enables
+# this unit: punar-smplifyd.socket starts it on punard's first call, which a
+# device that never enrolls never makes. While it holds anything of an
+# identity it stays resident, and an enrolled device's agent is hard to stop:
+# a root `systemctl stop` or `restart` is refused, a kill is restarted, and
+# the ways left (mask then stop, a runtime drop-in, a freeze, deleting the
+# identity) are each noticed by punard within one reconcile pass and audited
+# as enroll.agent agent_unavailable (a drop-in or mask by punard's unit
+# check, crates/punard/src/agent_units.rs). Once it holds nothing it exits
+# with 75, which this unit treats as a clean exit it does not restart, and
+# the socket starts it again on the next call.
+[Unit]
+Description=Punar built-in Smplify device agent (identity and transport)
+Documentation=file:/usr/share/doc/punar/smplify-enrollment.md
+Requires=punar-smplifyd.socket
+After=punar-smplifyd.socket
+# Deliberately neither After= nor Wants=network-online.target: punard's boot
+# reconcile makes the first call on an enrolled device, and an activation
+# that waited for the network would hold punard's start behind it. The agent
+# answers "unreachable" for a link that is not up yet, like any other.
+#
+# Only a dependency may stop it (shutdown, or the socket's own dependency
+# stop); an administrator's stop is refused.
+RefuseManualStop=yes
+# Never stop restarting it: with a start limit, a few kills in a row would
+# leave an enrolled device unmanaged until reboot. An agent that cannot
+# start at all is restarted with a back-off (below), forever, and punard
+# reads it as not_answering.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=punar-smplifyd
+Group=punar-smplifyd
+ExecStart=/usr/bin/punar-smplifyd run
+# No RuntimeDirectory=: the socket and its 0700 directory are the socket
+# unit's. A RuntimeDirectory= here is removed whenever the service stops,
+# taking the socket node with it, and every later call would find no socket
+# at all (measured, smplify-enrollment.md section 3.4).
+#
+# Key, certificate, CA and the token digest: 0600 files in a 0700 directory
+# the service user owns. Nothing else on the device can read the key.
+StateDirectory=punar-smplifyd
+StateDirectoryMode=0700
+UMask=0077
+# Every exit is restarted but the dormant one: 75 is the agent saying it
+# holds no identity (punar_smplifyd::activation::DORMANT_EXIT_STATUS), a
+# clean exit the socket undoes on the next call.
+Restart=always
+# At once after a kill: while a restart is pending systemd counts the
+# service as starting, and a new call to the socket then starts nothing
+# sooner, so a call made meanwhile waits out this delay. 100 ms, growing with
+# each restart to at most 5 s (systemd resets the count only when the agent
+# stops cleanly, as when it goes dormant), keeps a killed agent's next answer
+# inside punard's liveness wait (10 s), and one that cannot start at all from
+# spinning. Measured on systemd 257 with this unit: a call right after a kill
+# was answered in 0.4 s, and after the sixth kill in a row in 5.3 s.
+RestartSec=100ms
+RestartSteps=5
+RestartMaxDelaySec=5s
+RestartPreventExitStatus=75
+SuccessExitStatus=75
+TimeoutStopSec=5s
+
+# Same discipline as punar-pimd@.service: no capabilities, no devices, no
+# home, read-only system, TCP only for the outbound HTTPS hop.
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# No CPUAccounting=: systemd 258 and later account CPU for every unit and
+# warn on each load that the setting is gone; cpu.stat is there either way.
+IOAccounting=yes
+IPAccounting=yes
+StandardOutput=journal
+StandardError=journal
+
+# Deliberately no [Install] and no wants link anywhere: the socket starts
+# this unit, and an enablement would run the agent on every device, enrolled
+# or not. An [Install] section would also let a preset add a link under /etc
+# and fail the release check's byte-exact enabled-units manifest (A9).

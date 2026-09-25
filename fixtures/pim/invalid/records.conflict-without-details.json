@@ -1,0 +1,18 @@
+{
+  "kind": "reminder",
+  "reminder_id": "reminder_A1",
+  "list_id": "list_local1",
+  "title": "Publish the release notes",
+  "notes": null,
+  "due": null,
+  "recurrence_rule": null,
+  "completed_at": null,
+  "sync": {
+    "state": "conflict",
+    "local_revision": 7,
+    "remote_revision": "etag-9",
+    "updated_at": "2026-09-22T19:01:00Z",
+    "last_error": null,
+    "conflict": null
+  }
+}

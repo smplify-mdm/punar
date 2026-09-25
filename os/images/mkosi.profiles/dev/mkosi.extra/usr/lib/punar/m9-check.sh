@@ -68,7 +68,10 @@ CLASSES_FILE=/usr/share/punar/secrets/classes.yaml
 AI_DEFAULTS=/usr/share/punar/policy/ai-defaults.yaml
 APPROVALS_DIR=/var/lib/punar/approvals
 GRANTS_DIR=/var/lib/punar/grants
-SUMMARY_FILE=/run/punard/approvals.json
+# The shell's approval views, one per person (F0 review): the dev user's is
+# SUMMARY_FILE, set once PUNAR_UID is known below.
+SUMMARY_DIR=/run/punard/approvals
+LEGACY_SUMMARY_FILE=/run/punard/approvals.json
 AUDIT_LOG=/var/log/punar/audit.jsonl
 LEDGER_DIR=/var/lib/punar/agents/ledger
 PUNAR_HOME=/home/punar
@@ -171,6 +174,7 @@ os_timezone() {
 
 PUNAR_UID="$(id -u punar 2>/dev/null || echo 1000)"
 PUNAR_RUN="/run/user/${PUNAR_UID}"
+SUMMARY_FILE="${SUMMARY_DIR}/${PUNAR_UID}.json"
 
 WL_DISPLAY=""
 for wl_sock in "${PUNAR_RUN}"/wayland-*; do
@@ -185,6 +189,21 @@ as_punar() {
         "DBUS_SESSION_BUS_ADDRESS=unix:path=${PUNAR_RUN}/bus" \
         "WAYLAND_DISPLAY=${WL_DISPLAY}" \
         "HOME=${PUNAR_HOME}" "$@"
+}
+
+# resolve_approved <approval-id> <output-file> — approve as the console user,
+# who answers punarctl's password prompt on a pseudo-terminal from script(1).
+# F0-S1: approving a change to a device setting needs a device administrator's
+# fresh password (the dev user holds the role, as a first account does), and
+# F0-S4: punarctl reads a password only from a terminal or a socket, never a
+# pipe into it. The answer arrives two seconds in: punarctl first asks without
+# one, is told a password is needed, and flushes pending input as it turns echo
+# off, exactly as at a keyboard. The exit status is punarctl's.
+PUNAR_PASSWORD="punar"
+resolve_approved() {
+    { sleep 2; printf '%s\n' "${PUNAR_PASSWORD}"; sleep 12; } \
+        | as_punar script -qec "${CTL} approvals resolve $1 --decision approved" /dev/null \
+        > "$2" 2>&1
 }
 
 # in_scope <cmd...> — run one command INSIDE the managed agent session's
@@ -408,8 +427,33 @@ jq_check "the envelope carries the siblings, the contract line and the policy ci
         and (.policy.policy_id | length) > 0
         and .execution == null))"
 grep_row "the shell's summary file names the same approval" "${SUMMARY_FILE}" "${APR1}"
-check_eq "the summary file is 0640 root:punar in the ROOT-owned runtime dir (anti-spoofing)" \
-    "640 root punar" "$(stat -c '%a %U %G' "${SUMMARY_FILE}" 2>/dev/null)"
+# F0 review: one view per person, root-owned in a root-owned directory (anti-
+# spoofing), readable by root and by its one person through an ACL entry —
+# never by group punar, which every account is in.
+check_eq "the dev user's view is 0640 root:root (the group bits are the ACL mask)" \
+    "640 root root" "$(stat -c '%a %U %G' "${SUMMARY_FILE}" 2>/dev/null)"
+check_eq "the view directory is 0755 root:root" \
+    "755 root root" "$(stat -c '%a %U %G' "${SUMMARY_DIR}" 2>/dev/null)"
+if runuser -u punar -- cat "${SUMMARY_FILE}" >/dev/null 2>&1; then
+    note "ok   the dev user reads their own view"
+else
+    note "FAIL the dev user cannot read their own view (${SUMMARY_FILE})"
+    FAILED=1
+fi
+# Another account in group punar (it can traverse /run/punard) is refused.
+punar_gid="$(getent group punar | cut -d: -f3)"
+if setpriv --reuid=65534 --regid="${punar_gid:-65534}" --clear-groups cat "${SUMMARY_FILE}" >/dev/null 2>&1; then
+    note "FAIL another member of group punar read the dev user's approval view"
+    FAILED=1
+else
+    note "ok   another member of group punar cannot read the dev user's approval view"
+fi
+if [ -e "${LEGACY_SUMMARY_FILE}" ]; then
+    note "FAIL ${LEGACY_SUMMARY_FILE}, the view every account could read, still exists"
+    FAILED=1
+else
+    note "ok   there is no shared ${LEGACY_SUMMARY_FILE}"
+fi
 
 # --- 4. (c) an AI agent may resolve NOTHING (law 2, spec 60) -----------------
 in_scope "${CTL}" approvals resolve "${APR1}" --decision approved \
@@ -467,9 +511,16 @@ check_eq "dismissal is NOT denial: the request is still pending after the overla
 
 # The human answers. As punar — the routed console user, NOT root — so the
 # routing rule is exercised rather than bypassed by uid 0.
+# Without a password first (F0-S1): no terminal, no socket, so no
+# confirmation; punard refuses the yes and the request stays pending.
 as_punar "${CTL}" approvals resolve "${APR1}" --decision approved \
-    > "${RUN_DIR}/m9-resolve.txt" 2>&1
-check_true "the routed console user resolves the approval (exit 0)" "$?"
+    < /dev/null > "${RUN_DIR}/m9-resolve-nopass.txt" 2>&1
+check_eq "approving a device change with no password is refused (exit 3)" 3 "$?"
+as_punar "${CTL}" --json approvals get "${APR1}" > "${RUN_DIR}/m9-approval-nopass.json" 2>/dev/null
+jq_check "the approval is still pending after a yes with no password" \
+    "${RUN_DIR}/m9-approval-nopass.json" '.approval.status == "pending" and .execution == null'
+resolve_approved "${APR1}" "${RUN_DIR}/m9-resolve.txt"
+check_true "the routed console user resolves the approval with their password (exit 0)" "$?"
 as_punar "${CTL}" --json approvals get "${APR1}" > "${RUN_DIR}/m9-approved.json" 2>/dev/null
 jq_check "status approved, executed exactly once, and the execution names its audit event" \
     "${RUN_DIR}/m9-approved.json" \
@@ -897,8 +948,8 @@ jq_check "the privilege approval carries the reason VERBATIM and the grant windo
      and (.approval.resource | test("^[0-9]+m$"))
      and (.approval.reason | test("m9 exercise"))
      and .approval.requester.type == "human"'
-as_punar "${CTL}" approvals resolve "${APR_PRIV}" --decision approved >/dev/null 2>&1
-check_true "the human resolves their own privilege request (D-012 draws exactly this)" "$?"
+resolve_approved "${APR_PRIV}" "${RUN_DIR}/m9-resolve-privilege.txt"
+check_true "the human resolves their own privilege request with their password (D-012 draws exactly this)" "$?"
 as_punar "${CTL}" --json privilege status > "${RUN_DIR}/m9-grant.json" 2>/dev/null
 jq_check "a grant now exists: one capability, a window, and an id" \
     "${RUN_DIR}/m9-grant.json" \

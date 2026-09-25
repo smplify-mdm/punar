@@ -1,0 +1,6 @@
+{
+  "policy_id": "eng-role-sre",
+  "source_kind": "organization_role_policy",
+  "precedence_rank": 3,
+  "source_name": "Acme SRE Role"
+}

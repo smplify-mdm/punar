@@ -383,6 +383,69 @@ path on the device, so a `punard` that will not start is a device with no
 local administrative authority at all (**§1.6.2**). Neither reverses §1.6.
 Both are conditions on shipping it.
 
+### 1.6.0 The device administrator — a role, not a privilege (F0-S1, 2026-09-25)
+
+*(Added with the first-party apps foundation; owner decision OD-1. The
+posture above is unchanged: nobody holds root, `wheel` or a sudoers rule.)*
+
+**Decision: the first account onboarded is the device's administrator.** It is
+created in the system group **`punar-admin`**, which the image ships empty
+(release gate A25). The role is not a privilege level — it grants no shell, no
+ambient authority and no capability. It is the answer punard needs to a
+question a password cannot answer: *may this person act on the other people
+who use this device?*
+
+A password proves who is asking. Before F0, any person on a device could
+confirm their own password and then change device policy, enroll or unenroll
+the device, or install and roll back what it runs — for everyone. An action
+that **reaches another person** (signals or ends another uid's process or
+session or a system service, reveals another person's data, or changes
+device-wide state such as an `/etc` file or device policy) now needs uid 0 or
+a device administrator who has just confirmed their password; an agent is
+always refused; every attempt is audited (docs/api/ipc.md §23). JIT grants
+(§1.6) still apply on top: an administrator who wants fifteen minutes on the
+firewall asks for them, and only an administrator may.
+
+- **Handing the role on:** `punarctl admins add <name>` and
+  `punarctl admins remove <name>`, confirmed with the administrator's password.
+  **The last administrator can never be removed.** `punarctl admins list`
+  shows who administers the device, to anyone on it.
+- **Where it lives:** the account record's `groups` array (§1.9) and the
+  runtime edge `/run/userdb/<user>:punar-admin.membership` the materializer
+  publishes from it. A revocation takes effect at the person's next action,
+  not at their next login.
+- **Upgrades never leave a device without one.** On every boot, before the
+  account is published, the materializer gives the **device owner** — the
+  account `completed.json` records as having completed first run, which is the
+  first account by construction — the role *when no account a person can
+  sign in as holds it*. A device set up before the role existed therefore
+  comes out of its first boot on the new image with its owner as
+  administrator. "Can sign in as" means an account whose user record boot
+  publishes; today that is the owner alone, so a role handed to an account
+  boot does not publish does not count, and the owner is given it back rather
+  than the device coming up with no administrator anyone can use (F0 review).
+  punard's last-administrator rule counts the same way: `admins remove`
+  refuses to leave only administrators nobody can sign in as.
+  *Decided from the code:* onboarding creates exactly one account and refuses
+  a second first run, and nothing else in Punar creates accounts today, so a
+  device with several accounts has no record that ranks them. Should one
+  exist, the account `completed.json` names is still the one granted — never
+  the most recent sign-in and never the lowest uid — and the others wait for
+  an administrator's `punarctl admins add`. An image without the
+  `punar-admin` group (an older release after a rollback) changes nothing.
+  Proven by `an_upgraded_device_gives_its_owner_the_role_when_nobody_usable_holds_it` and the
+  WP-01 upgrade tests in `crates/punar-onboard/src/identity.rs`.
+- **An enrolled device's organization may decide instead**, through
+  `spec.security.localAdmin.administrators`: pin the list, or turn local
+  administration off. Leaving an enrollment the organization made removable
+  always follows the device's own list.
+
+**Why the first account, and not "nobody until someone asks".** A device on
+which nobody may change device policy, updates or enrollment is a device its
+owner cannot keep current — the §1.6.2 lockout, made permanent. The first
+person to set up a device owns it; the role follows ownership, and the
+organization can override it on a device it manages.
+
 ### 1.6.1 The first hour — and the self-service set that keeps JIT from becoming a prompt storm
 
 *(Added 2026-08-26 after a hard-nosed walk of a real first hour. §1.6's
@@ -539,8 +602,8 @@ The full posture of the first account:
 |---|---|---|
 | `uid` | **allocated once from a persistent on-disk map** (`/var/lib/punar/identity/uid-map.json`), lowest free ≥ 1000; normally 1000, and nothing may assume it | Below 60000 — see §6.3. Allocated-then-permanent, and **never derived** from the username, an email or a directory object id: `platform-sso.md` §6 rules 1 and 2, which this row exists to satisfy. Deriving a uid from a name is the one-way door that makes later directory binding irreversible |
 | primary group | `<username>` (per-user group) | Standard, and it makes `0700` homes and `umask 002` both safe |
-| supplementary groups | `punar`, `video`, `input` | `punar` = may ask (above). `video`/`input` are the direct-DRM safety net the dev image already grants; logind normally supplies them and they are belt-and-braces |
-| **not** in | `wheel`, `uucp`, `docker`, `storage` | `wheel` per §1.6. `uucp` was a dev-image debugging convenience and does not ship. The others are the classic "group that is silently root" set |
+| supplementary groups | `punar`, and `punar-admin` for the first account | `punar` = may ask (above). `punar-admin` = may act on everyone on this device (§1.6.0): a role punard checks, not a privilege — it grants no shell and no capability. Nothing else: see the next row |
+| **not** in | `input`, `video`, `wheel`, `uucp`, `docker`, `storage` | `input` is a keylogger's whole requirement: any process running as the person could open every `/dev/input/event*` node and read every keystroke, the lock screen's passphrase included. `video` is raw DRM and framebuffer access, which reads the screen. The session needs neither: logind hands the compositor its keyboard, pointer and DRM devices through `TakeDevice` on the active seat, and its `uaccess` ACLs follow the seat, so they end when the session does. Earlier images granted both as a "belt-and-braces" safety net; that was a standing weakness for a convenience nobody used, and `punar-identity-materialize` now takes both away from an existing account on its next boot, in the stored record and in `/run/userdb`. The greeter's system account holds neither either. Release gate A16 refuses an image in which the greeter, `_greetd`, the configured greetd user or any account in the human uid range (1000–59999) of `/etc/passwd` is in either group, through `/etc/group`, `/etc/gshadow` or a sysusers.d line, and any userdb membership, user record or group record in the image that puts anyone in either; it also requires the greeter's PAM session to run `pam_systemd`, since without `video` the greeter draws only because logind gives it the seat. Accounts created by onboarding live in `/var` and are not in the image, so the gate cannot see them: for those the guarantee is `materialize` above, which never publishes either group whatever a record says. `wheel` per §1.6. `uucp` was a dev-image debugging convenience and does not ship. `docker` and `storage` are the classic "group that is silently root" set |
 | shell | `/bin/bash` | The substrate's shell; §65 requires that the user *not need* it, not that it be absent |
 | home | `/home/<username>`, `0700` | On `/var` per ADR-003 |
 | `subuid`/`subgid` | `100000:65536` | Rootless podman, as the dev image already does — but for the created user, not for `punar` |
@@ -796,7 +859,7 @@ rather than per-stage:
 | Field | Writes | Through | If skipped |
 |---|---|---|---|
 | Language | *nothing in v1* | — | `English (US)`, the only entry, with M13 §5.2's dashed `OTHER LOCALES · NOT IN THIS BUILD` row and its reason |
-| Keyboard | keymap desired state on `/var`, materialised to Hyprland drop-in + `/etc/vconsole.conf` | `punarctl capabilities set system.keymap <layout>` *(dashed — M13 §5.3)* | `us` |
+| Keyboard | keymap desired state on `/var`, materialised to `/etc/vconsole.conf`; each session renders it as data for the compositor | `system.keymap` **(shipped, SMP-1405 WP-02)**: the first-run form's choice is sent with the account and punar-onboardd makes it the device's through punard, as root, because the new password was typed in it; afterwards the device's layout is a device administrator's (`punarctl keyboard layout set --device <layout>`, with their password, audited), a person's own is theirs (`punarctl keyboard layout set <layout>`), and the login screen's choice is the one session's it signs in to | `us`, or the installer's choice from the install seed on a device nobody has signed in to yet (an updated device keeps what it types today, so no existing password moves under a new layout) |
 | Timezone | timezone desired state on `/var`, materialised to `/etc/localtime` | `punarctl capabilities set time.timezone <tz>` **(shipped)** | `UTC`, and the clock says `UTC` rather than pretending |
 | **Higher contrast** | `~/.config/punar/theme.json` | `punarctl theme set contrast` | off — the `paper` default |
 
@@ -1301,7 +1364,7 @@ document and it costs sixteen bytes.
 | `identity` | `null` | `{provider, issuer, subject, upn, boundAt, lastVerifiedAt}` — where `subject` is the IdP's immutable subject claim (OIDC `sub`, Entra `oid`), **never the email**, which is a display attribute that changes |
 | `realNameSource` | `"local"` | `"directory"` once bound — so the first directory sync neither silently overwrites what the person typed nor silently refuses to update it. The ambiguity is resolved by a field that exists before the ambiguity does |
 | `auth.kinds` | `["password"]` | `["password", "oidc"]` — the authenticator is a *list*, so binding **adds** a kind rather than replacing the record's notion of how one signs in |
-| `groups.local[]` | `["punar", "video", "input"]` | unchanged |
+| `groups.local[]` | `["punar"]` | unchanged |
 | `groups.fromDirectory[]` | `[]` | populated by sync, and **never merged into `groups.local`** — so unbinding is a truncation, not a diff |
 | `homeDirectory` | `"/home/alice"` | an explicit field from day one, never derived from the username, because `alice.nguyen@acme.com` is not a path |
 | `uidSource` | `"local"` | `"directory"` — see §6.3 |

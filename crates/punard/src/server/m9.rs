@@ -24,6 +24,12 @@ pub(super) enum MutationAuthority {
     Root,
     /// A live section 48 grant for exactly this capability.
     Grant { grant_id: String },
+    /// A device administrator who has just confirmed their password, on a
+    /// capability they may set directly
+    /// ([`crate::authz::ADMINISTRATOR_DIRECT`]: the keyboard layout; SMP-1405
+    /// WP-02, F0, contract section 23.2). The ticket was spent before this
+    /// was returned.
+    DeviceAdministrator,
     /// AI authority policy said `allow`. **No shipped M9 policy does** —
     /// the personal defaults are `approval_required` or `deny` across the
     /// board — but the value is part of SPEC section 20 and is implemented
@@ -55,6 +61,17 @@ pub(super) fn contract_line(kind: ApprovalKind, capability: &str, resource: &str
         ApprovalKind::CredentialRequest => format!("RequestCredential({resource})"),
         ApprovalKind::PrivilegeRequest => format!("RequestPrivilege({capability}, {resource})"),
     }
+}
+
+/// How a person makes a capability change an agent was refused: a grant for
+/// that one capability, then the typed call. Never `sudo` — no account on a
+/// Punar device holds it (docs/design/onboarding.md section 1.6) — and never
+/// from inside the agent's scope, where `privilege.request` is refused too.
+fn person_makes_the_change(id: &str, state_hint: &str) -> String {
+    format!(
+        "punarctl privilege request --capability {id} --reason \"<why>\", then \
+         punarctl capabilities set {id} {state_hint}"
+    )
 }
 
 /// Everything needed to raise one approval. Built by the caller that knows
@@ -163,16 +180,35 @@ impl Inner {
         }
     }
 
+    /// "Now" on the boot clock, for every M9 expiry decision (SMP-1405).
+    /// `None` when the clock cannot be read, and `None` authorizes nothing:
+    /// no grant is live, no approval is answerable, and nothing that
+    /// expires can be created.
+    pub(super) fn trusted_now(&self) -> Option<BootStamp> {
+        self.cfg.trusted_clock.now()
+    }
+
     /// Lazy expiry (contract section 14.4), for approvals **and** grants.
     ///
     /// Runs on every read, at resolve, at consume, and on every reconcile
     /// pass — no timer anywhere (SPEC section 6.3). Each lapse is audited
     /// once, attributed to the daemon: nobody *did* this, time passed.
+    ///
+    /// Skipped, loudly, when the boot clock cannot be read: a sweep writes
+    /// terminal state, and expiring every record over a transient read
+    /// failure would be destruction, not caution. Nothing is live meanwhile,
+    /// because every decision takes the same unreadable `now`.
     pub(super) fn sweep_approvals(&self, store: &mut ApprovalStore) {
-        let now = approvals::now_secs();
+        let Some(now) = self.trusted_now() else {
+            eprintln!(
+                "punard: the boot clock could not be read; no grant or approval is live \
+                 until it can, and nothing was swept"
+            );
+            return;
+        };
         let daemon = AuditActor::daemon();
         let mut changed = false;
-        for env in store.sweep(now) {
+        for env in store.sweep(&now) {
             changed = true;
             self.log_audit(self.m9_event(
                 &daemon,
@@ -183,7 +219,7 @@ impl Inner {
                 vec![env.policy.policy_id.clone()],
             ));
         }
-        for grant in store.sweep_grants(now) {
+        for grant in store.sweep_grants(&now) {
             changed = true;
             self.log_audit(self.m9_event(
                 &daemon,
@@ -199,16 +235,68 @@ impl Inner {
         }
     }
 
-    /// Rewrite `/run/punard/approvals.json`. Best-effort and non-fatal: the
-    /// file is a display view, and the socket is the authority (contract
-    /// section 15).
+    /// Rewrite every person's view in `/run/punard/approvals/`. Best-effort
+    /// and non-fatal: the files are display views, and the socket is the
+    /// authority (contract section 15).
     pub(super) fn publish_approvals_summary(&self, store: &ApprovalStore) {
-        if let Err(e) = store.publish_summary(approvals::now_secs()) {
+        let readers = self.approval_readers(store);
+        if let Err(e) = store.publish_summary(self.trusted_now().as_ref(), &readers) {
             eprintln!(
-                "punard: could not write {}: {e}",
-                self.cfg.approvals_file.display()
+                "punard: could not write an approval view in {}: {e}",
+                self.cfg.approvals_dir.display()
             );
         }
+    }
+
+    /// Everyone a view is published for: every person account on the
+    /// device, the console user approvals are routed to, and anyone who
+    /// holds a grant — each with every name an approval may be routed to
+    /// them by.
+    fn approval_readers(&self, store: &ApprovalStore) -> Vec<SummaryReader> {
+        let sources = self.admin_sources();
+        let mut uids: Vec<u32> = sources
+            .accounts()
+            .into_iter()
+            .filter(|account| account.uid != u32::MAX)
+            .map(|account| account.uid)
+            .collect();
+        uids.push(self.cfg.console_uid);
+        uids.extend(
+            store
+                .live_grants(None, self.trusted_now().as_ref())
+                .into_iter()
+                .map(|grant| grant.uid),
+        );
+        uids.sort_unstable();
+        uids.dedup();
+        uids.into_iter()
+            .filter(|uid| *uid != 0)
+            .map(|uid| {
+                let mut names = vec![format!("uid:{uid}")];
+                if let Some(name) =
+                    lookup_username(&self.cfg.passwd_file, uid).or_else(|| sources.username_of(uid))
+                {
+                    names.push(name);
+                }
+                SummaryReader { uid, names }
+            })
+            .collect()
+    }
+
+    /// Whether the approval `env` is `peer`'s to see: routed to them, or
+    /// root, who sees every one (F0 review — a stranger with socket access
+    /// used to read every person's approvals).
+    pub(super) fn approval_is_visible_to(&self, peer: &Peer, env: &ApprovalEnvelope) -> bool {
+        peer.uid == 0 || self.peer_names(peer).contains(&env.approval.user)
+    }
+
+    /// Every name an approval may be routed to `peer` by.
+    fn peer_names(&self, peer: &Peer) -> Vec<String> {
+        let mut names = vec![format!("uid:{}", peer.uid), self.peer_user(peer)];
+        if let Some(name) = self.admin_sources().username_of(peer.uid) {
+            names.push(name);
+        }
+        names
     }
 
     /// Raise an approval: validate, bound, persist, audit, publish.
@@ -236,9 +324,16 @@ impl Inner {
             )
         })?;
 
-        let now = approvals::now_secs();
-        let device_pending = store.pending_count(now);
-        let mine = store.pending_for_requester(&spec.requester.id, now);
+        // The window opens now, on the boot clock. A device that cannot read
+        // that clock raises nothing: an approval whose expiry cannot be
+        // judged would be either immortal or born dead.
+        let Some(opened) = self.trusted_now() else {
+            return Err(
+                self.internal("the boot clock could not be read, so no approval was raised")
+            );
+        };
+        let device_pending = store.pending_count(Some(&opened));
+        let mine = store.pending_for_requester(&spec.requester.id, Some(&opened));
         if device_pending >= MAX_PENDING_APPROVALS || mine >= MAX_PENDING_PER_REQUESTER {
             self.log_audit(self.m9_event(
                 actor,
@@ -288,7 +383,8 @@ impl Inner {
                 reason: spec.reason,
                 risk: spec.risk,
                 status: ApprovalStatus::Pending,
-                expires_at: approvals::rfc3339_in(ttl),
+                // For people to read; the window below decides.
+                expires_at: approvals::display_expiry_in(ttl),
             },
             kind: spec.kind,
             created_at: utc_now_rfc3339(),
@@ -300,6 +396,7 @@ impl Inner {
             resolved_by: None,
             consumed_at: None,
             execution: None,
+            lifetime: Some(BootWindow::of_secs(opened, ttl)),
         };
         store
             .put(envelope.clone())
@@ -326,6 +423,10 @@ impl Inner {
     /// 2. otherwise HUMAN PATH:
     ///      uid == 0                                 -> allow (unchanged)
     ///      live grant for (uid, capability)          -> allow (new)
+    ///      administrator-direct capability (the
+    ///        keyboard layout): not org-pinned, then
+    ///        a device administrator, then a fresh
+    ///        ticket for this call and process      -> allow (WP-02, F0)
     ///      otherwise                                 -> deny  (unchanged)
     /// ```
     ///
@@ -348,25 +449,63 @@ impl Inner {
         if let Some(session) = actor.agent_session_id.clone() {
             return self.authorize_agent_capability_set(actor, &session, id, params, &state_hint);
         }
+        // A process whose cgroup names an agent scope that could not be
+        // attributed to a session (a malformed or forged scope name) is an
+        // agent all the same (contract section 23.1): it gets neither root's
+        // path nor a person's grant, at any uid.
+        if let Some(who) = self.agent_shaped_peer(peer, actor) {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                actor,
+                "capabilities.set",
+                id,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "An AI agent may not change {id} this way.\n\
+                     Requested by: {who}\n\
+                     Policy: personal defaults — a process inside an agent scope is \
+                     an agent, whatever its uid, and its changes go through AI policy \
+                     and a person's approval (SPEC section 60).\n\
+                     Next step: run `punarctl capabilities set {id} {state_hint}` \
+                     yourself, outside the agent."
+                ),
+                json!({ "decision": "deny", "capability": id, "reason": "agent_scope" }),
+            ));
+        }
         if peer.uid == 0 {
             return Ok(MutationAuthority::Root);
         }
 
         // Section 48: a live, unexpired, unrevoked grant for exactly this
-        // capability makes a non-root peer's mutation legitimate.
-        {
+        // capability makes a non-root peer's mutation legitimate — while its
+        // holder is still a device administrator (F0-S1). A grant is minted
+        // only for an administrator who confirmed their password, and every
+        // registered capability is device-wide state; taking the role away
+        // must take the grant's effect away with it, not leave a window of
+        // up to an hour open behind a revocation.
+        let live_grant = {
             let mut store = self.approvals.lock().unwrap();
             self.sweep_approvals(&mut store);
-            if let Some(grant) = store.live_grant(peer.uid, id, approvals::now_secs()) {
-                return Ok(MutationAuthority::Grant {
-                    grant_id: grant.grant_id.clone(),
-                });
-            }
+            store
+                .live_grant(peer.uid, id, self.trusted_now().as_ref())
+                .map(|grant| grant.grant_id.clone())
+        };
+        if let Some(grant_id) = live_grant {
+            self.require_device_admin(
+                peer,
+                actor,
+                "capabilities.set",
+                id,
+                "Changing a device setting",
+                RosterScope::Governed,
+            )?;
+            return Ok(MutationAuthority::Grant { grant_id });
         }
 
-        // The unchanged M3/M5 denial. M5 amendment (contract section 5.4):
-        // when the target path is org-pinned, the citation names the pinning
-        // source — "personal defaults" would be a false citation there.
+        // Whether an organization pins this path: the one thing about the
+        // request below that does not depend on who is asking.
         let pinning = {
             let doc = self.effective.lock().unwrap();
             doc.get(id).and_then(|entry| {
@@ -378,6 +517,38 @@ impl Inner {
                 })
             })
         };
+
+        // SMP-1405 WP-02 and F0: the device's keyboard layout is
+        // /etc/vconsole.conf, what the login screen, the console and every
+        // account that has not chosen its own layout type in. That is
+        // device-wide state (contract section 23.1), so a person sets it as a
+        // device administrator with a fresh password, directly, without a
+        // privilege request. In F0's order: an organization's pin first (no
+        // password is spent on a value that would not take effect), then the
+        // role, then the ticket. A person's own layout never reaches punard.
+        if crate::authz::ADMINISTRATOR_DIRECT.contains(&id) {
+            if let Some((source_name, policy_id)) = &pinning {
+                let mut event = AuditEvent::denial(&self.device_id, actor, "capabilities.set", id);
+                event.policy_ids = vec![policy_id.clone()];
+                self.log_audit(event);
+                return Err(IpcError::denied_org_pinned(id, source_name, policy_id));
+            }
+            self.admit_device_change(
+                peer,
+                actor,
+                "capabilities.set",
+                "capabilities.set",
+                id,
+                params.ticket.as_deref(),
+                "Changing this device's keyboard layout",
+                &format!("punarctl keyboard layout set --device {state_hint}"),
+            )?;
+            return Ok(MutationAuthority::DeviceAdministrator);
+        }
+
+        // The unchanged M3/M5 denial. M5 amendment (contract section 5.4):
+        // when the target path is org-pinned, the citation names the pinning
+        // source — "personal defaults" would be a false citation there.
         let mut denial_event = AuditEvent::denial(&self.device_id, actor, "capabilities.set", id);
         if let Some((_, policy_id)) = &pinning {
             denial_event.policy_ids = vec![policy_id.clone()];
@@ -386,10 +557,9 @@ impl Inner {
         if let Some((source_name, policy_id)) = pinning {
             return Err(IpcError::denied_org_pinned(id, &source_name, &policy_id));
         }
-        Err(IpcError::denied_needs_root(
+        Err(IpcError::denied_needs_grant(
             id,
-            Some(id),
-            &format!("sudo punarctl capabilities set {id} {state_hint}"),
+            &format!("punarctl capabilities set {id} {state_hint}"),
         ))
     }
 
@@ -422,8 +592,9 @@ impl Inner {
                      Policy: personal defaults — the AI authority document is \
                      {}.\n\
                      Next step: add a rule under ai.agents.default.host, or make the \
-                     change yourself: sudo punarctl capabilities set {id} {state_hint}",
-                    punar_common::aipolicy::AI_DEFAULTS_FILE
+                     change yourself, outside the agent: {}",
+                    punar_common::aipolicy::AI_DEFAULTS_FILE,
+                    person_makes_the_change(id, state_hint),
                 ),
                 json!({
                     "decision": "deny",
@@ -449,9 +620,10 @@ impl Inner {
                          Requested by: {session}\n\
                          Policy: {} ({}) — this capability is denied to agents, and \
                          approval is not available for it.\n\
-                         Next step: make the change yourself: \
-                         sudo punarctl capabilities set {id} {state_hint}",
-                        ruling.source_name, ruling.policy_id
+                         Next step: make the change yourself, outside the agent: {}",
+                        ruling.source_name,
+                        ruling.policy_id,
+                        person_makes_the_change(id, state_hint),
                     ),
                     json!({
                         "decision": "deny",
@@ -542,24 +714,37 @@ impl Inner {
 
     // -- approvals.* --------------------------------------------------------
 
-    pub(super) fn handle_approvals_list(&self) -> Result<Value, IpcError> {
+    /// `approvals.list`: root sees every approval; a person sees the ones
+    /// routed to them, and is told how many others were withheld — the
+    /// `audit.tail` shape (contract section 14.1; F0 review).
+    pub(super) fn handle_approvals_list(&self, peer: &Peer) -> Result<Value, IpcError> {
         let mut store = self.approvals.lock().unwrap();
         self.sweep_approvals(&mut store);
-        Ok(to_value(ApprovalsListResult {
-            approvals: store.list(),
+        let (approvals, withheld): (Vec<ApprovalEnvelope>, Vec<ApprovalEnvelope>) = store
+            .list()
+            .into_iter()
+            .partition(|env| self.approval_is_visible_to(peer, env));
+        let mut result = to_value(ApprovalsListResult {
+            approvals,
             checked_at: utc_now_rfc3339(),
-        }))
+        });
+        result["withheld"] = json!(withheld.len());
+        Ok(result)
     }
 
+    /// `approvals.get`: an approval routed to someone else is answered
+    /// exactly as one that does not exist, so its existence is not told
+    /// either.
     pub(super) fn handle_approvals_get(
         &self,
+        peer: &Peer,
         params: &ApprovalIdParams,
     ) -> Result<Value, IpcError> {
         let mut store = self.approvals.lock().unwrap();
         self.sweep_approvals(&mut store);
         match store.get(&params.approval_id) {
-            Some(env) => Ok(to_value(env.clone())),
-            None => Err(self.no_such_approval(&params.approval_id)),
+            Some(env) if self.approval_is_visible_to(peer, env) => Ok(to_value(env.clone())),
+            _ => Err(self.no_such_approval(&params.approval_id)),
         }
     }
 
@@ -638,10 +823,13 @@ impl Inner {
                 "approval.create",
                 &params.capability,
             ));
-            return Err(IpcError::denied_needs_root(
+            return Err(IpcError::denied_root_only(
+                "Raising an approval directly",
                 "approvals",
-                None,
-                "sudo punarctl approvals ...",
+                "none from a person's account, by design — approvals are raised by \
+                 punard's own gate when a typed call needs one, and by the credential \
+                 broker; a person answers them. `punarctl approvals list` shows any \
+                 waiting for you.",
             ));
         }
         // The caller's citation when it has one (the broker evaluated the
@@ -755,9 +943,10 @@ impl Inner {
                 format!(
                     "{id} is waiting for {} to answer it, not {user}.\n\
                      Policy: personal defaults — an approval is routed to a person, and \
-                     only that person or an administrator may decide it.\n\
-                     Next step: ask {} to answer it, or re-run as root.",
-                    env.approval.user, env.approval.user
+                     only that person may decide it.\n\
+                     Next step: ask {} to answer it. Unanswered, it expires at {} and \
+                     changes nothing.",
+                    env.approval.user, env.approval.user, env.approval.expires_at
                 ),
                 json!({ "decision": "deny", "approval_id": id, "user": env.approval.user }),
             ));
@@ -766,7 +955,18 @@ impl Inner {
         // --- Rule 3: state. Expiry beats everything: a lapsed approval is
         // `expired`, never `conflict`, because "you were too late" and
         // "someone already answered" are different facts.
-        if env.approval.status == ApprovalStatus::Pending && env.has_lapsed(approvals::now_secs()) {
+        //
+        // One boot-clock reading judges the whole answer: whether it came in
+        // time, and when a grant it earns opens. Without one, nothing is
+        // answered and the card is left pending — saying `expired` here would
+        // be a claim the daemon cannot back, and the sweep that would make it
+        // true is skipped for the same reason.
+        let Some(now) = self.trusted_now() else {
+            return Err(self.internal(&format!(
+                "the boot clock could not be read, so {id} was not answered"
+            )));
+        };
+        if env.approval.status == ApprovalStatus::Pending && env.has_lapsed(Some(&now)) {
             self.sweep_approvals(&mut store);
             return Err(IpcError::expired(id, &env.approval.expires_at));
         }
@@ -788,6 +988,71 @@ impl Inner {
             ));
         }
 
+        // --- Rule 4 (F0-S1, contract section 23.2): approving a change to
+        // the device is acting on everyone who uses it. A `capability_set`
+        // executes on this call and a `privilege_request` mints a grant to
+        // change a device setting, so a person other than root must be a
+        // device administrator AND confirm their password now — the role is
+        // checked first, so a person without it never spends a password on
+        // an answer they cannot give. Denying changes nothing, and a
+        // `credential_request` issues the person's own credential to their
+        // own session; neither needs either.
+        if params.decision == ResolveDecision::Approved
+            && matches!(
+                env.kind,
+                ApprovalKind::CapabilitySet | ApprovalKind::PrivilegeRequest
+            )
+        {
+            let doing = match env.kind {
+                ApprovalKind::PrivilegeRequest => "Approving time to change a device setting",
+                _ => "Approving a change to a device setting",
+            };
+            self.require_device_admin(
+                peer,
+                &actor,
+                "approval.resolve",
+                id,
+                doing,
+                RosterScope::Governed,
+            )?;
+            let retry = format!("punarctl approvals resolve {id} --decision approved");
+            if peer.uid != 0 && params.ticket.is_none() {
+                self.log_audit(self.m9_event(
+                    &actor,
+                    "approval.resolve",
+                    id,
+                    Decision::Deny,
+                    "reauthentication_required",
+                    vec![env.policy.policy_id.clone()],
+                ));
+                return Err(IpcError::with_details(
+                    ErrorCode::Denied,
+                    format!(
+                        "{doing} needs your password, and this answer did not carry a \
+                         confirmation.\n\
+                         Policy: personal defaults — a change that reaches everyone on \
+                         this device is confirmed at the moment it is made.\n\
+                         Next step: approve it in the approval overlay, which asks for \
+                         your password, or run `{retry}` in a terminal."
+                    ),
+                    json!({
+                        "decision": "deny",
+                        "approval_id": id,
+                        "reason": "reauthentication_required",
+                    }),
+                ));
+            }
+            self.spend_reauth_ticket(
+                peer,
+                &actor,
+                "approvals.resolve",
+                "approval.resolve",
+                id,
+                params.ticket.as_deref(),
+                &retry,
+            )?;
+        }
+
         let mut resolved = env;
         resolved.approval.status = params.decision.status();
         resolved.resolved_at = Some(utc_now_rfc3339());
@@ -801,7 +1066,7 @@ impl Inner {
         });
 
         if params.decision == ResolveDecision::Approved {
-            let execution = self.execute_approved(&mut store, &resolved);
+            let execution = self.execute_approved(&mut store, &resolved, &now);
             resolved.execution = execution;
         }
 
@@ -833,6 +1098,7 @@ impl Inner {
         &self,
         store: &mut ApprovalStore,
         env: &ApprovalEnvelope,
+        now: &BootStamp,
     ) -> Option<Execution> {
         match env.kind {
             // The broker spends this later through `approvals.consume`.
@@ -840,7 +1106,9 @@ impl Inner {
             // token must never enter the daemon that writes /etc.
             ApprovalKind::CredentialRequest => None,
             ApprovalKind::CapabilitySet => Some(self.execute_approved_capability(env)),
-            ApprovalKind::PrivilegeRequest => Some(self.execute_approved_privilege(store, env)),
+            ApprovalKind::PrivilegeRequest => {
+                Some(self.execute_approved_privilege(store, env, now))
+            }
         }
     }
 
@@ -888,18 +1156,28 @@ impl Inner {
         execution
     }
 
-    /// Mint the grant a resolved `privilege_request` earned.
+    /// Mint the grant a resolved `privilege_request` earned, its window
+    /// opening at `now` — the reading that found the approval still
+    /// answerable.
     fn execute_approved_privilege(
         &self,
         store: &mut ApprovalStore,
         env: &ApprovalEnvelope,
+        now: &BootStamp,
     ) -> Execution {
-        let minutes = env
-            .approval
-            .resource
-            .trim_end_matches('m')
-            .parse::<u64>()
-            .unwrap_or(punar_common::approval::GRANT_DEFAULT_MINUTES);
+        // Clamped again on the way out: the record is punard's own, but the
+        // bound on how long privilege lasts is not something to trust a file
+        // for.
+        let minutes = punar_common::approval::clamp_grant_minutes(Some(
+            env.approval
+                .resource
+                .trim_end_matches('m')
+                .parse::<u64>()
+                .unwrap_or(punar_common::approval::GRANT_DEFAULT_MINUTES),
+        ));
+        // The grant's window opens at the resolving reading, on the boot
+        // clock, and ends at the next suspend or reboot at the latest.
+        let lifetime = BootWindow::of_secs(now.clone(), minutes.saturating_mul(60));
         let uid = env
             .requester_peer
             .as_ref()
@@ -924,8 +1202,10 @@ impl Inner {
             capability: env.approval.capability.clone(),
             reason: env.approval.reason.clone(),
             granted_at: utc_now_rfc3339(),
-            expires_at: approvals::rfc3339_in(minutes.saturating_mul(60)),
+            // For people to read; `lifetime` decides.
+            expires_at: approvals::display_expiry_in(minutes.saturating_mul(60)),
             revoked_at: None,
+            lifetime: Some(lifetime),
         };
         if let Err(e) = store.put_grant(grant.clone()) {
             return Execution {
@@ -970,10 +1250,12 @@ impl Inner {
                 "approval.consume",
                 id,
             ));
-            return Err(IpcError::denied_needs_root(
-                "an approval",
-                None,
-                "sudo punarctl approvals ...",
+            return Err(IpcError::denied_root_only(
+                "Spending an approved credential request",
+                "approvals",
+                "none from a person's account, by design — only the credential broker \
+                 that raised the request spends it. `punarctl approvals get <id>` shows \
+                 where it stands.",
             ));
         }
         let mut store = self.approvals.lock().unwrap();
@@ -997,7 +1279,14 @@ impl Inner {
         }
         // An approved credential approval **still expires**: a human's yes
         // is not a standing grant, and a second issuance raises a new one.
-        if env.has_lapsed(approvals::now_secs()) {
+        // Without a boot-clock reading nothing is spent, and the approval is
+        // not called expired when the daemon cannot say that it is.
+        let Some(now) = self.trusted_now() else {
+            return Err(self.internal(&format!(
+                "the boot clock could not be read, so {id} was not consumed"
+            )));
+        };
+        if env.has_lapsed(Some(&now)) {
             return Err(IpcError::expired(id, &env.approval.expires_at));
         }
         if env.approval.status != ApprovalStatus::Approved {
@@ -1106,7 +1395,21 @@ impl Inner {
             ));
         }
 
+        // A grant lets its holder change a registered capability, and every
+        // registered capability is device-wide state (the firewall, the
+        // hostname, the time zone, the update channel, browser policy). So
+        // only an administrator may ask for one (F0-S1). Refused here, where
+        // it costs nothing, rather than at `approvals.resolve`, where the
+        // person would already have typed a password for it.
         let cap = self.lookup(&params.capability)?;
+        self.require_device_admin(
+            peer,
+            &actor,
+            "privilege.request",
+            id,
+            "Asking for time to change a device setting",
+            RosterScope::Governed,
+        )?;
         let risk = cap.descriptor().risk;
         let minutes = punar_common::approval::clamp_grant_minutes(params.duration_minutes);
         let user = self.peer_user(peer);
@@ -1171,7 +1474,7 @@ impl Inner {
         self.sweep_approvals(&mut store);
         let scope = (peer.uid != 0).then_some(peer.uid);
         Ok(to_value(PrivilegeStatusResult {
-            grants: store.live_grants(scope, approvals::now_secs()),
+            grants: store.live_grants(scope, self.trusted_now().as_ref()),
             checked_at: utc_now_rfc3339(),
         }))
     }
@@ -1196,8 +1499,6 @@ impl Inner {
         })?;
         let mut store = self.approvals.lock().unwrap();
         self.sweep_approvals(&mut store);
-        let now = approvals::now_secs();
-
         let ids: Vec<String> = match target {
             Some(grant_id) => {
                 let Some(grant) = store.grant(grant_id) else {
@@ -1222,21 +1523,22 @@ impl Inner {
                     return Err(IpcError::with_details(
                         ErrorCode::Denied,
                         format!(
-                            "{grant_id} belongs to another user.\n\
-                             Policy: personal defaults — a grant is revoked by its owner \
-                             or by an administrator.\n\
-                             Next step: re-run as root."
+                            "{grant_id} belongs to {}, not to you.\n\
+                             Policy: personal defaults — a grant is revoked by the person \
+                             who holds it.\n\
+                             Next step: ask {} to revoke it; otherwise it ends by itself \
+                             at {}.",
+                            grant.user, grant.user, grant.expires_at
                         ),
                         json!({ "decision": "deny", "grant_id": grant_id }),
                     ));
                 }
                 vec![grant_id.to_string()]
             }
-            None => store
-                .live_grants((peer.uid != 0).then_some(peer.uid), now)
-                .into_iter()
-                .map(|g| g.grant_id)
-                .collect(),
+            // Handing privilege back needs no clock: `--all` drops every
+            // grant this peer holds, live or not, so an unreadable boot clock
+            // can never leave one behind.
+            None => store.grant_ids((peer.uid != 0).then_some(peer.uid)),
         };
 
         let mut revoked = Vec::new();

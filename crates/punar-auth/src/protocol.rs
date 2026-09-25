@@ -25,7 +25,39 @@ pub struct VerifyRequest {
     /// one.
     #[serde(default)]
     pub purpose: Purpose,
+    /// For [`Purpose::Admin`], and required there: the IPC method the ticket
+    /// may be spent on (`policy.set`). punard spends the ticket on that
+    /// method and no other (docs/api/ipc.md section 23.1).
+    #[serde(default)]
+    pub action: Option<String>,
+    /// For [`Purpose::Admin`]: the process that will spend the ticket, when
+    /// it is not the caller itself — a graphical surface asks on behalf of
+    /// the `punarctl` it started. It must be a live process running entirely
+    /// as the caller's own uid; the ticket then names it (pid and start
+    /// time), and punard spends it for that process only. Absent means the
+    /// caller itself.
+    #[serde(default)]
+    pub for_pid: Option<u32>,
 }
+
+/// How a request arrived, and so how its answer is sent.
+///
+/// `Length` is the original framing: a 4-byte little-endian length, then the
+/// JSON body; the answer comes back the same way. `Line` is one JSON object
+/// on one line, answered by one JSON line: what a graphical surface can write
+/// on a socket it connects itself, so that a password typed into it goes to
+/// this daemon directly and never through a pipe (F0-S4). The two cannot be
+/// confused: a line request starts `{"`, and as a length header those two
+/// bytes would announce at least 0x227B bytes — more than
+/// [`MAX_REQUEST_BYTES`], so no valid length frame starts that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Framing {
+    Length,
+    Line,
+}
+
+/// The first two bytes of every line-framed request.
+pub const LINE_REQUEST_START: [u8; 2] = *b"{\"";
 
 /// What a successful verification is FOR.
 ///
@@ -138,6 +170,21 @@ mod tests {
             serde_json::from_slice::<VerifyRequest>(br#"{"v":1,"password":"x","purpose":"root"}"#)
                 .is_err()
         );
+        let bound: VerifyRequest = serde_json::from_slice(
+            br#"{"v":1,"password":"x","purpose":"admin","action":"policy.set","for_pid":4242}"#,
+        )
+        .unwrap();
+        assert_eq!(bound.action.as_deref(), Some("policy.set"));
+        assert_eq!(bound.for_pid, Some(4242));
+    }
+
+    /// The two framings cannot be mistaken for each other: a line request's
+    /// first two bytes, read as a length header, announce more than any
+    /// request may hold.
+    #[test]
+    fn a_line_request_can_never_be_a_valid_length_frame() {
+        let smallest = u32::from_le_bytes([LINE_REQUEST_START[0], LINE_REQUEST_START[1], 0, 0]);
+        assert!(smallest as usize > MAX_REQUEST_BYTES);
     }
 
     #[test]

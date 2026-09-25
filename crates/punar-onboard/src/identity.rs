@@ -22,6 +22,32 @@ const UID_MAX_EXCLUSIVE: u32 = 60_000;
 const SUBID_START: u32 = 100_000;
 const SUBID_COUNT: u32 = 65_536;
 
+/// The group whose members administer the device (F0-S1; docs/api/ipc.md
+/// section 23; docs/design/onboarding.md section 1.6). The first account is
+/// created in it, and the materializer keeps a device from ever booting with
+/// no member. punard reads and edits the same name
+/// (`crates/punard/src/admins.rs`, which pins it with a test).
+pub const ADMIN_GROUP: &str = "punar-admin";
+
+/// The supplementary groups a person's account is created in: `punar`, the
+/// filesystem admission gate on punard's socket, and nothing else.
+const ACCOUNT_GROUPS: [&str; 1] = ["punar"];
+
+/// Groups an account must never hold, and that earlier onboarding granted.
+///
+/// `input` lets any process running as the person open every
+/// `/dev/input/event*` node, which is a keylogger's whole requirement: every
+/// keystroke in every application, the lock screen's passphrase included.
+/// `video` is raw DRM and framebuffer access, which reads the screen. The
+/// session needs neither. logind hands the compositor its input and DRM
+/// devices through `TakeDevice` on the active seat, and its `uaccess` ACLs
+/// follow the seat, not the account, so they end when the session does
+/// (docs/design/onboarding.md section 1.7).
+///
+/// Materialization strips both from a stored record on the next boot, so an
+/// account created by an older image loses them without being recreated.
+const RETIRED_GROUPS: [&str; 2] = ["input", "video"];
+
 #[derive(Clone, Debug)]
 pub struct IdentityPaths {
     pub state_dir: PathBuf,
@@ -512,12 +538,12 @@ impl IdentityStore {
         }
         create_private_dir(stage_dir)?;
 
-        let groups =
-            existing_supplementary_groups(self.platform.as_ref(), ["punar", "video", "input"])?;
+        let groups = existing_supplementary_groups(self.platform.as_ref(), ACCOUNT_GROUPS)?;
         if !groups.iter().any(|group| group == "punar") || admission_gid == gid {
             // A per-user primary group may not reuse the stable admission gid.
             return Err(IdentityError::AdmissionGroup);
         }
+        let groups = with_device_admin(self.platform.as_ref(), groups)?;
         let home = home_dir.to_string_lossy().into_owned();
         let account = AccountRecord {
             v: 1,
@@ -657,19 +683,129 @@ impl IdentityStore {
             .accounts_dir()
             .join(&marker.account_id)
             .join("account.json");
-        let account: AccountRecord = read_json(&account_path)?;
+        // Read as a document as well as a record, so that correcting it below
+        // rewrites only the group list and keeps every field, including any
+        // this build does not model.
+        let mut stored: serde_json::Value = read_json(&account_path)?;
+        let mut account: AccountRecord =
+            serde_json::from_value(stored.clone()).map_err(|_| IdentityError::Corrupt)?;
         if account.account_id != marker.account_id
             || account.username != marker.username
             || account.uid != marker.uid
         {
             return Err(IdentityError::Corrupt);
         }
+        // An account created by an older image was put in `input` and
+        // `video`. The stored record is the authority every later boot reads,
+        // so correct it there too, rather than leave it to disagree with /run.
+        //
+        // The correction is not what keeps the groups off: materialize_account
+        // never publishes a retired group, whatever the record says. So a
+        // record that cannot be rewritten this boot (a full, failing or
+        // read-only /var) is reported and retried on the next boot, and never
+        // stops the account materializing. greetd Requires= this service, so
+        // failing here would leave the machine with no way to sign in.
+        if account
+            .groups
+            .iter()
+            .any(|group| RETIRED_GROUPS.contains(&group.as_str()))
+        {
+            account
+                .groups
+                .retain(|group| !RETIRED_GROUPS.contains(&group.as_str()));
+            if let Some(groups) = stored
+                .get_mut("groups")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                groups.retain(|group| {
+                    !group
+                        .as_str()
+                        .is_some_and(|group| RETIRED_GROUPS.contains(&group))
+                });
+            }
+            if let Err(error) = write_json_atomic(&account_path, &stored, 0o600) {
+                let detail = match &error {
+                    IdentityError::Storage(cause) => cause.to_string(),
+                    other => other.to_string(),
+                };
+                eprintln!(
+                    "punar-identity: could not remove the retired input and video groups from \
+                     {}: {detail}; they are still left out of this boot's user database, \
+                     and the record is corrected on a later boot",
+                    account_path.display()
+                );
+            }
+        }
         let device: serde_json::Value = read_json(&self.paths.state_dir.join("device.json"))?;
         let device_name = device
             .get("displayName")
             .and_then(serde_json::Value::as_str)
             .ok_or(IdentityError::Corrupt)?;
+        let account = self.ensure_device_admin(account, &mut stored, &account_path);
         self.materialize_account(account, device_name)
+    }
+
+    /// NEVER ZERO ADMINISTRATORS (F0-S1). A device set up before the role
+    /// existed has an owner and no administrator, and an update must not
+    /// leave it that way — nobody could change its policy, updates or
+    /// enrollment again. So on every boot, before the account is published:
+    /// when no account a person can sign in as holds the role, the device
+    /// owner gets it.
+    ///
+    /// WHO THE OWNER IS. The account onboarding recorded as completing first
+    /// run (`completed.json`), which is the account this materializer
+    /// publishes. It is the first account by construction: onboarding creates
+    /// exactly one, and refuses a second first run. A device with more
+    /// accounts than that was not set up by Punar's onboarding and has no
+    /// record to rank them by, so this names the recorded owner and nobody
+    /// else — never the most recent sign-in, never the lowest uid.
+    ///
+    /// COUNTING ONLY WHO CAN SIGN IN (F0 review). The question is whether an
+    /// account this boot PUBLISHES holds the role — one a person can sign in
+    /// as. This materializer publishes the device owner and nobody else, so
+    /// another account's record that lists the role is an administrator
+    /// nobody can sign in as after this boot; counting it once let a device
+    /// whose owner had handed the role on and given up their own come up with
+    /// no usable administrator at all. When more accounts are published at
+    /// boot, they are counted here too. punard's last-administrator rule
+    /// counts the same way (`admins.rs`, `signs_in`), so the two cannot
+    /// disagree about whether a device has one.
+    ///
+    /// The persisted record is written — as the document it was read as, so
+    /// every field this build does not model survives — and the grant
+    /// survives with it; if the write fails the owner still holds the role
+    /// for this boot, and the next boot tries again.
+    ///
+    /// An image without the group (an older release booted after a
+    /// rollback) is left exactly as it was.
+    fn ensure_device_admin(
+        &self,
+        mut account: AccountRecord,
+        stored: &mut serde_json::Value,
+        account_path: &Path,
+    ) -> AccountRecord {
+        if account.groups.iter().any(|group| group == ADMIN_GROUP) {
+            return account;
+        }
+        if !matches!(self.platform.lookup("group", ADMIN_GROUP), Ok(Some(_))) {
+            return account;
+        }
+        account.groups.push(ADMIN_GROUP.to_string());
+        match stored
+            .get_mut("groups")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            Some(groups) => groups.push(serde_json::Value::from(ADMIN_GROUP)),
+            None => stored["groups"] = serde_json::Value::from(account.groups.clone()),
+        }
+        if let Err(error) = write_json_atomic(account_path, stored, 0o600) {
+            eprintln!(
+                "punar-identity: the device owner {} holds the administrator role for this \
+                 boot, but it could not be recorded ({error}); the next boot tries again",
+                account.username
+            );
+        }
+        account
     }
 
     fn materialize_account(
@@ -713,7 +849,26 @@ impl IdentityStore {
                 .runtime_userdb
                 .join(format!("{}.group", account.gid)),
         )?;
-        for group in &account.groups {
+        // A retired membership published earlier in this boot (by an older
+        // punar-onboardd, or before the record above was corrected) must not
+        // outlive this pass: nss-systemd reads group membership from these
+        // names alone.
+        for group in RETIRED_GROUPS {
+            let stale = self
+                .paths
+                .runtime_userdb
+                .join(format!("{username}:{group}.membership"));
+            match fs::remove_file(&stale) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(storage(error)),
+            }
+        }
+        for group in account
+            .groups
+            .iter()
+            .filter(|group| !RETIRED_GROUPS.contains(&group.as_str()))
+        {
             write_json_atomic(
                 &self
                     .paths
@@ -878,17 +1033,40 @@ impl IdentityStore {
             );
             paths.push(self.paths.runtime_userdb.join(format!("{id}.{suffix}")));
         }
-        for group in ["punar", "video", "input"] {
+        // Retired groups too: a transaction an older binary started may have
+        // published them, and a rollback removes everything it could have.
+        for group in ACCOUNT_GROUPS.iter().chain(RETIRED_GROUPS.iter()) {
             paths.push(
                 self.paths
                     .runtime_userdb
                     .join(format!("{}:{group}.membership", journal.username)),
             );
         }
+        paths.push(
+            self.paths
+                .runtime_userdb
+                .join(format!("{}:{ADMIN_GROUP}.membership", journal.username)),
+        );
         paths.push(self.paths.runtime_subuid.clone());
         paths.push(self.paths.runtime_subgid.clone());
         paths
     }
+}
+
+/// The first account administers the device (F0-S1, OD-1(a)): append the
+/// administrator group when the image has one. An image that predates the
+/// role creates the account without it, and the first boot of an image that
+/// has it grants it then ([`IdentityStore::materialize`]).
+fn with_device_admin(
+    platform: &dyn IdentityPlatform,
+    mut groups: Vec<String>,
+) -> Result<Vec<String>, IdentityError> {
+    if platform.lookup("group", ADMIN_GROUP)?.is_some()
+        && !groups.iter().any(|group| group == ADMIN_GROUP)
+    {
+        groups.push(ADMIN_GROUP.to_string());
+    }
+    Ok(groups)
 }
 
 fn existing_supplementary_groups<const N: usize>(
@@ -1064,7 +1242,7 @@ fn random_recovery_code() -> Result<String, IdentityError> {
         while bits >= 5 && emitted < 30 {
             bits -= 5;
             let index = ((accumulator >> bits) & 0x1f) as usize;
-            if emitted > 0 && emitted % 5 == 0 {
+            if emitted > 0 && emitted.is_multiple_of(5) {
                 out.push('-');
             }
             out.push(ALPHABET[index] as char);
@@ -1185,6 +1363,8 @@ mod tests {
     struct FakePlatform {
         hostname: Rc<RefCell<String>>,
         fail_after_materialize: Rc<Cell<bool>>,
+        /// An image from before the administrator role: no such group.
+        without_admin_group: Rc<Cell<bool>>,
     }
 
     impl FakePlatform {
@@ -1192,6 +1372,7 @@ mod tests {
             Self {
                 hostname: Rc::new(RefCell::new("original-host".to_string())),
                 fail_after_materialize: Rc::new(Cell::new(fail_after_materialize)),
+                without_admin_group: Rc::new(Cell::new(false)),
             }
         }
     }
@@ -1210,6 +1391,8 @@ mod tests {
 
         fn lookup(&self, database: &str, key: &str) -> Result<Option<String>, IdentityError> {
             let value = match (database, key) {
+                ("group", ADMIN_GROUP) if self.without_admin_group.get() => None,
+                ("group", ADMIN_GROUP) => Some(format!("{ADMIN_GROUP}:x:903:")),
                 ("group", "punar") => Some("punar:x:900:".to_string()),
                 ("group", "video") => Some("video:x:901:".to_string()),
                 ("group", "input") => Some("input:x:902:".to_string()),
@@ -1515,6 +1698,149 @@ mod tests {
         assert!(paths.runtime_userdb.join("1000.user").is_symlink());
     }
 
+    // ---- the device administrator (F0-S1) ------------------------------
+
+    fn account_groups(paths: &IdentityPaths) -> Vec<String> {
+        let dir = fs::read_dir(paths.accounts_dir())
+            .unwrap()
+            .flatten()
+            .find(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .unwrap();
+        read_json::<AccountRecord>(&dir.path().join("account.json"))
+            .unwrap()
+            .groups
+    }
+
+    fn set_account_groups(paths: &IdentityPaths, groups: &[&str]) {
+        let dir = fs::read_dir(paths.accounts_dir())
+            .unwrap()
+            .flatten()
+            .find(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .unwrap();
+        let path = dir.path().join("account.json");
+        let mut record: AccountRecord = read_json(&path).unwrap();
+        record.groups = groups.iter().map(|g| g.to_string()).collect();
+        write_json_atomic(&path, &record, 0o600).unwrap();
+    }
+
+    #[test]
+    fn the_first_account_administers_the_device() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(FakePlatform::new(false)));
+        store
+            .create_first_account("alice", "three amber rivers", "Alice Workstation")
+            .unwrap();
+        assert!(account_groups(&paths).iter().any(|g| g == ADMIN_GROUP));
+        assert!(
+            paths
+                .runtime_userdb
+                .join(format!("alice:{ADMIN_GROUP}.membership"))
+                .is_file(),
+            "the role is published as a login would see it"
+        );
+    }
+
+    /// The upgrade path: a device set up before the role has an owner and no
+    /// administrator, and its first boot on an image with the role must fix
+    /// that without anyone asking — and must not fix it twice.
+    #[test]
+    fn an_upgraded_device_gives_its_owner_the_role_when_nobody_usable_holds_it() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(FakePlatform::new(false)));
+        store
+            .create_first_account("alice", "three amber rivers", "Alice Workstation")
+            .unwrap();
+        // What an older onboarding left behind.
+        set_account_groups(&paths, &["punar", "video", "input"]);
+        let edge = paths
+            .runtime_userdb
+            .join(format!("alice:{ADMIN_GROUP}.membership"));
+        fs::remove_file(&edge).unwrap();
+
+        store.materialize().unwrap();
+        assert!(
+            account_groups(&paths).iter().any(|g| g == ADMIN_GROUP),
+            "the grant is recorded, not only published"
+        );
+        assert!(edge.is_file());
+
+        // Another account's record says it administers the device, but boot
+        // publishes only the owner, so nobody can sign in as it: the owner is
+        // given the role again rather than leaving the device with no
+        // administrator anyone can use (F0 review).
+        set_account_groups(&paths, &["punar"]);
+        fs::remove_file(&edge).unwrap();
+        let other = paths.accounts_dir().join("acct_00000000000000bb");
+        fs::create_dir_all(&other).unwrap();
+        let mut bob: AccountRecord = read_json(
+            &fs::read_dir(paths.accounts_dir())
+                .unwrap()
+                .flatten()
+                .find(|e| e.path() != other && !e.file_name().to_string_lossy().starts_with('.'))
+                .unwrap()
+                .path()
+                .join("account.json"),
+        )
+        .unwrap();
+        bob.account_id = "acct_00000000000000bb".into();
+        bob.username = "bob".into();
+        bob.uid = 1001;
+        bob.groups = vec!["punar".into(), ADMIN_GROUP.into()];
+        write_json_atomic(&other.join("account.json"), &bob, 0o600).unwrap();
+        store.materialize().unwrap();
+        assert!(
+            edge.is_file(),
+            "an administrator nobody can sign in as does not count"
+        );
+        assert!(account_groups(&paths).iter().any(|g| g == ADMIN_GROUP));
+        assert!(
+            !paths
+                .runtime_userdb
+                .join(format!("bob:{ADMIN_GROUP}.membership"))
+                .exists(),
+            "and an account boot does not publish gets no drop-in"
+        );
+    }
+
+    #[test]
+    fn an_image_without_the_role_changes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let platform = FakePlatform::new(false);
+        platform.without_admin_group.set(true);
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(platform));
+        store
+            .create_first_account("alice", "three amber rivers", "Alice Workstation")
+            .unwrap();
+        assert!(!account_groups(&paths).iter().any(|g| g == ADMIN_GROUP));
+        store.materialize().unwrap();
+        assert!(!account_groups(&paths).iter().any(|g| g == ADMIN_GROUP));
+    }
+
+    #[test]
+    fn a_rolled_back_first_run_leaves_no_administrator_edge() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths(&temp);
+        fs::create_dir_all(&paths.home_root).unwrap();
+        let store = IdentityStore::with_platform(paths.clone(), Box::new(FakePlatform::new(true)));
+        assert!(
+            store
+                .create_first_account("alice", "three amber rivers", "Alice Workstation")
+                .is_err()
+        );
+        assert!(
+            !paths
+                .runtime_userdb
+                .join(format!("alice:{ADMIN_GROUP}.membership"))
+                .exists()
+        );
+    }
+
     #[test]
     fn skeleton_metadata_cannot_reopen_the_home_directory() {
         use std::os::unix::fs::MetadataExt;
@@ -1537,6 +1863,213 @@ mod tests {
             fs::read_to_string(home.join("profile")).unwrap(),
             "private defaults\n"
         );
+    }
+
+    fn account_json(paths: &IdentityPaths) -> PathBuf {
+        let dir = fs::read_dir(paths.accounts_dir())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        dir.path().join("account.json")
+    }
+
+    /// The machine has `input` and `video` groups (the fake platform answers
+    /// for both, as every substrate does), and a new account is still put in
+    /// neither: membership is the account's grant, not the group's existence.
+    /// The one other group is the administrator role, which the first account
+    /// holds (F0-S1).
+    #[test]
+    fn a_new_account_is_in_the_admission_group_and_nothing_else() {
+        let temp = TempDir::new().unwrap();
+        let (_store, paths, _code) = recovery_store(&temp);
+        let account: AccountRecord = read_json(&account_json(&paths)).unwrap();
+        assert_eq!(account.groups, ["punar", ADMIN_GROUP]);
+        assert!(
+            paths
+                .runtime_userdb
+                .join("alice:punar.membership")
+                .is_file()
+        );
+        for group in RETIRED_GROUPS {
+            assert!(
+                !paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership"))
+                    .exists(),
+                "a new account must not be published in {group}"
+            );
+        }
+    }
+
+    /// The upgrade path: an account an older image created in `input` and
+    /// `video`, with those memberships already published in /run, loses both
+    /// on the next materialization, in the stored record and in /run, and
+    /// keeps everything else.
+    #[test]
+    fn materialize_takes_input_and_video_away_from_an_existing_account() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let record_path = account_json(&paths);
+        let mut legacy: serde_json::Value = read_json(&record_path).unwrap();
+        legacy["groups"] = json!(["punar", "video", "input"]);
+        write_json_atomic(&record_path, &legacy, 0o600).unwrap();
+        for group in RETIRED_GROUPS {
+            write_json_atomic(
+                &paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership")),
+                &json!({}),
+                0o644,
+            )
+            .unwrap();
+        }
+
+        store.materialize().unwrap();
+
+        // The record predates the administrator role too, and nobody holds
+        // it, so the owner gains it in the same pass (F0-S1).
+        let account: AccountRecord = read_json(&record_path).unwrap();
+        assert_eq!(account.groups, ["punar", ADMIN_GROUP]);
+        assert_eq!(account.username, "alice");
+        assert_eq!(account.auth.kinds, ["password"]);
+        assert_eq!(
+            fs::metadata(&record_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            paths
+                .runtime_userdb
+                .join("alice:punar.membership")
+                .is_file()
+        );
+        for group in RETIRED_GROUPS {
+            assert!(
+                !paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership"))
+                    .exists(),
+                "materialize left alice in {group}"
+            );
+        }
+        let before = fs::read(&record_path).unwrap();
+        store.materialize().unwrap();
+        assert_eq!(
+            fs::read(&record_path).unwrap(),
+            before,
+            "a record with nothing to take away is not rewritten"
+        );
+    }
+
+    /// The correction keeps every field of the stored record, including
+    /// ones this build does not model, and changes only the group list.
+    #[test]
+    fn correcting_the_record_keeps_every_other_field() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let record_path = account_json(&paths);
+        let mut legacy: serde_json::Value = read_json(&record_path).unwrap();
+        legacy["groups"] = json!(["input", "punar", "video"]);
+        legacy["futureField"] = json!({"kept": true});
+        write_json_atomic(&record_path, &legacy, 0o600).unwrap();
+
+        store.materialize().unwrap();
+
+        let mut corrected: serde_json::Value = read_json(&record_path).unwrap();
+        assert_eq!(corrected["groups"], json!(["punar", ADMIN_GROUP]));
+        assert_eq!(corrected["futureField"], json!({"kept": true}));
+        corrected["groups"] = legacy["groups"].clone();
+        assert_eq!(corrected, legacy, "only the group list changed");
+    }
+
+    /// A record that cannot be rewritten (here, its directory is read-only)
+    /// does not stop the account materializing, because greetd requires
+    /// materialization and nobody could sign in. The retired groups are
+    /// still kept out of /run; the record is corrected on a later boot.
+    #[test]
+    fn an_uncorrectable_record_never_stops_sign_in() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let record_path = account_json(&paths);
+        let mut legacy: serde_json::Value = read_json(&record_path).unwrap();
+        legacy["groups"] = json!(["punar", "video", "input"]);
+        write_json_atomic(&record_path, &legacy, 0o600).unwrap();
+        for group in RETIRED_GROUPS {
+            write_json_atomic(
+                &paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership")),
+                &json!({}),
+                0o644,
+            )
+            .unwrap();
+        }
+        let account_dir = record_path.parent().unwrap().to_path_buf();
+        let mode = fs::metadata(&account_dir).unwrap().permissions().mode();
+        fs::set_permissions(&account_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let writable = fs::write(account_dir.join("probe"), b"x").is_ok();
+
+        let outcome = store.materialize();
+        fs::set_permissions(&account_dir, fs::Permissions::from_mode(mode)).unwrap();
+        if writable {
+            // Running with the privilege to write anyway (root): the
+            // failure this test needs cannot be produced here.
+            return;
+        }
+        outcome.unwrap();
+        assert!(
+            paths
+                .runtime_userdb
+                .join("alice:punar.membership")
+                .is_file()
+        );
+        for group in RETIRED_GROUPS {
+            assert!(
+                !paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership"))
+                    .exists(),
+                "an unwritable record left alice in {group}"
+            );
+        }
+        // The owner administers the device for this boot even though the
+        // grant could not be recorded yet.
+        assert!(
+            paths
+                .runtime_userdb
+                .join(format!("alice:{ADMIN_GROUP}.membership"))
+                .is_file()
+        );
+        let still: AccountRecord = read_json(&record_path).unwrap();
+        assert_eq!(still.groups, ["punar", "video", "input"]);
+        store.materialize().unwrap();
+        let corrected: AccountRecord = read_json(&record_path).unwrap();
+        assert_eq!(
+            corrected.groups,
+            ["punar", ADMIN_GROUP],
+            "corrected once it can be, and the owner's role recorded with it"
+        );
+    }
+
+    /// Even a record that still names a retired group is never published
+    /// in it: the /run edge is filtered on its own, not only through the
+    /// record's correction.
+    #[test]
+    fn a_retired_group_is_never_published_even_from_an_uncorrected_record() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let mut account: AccountRecord = read_json(&account_json(&paths)).unwrap();
+        account.groups = vec!["punar".into(), "input".into()];
+        store
+            .materialize_account(account, "Alice Workstation")
+            .unwrap();
+        assert!(
+            paths
+                .runtime_userdb
+                .join("alice:punar.membership")
+                .is_file()
+        );
+        assert!(!paths.runtime_userdb.join("alice:input.membership").exists());
     }
 
     #[test]

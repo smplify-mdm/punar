@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Mail
+GenericName=Email Client
+Comment=Read mail with remote content blocked by default
+Exec=punarctl mail open
+TryExec=punarctl
+Icon=mail-unread-symbolic
+Terminal=false
+Categories=Network;Email;
+Keywords=mail;email;inbox;imap;
+StartupNotify=true
+StartupWMClass=org.punar.Mail
+X-Punar-FirstParty=true

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/catalog/architecture-exceptions.json",
+  "title": "CatalogArchitectureExceptions",
+  "description": "The catalogue entries that do NOT satisfy CURATION.md admission rule 2 \u2014 no build for every supported architecture, and no deliberately labelled official web fallback for the missing one \u2014 acknowledged in the repository rather than discovered by a person on the wrong machine. tools/validate_schemas.py fails when an entry is missing an architecture and is not listed here, and fails again when a listing has become untrue, because an acknowledgement that has quietly stopped being true is worse than none.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "title": "Version",
+      "description": "Document version. 1.",
+      "const": 1
+    },
+    "note": {
+      "title": "Note",
+      "description": "Why this file exists, in prose, for whoever meets it next.",
+      "type": "string",
+      "minLength": 1
+    },
+    "supported_architectures": {
+      "title": "Supported architectures",
+      "description": "The architectures Punar builds images for, spelled as the catalogue's source `architectures` arrays spell them.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "x86_64",
+          "aarch64"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "apps": {
+      "title": "Acknowledged entries",
+      "description": "Catalogue app id -> what is missing and why. An entry here means the application is ABSENT on that architecture; the shell filters it out rather than offering it and refusing.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "missing": {
+            "title": "Missing architectures",
+            "description": "The supported architectures this entry has no source for.",
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": [
+                "x86_64",
+                "aarch64"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "reason": {
+            "title": "Reason",
+            "description": "Why neither an architecture-specific build nor a labelled web fallback exists. Required and required to be non-empty: a bare list of ids is a list of things nobody has to justify.",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "missing",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "v",
+    "note",
+    "supported_architectures",
+    "apps"
+  ],
+  "additionalProperties": false
+}

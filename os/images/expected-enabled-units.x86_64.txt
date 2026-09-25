@@ -35,7 +35,6 @@ etc/systemd/system/sysinit.target.wants/systemd-sysext.service -> /usr/lib/syste
 etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service -> /usr/lib/systemd/system/systemd-timesyncd.service
 etc/systemd/system/systemd-journald.service.wants/systemd-journald-audit.socket -> /usr/lib/systemd/system/systemd-journald-audit.socket
 etc/systemd/user/basic.target.wants/systemd-tmpfiles-setup.service -> /usr/lib/systemd/user/systemd-tmpfiles-setup.service
-etc/systemd/user/default.target.wants/gcr-ssh-agent.service -> /usr/lib/systemd/user/gcr-ssh-agent.service
 etc/systemd/user/default.target.wants/machines.target -> /usr/lib/systemd/user/machines.target
 etc/systemd/user/default.target.wants/p11-kit-server.service -> /usr/lib/systemd/user/p11-kit-server.service
 etc/systemd/user/default.target.wants/pipewire-pulse.service -> /usr/lib/systemd/user/pipewire-pulse.service
@@ -43,7 +42,6 @@ etc/systemd/user/default.target.wants/pipewire.service -> /usr/lib/systemd/user/
 etc/systemd/user/graphical-session-pre.target.wants/xdg-desktop-portal-rewrite-launchers.service -> /usr/lib/systemd/user/xdg-desktop-portal-rewrite-launchers.service
 etc/systemd/user/graphical-session.target.wants/hyprpolkitagent.service -> /usr/lib/systemd/user/hyprpolkitagent.service
 etc/systemd/user/pipewire.service.wants/wireplumber.service -> /usr/lib/systemd/user/wireplumber.service
-etc/systemd/user/sockets.target.wants/gcr-ssh-agent.socket -> /usr/lib/systemd/user/gcr-ssh-agent.socket
 etc/systemd/user/sockets.target.wants/p11-kit-server.socket -> /usr/lib/systemd/user/p11-kit-server.socket
 etc/systemd/user/sockets.target.wants/pipewire-pulse.socket -> /usr/lib/systemd/user/pipewire-pulse.socket
 etc/systemd/user/sockets.target.wants/pipewire.socket -> /usr/lib/systemd/user/pipewire.socket

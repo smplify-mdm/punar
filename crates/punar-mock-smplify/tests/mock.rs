@@ -8,7 +8,7 @@
 //! that would break the in-VM m5-check breaks these host tests first.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -211,6 +211,107 @@ fn fixtures_load_and_compose_from_the_real_tree() {
         5,
         "no invented fields: {envelope_fields:?}"
     );
+
+    // The sets admin.policy_publish may choose, the composed baseline first
+    // among them.
+    let names: Vec<&str> = set.policy_sets.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "default",
+            "duplicate-id",
+            "firewall-off",
+            "none",
+            "plus-role"
+        ]
+    );
+    assert_eq!(set.policy_sets["default"].policies, set.policies);
+    assert_eq!(set.policy_sets["default"].assignment, "policies");
+    let off = &set.policy_sets["firewall-off"];
+    assert_eq!(off.policy_ids(), ["eng-baseline-v12"]);
+    assert_eq!(
+        off.policies[0]["policy"]["spec"]["security"]["firewall"]["enabled"],
+        false
+    );
+    let mut rest = off.policies[0]["policy"].clone();
+    rest["spec"]["security"]["firewall"]["enabled"] = json!(true);
+    assert_eq!(
+        rest,
+        read_fixture_json("desired-state-eng-baseline-v12.json"),
+        "only the firewall rule differs"
+    );
+    assert_eq!(
+        set.policy_sets["plus-role"].policy_ids(),
+        ["eng-baseline-v12", "eng-role-sre"]
+    );
+    assert_eq!(
+        set.policy_sets["duplicate-id"].policy_ids(),
+        ["eng-baseline-v12", "eng-baseline-v12"],
+        "invalid by design"
+    );
+    assert_eq!(set.policy_sets["none"].assignment, "none");
+    assert!(set.policy_sets["none"].policies.is_empty());
+}
+
+/// A policy set that is not what it says is refused at startup, like every
+/// other fixture defect.
+#[test]
+fn a_broken_policy_set_fails_loudly() {
+    let dir = std::env::temp_dir().join(format!("punar-mock-badsets-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    for file in [
+        "org.json",
+        "policy-source-eng-baseline-v12.json",
+        "desired-state-eng-baseline-v12.json",
+    ] {
+        fs::copy(repo_fixtures().join(file), dir.join(file)).unwrap();
+    }
+    let set_dir = |name: &str| {
+        let set = dir.join("policy-sets").join(name);
+        fs::create_dir_all(&set).unwrap();
+        set
+    };
+    let refused = |needle: &str| {
+        let err = punar_mock_smplify::fixtures::load(&dir).unwrap_err();
+        assert!(err.to_string().contains(needle), "{err}");
+    };
+
+    fs::write(
+        set_dir("default").join("set.json"),
+        r#"{"v":1,"assignment":"none","envelopes":[]}"#,
+    )
+    .unwrap();
+    refused("two defaults");
+    fs::remove_dir_all(dir.join("policy-sets/default")).unwrap();
+
+    fs::write(
+        set_dir("odd").join("set.json"),
+        r#"{"v":1,"assignment":"maybe","envelopes":[]}"#,
+    )
+    .unwrap();
+    refused("not policies, none or unusable");
+    fs::write(
+        set_dir("odd").join("set.json"),
+        r#"{"v":1,"assignment":"policies","envelopes":[
+            {"envelope":"policy-source-eng-baseline-v12.json","desired_state":"missing.json"}]}"#,
+    )
+    .unwrap();
+    refused("missing.json");
+    fs::write(
+        set_dir("odd").join("set.json"),
+        r#"{"v":1,"assignment":"policies","envelopes":[
+            {"envelope":"../org.json","desired_state":"desired-state-eng-baseline-v12.json"}]}"#,
+    )
+    .unwrap();
+    refused("bare fixture name");
+    fs::write(
+        set_dir("odd").join("set.json"),
+        r#"{"v":1,"assignment":"none","envelopes":[],"serve":"everything"}"#,
+    )
+    .unwrap();
+    refused("unknown field");
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -349,6 +450,33 @@ fn reregistration_rotates_the_token() {
     mock.call_ok("policy.fetch", json!({"device_token": second}));
 }
 
+/// punard's liveness call and its unenrollment, answered as the built-in
+/// agent answers them: an identity for a token this control plane issued and
+/// none otherwise, and a wipe confirmed for any token, the device's reports
+/// kept.
+#[test]
+fn identity_status_and_unregister_answer_as_the_agent_does() {
+    let mock = TestMock::start("identity");
+    let token = mock.enroll();
+    assert_eq!(
+        mock.call_ok("identity.status", json!({"device_token": token})),
+        json!({"enrolled": true, "token_matches": true})
+    );
+    assert_eq!(
+        mock.call_ok("identity.status", json!({"device_token": "tok_unknown"})),
+        json!({"enrolled": false})
+    );
+    assert_eq!(
+        mock.call_ok("identity.status", json!({})),
+        json!({"enrolled": false})
+    );
+    assert_eq!(
+        mock.call_ok("enroll.unregister", json!({"device_token": token})),
+        json!({"wiped": true})
+    );
+    mock.call_err("enroll.unregister", json!({}), "invalid_params");
+}
+
 // ---------------------------------------------------------------------------
 // policy.fetch
 // ---------------------------------------------------------------------------
@@ -370,6 +498,109 @@ fn policy_fetch_serves_the_composed_baseline() {
         policies[0]["policy"],
         read_fixture_json("desired-state-eng-baseline-v12.json")
     );
+    assert_eq!(result["assignment"], "policies", "the list is the policy");
+}
+
+/// What every device is served changes when a permitted administrator
+/// publishes another fixture set, and stays changed across a restart.
+#[test]
+fn a_published_policy_set_is_served_until_another_is() {
+    let mut mock = TestMock::start("publish");
+    let token = mock.enroll();
+    let fetch = |mock: &TestMock| mock.call_ok("policy.fetch", json!({"device_token": token}));
+
+    let published = mock.call_ok(
+        "admin.policy_publish",
+        json!({"admin": "secops@acme.com", "set": "firewall-off"}),
+    );
+    assert_eq!(published["published"], "firewall-off");
+    assert_eq!(published["policy_ids"], json!(["eng-baseline-v12"]));
+    assert_eq!(published["identity_verified"], false);
+    let served = fetch(&mock);
+    assert_eq!(
+        served["policies"][0]["policy"]["spec"]["security"]["firewall"]["enabled"],
+        false
+    );
+    assert_eq!(served["assignment"], "policies");
+
+    mock.restart();
+    assert_eq!(fetch(&mock), served, "published survives a restart");
+
+    mock.call_ok(
+        "admin.policy_publish",
+        json!({"admin": "secops@acme.com", "set": "none"}),
+    );
+    assert_eq!(fetch(&mock), json!({"policies": [], "assignment": "none"}));
+    mock.call_ok(
+        "admin.policy_publish",
+        json!({"admin": "secops@acme.com", "set": "default"}),
+    );
+    let fixtures = punar_mock_smplify::fixtures::load(&repo_fixtures()).unwrap();
+    assert_eq!(fetch(&mock)["policies"], json!(fixtures.policies));
+}
+
+/// Publishing is its own permission, refused to a role that may only ask
+/// questions and to an identity the organization does not know, and every
+/// attempt, refused or not, is on the mock's audit trail.
+#[test]
+fn publishing_policy_is_role_gated_and_every_attempt_audited() {
+    let mock = TestMock::start("publish-gate");
+    let token = mock.enroll();
+    let before = mock.call_ok("policy.fetch", json!({"device_token": token}));
+
+    let error = mock.call_err(
+        "admin.policy_publish",
+        json!({"admin": "cio@acme.com", "set": "firewall-off"}),
+        "denied",
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("policy_publish_roles"),
+        "{error}"
+    );
+    mock.call_err(
+        "admin.policy_publish",
+        json!({"admin": "attacker@evil.example", "set": "firewall-off"}),
+        "denied",
+    );
+    mock.call_err(
+        "admin.policy_publish",
+        json!({"admin": "secops@acme.com", "set": "everything"}),
+        "not_found",
+    );
+    mock.call_err(
+        "admin.policy_publish",
+        json!({"admin": "secops@acme.com", "set": "../org"}),
+        "invalid_params",
+    );
+    assert_eq!(
+        mock.call_ok("policy.fetch", json!({"device_token": token})),
+        before,
+        "nothing was published"
+    );
+
+    let audit = read_jsonl(&mock.state_dir().join("policy-publications.jsonl"));
+    let outcomes: Vec<(&str, &str)> = audit
+        .iter()
+        .map(|line| {
+            (
+                line["admin"].as_str().unwrap(),
+                line["outcome"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("cio@acme.com", "denied"),
+            ("attacker@evil.example", "denied"),
+            ("secops@acme.com", "not_found"),
+        ]
+    );
+    assert!(audit.iter().all(|line| line["identity_verified"] == false));
+    assert!(!mock.state_dir().join("published-policy.json").exists());
 }
 
 #[test]
@@ -449,12 +680,13 @@ fn compliance_report_requires_a_valid_token_and_object_report() {
 fn inventory_reports_append_to_their_own_log() {
     let mock = TestMock::start("inventory");
     let token = mock.enroll();
+    // punard's shape: no hostname and no capability value, which never
+    // leave the device (docs/development/milestone-5.md section 6).
     let inventory = json!({
         "os": {"id": "punar", "version_id": "0.5"},
         "kernel": "6.12.0",
-        "hostname": "punar-m5",
         "capabilities": [
-            {"capability": "security.firewall", "supported": true, "current_state": "enabled"},
+            {"capability": "security.firewall", "supported": true},
         ],
     });
     let result = mock.call_ok(
@@ -555,8 +787,17 @@ fn oversized_lines_are_a_framing_violation() {
         r#"{{"v":1,"id":"t-big","method":"org.discover","params":{{"domain":"{}"}}}}"#,
         "a".repeat(5000)
     );
-    stream.write_all(huge.as_bytes()).unwrap();
-    stream.write_all(b"\n").unwrap();
+    // The bounded reader is allowed to reject and close as soon as the byte
+    // limit is crossed; it need not wait for the sender to finish the rest of
+    // the oversized frame. Depending on socket scheduling, either write can
+    // therefore observe EPIPE after the server has already queued its error.
+    // That is the strict behavior this test is proving, not a test failure.
+    if let Err(error) = stream
+        .write_all(huge.as_bytes())
+        .and_then(|()| stream.write_all(b"\n"))
+    {
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
     let response = read_response(&mut stream).expect("error response before close");
     assert_eq!(response["error"]["code"], "malformed_request");
     assert!(read_response(&mut stream).is_none(), "connection closed");

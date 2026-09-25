@@ -1,0 +1,50 @@
+[Unit]
+Description=Punar Mail account management for profile UID %i
+Documentation=file:/usr/share/doc/punar/pim-ipc.md
+Requires=punar-mail-accounts@%i.socket
+After=punar-mail-accounts@%i.socket
+
+[Service]
+Type=simple
+User=punar-mail-accounts
+Group=punar-mail-accounts
+Environment=PUNAR_PROFILE_UID=%i
+Environment=PUNAR_MAIL_SURFACE=accounts
+ExecStart=/usr/bin/punar-mail-bridge
+Sockets=punar-mail-accounts@%i.socket
+RuntimeDirectory=punar-mail-accounts/%i
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=no
+TimeoutStopSec=5s
+
+# The manager receives only an account-management PIM stream and a verified
+# Wayland stream. It owns no state and has no network or device access.
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+CapabilityBoundingSet=
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CPUAccounting=yes
+IOAccounting=yes
+IPAccounting=yes
+StandardOutput=journal
+StandardError=journal
+
+# Deliberately no [Install]. Account management has zero idle residency.

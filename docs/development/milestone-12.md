@@ -129,7 +129,7 @@ join); SNI, DNS or payload inspection **in any milestone, ever** (§7.5).
 | 2 | **Table ownership is partitioned by table name, and that is the whole conflict-resolution story.** punard owns `table inet punar-base` (device firewall posture, M3 §4.1). punar-netd owns `table inet punar-net` (per-principal egress policy). Neither daemon ever reads, writes or destroys the other's table. Two tables at the same hook compose safely in nftables: a drop in either is final. §5.1. |
 | 3 | **The enforcement primitive is `socket cgroupv2` matching in an nftables output chain.** For each managed agent session, netd emits a jump keyed on the session's **actual** scope cgroup path (read from `/proc/<pid>/cgroup` — the same kernel-attested chain M7/M8 verify, never a hardcoded layout) into a per-session chain of zone rules ending in the project's residual decision. This is real kernel enforcement, needs no new package, no forwarding, no address allocation, and no change to the M6/M7 launch path. §5.2. |
 | 4 | **Deny is `reject`, not `drop`, and logging is split from enforcement.** `reject with icmpx type admin-prohibited` fails a `connect()` immediately instead of hanging it (spec 73: a restriction must be legible, and a 130-second timeout is not legible). The rate limiter goes on a **separate log-only rule** ahead of the reject rule — putting `limit rate` on the reject rule itself would make the enforcement fail **open** under flood. §5.3. |
-| 5 | **The residual is per-project, and the device default is unchanged.** Inside a session chain: explicit zone sets first, then loopback/link-local, then the project's `internet` decision as the residual. Outside a session chain: **nothing** — M12 does not filter the browser, the user's shell, or any process Punar did not launch. Punar becomes a per-principal egress policy, not a device egress firewall. §5.6. |
+| 5 | **The residual is per-project, and the device default is unchanged.** Inside a session chain: explicit root-owned zone sets first; the system resolver stub only when `internet` is allowed; all other loopback/link-local destinations rejected; then the project's `internet` decision as the residual. Outside a session chain: **nothing** — M12 does not filter the browser, the user's shell, or any process Punar did not launch. Punar becomes a per-principal egress policy, not a device egress firewall. §5.6. |
 | 6 | **Effective decision = strictest of (project route policy, manifest grant)**, with `deny > approval_required > allow`, and unlisted-zone = `deny` inside a session chain. This is a **deliberate divergence** from M4's highest-layer-wins precedence: the two documents are co-equal statements by the same author about the same project, and co-equal disagreement resolves restrictively. §4.3. |
 | 7 | **Zone membership is CIDRs only, and netd never resolves a hostname.** `network-zone.json` is not extended (M8 Decision 0 discipline); membership lives in a non-contract data file `/usr/share/punar/network/zone-members.json` (the `process-classes.json` / `suspected.json` precedent). Consequence, stated on every surface: **a zone defined only by hostname cannot be enforced in M12**, and Punar displays a destination *name* only when its own zone data supplied one. §4.1, §7.4. |
 | 8 | **punar-netd has no network access at all.** `RestrictAddressFamilies=AF_UNIX AF_NETLINK` + `IPAddressDeny=any`. The daemon that enforces and watches the network structurally cannot open a socket to it. This is what makes decision 7 non-negotiable (name resolution would require DNS) and it is asserted in-VM. §3.3. |
@@ -380,11 +380,17 @@ table inet punar-net {
     # allow zones
     ip daddr @z_corp_dev_v4  counter name c_4f21_corp_dev_allow accept
 
-    # local traffic is not a zone decision
-    ip  daddr 127.0.0.0/8    accept
-    ip6 daddr ::1/128        accept
-    ip  daddr 169.254.0.0/16 accept
-    ip6 daddr fe80::/10      accept
+    # internet may resolve through the local systemd-resolved stub, but it
+    # does not grant every host service or cloud metadata endpoint
+    ip daddr 127.0.0.53 udp dport 53 accept
+    ip daddr 127.0.0.53 tcp dport 53 accept
+
+    # all remaining local infrastructure is denied unless an explicit
+    # root-owned zone above named it
+    ip  daddr 127.0.0.0/8    counter reject with icmpx type admin-prohibited
+    ip6 daddr ::1/128        counter reject with icmpx type admin-prohibited
+    ip  daddr 169.254.0.0/16 counter reject with icmpx type admin-prohibited
+    ip6 daddr fe80::/10      counter reject with icmpx type admin-prohibited
 
     # residual = the project's `internet` decision
     counter name c_4f21_internet_allow accept
@@ -404,10 +410,14 @@ Hardcoding `user.slice/user-<uid>.slice/user@<uid>.service/app.slice/…`
 would break the moment a user manager arranges slices differently, and it
 would break *silently and open*, which is the worst failure available.
 
-**Loopback is not blanket-accepted before zone matching.** Zone sets are
-evaluated first, so a zone may legitimately claim a loopback address —
-which is exactly what the offline check fixture does (§13.2). On a real
-device no product zone claims loopback and the accept rule applies.
+**Loopback and link-local are not blanket-accepted.** Zone sets are evaluated
+first, so a root-owned zone may legitimately claim a loopback address — which
+is exactly what the offline check fixture does (§13.2). Everything else in
+`127.0.0.0/8`, `::1/128`, `169.254.0.0/16`, and `fe80::/10` is rejected before
+the internet residual. This prevents `internet = allow` from silently granting
+agent access to host-only services or link-local metadata. The only implicit
+exception is `127.0.0.53:53` for the system resolver, and only for an
+internet-allowed project.
 
 ### 5.3 Deny semantics, logging, and counters
 
@@ -918,7 +928,9 @@ Watched ≠ policed: only sessions Punar launched are governed (milestone-12 §5
 ```
 
 - Data path: a **root-owned side file** `/run/punar-netd/connections.json`,
-  `0640 root:punar`, written atomically on change only. Same reasoning as
+  `0640 root:punar`, written atomically on change only. *(F0, 2026-09-25: now
+  root-only; the panel shows the caller's scoped `network.connections` answer
+  instead — §11.1's note.)* Same reasoning as
   M8 §8.2 and M10 decision 7: a connection list is personal data, and a
   forgeable privacy panel is a phishing primitive. `/run/punar` is
   user-writable and therefore disqualified. The shell reads it with an
@@ -1021,6 +1033,11 @@ adds, as new sections, additively.
 /run/punar-netd/connections.json  0640 root:punar
 /var/lib/punar/network/     0700 root:root
 ```
+
+*(Superseded 2026-09-25 by the F0 foundation: `connections.json` is `0600`,
+root only, because it holds every person's rows, and `network.connections`
+answers each non-root caller with their own rows and the device's plus a
+`withheld` count — docs/api/ipc.md §21.3.)*
 
 Same framing, envelope and error codes as `punar-common::ipc`
 (ipc.md §2–§4). Admission by group `punar`; mutations by `SO_PEERCRED`.
@@ -1177,7 +1194,7 @@ Two tools already in the image do all of it:
 
 **Fixture zone data** (staged only for the check, and labeled as fixture,
 never product data): `corp_prod → 127.0.0.7/32`, `internet` residual
-allow. Because zone sets are evaluated before the loopback accept
+allow. Because explicit zone sets are evaluated before the structural loopback reject
 (§5.2), a loopback address is a legitimate zone member and the whole
 enforcement chain is exercised without a NIC. The report prints one
 `info` line saying so in plain words, so no reader mistakes a loopback
@@ -1338,8 +1355,9 @@ zone fixtures under `fixtures/network/valid/` (already present for
 policy — M12 adds the loopback **fixture** zone document and one invalid
 document per new failure mode). A `punar-netd` unit test pins the
 ruleset generator against a golden `.nft` text for a fixed session +
-policy input, so the rule *order* (log before reject; zones before
-loopback; residual last) is regression-tested where a VM cannot see it.
+policy input, so the rule *order* (log before reject; zones before local
+infrastructure rejects; residual last) is regression-tested where a VM cannot
+see it.
 
 ### 13.4 What genuinely cannot be tested offline — Phase 2, stated plainly
 

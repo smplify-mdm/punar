@@ -30,3 +30,12 @@ UseDomains=yes
 # Network-provided automatic timezone (RFC 4833), with the same privacy
 # posture as wired networking: receive locally, never query a GeoIP service.
 UseTimezone=yes
+# The network does not choose this machine's clock: the reasoning is in
+# 50-punar-dhcp.network, and it matters more here, where the network is
+# often a café's or an airport's.
+UseNTP=no
+
+[DHCPv6]
+# Router advertisements can start networkd's DHCPv6 client even with
+# DHCP=ipv4; refuse its NTP servers too (see 50-punar-dhcp.network).
+UseNTP=no

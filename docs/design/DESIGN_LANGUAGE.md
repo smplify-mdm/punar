@@ -81,8 +81,9 @@ Two surface systems. Color never decorates; it states status or identity.
 | warn | `#8A5A00` | `#F2BE85` | remediating, approval pending, expiring |
 | bad | `#A31F2C` | `#FF7A7A` | non-compliant, denied, blocked |
 
-Rules: interfaces are near-monochrome by default; a screen with no status to
-report contains **no** color. Green/amber/red map 1:1 to policy decisions
+Rules: **system surfaces** are near-monochrome by default; a system screen with
+no status to report contains **no** color. First-party applications are scoped
+out — see *Application color* below. Green/amber/red map 1:1 to policy decisions
 (allow / approval_required / deny) and compliance states — a user learns the
 meaning once and it never lies.
 
@@ -97,6 +98,42 @@ and text — and take a red fill only on a final confirmation step. At most
 one holds the color and the other goes ghost. This keeps the semantic promise
 intact: color still means decision, now including the one the user is about
 to make.
+
+### Application color (adopted 2026-09-10)
+
+The two rules above describe **system surfaces**: the bar, command center,
+System Control, approvals, notifications, the greeter, the lock and the
+overview. There the OS is speaking, every mark is a claim it is making, and
+near-monochrome is what keeps the claims legible.
+
+**First-party applications are not system surfaces and may use color.** A
+calendar whose calendars cannot be told apart, or a mail client that cannot
+show a person their own label colors, is not a restrained instrument — it is a
+worse product. Color in an application belongs to the person's own data, not to
+an assertion the operating system is making about their machine, and the rule
+was never meant to reach it.
+
+One boundary keeps the semantic promise intact, and it is the whole of the
+constraint:
+
+- **The status triad stays reserved, everywhere.** `ok` / `warn` / `bad` at
+  their exact values (§2) mean allow / approval_required / deny and compliance
+  state, inside an application as much as outside it. An app that has a policy
+  state to report uses them and means it.
+- **Identity color is a tint, not the triad.** User-assigned color — a calendar,
+  a label, an account — renders as a desaturated tint carrying the person's hue,
+  never at the saturation of a status value, so a green calendar can never be
+  mistaken for a compliance verdict. Identity color is applied as a fill wash or
+  an accent bar; it never becomes the color of a word a person must read.
+- **Structure stays monochrome.** Rules, hairlines, section heads, meta rows,
+  keys and the type ramp are unchanged. Color lands on content, not on chrome.
+- **Nothing is color-only.** Any distinction carried by color must also be
+  carried by position, weight, a mark or a word, because a person who cannot
+  separate two hues must still be able to use the application.
+
+The test: remove every hue from an application and it must still be fully
+usable, just harder to scan. If something becomes unknowable, that thing was
+encoded in color alone and needs a second channel.
 
 ## 3. Shape, elevation, rules
 
@@ -297,7 +334,9 @@ For this design language specifically, two consequences bind:
 ## 9. Non-negotiables
 
 1. UI code consumes tokens (`punar-tokens.*`) — never hardcoded values.
-2. No color without meaning; no decoration that doesn't explain.
+2. No color without meaning on a system surface; no decoration that doesn't
+   explain. In a first-party application, a person's own identity color is
+   meaning — see §2 *Application color*.
 3. Mono for labels and data, sans for statements and prose — never swapped.
 4. Every first-party surface keyboard-operable (spec §12) — focus states use
    a 2px ink (or panel-fg) ring, offset 2px, no color dependence.

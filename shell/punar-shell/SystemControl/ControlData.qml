@@ -24,8 +24,14 @@
 //        punarctl privilege status --json the §48 grants held right now
 //        punarctl web-apps list --json    installed web apps, contexts and
 //                                         the effective install policy
+//      and three more, each only while its own view is selected:
+//        punarctl network status --json       Network: netd's enforcement
+//        punarctl privacy connections --json  Connections: the local TCP view
+//        punarctl relay status --json         Relay: the route model
 //      A daemon that is not running answers nothing, and the surface then
-//      says AWAITING PUNARD instead of inventing a value.
+//      says AWAITING PUNARD instead of inventing a value. A view that a verb
+//      answers draws what the verb said, so the panel and the terminal
+//      cannot tell a person two different things.
 //
 //   3. THE KERNEL, for the handful of facts knowable without a network
 //      manager, a power daemon or a Bluetooth stack — fixed paths in
@@ -41,7 +47,7 @@
 //   [E] REQUEST EXCEPTION →  punarctl privilege request --capability <p>
 //                            --reason <typed> --duration 15
 //       The §48 reason-required flow. It creates an APPROVAL: punard
-//       writes approvals.json and the M9 gate (Plate D-003) opens itself.
+//       writes the approval views and the M9 gate (Plate D-003) opens itself.
 //       This is the plate's amber "Request exception · Approval required"
 //       tag wearing the approval_required colour, exactly as drawn.
 //   [S] SET STATE        →  punarctl capabilities set <path> <state>
@@ -110,6 +116,9 @@ Scope {
     //
     // "" | "reason" | "password"
     property string adminStage: ""
+    // "policy" (pin or withdraw a device-policy value: reason, then
+    // password) or "keymap" (the device's keyboard layout: password only).
+    property string adminKind: "policy"
     property string adminPath: ""
     /// The value to pin, already a JSON scalar as a string. Empty means the
     /// entry is being withdrawn.
@@ -128,6 +137,7 @@ Scope {
     property string pendingTimeZone: ""
     property bool pendingWebAppInstall: false
     property string pendingWebAppRemoval: ""
+    property string pendingWebContext: ""
 
     // Raised when the reader asks for the full AI surface.
     signal aiPanelRequested
@@ -225,6 +235,15 @@ Scope {
         return Math.max(0, Math.round((d.getTime() - data.nowMs) / 60000));
     }
 
+    /// A word as a POSIX shell would read it back, for commands this
+    /// surface prints for a person to copy. Display only: nothing is ever
+    /// run through a shell.
+    function shellWord(word: string): string {
+        if (/^[A-Za-z0-9._\/@:=+-]+$/.test(word))
+            return word;
+        return "'" + String(word).split("'").join("'\\''") + "'";
+    }
+
     function capabilityLabel(path: string): string {
         switch (path) {
         case "security.firewall":
@@ -233,6 +252,12 @@ Scope {
             return "Hostname";
         case "time.timezone":
             return "Timezone";
+        case "system.update_channel":
+            return "Update channel";
+        case "security.credential_isolation":
+            return "Credential isolation";
+        case "system.keymap":
+            return "Keyboard layout";
         default:
             return path;
         }
@@ -308,6 +333,31 @@ Scope {
     Probe {
         id: webAppsProbe
     }
+    // Keyboard (SMP-1405 WP-02): the layout and the clipboard-key grammar,
+    // read with the verbs a terminal uses, only while the view is open.
+    Probe {
+        id: keyboardProbe
+    }
+    Probe {
+        id: clipboardProbe
+    }
+    // Encryption, Secure Boot and Power: `punarctl device posture --json`,
+    // the device.posture answer a managing organization also receives. One
+    // LUKS2 answer on the device, and the battery rule the classifier uses.
+    Probe {
+        id: postureProbe
+    }
+    // Network, Connections and Relay: punar-netd's own answers, asked only
+    // while the view that shows them is selected.
+    Probe {
+        id: networkProbe
+    }
+    Probe {
+        id: connectionsProbe
+    }
+    Probe {
+        id: relayProbe
+    }
 
     // The mutation channel — separate from the probes so a write never
     // races a read, and so its exit code and stderr can be shown.
@@ -323,17 +373,8 @@ Scope {
             waitForEnd: true
         }
 
-        onStarted: {
-            if (adminSecret.value === "")
-                return;
-            mutation.write(adminSecret.value + "\n");
-            adminSecret.value = "";
-            mutation.stdinEnabled = false;
-        }
-
         // Connected, not declared — see the note on Probe above.
         Component.onCompleted: mutation.exited.connect(function (exitCode) {
-            adminSecret.value = "";
             data.lastActionPending = false;
             data.lastActionExit = exitCode;
             data.lastActionError = String(mutationErr.text).trim();
@@ -357,6 +398,11 @@ Scope {
                 data.pendingWebAppRemoval = "";
                 data.webAppRemoveArmed = "";
             }
+            if (data.pendingWebContext !== "") {
+                if (exitCode === 0)
+                    data.webAppContext = data.pendingWebContext;
+                data.pendingWebContext = "";
+            }
             // Disarm unconditionally. This used to sit inside the web-app
             // removal branch, so a power action that FAILED left its row
             // armed — one stray press away from trying again with no
@@ -367,6 +413,8 @@ Scope {
             data.refreshProbes();
             if (data.selectedId === "applications")
                 data.refreshWebApps();
+            if (data.selectedId === "keyboard")
+                data.refreshKeyboard();
         })
     }
 
@@ -387,6 +435,7 @@ Scope {
             data.lastActionError = "'" + argv[0] + "' could not be started on this machine.";
             data.pendingWebAppInstall = false;
             data.pendingWebAppRemoval = "";
+            data.pendingWebContext = "";
             data.webAppRemoveArmed = "";
             data.powerArmed = "";
         }
@@ -397,10 +446,28 @@ Scope {
         capsProbe.ask(["punarctl", "capabilities", "--json"]);
         policyProbe.ask(["punarctl", "policy", "effective", "--json"]);
         grantsProbe.ask(["punarctl", "privilege", "status", "--json"]);
+        postureProbe.ask(["punarctl", "device", "posture", "--json"]);
     }
 
     function refreshWebApps(): void {
         webAppsProbe.ask(["punarctl", "--json", "web-apps", "list"]);
+    }
+
+    function refreshKeyboard(): void {
+        keyboardProbe.ask(["punarctl", "--json", "keyboard", "layout", "status"]);
+        clipboardProbe.ask(["punarctl", "--json", "keyboard", "clipboard-keys", "status"]);
+    }
+
+    // The verb behind the selected view, when that view has one of its own.
+    function refreshSelectedView(): void {
+        if (data.selectedId === "network")
+            networkProbe.ask(["punarctl", "network", "status", "--json"]);
+        else if (data.selectedId === "connections")
+            connectionsProbe.ask(["punarctl", "privacy", "connections", "--json"]);
+        else if (data.selectedId === "relay")
+            relayProbe.ask(["punarctl", "relay", "status", "--json"]);
+        else if (data.selectedId === "keyboard")
+            data.refreshKeyboard();
     }
 
     // ---------------------------------------------------------------
@@ -410,6 +477,7 @@ Scope {
     // ---------------------------------------------------------------
 
     readonly property var statusData: data.obj(statusProbe.payload)
+    readonly property var postureData: data.obj(postureProbe.payload)
     readonly property bool daemonAnswered: data.statusData !== null
 
     readonly property var capabilityList: {
@@ -514,10 +582,6 @@ Scope {
     property string netGateway: ""
     property string netOperState: ""
     property string netAddress: ""
-    property string batteryCapacity: ""
-    property string batteryStatus: ""
-    property string cryptUuid: ""
-    property string secureBootValue: ""
 
     function hexToIp(h: string): string {
         if (h.length !== 8)
@@ -577,41 +641,6 @@ Scope {
         onLoaded: data.netAddress = String(macFile.text()).trim()
         onLoadFailed: data.netAddress = ""
     }
-    FileView {
-        id: batCapFile
-        path: "/sys/class/power_supply/BAT0/capacity"
-        onLoaded: data.batteryCapacity = String(batCapFile.text()).trim()
-        onLoadFailed: data.batteryCapacity = ""
-    }
-    FileView {
-        id: batStatusFile
-        path: "/sys/class/power_supply/BAT0/status"
-        onLoaded: data.batteryStatus = String(batStatusFile.text()).trim()
-        onLoadFailed: data.batteryStatus = ""
-    }
-    // A device-mapper crypt target names itself in its UUID
-    // ("CRYPT-LUKS2-…"). This is the only disk-encryption fact the device
-    // reports without a helper; punard registers no encryption
-    // capability, so there is nothing else to read.
-    FileView {
-        id: cryptFile
-        path: "/sys/block/dm-0/dm/uuid"
-        onLoaded: data.cryptUuid = String(cryptFile.text()).trim()
-        onLoadFailed: data.cryptUuid = ""
-    }
-    // The EFI SecureBoot variable: four attribute bytes, then one value
-    // byte. Absent on a machine that did not boot under UEFI Secure Boot
-    // — which is every current Punar build, and the plate says so.
-    FileView {
-        id: secureBootFile
-        path: "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-        onLoaded: {
-            var t = String(secureBootFile.text());
-            data.secureBootValue = t.length >= 5 ? (t.charCodeAt(4) === 1 ? "enabled" : "disabled") : "";
-        }
-        onLoadFailed: data.secureBootValue = ""
-    }
-
     function parseTimezones(body: string): void {
         var seen = {"UTC": true};
         var zones = ["UTC"];
@@ -643,10 +672,6 @@ Scope {
         routeFile.reload();
         operFile.reload();
         macFile.reload();
-        batCapFile.reload();
-        batStatusFile.reload();
-        cryptFile.reload();
-        secureBootFile.reload();
     }
 
     // Live session audio. The tracker keeps the default nodes bound so
@@ -686,6 +711,7 @@ Scope {
                     {id: "datetime", name: "Date & Time"},
                     {id: "bluetooth", name: "Bluetooth"},
                     {id: "displays", name: "Displays"},
+                    {id: "keyboard", name: "Keyboard"},
                     {id: "audio", name: "Audio"},
                     {id: "power", name: "Power"},
                     {id: "applications", name: "Applications"}
@@ -726,6 +752,15 @@ Scope {
                     {id: "compliance", name: "Compliance"},
                     {id: "policies", name: "Policies"},
                     {id: "privilege", name: "Privilege"}
+                ]
+            });
+        } else if (Status.identityRelease !== "") {
+            // The one organization fact a personal device can carry: an
+            // unenrollment still finishing, or an identity punard keeps.
+            sections.push({
+                section: "Organization",
+                items: [
+                    {id: "enrollment", name: "Enrollment"}
                 ]
             });
         }
@@ -845,24 +880,30 @@ Scope {
                 return;
             }
             data.powerArmed = "";
+            // The `punarctl session` verbs, as SessionMenu.qml runs them, by
+            // absolute path for the reason it gives: this surface must not
+            // depend on whatever PATH the login manager handed the session.
             if (kind === "sessionEnd")
-                data.runMutation(["hyprctl", "dispatch", "exit"]);
+                data.runMutation(["/usr/bin/punarctl", "session", "end"]);
             else if (kind === "systemRestart")
-                data.runMutation(["systemctl", "reboot"]);
+                data.runMutation(["/usr/bin/punarctl", "session", "restart"]);
             else
-                data.runMutation(["systemctl", "poweroff"]);
+                data.runMutation(["/usr/bin/punarctl", "session", "shutdown"]);
         } else if (kind === "webContext") {
+            // The same write a person types: punarctl checks the context
+            // against punard's list and the workspace name against the
+            // binding grammar, and its refusal shows in the action row.
+            // BrowserContext sees the new file through its watch.
+            if (mutation.running)
+                return;
             var contextId = String(a.contextId);
-            if (BrowserContext.bindToFocusedWorkspace(contextId)) {
-                data.webAppContext = contextId;
-                data.lastActionArgv = "Browser context preference · " + contextId;
-                data.lastActionExit = 0;
-                data.lastActionError = "";
-            } else {
-                data.lastActionArgv = "Browser context preference · " + contextId;
-                data.lastActionExit = 1;
-                data.lastActionError = "The browser context preference could not be saved.";
-            }
+            var workspace = BrowserContext.focusedWorkspaceName();
+            data.pendingWebContext = contextId;
+            if (workspace !== "")
+                data.runMutation(["punarctl", "web-apps", "context", "bind", contextId,
+                    "--workspace", workspace, "--activate"]);
+            else
+                data.runMutation(["punarctl", "web-apps", "context", "use", contextId]);
         } else if (kind === "application") {
             data.applicationRequested(a.entry, "");
         } else if (kind === "catalogApplication") {
@@ -871,6 +912,18 @@ Scope {
             // §48 requires a reason, so the reason is asked for before
             // anything is sent. Esc cancels; Enter submits.
             data.reasonForCapability = String(a.path);
+        } else if (kind === "keyboardLayout") {
+            // The person's own layout: kept in their own preferences and
+            // applied to this session live. It never reaches punard and needs
+            // no password; the device's layout is the administrator's
+            // (keyboardDevice below).
+            data.runMutation(["punarctl", "keyboard", "layout", "set", String(a.value)]);
+        } else if (kind === "keyboardReset") {
+            data.runMutation(["punarctl", "keyboard", "layout", "reset"]);
+        } else if (kind === "keyboardDevice") {
+            data.beginDeviceKeymap(String(a.value));
+        } else if (kind === "clipboardKeys") {
+            data.runMutation(["punarctl", "keyboard", "clipboard-keys", String(a.value)]);
         } else if (kind === "capset") {
             var path = String(a.path);
             var value = String(a.value);
@@ -885,10 +938,24 @@ Scope {
         }
     }
 
-    /// Start the two-step administrator flow for one path.
+    /// Start the two-step administrator flow for one path — for a device
+    /// administrator. A person without the role is told who can make the
+    /// change instead of being asked for a reason and a password that could
+    /// not be used (F0-S1: punard checks the role first).
     function beginAdminEdit(path: string, value: string): void {
         if (mutation.running)
             return;
+        if (!DeviceAdmin.mayAdminister) {
+            // The command a person would type, whole: they can hand it to
+            // an administrator as it stands.
+            data.lastActionArgv = "punarctl policy "
+                + (value === "" ? "clear " + path : "set " + path + " " + data.shellWord(value))
+                + " --reason \"<why>\"";
+            data.lastActionExit = 3;
+            data.lastActionError = DeviceAdmin.refusal("Changing device policy");
+            return;
+        }
+        data.adminKind = "policy";
         data.adminPath = path;
         data.adminValue = value;
         data.adminReason = "";
@@ -896,8 +963,30 @@ Scope {
         data.lastActionError = "";
     }
 
+    /// The device's keyboard layout is what the login screen and every
+    /// account without its own type in (docs/api/ipc.md §5.4, §23.2): a
+    /// device administrator's change, confirmed with their password. A
+    /// person without the role is told who can make it instead.
+    function beginDeviceKeymap(value: string): void {
+        if (mutation.running || adminRun.running)
+            return;
+        if (!DeviceAdmin.mayAdminister) {
+            data.lastActionArgv = "punarctl keyboard layout set --device " + data.shellWord(value);
+            data.lastActionExit = 3;
+            data.lastActionError = DeviceAdmin.refusal("Changing this device's keyboard layout");
+            return;
+        }
+        data.adminKind = "keymap";
+        data.adminPath = "system.keymap";
+        data.adminValue = value;
+        data.adminReason = "";
+        data.adminStage = "password";
+        data.lastActionError = "";
+    }
+
     function cancelAdminEdit(): void {
         data.adminStage = "";
+        data.adminKind = "policy";
         data.adminPath = "";
         data.adminValue = "";
         data.adminReason = "";
@@ -916,50 +1005,87 @@ Scope {
         data.adminStage = "password";
     }
 
-    /// The second step. The password is written on an anonymous pipe to a
-    /// fixed helper — never an argument, never an environment variable, and
-    /// never held in a property, which is why it is a parameter that falls
-    /// out of scope the moment this returns.
+    /// The second step: `punarctl policy set|clear`, the very command a
+    /// terminal runs. The password goes from this surface to punar-authd
+    /// directly, and punarctl receives only a ticket bound to it and to
+    /// `policy.set` (`--ticket-from-parent`, F0-S4). It is never an
+    /// argument, never an environment variable, never a pipe, and never held
+    /// past the handoff: PasswordRun keeps it only until it has been written.
     function submitAdminPassword(password: string): void {
-        if (data.adminStage !== "password" || mutation.running)
+        if (data.adminStage !== "password" || mutation.running || adminRun.running)
             return;
-        var argv = [
-            "/usr/lib/punar/punar-policy-set.sh",
-            data.adminPath,
-            data.adminValue === "" ? "--clear" : data.adminValue,
-            data.adminReason
-        ];
+        // An empty submit is a person pressing Enter twice, not a request. It
+        // is refused HERE rather than by punarctl, because reaching it at all
+        // means spawning a process to be told what this line already knows —
+        // and punar-authd would count the attempt against the account's
+        // faillock tally for nothing.
+        if (password === "") {
+            data.lastActionArgv = data.adminKind === "keymap"
+                ? "punarctl keyboard layout set --device " + data.shellWord(data.adminValue)
+                : "punarctl policy set " + data.adminPath;
+            data.lastActionExit = 2;
+            data.lastActionError = "Enter your password to confirm this change.";
+            return;
+        }
+        if (data.adminKind === "keymap") {
+            // The device's keyboard layout: `capabilities.set` on
+            // system.keymap, with a ticket bound to that method and to this
+            // punarctl, exactly as a terminal's `--device` run gets one.
+            var keymapValue = data.adminValue;
+            data.cancelAdminEdit();
+            data.lastActionArgv = "punarctl keyboard layout set --device " + data.shellWord(keymapValue);
+            data.lastActionExit = -1;
+            data.lastActionError = "";
+            data.lastActionPending = true;
+            data.pendingTimeZone = "";
+            if (!adminRun.start(["/usr/bin/punarctl", "keyboard", "layout", "set", "--device",
+                        keymapValue, "--ticket-from-parent"], password, "capabilities.set")) {
+                data.lastActionPending = false;
+                data.lastActionExit = 127;
+                data.lastActionError = "punarctl could not be started on this machine.";
+            }
+            return;
+        }
+        var argv = data.adminValue === ""
+            ? ["/usr/bin/punarctl", "policy", "clear", data.adminPath,
+               "--reason", data.adminReason, "--ticket-from-parent"]
+            : ["/usr/bin/punarctl", "policy", "set", data.adminPath, data.adminValue,
+               "--reason", data.adminReason, "--ticket-from-parent"];
         data.adminStage = "";
+        // The command a person would type for the same change, whole: it
+        // asks for the password on a terminal, as this surface just did.
         data.lastActionArgv = "punarctl policy "
             + (data.adminValue === "" ? "clear " : "set ")
             + data.adminPath
-            + (data.adminValue === "" ? "" : " " + data.adminValue);
+            + (data.adminValue === "" ? "" : " " + data.shellWord(data.adminValue))
+            + " --reason " + data.shellWord(data.adminReason);
         data.lastActionExit = -1;
         data.lastActionError = "";
         data.lastActionPending = true;
         data.pendingTimeZone = "";
-        mutation.command = argv;
-        adminSecret.value = password;
-        try {
-            mutation.stdinEnabled = true;
-            mutation.running = true;
-        } catch (e) {
-            adminSecret.value = "";
+        if (!adminRun.start(argv, password, "policy.set")) {
             data.lastActionPending = false;
             data.lastActionExit = 127;
-            data.lastActionError = "The policy helper is not installed on this machine.";
+            data.lastActionError = "punarctl could not be started on this machine.";
         }
         data.adminPath = "";
         data.adminValue = "";
         data.adminReason = "";
     }
 
-    /// Holds the typed secret for exactly as long as it takes the helper to
-    /// start and read one line. Cleared by onStarted, and again on exit, so
-    /// no code path leaves it set.
-    QtObject {
-        id: adminSecret
-        property string value: ""
+    // The administrator path's own process: the password crosses a socket,
+    // and the answer is shown exactly like any other mutation's.
+    PasswordRun {
+        id: adminRun
+
+        onFinished: function (exitCode, said) {
+            data.lastActionPending = false;
+            data.lastActionExit = exitCode;
+            data.lastActionError = said;
+            data.refreshProbes();
+            if (data.selectedId === "keyboard")
+                data.refreshKeyboard();
+        }
     }
 
     function submitReason(reason: string): void {
@@ -1037,11 +1163,31 @@ Scope {
         } else {
             data.webAppComposerVisible = false;
         }
+        data.refreshSelectedView();
     }
 
     function refreshAll(): void {
         data.refreshProbes();
         data.refreshKernelFacts();
+        data.refreshSelectedView();
+        // Whether this person administers the device, so an administrator
+        // edit is offered to one and explained to anyone else.
+        DeviceAdmin.refresh();
+    }
+
+    // A punar-netd verb that has not answered: its refusal verbatim when one
+    // came back, and the same command for a terminal either way.
+    function netdSilent(probe: var, verb: string): var {
+        var said = probe.errorText;
+        return {
+            what: probe.answered ? verb + " did not answer" : "Asking punar-netd",
+            why: said !== "" ? said : (probe.answered ? "punar-netd returned nothing this surface could read. Nothing is drawn in place of its answer." : "The answer arrives in a moment; nothing is drawn before it does."),
+            when_: "Run `" + verb + "` in a terminal for the same answer"
+        };
+    }
+
+    function plainWord(value: var): string {
+        return typeof value === "string" ? value.replace(/_/g, " ") : "";
     }
 
     // ---------------------------------------------------------------
@@ -1102,17 +1248,22 @@ Scope {
         if (grant !== null && cap.mutable === true) {
             // A live §48 grant is the ONLY circumstance in which this
             // session may write the capability, so the set action appears
-            // only now — and it names the state it would write.
-            var current = data.stateWord(exp.effective_value);
-            var next = current === "enabled" ? "disabled" : "enabled";
-            acts.push({
-                hotkey: "S",
-                label: "Set " + next,
-                tone: "ghost",
-                kind: "capset",
-                path: path,
-                value: next
-            });
+            // only now — and it names the state it would write. Only for a
+            // capability that declares exactly two values, where one key
+            // can mean "the other one". A hostname or a timezone has an
+            // open value space, and "Set enabled" there would have renamed
+            // the machine "enabled": such a value is set from a terminal
+            // (`punarctl capabilities set <path> <value>`).
+            var next = data.otherAllowedState(cap, exp.effective_value);
+            if (next !== "")
+                acts.push({
+                    hotkey: "S",
+                    label: "Set " + next,
+                    tone: "ghost",
+                    kind: "capset",
+                    path: path,
+                    value: next
+                });
             acts.push({
                 hotkey: "R",
                 label: "Revoke grant",
@@ -1186,6 +1337,8 @@ Scope {
         }
         if (id === "displays")
             return data.viewDisplays();
+        if (id === "keyboard")
+            return data.viewKeyboard();
         if (id === "audio")
             return data.viewAudio();
         if (id === "power")
@@ -1454,20 +1607,48 @@ Scope {
                 v: data.netAddress === "" ? "not reported" : data.netAddress
             });
         }
+        // punar-netd's own answer, the one `punarctl network status` prints.
+        // When it has not answered, the row says so, in netd's words when it
+        // refused: a policy row that simply vanished would read as "fine".
+        var status = data.obj(networkProbe.payload);
+        var enforcement = status === null ? null : data.obj(status.enforcement);
+        if (enforcement !== null) {
+            var state = data.str(enforcement, "state", "not reported");
+            var sessions = typeof enforcement.installed_sessions === "number" ? enforcement.installed_sessions : 0;
+            kv.push({
+                k: "Project network policy",
+                v: state.toUpperCase() + " · " + data.str(enforcement, "reason", sessions + (sessions === 1 ? " managed session" : " managed sessions") + " in the kernel table"),
+                tone: state === "available" ? "ok" : "bad"
+            });
+        } else {
+            var silent = data.netdSilent(networkProbe, "punarctl network status");
+            kv.push({
+                k: "Project network policy",
+                v: networkProbe.answered ? "UNKNOWN · " + silent.what + " · " + silent.why : silent.what,
+                tone: networkProbe.answered ? "bad" : ""
+            });
+        }
         kv.push({
             k: "Source",
-            v: "/proc/net/route · /sys/class/net — read once per open"
+            v: "/proc/net/route · /sys/class/net · punarctl network status — read once per open"
         });
+        // Whether a Wi-Fi capability exists is the registry's answer, not a
+        // sentence here: the row changes the day one is registered.
+        var wifi = data.capabilityIds("wifi");
         return {
             title: "Network",
-            sub: "System · kernel routing table · read-only",
+            sub: "System · kernel routing table and punar-netd · read-only",
             kv: kv,
-            dashed: {
-                what: "Networks, connect and disconnect · Milestone 12",
-                why: "Punar ships no NetworkManager and registers no network capability, so there is no list of networks to show and no ConnectWifi to call. The plate draws that row against punar-netd, which arrives with the network privacy prototype.",
-                when_: "Milestone 12 · punar-netd"
+            dashed: wifi.length > 0 ? {
+                what: "Wi-Fi networks, joining and leaving",
+                why: "punard's registry carries " + wifi.join(", ") + ". This panel does not drive " + (wifi.length === 1 ? "it" : "them") + " yet, so it offers nothing here it could not carry out.",
+                when_: "Run `punarctl capabilities` for the same list"
+            } : {
+                what: "Wi-Fi networks, joining and leaving",
+                why: data.capabilityList.length === 0 ? "iwd associates with Wi-Fi and systemd-networkd addresses every link; both ship and run. punarctl capabilities has not answered, so this row does not say whether Punar can choose a network for you." : "iwd associates with Wi-Fi and systemd-networkd addresses every link; both ship and run. Choosing a network is not something punard offers: its registry carries no Wi-Fi capability, so this row offers nothing it could not carry out.",
+                when_: "Run `punarctl capabilities` for the registry's own list"
             },
-            note: "System Control shows what the kernel already reports. It does not start a network service in order to have something to draw, and it will not render a toggle that no capability backs."
+            note: "System Control shows what the kernel and punar-netd report. It does not start a network service in order to have something to draw, and it will not render a toggle that no capability backs."
         };
     }
 
@@ -1492,8 +1673,180 @@ Scope {
             },
             rows: rows,
             emptyRows: "No monitor is reported by the compositor",
-            note: "Read-only, and here is the reason: display configuration is not a registered capability. punard's registry carries three backends — security.firewall, system.hostname, time.timezone — and this panel does not write a setting the control plane does not own."
+            note: data.displaysNote()
         };
+    }
+
+    // The layouts offered here, as on the login screen. Every other installed
+    // layout is one command away: `punarctl keyboard layout list`.
+    readonly property var keyboardChoices: [
+        {code: "us", name: "English (US)"},
+        {code: "gb", name: "English (UK)"},
+        {code: "de", name: "German"},
+        {code: "fr", name: "French"},
+        {code: "es", name: "Spanish"},
+        {code: "it", name: "Italian"},
+        {code: "pt", name: "Portuguese"},
+        {code: "br", name: "Portuguese (Brazil)"},
+        {code: "nl", name: "Dutch"},
+        {code: "se", name: "Swedish"},
+        {code: "pl", name: "Polish"},
+        {code: "cz", name: "Czech"},
+        {code: "tr", name: "Turkish"},
+        {code: "jp", name: "Japanese"},
+        {code: "ru", name: "Russian"},
+        {code: "ua", name: "Ukrainian"}
+    ]
+
+    function viewKeyboard(): var {
+        var status = keyboardProbe.payload;
+        if (status === null) {
+            return {
+                title: "Keyboard",
+                sub: "System · layout and keys",
+                dashed: keyboardProbe.answered && keyboardProbe.errorText !== "" ? {
+                    what: "punarctl keyboard layout status did not answer",
+                    why: keyboardProbe.errorText,
+                    when_: "Run `punarctl keyboard layout` for the same answer"
+                } : {
+                    what: "Reading the keyboard",
+                    why: "punarctl keyboard layout status has not answered yet.",
+                    when_: "A moment"
+                }
+            };
+        }
+        var device = data.str(status, "device", "us");
+        var yours = data.str(status, "yours", "");
+        var kv = [];
+        var layouts = Array.isArray(status.layouts) ? status.layouts : [];
+        for (var i = 0; i < layouts.length; i++) {
+            kv.push({
+                k: i === 0 ? "This device" : "Also",
+                v: data.str(layouts[i], "description", "") + " · " + data.str(layouts[i], "layout", "")
+                    + (data.str(layouts[i], "variant", "") !== "" ? "+" + data.str(layouts[i], "variant", "") : ""),
+                mono: false
+            });
+        }
+        kv.push({
+            k: "Yours",
+            v: yours !== "" ? yours : "THE DEVICE'S · none of your own",
+            mono: yours !== ""
+        });
+        var session = data.obj(status.session);
+        if (session !== null)
+            kv.push({
+                k: "This session",
+                v: data.str(session, "kb_layout", "")
+            });
+        var live = data.obj(status.live);
+        if (live !== null && data.str(live, "active_keymap", "") !== "")
+            kv.push({
+                k: "Typing now",
+                v: data.str(live, "active_keymap", ""),
+                mono: false
+            });
+        var chord = data.str(status, "switch_chord", "");
+        if (chord !== "")
+            kv.push({
+                k: "Switch layouts",
+                v: "Alt + Alt · " + chord,
+                mono: false
+            });
+        var clipboard = clipboardProbe.payload;
+        var mac = clipboard !== null && data.str(clipboard, "clipboard_keys", "") === "mac";
+        kv.push({
+            k: "Clipboard keys",
+            v: mac ? "MAC-STYLE · Punar + C, V, X" : "STANDARD · each app's own",
+            mono: false
+        });
+
+        // A choice here is the person's own layout; the device's is an
+        // administrator's, offered below with a password.
+        var rows = [];
+        var mine = yours !== "" ? yours : device;
+        var first = mine.split(",")[0].split("+")[0];
+        for (var c = 0; c < data.keyboardChoices.length; c++) {
+            var choice = data.keyboardChoices[c];
+            var current = choice.code === first;
+            var row = {
+                name: choice.name,
+                meta: current ? (yours !== "" ? "Your layout" : "This device's layout, and yours") : "Select to use · " + choice.code,
+                tone: current ? "ok" : "",
+                tag: current ? "Current" : ""
+            };
+            if (!current) {
+                row.action = {
+                    kind: "keyboardLayout",
+                    value: choice.code
+                };
+            }
+            rows.push(row);
+        }
+        var actions = [
+            {
+                hotkey: "C",
+                label: mac ? "Use standard clipboard keys" : "Use Mac-style clipboard keys",
+                tone: "ghost",
+                kind: "clipboardKeys",
+                value: mac ? "off" : "on"
+            }
+        ];
+        if (yours !== "" && yours !== device) {
+            actions.push({
+                hotkey: "D",
+                label: "Make " + yours + " this device's layout · administrator",
+                tone: "ghost",
+                kind: "keyboardDevice",
+                value: yours
+            });
+            actions.push({
+                hotkey: "R",
+                label: "Use this device's layout, " + device,
+                tone: "ghost",
+                kind: "keyboardReset"
+            });
+        }
+        return {
+            title: "Keyboard",
+            sub: "System · layout, switch chord and clipboard keys",
+            kv: kv,
+            rows: rows,
+            actions: actions,
+            note: "A layout chosen here is yours: every session of yours types in it, and nobody else's changes. This device's layout is what the login screen, the console and everyone without a layout of their own type in, so changing it needs a device administrator's password and is recorded in the audit log; an organization can still set it for a managed device. A layout that cannot type Latin letters is led by US English with both Alt keys as the switch, so every Punar key chord keeps working. Mac-style clipboard keys make Punar + C, V and X copy, paste and cut, and move floating and centring to Punar + Alt + V and C. Terminal: punarctl keyboard layout set <layouts> · punarctl keyboard layout set --device <layouts> · punarctl keyboard layout reset · punarctl keyboard clipboard-keys on|off."
+        };
+    }
+
+    // Why Displays is read-only, in the registry's own words: the list is
+    // `punarctl capabilities`, not a sentence that goes stale when a backend
+    // is added, and whether display configuration is one of them is read
+    // from the same list.
+    function displaysNote(): string {
+        var caps = data.capabilityList;
+        if (caps.length === 0)
+            return "Read-only: punarctl capabilities has not answered, so this panel names no backends it did not read and offers no setting.";
+        var ids = [];
+        for (var i = 0; i < caps.length; i++) {
+            var id = data.str(caps[i], "capability", "");
+            if (id !== "")
+                ids.push(id);
+        }
+        var display = data.capabilityIds("display.");
+        if (display.length > 0)
+            return "Read-only here: punard's registry carries " + display.join(", ") + ", and this panel does not drive " + (display.length === 1 ? "it" : "them") + " yet. Run `punarctl capabilities` for the same list.";
+        return "Read-only, and here is the reason: no display capability is registered. punard's registry carries " + ids.length + (ids.length === 1 ? " backend — " : " backends — ") + ids.join(", ") + " — and this panel does not write a setting the control plane does not own.";
+    }
+
+    // The registered capability ids that contain `part`, from
+    // `punarctl capabilities`: empty until it has answered.
+    function capabilityIds(part: string): var {
+        var found = [];
+        var caps = data.capabilityList;
+        for (var i = 0; i < caps.length; i++) {
+            var id = data.str(caps[i], "capability", "");
+            if (id !== "" && id.indexOf(part) !== -1)
+                found.push(id);
+        }
+        return found;
     }
 
     function viewAudio(): var {
@@ -1556,82 +1909,91 @@ Scope {
         };
     }
 
+    function powerActions(): var {
+        return [
+            {
+                hotkey: "L",
+                label: data.powerArmed === "sessionEnd"
+                    ? "Press again to end session" : "End session",
+                tone: data.powerArmed === "sessionEnd" ? "warn" : "ghost",
+                kind: "sessionEnd"
+            },
+            {
+                hotkey: "R",
+                label: data.powerArmed === "systemRestart"
+                    ? "Press again to restart" : "Restart",
+                tone: data.powerArmed === "systemRestart" ? "warn" : "ghost",
+                kind: "systemRestart"
+            },
+            {
+                hotkey: "P",
+                label: data.powerArmed === "systemPowerOff"
+                    ? "Press again to shut down" : "Shut down",
+                tone: data.powerArmed === "systemPowerOff" ? "warn" : "ghost",
+                kind: "systemPowerOff"
+            }
+        ];
+    }
+
+    // The posture probe's own failure, or the AWAITING PUNARD panel. A
+    // refusal is shown verbatim rather than dressed up as "no data".
+    function postureUnanswered(): var {
+        if (postureProbe.answered && postureProbe.errorText !== "") {
+            return {
+                what: "punarctl device posture did not answer",
+                why: postureProbe.errorText,
+                when_: "Run `punarctl device posture` for the same answer"
+            };
+        }
+        return data.awaiting();
+    }
+
     function viewPower(): var {
-        if (data.batteryCapacity === "") {
+        var posture = data.postureData;
+        if (posture === null) {
+            return {
+                title: "Power",
+                sub: "System · power supply class",
+                dashed: data.postureUnanswered(),
+                actions: data.powerActions()
+            };
+        }
+        var batteries = posture.power && Array.isArray(posture.power.batteries)
+            ? posture.power.batteries : [];
+        if (batteries.length === 0) {
             return {
                 title: "Power",
                 sub: "System · power supply class",
                 dashed: {
                     what: "No battery reported",
-                    why: "This device exposes no BAT0 entry under /sys/class/power_supply — which is what a virtual machine reports, truthfully. No power capability is registered either, so there is nothing to govern.",
+                    why: "No power_supply entry on this device is named BAT… or has the type Battery, which is what a desktop or a virtual machine reports, truthfully. No power capability is registered either, so there is nothing to govern.",
                     when_: "Unscheduled · no milestone claims power management"
                 },
-                actions: [
-                    {
-                        hotkey: "L",
-                        label: data.powerArmed === "sessionEnd"
-                            ? "Press again to end session" : "End session",
-                        tone: data.powerArmed === "sessionEnd" ? "warn" : "ghost",
-                        kind: "sessionEnd"
-                    },
-                    {
-                        hotkey: "R",
-                        label: data.powerArmed === "systemRestart"
-                            ? "Press again to restart" : "Restart",
-                        tone: data.powerArmed === "systemRestart" ? "warn" : "ghost",
-                        kind: "systemRestart"
-                    },
-                    {
-                        hotkey: "P",
-                        label: data.powerArmed === "systemPowerOff"
-                            ? "Press again to shut down" : "Shut down",
-                        tone: data.powerArmed === "systemPowerOff" ? "warn" : "ghost",
-                        kind: "systemPowerOff"
-                    }
-                ]
+                actions: data.powerActions()
             };
         }
+        var kv = [];
+        for (var i = 0; i < batteries.length; i++) {
+            var battery = batteries[i];
+            var charge = typeof battery.capacity_percent === "number"
+                ? battery.capacity_percent + " %" : "charge not reported";
+            var state = typeof battery.status === "string" && battery.status !== ""
+                ? battery.status.toUpperCase() : "STATE NOT REPORTED";
+            kv.push({
+                k: String(battery.name),
+                v: charge + " · " + state
+            });
+        }
+        kv.push({
+            k: "Source",
+            v: "punarctl device — read once per open"
+        });
         return {
             title: "Power",
             sub: "System · power supply class · read-only",
-            kv: [
-                {
-                    k: "Charge",
-                    v: data.batteryCapacity + " %"
-                },
-                {
-                    k: "State",
-                    v: data.batteryStatus === "" ? "not reported" : data.batteryStatus.toUpperCase()
-                },
-                {
-                    k: "Source",
-                    v: "/sys/class/power_supply/BAT0 — read once per open"
-                }
-            ],
+            kv: kv,
             note: "Punar reports the supply class and does not set it: there is no typed power capability. Ending the session, restarting and shutting down go to logind, which asks polkit whether this session may act.",
-            actions: [
-                {
-                    hotkey: "L",
-                    label: data.powerArmed === "sessionEnd"
-                        ? "Press again to end session" : "End session",
-                    tone: data.powerArmed === "sessionEnd" ? "warn" : "ghost",
-                    kind: "sessionEnd"
-                },
-                {
-                    hotkey: "R",
-                    label: data.powerArmed === "systemRestart"
-                        ? "Press again to restart" : "Restart",
-                    tone: data.powerArmed === "systemRestart" ? "warn" : "ghost",
-                    kind: "systemRestart"
-                },
-                {
-                    hotkey: "P",
-                    label: data.powerArmed === "systemPowerOff"
-                        ? "Press again to shut down" : "Shut down",
-                    tone: data.powerArmed === "systemPowerOff" ? "warn" : "ghost",
-                    kind: "systemPowerOff"
-                }
-            ]
+            actions: data.powerActions()
         };
     }
 
@@ -1709,57 +2071,79 @@ Scope {
     }
 
     function viewEncryption(): var {
-        var luks = data.cryptUuid !== "" && data.cryptUuid.indexOf("CRYPT-LUKS") === 0;
-        if (!luks) {
+        var posture = data.postureData;
+        if (posture === null || posture.posture === undefined) {
             return {
                 title: "Encryption",
                 sub: "Security · disk encryption",
-                kv: [
-                    {
-                        k: "Crypt target",
-                        v: data.cryptUuid === "" ? "none — no device-mapper crypt device on this machine" : data.cryptUuid,
-                        mono: data.cryptUuid !== ""
-                    }
-                ],
-                dashed: {
-                    what: "Not measured as a capability",
-                    why: "punard registers no encryption capability, so there is no effective value, no source policy and no compliance state to explain. The only fact this device reports is the device-mapper UUID above — and on this build there is not one, because the development image boots unencrypted.",
-                    when_: "The installer design makes LUKS2 the default for an installed device"
-                }
+                dashed: data.postureUnanswered()
             };
         }
+        var encrypted = posture.posture.disk_encryption_enabled;
+        var kv = [
+            {
+                k: "Data paths",
+                v: encrypted === true ? "LUKS2"
+                    : encrypted === false ? "NOT ENCRYPTED" : "UNKNOWN",
+                tone: encrypted === true ? "ok" : encrypted === false ? "bad" : "warn"
+            },
+            {
+                k: "Scope",
+                v: encrypted === true ? "every data path (/var, /home) is proven on LUKS2"
+                    : encrypted === false ? "a data path is on storage that is not LUKS2"
+                    : "the storage evidence could not be read",
+                mono: false
+            },
+            {
+                k: "Source",
+                v: "punarctl device posture — read once per open"
+            }
+        ];
         return {
             title: "Encryption",
             sub: "Security · disk encryption · dm-crypt",
-            kv: [
-                {
-                    k: "Crypt target",
-                    v: data.cryptUuid
-                },
-                {
-                    k: "Format",
-                    v: "LUKS2",
-                    tone: "ok"
-                },
-                {
-                    k: "Source",
-                    v: "/sys/block/dm-0/dm/uuid — read once per open"
-                }
-            ],
-            note: "This is an observation, not a compliance judgement: no capability governs disk encryption yet, so nothing here is remediated or audited."
+            kv: kv,
+            note: "One answer on this device: the proof punard reports to a managing organization, and the one the Mail vault requires before it opens. It is an observation, not a compliance judgement: no capability governs disk encryption yet, so nothing here is remediated or audited."
         };
     }
 
     function viewSecureBoot(): var {
         var attestation = data.str(data.statusData, "attestation", "");
-        var kv = [
-            {
-                k: "EFI variable",
-                v: data.secureBootValue === "" ? "absent — this device did not boot under UEFI Secure Boot" : data.secureBootValue.toUpperCase(),
-                mono: data.secureBootValue !== "",
-                tone: data.secureBootValue === "enabled" ? "ok" : ""
+        var posture = data.postureData;
+        var kv = [];
+        if (posture === null || posture.posture === undefined) {
+            kv.push({
+                k: "Secure Boot",
+                v: "not read"
+            });
+        } else {
+            var p = posture.posture;
+            kv.push({
+                k: "Secure Boot",
+                v: p.uefi === false ? "NOT UEFI — this device did not boot under UEFI"
+                    : p.secure_boot === true ? "ENABLED"
+                    : p.secure_boot === false ? "DISABLED" : "UNKNOWN",
+                tone: p.secure_boot === true ? "ok" : ""
+            });
+            kv.push({
+                k: "TPM",
+                v: p.tpm_present === true
+                    ? (typeof p.tpm_version === "string" ? p.tpm_version : "PRESENT")
+                    : p.tpm_present === false ? "ABSENT" : "UNKNOWN"
+            });
+            if (p.is_virtual === true) {
+                kv.push({
+                    k: "Virtual",
+                    v: (typeof p.virtualization === "string" ? p.virtualization.toUpperCase() : "HYPERVISOR")
+                        + " — Secure Boot and TPM here are the hypervisor's",
+                    tone: "warn"
+                });
             }
-        ];
+            kv.push({
+                k: "Source",
+                v: "punarctl device posture — read once per open"
+            });
+        }
         if (attestation !== "") {
             kv.push({
                 k: "Attestation",
@@ -2013,47 +2397,177 @@ Scope {
     // ---- PRIVACY ---------------------------------------------------
 
     function privacyView(id: string): var {
-        if (id === "connections") {
+        if (id === "connections")
+            return data.viewConnections();
+        if (id === "relay")
+            return data.viewRelay();
+        return null;
+    }
+
+    // What `punarctl privacy connections` prints, drawn: the bounded local
+    // TCP view punar-netd builds on demand. Its wire carries no port, local
+    // address, uid, pid or payload, so neither does this view.
+    function viewConnections(): var {
+        var answer = data.obj(connectionsProbe.payload);
+        if (answer === null) {
             return {
                 title: "Connections",
                 sub: "Privacy · who is talking to the network",
-                dashed: {
-                    what: "Local network observability is not available yet",
-                    why: "Nothing on this device observes network destinations — punar-netd arrives in Milestone 12, and Punar does not guess at data it does not mediate. punarctl privacy connections answers with this same sentence, because it is the same answer.",
-                    when_: "Milestone 12 · network privacy prototype"
-                },
-                kv: [
-                    {
-                        k: "What does exist",
-                        v: "punarctl privacy ledger — what AI sessions accessed"
-                    },
-                    {
-                        k: "And",
-                        v: "punarctl privacy queries — every question an admin asked"
-                    }
-                ],
-                note: "Those two commands are the real privacy surfaces on this device today, and they are the user's to read without privilege. This panel links to them rather than reprinting them, so there is one record and not two."
+                dashed: data.netdSilent(connectionsProbe, "punarctl privacy connections")
             };
         }
-        if (id === "relay") {
+        var kv = [];
+        var scanned = data.shortTime(data.str(answer, "scanned_at", ""));
+        kv.push({
+            k: "Scanned",
+            v: scanned === "" ? "not reported" : scanned
+        });
+        var enforcement = data.str(answer, "enforcement", "not reported");
+        kv.push({
+            k: "Enforcement",
+            v: enforcement.toUpperCase() + " · " + data.str(answer, "enforcement_reason", "per managed cgroup"),
+            tone: enforcement === "available" ? "ok" : "bad"
+        });
+        kv.push({
+            k: "Transport",
+            v: data.str(answer, "transport", "not reported") + " · current sockets · on demand"
+        });
+        var relay = data.obj(answer.relay);
+        if (relay !== null) {
+            kv.push({
+                k: "Relay",
+                v: data.plainWord(relay.mode) + (relay.simulated === true ? " · simulated, the packet path is direct" : " · direct"),
+                tone: relay.simulated === true ? "warn" : ""
+            });
+        }
+        var dns = data.obj(answer.dns_protection);
+        if (dns !== null) {
+            kv.push({
+                k: "DNS protection",
+                v: data.plainWord(dns.state) + " · planned for " + data.plainWord(dns.milestone)
+            });
+        }
+        var rows = [];
+        var processes = Array.isArray(answer.processes) ? answer.processes : [];
+        for (var i = 0; i < processes.length; i++) {
+            var proc = data.obj(processes[i]);
+            if (proc === null)
+                continue;
+            var session = data.obj(proc.session);
+            var who = data.str(proc, "name", "unnamed") + " · " + (proc.governed === true ? "governed" : "not governed") + " · " + (session === null ? data.plainWord(proc.pid_class) + " · unmanaged" : data.str(session, "project", "") + " · " + data.str(session, "id", ""));
+            var connections = Array.isArray(proc.connections) ? proc.connections : [];
+            var denied = Array.isArray(proc.denied) ? proc.denied : [];
+            if (connections.length === 0 && denied.length === 0) {
+                rows.push({
+                    name: data.str(proc, "name", "unnamed"),
+                    meta: who + " · " + data.str(proc, "note", "No current TCP connections"),
+                    tone: ""
+                });
+            }
+            for (var c = 0; c < connections.length; c++) {
+                var conn = data.obj(connections[c]);
+                if (conn === null)
+                    continue;
+                var destination = data.str(conn, "destination", "");
+                rows.push({
+                    name: data.str(conn, "name", destination),
+                    meta: who + " · " + destination + " · " + data.plainWord(conn.zone) + " · " + data.plainWord(conn.category) + " · " + data.plainWord(conn.route) + " · " + data.plainWord(conn.state),
+                    tone: ""
+                });
+            }
+            for (var d = 0; d < denied.length; d++) {
+                var denial = data.obj(denied[d]);
+                if (denial === null)
+                    continue;
+                var last = data.str(denial, "last_destination", "");
+                rows.push({
+                    name: data.str(denial, "zone", "zone"),
+                    meta: who + " · DENIED " + (typeof denial.attempts === "number" ? denial.attempts : 0) + " · " + data.plainWord(denial.kind) + (last === "" ? "" : " · last " + last) + " · " + data.str(denial, "explain", ""),
+                    tone: "bad"
+                });
+            }
+        }
+        var notes = [];
+        var limitations = Array.isArray(answer.limitations) ? answer.limitations : [];
+        for (var l = 0; l < limitations.length; l++) {
+            if (typeof limitations[l] === "string" && limitations[l] !== "")
+                notes.push(limitations[l]);
+        }
+        notes.push("No ports · no local addresses · no payloads · no DNS history · no export method. This is punarctl privacy connections, drawn; the terminal prints the same answer.");
+        return {
+            title: "Connections",
+            sub: "Privacy · who is talking to the network · on demand",
+            pill: {
+                label: processes.length + (processes.length === 1 ? " process" : " processes")
+            },
+            kv: kv,
+            rows: rows,
+            emptyRows: "No current TCP connections observed",
+            note: notes.join(" ")
+        };
+    }
+
+    // What `punarctl relay status` prints, drawn. While the relay is a
+    // simulated route model, the view says so in the same words the CLI does.
+    function viewRelay(): var {
+        var relay = data.obj(relayProbe.payload);
+        if (relay === null) {
             return {
                 title: "Relay",
                 sub: "Privacy · private relay",
-                dashed: {
-                    what: "Not implemented until Milestone 12",
-                    why: "punarctl relay status answers with exactly this sentence. The relay is drawn dashed everywhere it appears in the design language because the complete path is not operating — implementation alone does not earn a solid line.",
-                    when_: "Milestone 12 · network privacy prototype"
-                }
+                dashed: data.netdSilent(relayProbe, "punarctl relay status")
             };
         }
-        return null;
+        var simulated = relay.simulated === true;
+        var rows = [];
+        var hops = Array.isArray(relay.hops) ? relay.hops : [];
+        for (var i = 0; i < hops.length; i++) {
+            var hop = data.obj(hops[i]);
+            if (hop === null)
+                continue;
+            var knows = Array.isArray(hop.knows) ? hop.knows : [];
+            var words = [];
+            for (var k = 0; k < knows.length; k++)
+                words.push(data.plainWord(knows[k]));
+            rows.push({
+                name: data.str(hop, "role", "hop"),
+                meta: "knows " + (words.length === 0 ? "nothing it reports" : words.join(" · ")),
+                tone: ""
+            });
+        }
+        var milestone = data.str(relay, "real_relay_milestone", "");
+        var result = {
+            title: "Relay",
+            sub: "Privacy · private relay · " + (simulated ? "simulated route model" : "direct"),
+            pill: {
+                label: simulated ? "SIMULATED" : data.plainWord(relay.mode).toUpperCase()
+            },
+            kv: [
+                {
+                    k: "Mode",
+                    v: data.plainWord(relay.mode) + (simulated ? " · simulated model, the packet path remains direct" : " · direct packet path"),
+                    tone: simulated ? "warn" : ""
+                }
+            ],
+            rows: rows,
+            emptyRows: "No relay hops: traffic takes the direct path",
+            note: data.str(relay, "property_claimed", "") !== "" ? "Claimed by the model: " + data.str(relay, "property_claimed", "") + ". Change it with punarctl relay set." : "Change it with punarctl relay set."
+        };
+        if (simulated || milestone !== "") {
+            result.dashed = {
+                what: "A relay that carries packets",
+                why: data.str(relay, "property_not_held", "The relay is a route model, not a path packets take.") + " The relay is drawn dashed wherever it appears because the complete path is not operating; implementation alone does not earn a solid line.",
+                when_: milestone === "" ? "Not scheduled" : "Independent relay trust boundaries · " + data.plainWord(milestone)
+            };
+        }
+        return result;
     }
 
     // ---- ORGANIZATION ----------------------------------------------
 
     function orgView(id: string): var {
         if (id === "enrollment" && !Status.enrolled)
-            return null;
+            return Status.identityRelease === "" ? null : data.viewIdentityRelease();
         if (id === "enrollment")
             return data.viewEnrollment();
         if (id === "compliance")
@@ -2090,9 +2604,42 @@ Scope {
                     k: "Compliance",
                     v: Status.label.toUpperCase(),
                     tone: Status.state
+                },
+                {
+                    // The words punarctl enroll status prints for the same
+                    // state, which also says why.
+                    k: "Management",
+                    v: Status.managementInterrupted ? "INTERRUPTED" : "ACTIVE",
+                    tone: Status.managementInterrupted ? "bad" : "ok"
                 }
             ],
-            note: "Enrollment adds chrome; it never redraws the machine. Every section of this panel looked the same before it and looks the same after, with the organization's answers annotated on top."
+            note: Status.managementInterrupted
+                ? "Management interrupted: this device cannot reach its organization's agent, so reports wait until it answers. The organization keeps what it already received, and the policy it set is still enforced. punarctl enroll status says why."
+                : "Enrollment adds chrome; it never redraws the machine. Every section of this panel looked the same before it and looks the same after, with the organization's answers annotated on top."
+        };
+    }
+
+    // A personal device whose Smplify identity is not gone yet. The words
+    // punarctl enroll status prints for the same state.
+    function viewIdentityRelease(): var {
+        var kept = Status.identityRelease === "kept";
+        return {
+            title: "Enrollment",
+            sub: "Organization · personal device",
+            kv: [
+                {
+                    k: "Enrollment",
+                    v: "NONE"
+                },
+                {
+                    k: "Smplify identity",
+                    v: kept ? "KEPT" : "RELEASE PENDING",
+                    tone: kept ? "bad" : "warn"
+                }
+            ],
+            note: kept
+                ? "Nothing records the end of the enrollment this device's Smplify identity belongs to, so punard keeps it rather than wiping it, and asks the agent nothing. It is in the audit log as enroll.release, and a new enrollment replaces it. punarctl enroll status says the same."
+                : "This device is personal. Its Smplify agent has not yet confirmed it wiped the device's key, and is asked again on every reconcile pass. punarctl enroll status says why."
         };
     }
 
@@ -2247,17 +2794,24 @@ Scope {
             var c = caps[i];
             if (c === null || typeof c !== "object" || data.str(c, "capability", "") !== path)
                 continue;
-            var allowed = c.allowed_desired_states;
-            if (!Array.isArray(allowed) || allowed.length !== 2)
-                return "";
-            var current = JSON.stringify(entry.effective_value);
-            for (var j = 0; j < allowed.length; j++) {
-                if (JSON.stringify(allowed[j]) !== current)
-                    return String(allowed[j]);
-            }
-            return "";
+            return data.otherAllowedState(c, entry.effective_value);
         }
         return "";
+    }
+
+    /// For a capability descriptor that declares exactly two allowed
+    /// states, the one `value` is not. "" for any other capability.
+    function otherAllowedState(cap: var, value: var): string {
+        var allowed = cap === null || typeof cap !== "object" ? null : cap.allowed_desired_states;
+        if (!Array.isArray(allowed) || allowed.length !== 2)
+            return "";
+        var current = JSON.stringify(value);
+        var match = -1;
+        for (var j = 0; j < allowed.length; j++) {
+            if (JSON.stringify(allowed[j]) === current)
+                match = j;
+        }
+        return match < 0 ? "" : String(allowed[1 - match]);
     }
 
     function viewPrivilege(): var {

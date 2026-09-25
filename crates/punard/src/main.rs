@@ -13,8 +13,10 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use punar_common::DeviceClass;
 use punard::backends::browser_policy::BrowserPolicyBackend;
+use punard::backends::credential_isolation::CredentialIsolationBackend;
 use punard::backends::firewall::FirewallBackend;
 use punard::backends::hostname::HostnameBackend;
+use punard::backends::keymap::KeymapBackend;
 use punard::backends::timezone::TimezoneBackend;
 use punard::backends::update_channel::UpdateChannelBackend;
 use punard::capability::Registry;
@@ -101,12 +103,13 @@ struct RunArgs {
     #[arg(long, default_value = punard::enroll::DEFAULT_STATUS_FILE)]
     status_file: PathBuf,
 
-    /// M9 approval summary the shell watches (docs/api/ipc.md section 15).
-    /// Inside the `0750 root:punar` `/run/punard`, deliberately not beside
-    /// the world-readable status summary: approval details are admitted-user
-    /// data, and a file a local process can substitute is a spoofing primitive.
-    #[arg(long, default_value = punar_common::approval::APPROVALS_SUMMARY_FILE)]
-    approvals_file: PathBuf,
+    /// M9 approval views the shell watches, one `<uid>.json` per person
+    /// (docs/api/ipc.md section 15). Inside the `0750 root:punar`
+    /// `/run/punard`, deliberately not beside the world-readable status
+    /// summary: approval details are a person's own data, and a file a local
+    /// process can substitute is a spoofing primitive.
+    #[arg(long, default_value = punar_common::approval::APPROVALS_SUMMARY_DIR)]
+    approvals_dir: PathBuf,
 
     /// M9 AI authority document (SPEC section 20). A missing or unreadable
     /// file falls back to the compiled-in personal defaults — the same
@@ -137,6 +140,11 @@ struct RunArgs {
 
 fn build_registry(args: &RunArgs) -> Registry {
     Registry::new(vec![
+        // Observed, never applied: which provider owns org.freedesktop.secrets
+        // is a property of the image. It is registered so that an enrolled
+        // device REPORTS whether its credential store isolates applications,
+        // rather than that fact living only in a design document.
+        Box::new(CredentialIsolationBackend::default()),
         Box::new(FirewallBackend::new(
             args.nft_bin.clone(),
             args.ruleset.clone(),
@@ -159,6 +167,9 @@ fn build_registry(args: &RunArgs) -> Registry {
                 ),
             ]),
         ),
+        // The keyboard layout (SMP-1405 WP-02): /etc/vconsole.conf, checked
+        // against the image's XKB list, first defaulted from the install seed.
+        Box::new(KeymapBackend::for_image()),
         Box::new(UpdateChannelBackend::new(
             args.state_dir.join("update/channel"),
             vec![
@@ -177,15 +188,32 @@ fn run(args: RunArgs) -> ExitCode {
     let registry = build_registry(&args);
     // Control-plane endpoint precedence: flag, then environment override,
     // then the compiled default (milestone-5.md section 4.2 — the env
-    // seam is how host tests point punard at a temp socket).
-    let control_plane_socket = args
-        .control_plane_socket
-        .or_else(|| {
-            std::env::var_os(punard::enroll::CONTROL_PLANE_SOCKET_ENV)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| PathBuf::from(punard::enroll::DEFAULT_CONTROL_PLANE_SOCKET));
+    // seam is how host tests point punard at a temp socket). An override is
+    // honoured only on an image that ships the development control plane
+    // (release check A5 keeps it off every release image): elsewhere it is
+    // a way to route punard to a stand-in for the agent, so it is refused,
+    // punard dials the built-in agent, and the attempt is audited.
+    let default_socket = PathBuf::from(punard::enroll::DEFAULT_CONTROL_PLANE_SOCKET);
+    let requested = args.control_plane_socket.or_else(|| {
+        std::env::var_os(punard::enroll::CONTROL_PLANE_SOCKET_ENV)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    });
+    let development = std::path::Path::new(punard::enroll::DEVELOPMENT_CONTROL_PLANE).exists();
+    let (control_plane_socket, control_plane_override_refused) =
+        punard::enroll::resolve_control_plane(requested, development);
+    if control_plane_override_refused {
+        eprintln!(
+            "punard: refusing to dial another control plane instead of the built-in Smplify \
+             agent: this image ships no development control plane ({})",
+            punard::enroll::DEVELOPMENT_CONTROL_PLANE
+        );
+    }
+    // Dialling the built-in agent's own socket: every connection must reach
+    // systemd's listener, and the units management depends on are checked
+    // on every pass while enrolled (punard::agent_units).
+    let agent_integrity =
+        (control_plane_socket == default_socket).then(punard::agent_units::AgentIntegrity::default);
     // Same precedence for the sibling daemon's socket.
     let agentd_socket = args
         .agentd_socket
@@ -213,9 +241,11 @@ fn run(args: RunArgs) -> ExitCode {
     let cfg = DaemonConfig {
         group: args.group,
         control_plane_socket,
+        agent_integrity,
+        control_plane_override_refused,
         agentd_socket,
         status_file: args.status_file,
-        approvals_file: args.approvals_file,
+        approvals_dir: args.approvals_dir,
         ai_defaults_file: args.ai_defaults_file,
         console_uid: args.console_uid,
         device_class_override: args.device_class_override,

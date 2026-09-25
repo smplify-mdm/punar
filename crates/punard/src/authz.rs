@@ -92,6 +92,23 @@ pub fn agent_session_of_peer(proc_root: &Path, peer: &Peer) -> Option<String> {
     punar_common::principal::agent_session_of_pid(proc_root, peer.pid)
 }
 
+/// Capabilities a device administrator may set directly, with a fresh
+/// password and no privilege request (SMP-1405 WP-02, F0; docs/api/ipc.md
+/// sections 5.4 and 23.2).
+///
+/// The keyboard layout is here because it is set often, by people at the
+/// machine, and is harmless to get wrong for a moment, so the section 48
+/// round trip (ask, approve, then set) would be ceremony. It is still
+/// device-wide state: `/etc/vconsole.conf` is what the login screen, the
+/// console and every account that has not chosen its own layout type in. So
+/// it takes what every other device-wide change takes (contract section
+/// 23.1): uid 0, or a device administrator presenting a `punar-authd` ticket
+/// minted for this call and this process. WP-02 first let the seated person
+/// set it with no administrator; F0's rule replaced that. A person's own
+/// layout never reaches punard at all: it is their preference, kept in their
+/// own configuration (`punarctl keyboard layout set` without `--device`).
+pub const ADMINISTRATOR_DIRECT: &[&str] = &[punar_common::keymap::CAPABILITY_ID];
+
 /// The M3 mutation rule: uid 0 only. Reads are open to any admitted peer and
 /// never reach this function.
 pub fn authorize_mutation(peer: &Peer) -> Decision {

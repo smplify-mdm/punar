@@ -78,6 +78,28 @@ if command -v punarctl >/dev/null 2>&1; then
     fi
 fi
 
+# The keyboard layout, as data (SMP-1405 WP-02). punarctl picks this
+# session's layout — the login screen's choice for this sign-in, else the
+# person's own (~/.config/punar/keyboard.json), else the device's (punard's
+# system.keymap, /etc/vconsole.conf) — checks it against the image's XKB list,
+# and writes three validated values to $XDG_RUNTIME_DIR/punar/session/input.lua,
+# which hyprland.lua reads with a pattern and never runs. PUNAR_KEYMAP is the
+# layout chosen on the login screen, set by punar-greet only for a successful
+# sign-in; `--adopt` makes it this session's, never the device's (that is a
+# device administrator's change, docs/api/ipc.md section 5.4). A failure here
+# never keeps anyone out of the desktop: without the file the session types
+# US English, and the reason is in the session log.
+if command -v punarctl >/dev/null 2>&1; then
+    if [ -n "${PUNAR_KEYMAP:-}" ]; then
+        timeout 10 punarctl keyboard layout render --adopt "${PUNAR_KEYMAP}" \
+            || printf '%s\n' 'punar-session: the keyboard layout could not be rendered; typing US English' >&2
+    else
+        timeout 10 punarctl keyboard layout render \
+            || printf '%s\n' 'punar-session: the keyboard layout could not be rendered; typing US English' >&2
+    fi
+fi
+unset PUNAR_KEYMAP
+
 # Installed by the image staging step.
 # shellcheck disable=SC1091
 . /usr/lib/punar/punar-graphics-env.sh
@@ -130,4 +152,24 @@ punar_clear_vt() {
 }
 punar_clear_vt
 
-exec Hyprland --config "${PUNAR_HYPRLAND_CONFIG}"
+# AND NOTHING MAY WRITE TO IT AFTERWARDS, which is the half the clear above was
+# missing. greetd connects a session's stdio straight to the VT — that is how
+# the packaged text greeter works at all — so the compositor's own startup log
+# is printed onto tty1 immediately after this clear runs. It is invisible while
+# the compositor holds DRM and is revealed the instant it exits, which is
+# precisely the handover the clear exists to keep black. Clearing and then
+# printing onto the same terminal removed the previous occupant's text and
+# replaced it with our own.
+#
+# The journal is where a compositor log belongs in any case: `journalctl -t
+# punar-session` reads it, and nothing is lost.
+punar_exec_compositor() {
+    if command -v systemd-cat >/dev/null 2>&1; then
+        exec systemd-cat --identifier=punar-session --priority=info -- "$@"
+    fi
+    # No systemd-cat: still never the terminal. A session-scoped file keeps the
+    # log reachable on a machine where the journal is not available.
+    exec "$@" >>"${XDG_RUNTIME_DIR:-/tmp}/punar-session.log" 2>&1
+}
+
+punar_exec_compositor Hyprland --config "${PUNAR_HYPRLAND_CONFIG}"

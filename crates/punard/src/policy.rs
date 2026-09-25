@@ -218,6 +218,134 @@ fn extract_local_admin_policy(
     }))
 }
 
+/// Who administers an enrolled device, in an organization's words
+/// (`spec.security.localAdmin.administrators`; F0-S1, docs/api/ipc.md
+/// section 23.4).
+///
+/// Absent means the organization has no opinion, and the device's own
+/// administrators — members of the `punar-admin` group — decide, which is the
+/// state of every unenrolled device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminRoster {
+    /// The device's own `punar-admin` members administer it. Stated
+    /// explicitly by an organization that wants a local list and wants that
+    /// written down.
+    Local,
+    /// Exactly these accounts, by name, administer this device while it is
+    /// enrolled. The local list is kept but has no effect, and `admins.set`
+    /// is refused, naming the organization.
+    Pinned(Vec<String>),
+    /// Nobody at the device administers it: every action that needs the role
+    /// is refused for everyone but root, naming the organization.
+    None,
+}
+
+impl AdminRoster {
+    /// The wire word for the mode (`admins.list`, refusal details).
+    pub fn mode(&self) -> &'static str {
+        match self {
+            AdminRoster::Local => "local",
+            AdminRoster::Pinned(_) => "pinned",
+            AdminRoster::None => "none",
+        }
+    }
+}
+
+/// One organization's opinion about who administers this device, with the
+/// provenance a refusal cites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminRosterLayer {
+    pub provenance: Provenance,
+    pub roster: AdminRoster,
+}
+
+/// Pick the roster that governs: the best-ranked layer, first-wins within a
+/// rank, exactly as [`resolve_local_admin`] does.
+pub fn resolve_admin_roster(layers: &[AdminRosterLayer]) -> Option<&AdminRosterLayer> {
+    layers.iter().min_by_key(|layer| layer.provenance.rank)
+}
+
+/// The longest account name a roster may carry, and the shape of one. The
+/// names are compared against the device's own account names and never
+/// become a path, but a roster that could carry any string would be a place
+/// to hide one.
+const ROSTER_NAME_MAX: usize = 32;
+
+fn roster_name_ok(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z' | b'_'))
+        && name.len() <= ROSTER_NAME_MAX
+        && bytes.all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
+/// Extract `spec.security.localAdmin.administrators`. Like `policyEditing`,
+/// a present-but-unreadable value refuses daemon start rather than falling
+/// back to the device's own list: "the organization said something about who
+/// may act on other people here, and this device could not tell what" must
+/// never resolve to the permissive answer.
+fn extract_admin_roster(
+    payload: &Value,
+    provenance: &Provenance,
+    path: &Path,
+) -> io::Result<Option<AdminRosterLayer>> {
+    let Some(section) = payload.pointer("/spec/security/localAdmin/administrators") else {
+        return Ok(None);
+    };
+    let broken = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: spec.security.localAdmin.administrators {why} — refusing to start",
+                path.display()
+            ),
+        )
+    };
+    let Some(object) = section.as_object() else {
+        return Err(broken("must be an object"));
+    };
+    if let Some(unknown) = object
+        .keys()
+        .find(|key| !matches!(key.as_str(), "mode" | "accounts"))
+    {
+        return Err(broken(&format!("has an unknown field {unknown:?}")));
+    }
+    let accounts = object.get("accounts");
+    let roster = match object.get("mode").and_then(Value::as_str) {
+        Some("local") if accounts.is_none() => AdminRoster::Local,
+        Some("none") if accounts.is_none() => AdminRoster::None,
+        Some("local" | "none") => {
+            return Err(broken("names accounts, which only mode \"pinned\" takes"));
+        }
+        Some("pinned") => {
+            let names: Option<Vec<String>> = accounts.and_then(Value::as_array).map(|list| {
+                list.iter()
+                    .filter_map(|name| name.as_str().filter(|n| roster_name_ok(n)))
+                    .map(str::to_string)
+                    .collect()
+            });
+            match names {
+                Some(names)
+                    if !names.is_empty()
+                        && Some(names.len())
+                            == accounts.and_then(Value::as_array).map(Vec::len) =>
+                {
+                    AdminRoster::Pinned(names)
+                }
+                _ => {
+                    return Err(broken(
+                        "with mode \"pinned\" needs a non-empty list of account names",
+                    ));
+                }
+            }
+        }
+        _ => return Err(broken("mode must be \"local\", \"pinned\" or \"none\"")),
+    };
+    Ok(Some(AdminRosterLayer {
+        provenance: provenance.clone(),
+        roster,
+    }))
+}
+
 /// Result of loading `policy.d/`.
 #[derive(Debug, Default)]
 pub struct LoadedPolicies {
@@ -231,6 +359,8 @@ pub struct LoadedPolicies {
     pub browsers: Vec<BrowserPolicyLayer>,
     /// Organization opinions about local administration (SPEC section 44.5).
     pub local_admin: Vec<LocalAdminLayer>,
+    /// Organization opinions about who administers the device (F0-S1).
+    pub admin_roster: Vec<AdminRosterLayer>,
     /// `spec.*` paths that have no registered capability yet — logged once
     /// at load and ignored (they land with their capabilities, M5+).
     pub unmapped: Vec<String>,
@@ -315,6 +445,9 @@ pub fn load_policy_dir(dir: &Path) -> io::Result<LoadedPolicies> {
                 if let Some(local_admin) = extract_local_admin_policy(payload, &provenance, &path)?
                 {
                     loaded.local_admin.push(local_admin);
+                }
+                if let Some(roster) = extract_admin_roster(payload, &provenance, &path)? {
+                    loaded.admin_roster.push(roster);
                 }
                 let browser_managed = application.as_ref().is_some_and(|layer| {
                     !layer.required_web_apps.is_empty()
@@ -1612,6 +1745,86 @@ mod tests {
         let err = load_policy_dir(&policy_dir).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("policyEditing"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_organization_can_pin_or_deny_local_administrators_and_a_broken_roster_refuses_to_start() {
+        let dir = tmp("admin-roster");
+        let policy_dir = dir.join("policy.d");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        assert!(
+            load_policy_dir(&policy_dir)
+                .unwrap()
+                .admin_roster
+                .is_empty()
+        );
+        assert!(resolve_admin_roster(&[]).is_none());
+
+        let envelope = |administrators: Value| {
+            json!({
+                "policy_id": "eng-baseline-v12",
+                "source_kind": "organization_baseline",
+                "precedence_rank": 2,
+                "source_name": "Acme Engineering Baseline",
+                "policy": {
+                    "apiVersion": "smplify.io/v1alpha1",
+                    "kind": "DeviceDesiredState",
+                    "metadata": {"organization": "acme", "device": "dev_test"},
+                    "spec": {
+                        "security": {
+                            "firewall": {"enabled": true},
+                            "localAdmin": {
+                                "policyEditing": "allowed",
+                                "administrators": administrators
+                            }
+                        }
+                    }
+                }
+            })
+        };
+        let load = |administrators: Value| {
+            std::fs::write(
+                policy_dir.join("a.json"),
+                serde_json::to_string(&envelope(administrators)).unwrap(),
+            )
+            .unwrap();
+            load_policy_dir(&policy_dir)
+        };
+
+        for (body, expected) in [
+            (json!({"mode": "local"}), AdminRoster::Local),
+            (json!({"mode": "none"}), AdminRoster::None),
+            (
+                json!({"mode": "pinned", "accounts": ["alice", "it_ops"]}),
+                AdminRoster::Pinned(vec!["alice".into(), "it_ops".into()]),
+            ),
+        ] {
+            let loaded = load(body.clone()).unwrap();
+            let governing = resolve_admin_roster(&loaded.admin_roster).expect("an opinion");
+            assert_eq!(governing.roster, expected, "{body}");
+            assert_eq!(governing.provenance.policy_id, "eng-baseline-v12");
+            assert!(
+                !loaded.unmapped.iter().any(|p| p.contains("localAdmin")),
+                "a consumed section is not also unmapped"
+            );
+        }
+
+        // Nothing unreadable ever resolves to the device's own list.
+        for broken in [
+            json!("pinned"),
+            json!({"mode": "everyone"}),
+            json!({"mode": "pinned"}),
+            json!({"mode": "pinned", "accounts": []}),
+            json!({"mode": "pinned", "accounts": ["alice", "../root"]}),
+            json!({"mode": "pinned", "accounts": ["alice", 7]}),
+            json!({"mode": "local", "accounts": ["alice"]}),
+            json!({"mode": "none", "extra": true}),
+        ] {
+            let err = load(broken.clone()).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{broken}");
+            assert!(err.to_string().contains("administrators"), "{err}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1231,15 +1231,17 @@ impl LedgerEngine {
 
     // -- publication ---------------------------------------------------
 
-    /// Rewrite `/run/punar-agentd/ledger.json` for the sessions the panel
+    /// Rewrite `/run/punar-agentd/ledger.json` for the sessions agentd
     /// currently shows (docs/api/ipc.md section 13.2).
     ///
-    /// `0640 root:punar` inside the **root-owned** agentd runtime
-    /// directory: only the socket's own admission set may read a ledger,
-    /// and because the directory is root-owned a local user cannot unlink
-    /// the file and substitute a forgery. Best effort by contract — the
-    /// panel fails closed on a missing file, and a failure here never
-    /// fails a request.
+    /// `0640 root:punar-audit` inside the **root-owned** agentd runtime
+    /// directory. The file holds every person's rows, so no person may read
+    /// it: `punar-audit` has no human member, and a person — and the AI
+    /// panel on their behalf — reads their own sessions through
+    /// `agents.access`, which is owner-or-root. Because the directory is
+    /// root-owned a local user cannot unlink the file and substitute a
+    /// forgery. Best effort by contract: a failure here never fails a
+    /// request.
     pub fn write_runtime_view(&self, session_ids: &[String], now: &str) {
         let sessions: Vec<AgentsAccessResult> = session_ids
             .iter()
@@ -1270,7 +1272,7 @@ impl LedgerEngine {
             return;
         }
         if let Some(gid) = self.runtime_gid {
-            // root:punar — meaningful only as root, harmless otherwise.
+            // root:punar-audit — meaningful only as root, harmless otherwise.
             let _ = std::os::unix::fs::chown(&self.cfg.runtime_file, Some(0), Some(gid));
         }
     }

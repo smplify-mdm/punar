@@ -6,6 +6,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Atomically write `bytes` to `path` with `mode`: temp file in the same
@@ -120,6 +123,108 @@ pub fn write_atomic_synced(path: &Path, bytes: &[u8], mode: u32) -> io::Result<(
     }
 }
 
+/// [`write_atomic_synced`] for a file root owns and exactly one other uid,
+/// `reader`, may read: created `0600`, given the POSIX access ACL
+/// `user::rw-, user:<reader>:r--, group::---, mask::r--, other::---` before it
+/// is renamed into place, so there is no moment at which the name points at
+/// a file anyone else can read (F0 review: the per-person approval views).
+///
+/// Not a group: a person's primary group is not guaranteed to be theirs
+/// alone. Not the person as owner: an owner can chmod and rewrite a file, and
+/// the files this writes are what a person reads before they consent. A
+/// filesystem without POSIX ACLs refuses, and the error is returned with
+/// nothing renamed into place: the reader then sees no view — closed, not
+/// open.
+pub fn write_atomic_synced_for_reader(path: &Path, bytes: &[u8], reader: u32) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let tmp = parent.join(format!(".{file_name}.punard-tmp.{}", std::process::id()));
+    let open_excl = || {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+    };
+    let written = (|| {
+        let mut f = match open_excl() {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&tmp)?;
+                open_excl()?
+            }
+            Err(e) => return Err(e),
+        };
+        f.write_all(bytes)?;
+        grant_read_to_one_uid(&f, reader)?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    match written {
+        Ok(()) => {
+            if let Ok(dir) = File::open(&parent) {
+                let _ = dir.sync_all();
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// The name of the POSIX access ACL extended attribute.
+const POSIX_ACL_ACCESS: &str = "system.posix_acl_access";
+
+/// The access ACL that lets root read and write `file` and exactly one other
+/// uid, `reader`, read it — nobody else (see
+/// [`write_atomic_synced_for_reader`]). The kernel's xattr form
+/// (`linux/posix_acl_xattr.h`): a little-endian version 2 header, then
+/// `(tag: u16, perm: u16, id: u32)` entries in tag order.
+pub fn one_reader_acl(reader: u32) -> Vec<u8> {
+    const VERSION: u32 = 2;
+    const UNDEFINED_ID: u32 = u32::MAX;
+    const USER_OBJ: u16 = 0x01;
+    const USER: u16 = 0x02;
+    const GROUP_OBJ: u16 = 0x04;
+    const MASK: u16 = 0x10;
+    const OTHER: u16 = 0x20;
+    const READ: u16 = 4;
+    const WRITE: u16 = 2;
+    let mut blob = VERSION.to_le_bytes().to_vec();
+    for (tag, perm, id) in [
+        (USER_OBJ, READ | WRITE, UNDEFINED_ID),
+        (USER, READ, reader),
+        (GROUP_OBJ, 0, UNDEFINED_ID),
+        (MASK, READ, UNDEFINED_ID),
+        (OTHER, 0, UNDEFINED_ID),
+    ] {
+        blob.extend_from_slice(&tag.to_le_bytes());
+        blob.extend_from_slice(&perm.to_le_bytes());
+        blob.extend_from_slice(&id.to_le_bytes());
+    }
+    blob
+}
+
+/// Set [`one_reader_acl`] on `file`.
+pub fn grant_read_to_one_uid(file: &File, reader: u32) -> io::Result<()> {
+    rustix::fs::fsetxattr(
+        file,
+        POSIX_ACL_ACCESS,
+        &one_reader_acl(reader),
+        rustix::fs::XattrFlags::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
 /// Remove `path` and `fsync` the parent directory, so an unlink that means
 /// "this authorization is over" survives a crash (see
 /// [`write_atomic_synced`]). A missing file is success.
@@ -176,11 +281,39 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
+/// Each stream of a [`run_with_timeout`] child is kept up to this many bytes.
+/// No caller expects anything near it; past it the output is not one a caller
+/// can use whole, and holding more would let a runaway child grow punard.
+pub const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// How long a child's pipes may stay open after it exited, for a reader that
+/// has not handed its bytes over yet, when the deadline has already passed.
+const OUTPUT_GRACE: Duration = Duration::from_millis(200);
+
 /// Run `bin` with a **fixed argv** (never a shell — SPEC section 10) and a
 /// wall-clock deadline; on expiry the child is killed and an error returned.
-/// Output is read after exit — fine for the small outputs of `nft` (well
-/// under the 64 KiB pipe buffer, so the child never blocks on write).
+/// Output is capped at [`MAX_COMMAND_OUTPUT_BYTES`] per stream
+/// ([`run_bounded`]).
 pub fn run_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> io::Result<CommandResult> {
+    run_bounded(bin, args, timeout, MAX_COMMAND_OUTPUT_BYTES)
+}
+
+/// [`run_with_timeout`] with the caller's own cap on each stream.
+///
+/// Both pipes are drained WHILE the child runs, each by its own thread. A
+/// pipe holds 64 KiB on Linux, and a child that fills one blocks on its next
+/// write until someone reads: reading only after exit turned any output past
+/// that into a hang, killed at the deadline and reported as a timeout.
+///
+/// Past `max_output_bytes` on either stream the child is killed and the run
+/// fails with [`io::ErrorKind::FileTooLarge`] — never a timeout, and never a
+/// truncated `stdout` a caller would parse as if it were whole.
+pub fn run_bounded(
+    bin: &Path,
+    args: &[&str],
+    timeout: Duration,
+    max_output_bytes: usize,
+) -> io::Result<CommandResult> {
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
@@ -188,33 +321,105 @@ pub fn run_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> io::Res
         .stderr(Stdio::piped())
         .spawn_busy_retry()?;
     let start = Instant::now();
+    let deadline = start + timeout;
+    let overflow = Arc::new(AtomicBool::new(false));
+    let (sender, received) = mpsc::channel();
+    if let Some(stdout) = child.stdout.take() {
+        drain_in_background(stdout, Stream::Out, max_output_bytes, &overflow, &sender);
+    }
+    if let Some(stderr) = child.stderr.take() {
+        drain_in_background(stderr, Stream::Err, max_output_bytes, &overflow, &sender);
+    }
+    drop(sender);
+
+    let too_large = || {
+        io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("{} wrote more than {max_output_bytes} bytes", bin.display()),
+        )
+    };
+    let timed_out = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("{} timed out after {timeout:?}", bin.display()),
+        )
+    };
     let status = loop {
+        if overflow.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(too_large());
+        }
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if start.elapsed() >= timeout {
+        if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("{} timed out after {timeout:?}", bin.display()),
-            ));
+            return Err(timed_out());
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_string(&mut stdout);
+
+    // The pipes close when the child exits, unless something it started
+    // still holds them; that waits no longer than the deadline allows. A
+    // reader left behind ends when the last holder exits.
+    let (mut stdout, mut stderr) = (None, None);
+    while stdout.is_none() || stderr.is_none() {
+        let wait = deadline
+            .saturating_duration_since(Instant::now())
+            .max(OUTPUT_GRACE);
+        match received.recv_timeout(wait) {
+            Ok((Stream::Out, bytes)) => stdout = Some(bytes),
+            Ok((Stream::Err, bytes)) => stderr = Some(bytes),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(timed_out()),
+        }
     }
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_string(&mut stderr);
+    if overflow.load(Ordering::SeqCst) {
+        return Err(too_large());
     }
+    let text =
+        |bytes: Option<Vec<u8>>| String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned();
     Ok(CommandResult {
         success: status.success(),
-        stdout,
-        stderr,
+        stdout: text(stdout),
+        stderr: text(stderr),
     })
+}
+
+#[derive(Clone, Copy)]
+enum Stream {
+    Out,
+    Err,
+}
+
+/// Read `pipe` to its end on a thread of its own, keeping at most `cap`
+/// bytes. Past the cap it flags `overflow` and goes on reading, discarding,
+/// so the child is never left blocked on a full pipe while it is stopped.
+fn drain_in_background(
+    mut pipe: impl Read + Send + 'static,
+    stream: Stream,
+    cap: usize,
+    overflow: &Arc<AtomicBool>,
+    sender: &mpsc::Sender<(Stream, Vec<u8>)>,
+) {
+    let overflow = Arc::clone(overflow);
+    let sender = sender.clone();
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) if kept.len() + read <= cap => kept.extend_from_slice(&chunk[..read]),
+                Ok(_) => overflow.store(true, Ordering::SeqCst),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = sender.send((stream, kept));
+    });
 }
 
 /// Look up a group's gid by name in an `/etc/group`-format file.
@@ -463,5 +668,99 @@ mod tests {
             run_with_timeout(Path::new("/bin/echo"), &["hi"], Duration::from_secs(5)).unwrap();
         assert!(res.success);
         assert_eq!(res.stdout.trim(), "hi");
+    }
+
+    /// More output than a pipe holds, on both streams at once: read only
+    /// after exit, the child blocks on its write and is killed as "hung".
+    #[test]
+    fn run_with_timeout_drains_output_larger_than_a_pipe() {
+        let started = Instant::now();
+        let res = run_with_timeout(
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                "head -c 300000 /dev/zero | tr '\\0' o; head -c 200000 /dev/zero | tr '\\0' e >&2",
+            ],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(res.success);
+        assert_eq!(res.stdout.len(), 300_000);
+        assert!(res.stdout.bytes().all(|b| b == b'o'));
+        assert_eq!(res.stderr.len(), 200_000);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Past the cap the run fails as too large, promptly — not as a
+    /// timeout, and never with a shortened stdout.
+    #[test]
+    fn output_past_the_cap_is_too_large_never_truncated() {
+        let started = Instant::now();
+        let error = run_bounded(
+            Path::new("/bin/sh"),
+            &["-c", "while :; do echo row; done"],
+            Duration::from_secs(20),
+            64 * 1024,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Exactly at the cap is whole output.
+        let res = run_bounded(
+            Path::new("/bin/sh"),
+            &["-c", "head -c 65536 /dev/zero"],
+            Duration::from_secs(10),
+            64 * 1024,
+        )
+        .unwrap();
+        assert_eq!(res.stdout.len(), 65_536);
+    }
+
+    /// F0 review: a per-person view is readable by root and by the one uid it
+    /// is for, through an ACL set before the name exists — never by a group,
+    /// never by the person as owner. The kernel is the judge: it refuses a
+    /// malformed ACL, and it reports back exactly the entries set.
+    #[test]
+    fn a_view_is_written_readable_by_one_uid_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("punard-acl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("1234.json");
+        match write_atomic_synced_for_reader(&path, b"{}", 1234) {
+            Ok(()) => {}
+            // A filesystem without POSIX ACLs refuses, and nothing is left
+            // behind to read.
+            Err(e) if e.raw_os_error() == Some(95) => {
+                eprintln!("note: this filesystem has no POSIX ACLs; the ACL leg is skipped");
+                assert!(!path.exists());
+                assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no temp file left");
+                let _ = fs::remove_dir_all(&dir);
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        }
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        let file = File::open(&path).unwrap();
+        let mut buf = [0u8; 256];
+        let len = rustix::fs::fgetxattr(&file, POSIX_ACL_ACCESS, &mut buf).unwrap();
+        let acl = &buf[..len];
+        assert_eq!(
+            acl,
+            one_reader_acl(1234),
+            "the kernel kept exactly this ACL"
+        );
+        // With an ACL the group bits show the mask: r for the named reader,
+        // and nothing for the owning group or anyone else.
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "{mode:o}");
+        // The blob names exactly one other uid.
+        let named: Vec<u32> = acl[4..]
+            .chunks(8)
+            .filter(|entry| u16::from_le_bytes([entry[0], entry[1]]) == 0x02)
+            .map(|entry| u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]))
+            .collect();
+        assert_eq!(named, [1234]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

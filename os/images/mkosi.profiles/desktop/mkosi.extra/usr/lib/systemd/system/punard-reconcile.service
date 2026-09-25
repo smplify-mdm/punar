@@ -17,6 +17,25 @@ After=punard.service
 [Service]
 Type=oneshot
 Slice=punar-background.slice
-ExecStart=/usr/bin/punarctl --json reconcile
+# Quiet: one journal line when a pass remediated something or failed to,
+# nothing when it only confirmed what was already so. The full report every
+# two minutes was most of the journal's idle writes and said nothing new:
+# every pass is audited in /var/log/punar/audit.jsonl (a `reconcile` event,
+# one per remediation attempt, one per compliance change and each enrollment
+# transition; docs/api/ipc.md section 6), and `punarctl reconcile` shows the
+# full report on demand.
+ExecStart=/usr/bin/punarctl reconcile --quiet
+# This service never sets the clock, and audit times and the deadlines that
+# must outlive a reboot still read it: ProtectClock drops CAP_SYS_TIME and
+# refuses the clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
+ProtectClock=yes
 StandardOutput=journal
 StandardError=journal
+# What it does write, it writes at notice, and nothing below notice is kept:
+# systemd's own info lines for every run ("Starting", "Deactivated
+# successfully", "Finished") go, while a failed run's lines (notice, warning,
+# error) and this unit's own output stay. Measured on systemd 261. The
+# kernel audit records systemd emits for each start and stop are not log
+# lines and are untouched.
+SyslogLevel=notice
+LogLevelMax=notice

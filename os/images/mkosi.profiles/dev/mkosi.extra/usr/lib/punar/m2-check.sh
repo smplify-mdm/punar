@@ -8,7 +8,10 @@
 #
 # Session env (HYPRLAND_INSTANCE_SIGNATURE, WAYLAND_DISPLAY) is discovered
 # from $XDG_RUNTIME_DIR — the simplest robust path: exactly one Hyprland
-# instance and one quickshell instance exist in this image.
+# instance exists in this image. Quickshell is NOT unique: Mail and the
+# greeter are separate Quickshell configurations under the same
+# /usr/share/punar/shell root, so the shell is addressed by its exact argv
+# (see step 9) rather than by that directory.
 #
 # Every assertion is a `hyprctl -j` + jq read or a `qs ipc` response — no
 # new daemons, no polling loops beyond bounded waits (PERFORMANCE_BUDGETS).
@@ -408,10 +411,17 @@ fi
 cp "${STATE_FILE}" "${RUN_DIR}/m2-workspaces-state.json" 2>/dev/null || true
 
 # --- 9. shell restart → name restoration (milestone-2.md §7 row 11) ----------
-pkill -f '/usr/share/punar/shell' >/dev/null 2>&1
-shell_dead() { ! pgrep -f '/usr/share/punar/shell'; }
+# The shell is addressed by its exact argv and our own uid. A bare
+# `-f /usr/share/punar/shell` also matched the production Mail surface, which
+# surfaces-check launches just before this script and which runs as a locked
+# service user: pkill "killed" it silently (EPERM, discarded), pgrep kept
+# seeing it, and the gate waited 30s for a process it had never touched —
+# the 2026-09-23 red. On failure, print what is actually there.
+SHELL_PATTERN='^qs -p /usr/share/punar/shell$'
+pkill -u "$(id -un)" -f "${SHELL_PATTERN}" >/dev/null 2>&1
+shell_dead() { ! pgrep -u "$(id -un)" -f "${SHELL_PATTERN}" >/dev/null 2>&1; }
 if ! wait_for 30 shell_dead; then
-    note "FAIL quickshell did not exit after pkill"
+    note "FAIL quickshell did not exit after pkill: $(pgrep -af '/usr/share/punar/shell' 2>/dev/null | tr '\n' ';')"
     FAILED=1
 fi
 # Clear the name while the shell is down so nothing rewrites the file.

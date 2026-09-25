@@ -571,6 +571,21 @@ keyboard-first operating system cannot honestly defer, and it is small:
   image actually ships. An unvalidated layout string reaching a config
   file is a config-injection surface, and a capability whose apply can be
   fed arbitrary text is not a typed capability.
+- **As built (SMP-1405 WP-02), two departures from the sketch above.**
+  punard writes only `/etc/vconsole.conf`: no root-owned compositor drop-in
+  and no `hyprctl` from the daemon, because root has no business in a
+  person's compositor. Each session instead renders the layout as data
+  (`punarctl keyboard layout render` →
+  `$XDG_RUNTIME_DIR/punar/session/input.lua`, read by `punar-input.lua`
+  with a pattern, never run), and `punarctl keyboard layout set` applies it
+  live with one `hyprctl eval`. And there are two layouts: a person's own,
+  which `punarctl keyboard layout set` keeps in their preferences with no
+  password and no punard, and the device's, which is device-wide state and
+  so a device administrator's with a fresh password (`set --device`,
+  docs/api/ipc.md section 5.4; WP-02 first let the seated person set the
+  device's, and the F0 merge replaced that). The first-run form's choice is
+  made the device's by punar-onboardd, as root, with the first account. It
+  is still validated, audited and pinnable by an organization.
 
 Timezone needs no new backend. Locale does, plus glibc locale generation
 and font coverage, and that is §5.4's deferral.

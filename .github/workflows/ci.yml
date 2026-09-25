@@ -187,10 +187,10 @@ jobs:
       - name: Install libpam headers (punar-auth links libpam)
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libpam0g-dev
 
-      - name: Install Rust toolchain (stable, rustfmt + clippy)
+      - name: Install Rust toolchain (1.88, rustfmt + clippy)
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          rustup default stable
+          rustup toolchain install 1.88 --profile minimal --component rustfmt --component clippy
+          rustup default 1.88
           rustc --version
 
       - name: Cache cargo registry and build artifacts
@@ -240,11 +240,40 @@ jobs:
       - name: Validate stabilized-window memory attribution wiring
         run: ./tests/performance/memory-attribution-contract-test.sh
 
+      - name: Validate the benchmark probe against its fixtures
+        run: ./tests/performance/bench-probe-test.sh
+
+      - name: Validate the benchmark report's win rule, losses and parsers
+        run: ./tests/performance/bench-summarize-test.sh
+
       - name: Validate release-image policy gate branches
         run: ./tests/images/release-image-policy-test.sh
 
+      # The power rule's own JavaScript, evaluated with node against the
+      # subjects that matter: with another person signed in, only a device
+      # administrator restarts or shuts down (F0-S1).
+      - name: Evaluate the power polkit rule
+        run: ./tests/images/power-polkit-rule-test.sh
+
       - name: Validate bounded early-boot module policy
         run: ./tests/images/initrd-module-policy-test.sh
+
+      # The unpacked initramfs stayed resident as Unevictable memory for the
+      # whole boot on the arm64 release image (Linux 7.1; PERFORMANCE_BUDGETS.md
+      # §4.1); every lane frees it before switch-root on Linux 7.0 to 7.2.
+      # Pins the unit's ordering and hardening, the reboot-on-failure drop-ins,
+      # the kernel range, the job wait, the keep set against fake initramfs
+      # trees, and the mount boundaries with real mounts. That last check needs
+      # an unprivileged user and mount namespace, which Ubuntu 24.04 restricts
+      # through AppArmor; under CI the test fails rather than skip it.
+      - name: Allow unprivileged user namespaces for the mount-boundary check
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Validate the initramfs release step and its keep set
+        run: ./tests/images/initramfs-release-contract-test.sh
 
       - name: Validate installer live-root and tree-manifest contracts
         run: |
@@ -254,6 +283,19 @@ jobs:
 
       - name: Validate governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh
+
+      # M11's two-way context-separation check, with the check's own helpers:
+      # a probe counts only in Local Storage, never through the URL a session
+      # file recorded, and Chromium is closed through its browser process so
+      # its storage service commits instead of being signalled away.
+      - name: Validate the M11 storage probe and browser shutdown
+        run: ./tests/desktop/m11-storage-probe-test.sh
+
+      # The desktop gate's keyring classifier (surfaces-check.sh group 8k)
+      # against files gnome-keyring itself wrote: encrypted, plaintext, and
+      # the empty reservation it makes before writing a new keyring.
+      - name: Validate the keyring format classifier
+        run: ./tests/desktop/keyring-format-test.sh
 
       # The durable documents are what the next session starts from, so a
       # countable claim going quietly false in one of them is a defect, not
@@ -305,12 +347,28 @@ jobs:
       - name: Enforce Hyprland 0.56 dispatcher API
         run: ./tools/check-hyprland-dispatchers.sh
 
+      # SMP-1405 WP-02. A Hyprland Lua error is not a build failure: it shows
+      # up at login as a desktop with no key binds. The pinned Hyprland's own
+      # --verify-config evaluates every configuration file (four sessions),
+      # the data-only keyboard reader's contract, and foot.ini.
+      - name: Verify the Hyprland Lua configuration and foot.ini (pinned Hyprland)
+        run: ./tools/hyprland-verify.sh
+
+      - name: Test the key grammar contract (described, no chord twice, Omarchy families)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends lua5.4
+          ./tests/desktop/keybind-contract-test.sh
+
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
             tools/build-image.sh tools/boot-test.sh tools/installer-boot-test.sh tools/install-test.sh \
             tools/build-amd64-debian-image.sh \
-            tools/build-arm64-image.sh tools/boot-test-arm64.sh \
+            tools/build-arm64-image.sh tools/build-encrypted-arm64-acceptance-image.sh \
+            tools/prepare-mail-acceptance-lab.sh tests/acceptance/mail-tls-provider-test.sh \
+            tools/prepare-smplify-lab.sh \
+            tools/boot-test-arm64.sh \
             tools/build-raspberry-pi-bootfs.sh \
             tools/build-raspberry-pi-install-bundle.sh \
             tools/build-release-bundle.sh \
@@ -339,14 +397,20 @@ jobs:
             tests/images/installer-initrd-test.sh \
             tests/images/installer-iso-contract-test.sh \
             tests/images/initrd-module-policy-test.sh \
+            tests/images/initramfs-release-contract-test.sh \
+            os/images/initrd-common/usr/lib/punar/release-initramfs \
             tests/images/release-image-policy-test.sh \
+            tests/images/power-polkit-rule-test.sh \
             tests/images/repart-spike.sh \
             tests/images/raspberry-pi-bootfs-test.sh \
             tests/images/raspberry-pi-bundle-check.sh \
             tests/images/tree-manifest-test.sh \
             tests/images/developer-baseline-contract-test.sh \
             tests/images/debian-substrate-contract-test.sh \
+            tests/images/bubblewrap-security-contract-test.sh \
             tests/images/vendor-sandbox-contract-test.sh \
+            tests/images/clock-trust-contract-test.sh \
+            tests/images/smplifyd-activation-contract-test.sh \
             tests/performance/check-budgets.sh \
             tests/performance/check-budgets-test.sh \
             tests/performance/memory-attribution-contract-test.sh \
@@ -354,19 +418,36 @@ jobs:
             os/modules/desktop/hypr/punar-scratchpad.sh \
             os/modules/desktop/hypr/punar-graphics-env.sh \
             os/modules/desktop/hypr/punar-terminal-app.sh \
+            os/modules/desktop/hypr/punar-shell-run.sh \
+            os/modules/desktop/hypr/punar-end-session.sh \
             tests/desktop/app-launcher-contract-test.sh \
+            tests/desktop/evolution-defaults-contract-test.sh \
+            tests/desktop/bar-affordance-contract-test.sh \
+            tests/desktop/session-end-confirm-contract-test.sh \
+            tests/desktop/system-control-parity-contract-test.sh \
+            tests/desktop/terminal-parity-gate-test.sh \
+            tests/desktop/mail-identity-contract-test.sh \
+            tests/desktop/qml-inline-component-depth-test.sh \
+            tests/desktop/qml-url-surface-import-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
+            tests/desktop/m11-storage-probe-test.sh \
+            tests/desktop/keyring-format-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
+            tests/desktop/shell-run-test.sh \
             tests/desktop/terminal-app-test.sh \
+            tests/desktop/keybind-contract-test.sh \
+            tools/hyprland-verify.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/greeter-session.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/vendor-sandbox-bin/xdg-open \
-            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-policy-set.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/wifi-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/recovery-check.sh \
             tools/check-doc-freshness.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surface-cost-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m2-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m3-check.sh \
@@ -392,11 +473,75 @@ jobs:
       - name: Test native Lua layout switching
         run: ./tests/desktop/layout-script-test.sh
 
+      - name: Test the shell supervisor and the end-session fallback
+        run: ./tests/desktop/shell-run-test.sh
+
       - name: Test terminal application launching
         run: ./tests/desktop/terminal-app-test.sh
 
       - name: Test installed-app state and cross-workspace focus contract
         run: ./tests/desktop/app-launcher-contract-test.sh
+
+      # Every GSettings key in the seed is pinned by exact spelling, because
+      # GSettings ignores a key it does not know: a typo ships, changes
+      # nothing, and reports success. The two deliberate omissions are pinned
+      # too — both are things a later edit would helpfully add and both would
+      # remove something the person asked for.
+      - name: Validate the Evolution first-run defaults and disclosures
+        run: ./tests/desktop/evolution-defaults-contract-test.sh
+
+      # A control that changes the cursor must also change its appearance.
+      # The workspace indicator opened the overview for two builds while a
+      # person testing it reported they could not see how to switch project
+      # workspaces with a mouse — it was drawn exactly like the inert
+      # separators beside it, and its hoverEnabled was inert because the
+      # MouseArea had no id for anything to bind to.
+      - name: Validate that bar controls show a hover state
+        run: ./tests/desktop/bar-affordance-contract-test.sh
+
+      # PUNAR+SHIFT+E sits beside SHIFT+W, +Q and +F, and ending a session
+      # closes every window in it with no undo. It used to call the exit
+      # dispatcher directly; it now opens the session menu with End session
+      # armed, and a second press signs out. Every link of that chain is pinned.
+      - name: Validate that ending the session from the keyboard asks first
+        run: ./tests/desktop/session-end-confirm-contract-test.sh
+
+      # System Control must not claim, offer or hide more than the device
+      # does: [S] only for two-valued capabilities (it once offered to rename
+      # the machine "enabled"), no parity claim it lacks, any battery punard
+      # counts, a label for every capability, refusals read rather than run
+      # detached, plain text for organization-supplied names, and a printed
+      # policy command a person could run.
+      - name: Validate System Control's parity claims and refusal handling
+        run: ./tests/desktop/system-control-parity-contract-test.sh
+
+      # Terminal parity by construction: every process the shell starts is
+      # punarctl, a helper scoped to one file with its reason, or a documented
+      # funnel; and every System Control view names its punarctl verb (the
+      # punarctl unit tests prove each verb parses).
+      - name: Check the shell runs punarctl for what a terminal can do
+        run: ./tests/desktop/terminal-parity-gate-test.sh
+
+      # The app id, the desktop file id and StartupWMClass must agree, because
+      # the shell joins a running window to its product name by the desktop
+      # FILE id and never by StartupWMClass. A disagreement puts the raw
+      # reverse-DNS id back in the bar, silently — nothing errors.
+      - name: Validate Punar Mail's window identity
+        run: ./tests/desktop/mail-identity-contract-test.sh
+
+      # An inline component nested below the file root makes the QML engine
+      # refuse the whole file, and qmllint reports it CLEAN — the only symptom
+      # is a surface that never appears. Three CI cycles were spent on exactly
+      # that, so it is now caught in seconds by a script.
+      - name: Validate inline component placement
+        run: ./tests/desktop/qml-inline-component-depth-test.sh
+
+      # The surface-cost probe loads each deferred surface by URL, and such a
+      # file does not see its directory's other files by bare name: the
+      # Overview and the Alt+Tab switcher failed to load there, which only
+      # the desktop gate's VM showed. Caught here in seconds instead.
+      - name: Validate URL-loaded surface imports
+        run: ./tests/desktop/qml-url-surface-import-test.sh
 
       - name: Test governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh
@@ -407,8 +552,26 @@ jobs:
       - name: Test common Debian substrate migration contract
         run: ./tests/images/debian-substrate-contract-test.sh
 
+      - name: Test Bubblewrap security floor
+        run: ./tests/images/bubblewrap-security-contract-test.sh
+
       - name: Test native-vendor OAuth sandbox contract
         run: ./tests/images/vendor-sandbox-contract-test.sh
+
+      # Audit times and the deadlines that outlive a reboot read the wall
+      # clock (grants, approvals, tickets and credentials expire on the boot
+      # clock since SMP-1405), so nothing but root may move it: no
+      # DHCP-supplied NTP server, no timedated
+      # set-time/set-ntp/set-local-rtc from a session, and ProtectClock=yes on
+      # every Punar service that is not a reviewed exclusion.
+      - name: Test that the network and the session cannot set the clock
+        run: ./tests/images/clock-trust-contract-test.sh
+
+      # A device that never enrolls runs no Smplify code: the agent is started
+      # by its socket on punard's first call, stays resident only while it
+      # holds an identity, and an administrator's stop is refused.
+      - name: Test that the Smplify agent is dormant until enrolled
+        run: ./tests/images/smplifyd-activation-contract-test.sh
 
       - name: Build punar-dev + punar-desktop images (containerized mkosi)
         run: ./tools/build-image.sh all
@@ -585,10 +748,14 @@ jobs:
             os/images/cache/cargo-target-amd64-debian
           # Do not hash the staged desktop tree directly: it deliberately
           # contains absolute systemd enablement symlinks, which GitHub's
-          # hashFiles walker rejects before the build can start. The commit
-          # SHA invalidates changed shared desktop inputs; the restore prefix
-          # still reuses the latest snapshot-bounded package/Cargo cache.
-          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**', 'Cargo.lock') }}-${{ github.sha }}
+          # hashFiles walker rejects before the build can start, and the
+          # build stages root-owned 0750 product binaries (punar-pim-launch)
+          # into mkosi.extra that the runner cannot read when the post step
+          # re-evaluates this key. So hash the lane's tracked inputs by name,
+          # as the arm64 lane does. The commit SHA invalidates changed shared
+          # desktop inputs; the restore prefix still reuses the latest
+          # snapshot-bounded package/Cargo cache.
+          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/snapshot.env', 'os/images/amd64-debian/container-build.sh', 'os/images/amd64-debian/mkosi.conf', 'os/images/amd64-debian/mkosi.profiles/*/mkosi.conf', 'os/images/amd64-debian/mkosi.profiles/*/mkosi.postinst.chroot', 'Cargo.lock') }}-${{ github.sha }}
           restore-keys: punar-debian-amd64-
 
       - name: Build pinned Debian amd64 minimal + desktop candidates
@@ -675,7 +842,7 @@ jobs:
             os/images/cache/debian-amd64-pkgs
             os/images/cache/cargo-amd64-debian
             os/images/cache/cargo-target-amd64-debian
-          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/**', 'Cargo.lock') }}-${{ github.sha }}
+          key: punar-debian-amd64-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/amd64-debian/snapshot.env', 'os/images/amd64-debian/container-build.sh', 'os/images/amd64-debian/mkosi.conf', 'os/images/amd64-debian/mkosi.profiles/*/mkosi.conf', 'os/images/amd64-debian/mkosi.profiles/*/mkosi.postinst.chroot', 'Cargo.lock') }}-${{ github.sha }}
           restore-keys: punar-debian-amd64-
 
       - name: Build pinned Debian amd64 release and hybrid installer
@@ -778,7 +945,7 @@ jobs:
             os/images/cache/debian-arm64-pkgs
             os/images/cache/cargo-arm64
             os/images/cache/cargo-target-arm64
-          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/**', 'os/images/mkosi.profiles/desktop/mkosi.conf', 'Cargo.lock') }}
+          key: punar-arm64-debian-${{ runner.arch }}-${{ hashFiles('os/images/debian-snapshot.env', 'os/images/arm64/snapshot.env', 'os/images/arm64/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/mkosi.conf', 'os/images/arm64/mkosi.profiles/desktop/mkosi.postinst.chroot', 'os/images/mkosi.profiles/desktop/mkosi.conf', 'Cargo.lock') }}
           restore-keys: punar-arm64-debian-${{ runner.arch }}-
 
       - name: Build native ARM64 minimal + desktop images

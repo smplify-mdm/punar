@@ -173,6 +173,8 @@ fn snapshot_from_list(list: AgentsListResult, proc_root: &Path) -> SessionSnapsh
                 user: record.user,
                 process_id: record.process_id,
                 cgroup_id: cgroup_id(proc_root, &cgroup_path),
+                uid: scope_owner_uid(&cgroup_path)
+                    .or_else(|| process_uid(proc_root, record.process_id)),
                 cgroup_path,
             })
         })();
@@ -187,6 +189,38 @@ fn snapshot_from_list(list: AgentsListResult, proc_root: &Path) -> SessionSnapsh
     sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     skipped.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     SessionSnapshot { sessions, skipped }
+}
+
+/// Whose session this is, from the scope's own place in the cgroup tree: the
+/// `user-<uid>.slice` systemd made for that person, as the FIRST component
+/// under `/user.slice` (F0 review). The path was just read from the kernel
+/// and checked to hold this session's scope, and a person can create
+/// cgroups only below their own delegated subtree — never a sibling
+/// `user-<other>.slice` at that depth — so this names the owner for as long
+/// as the scope exists, even after the process agentd registered has exited
+/// and its children run on. `None` for a scope outside any user slice.
+fn scope_owner_uid(cgroup_path: &str) -> Option<u32> {
+    let mut components = cgroup_path.strip_prefix('/')?.split('/');
+    if components.next()? != "user.slice" {
+        return None;
+    }
+    let slice = components.next()?;
+    let uid = slice.strip_prefix("user-")?.strip_suffix(".slice")?;
+    (!uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| uid.parse().ok())
+        .flatten()
+}
+
+/// The real uid of `pid`, from the kernel's own status file — the fallback
+/// for a scope outside any user slice. `None` when it cannot be read; the
+/// caller then shows that session's rows to root only.
+fn process_uid(proc_root: &Path, pid: u32) -> Option<u32> {
+    let status = fs::read_to_string(proc_root.join(pid.to_string()).join("status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|ids| ids.split_whitespace().next())
+        .and_then(|real| real.parse().ok())
 }
 
 fn cgroup_id(proc_root: &Path, cgroup_path: &str) -> Option<u64> {
@@ -289,6 +323,31 @@ mod tests {
         let snapshot = snapshot_from_list(list(record()), &root);
         assert_eq!(snapshot.sessions.len(), 1);
         assert!(snapshot.skipped.is_empty());
+        // No status file: whose session it is stays unknown, and its rows
+        // go to root only.
+        assert_eq!(snapshot.sessions[0].uid, None);
+        // The owner is the kernel's real uid of the root process, never the
+        // name agentd was told.
+        fs::write(
+            root.join("42/status"),
+            "Name:\tclaude\nUid:\t1001\t1001\t1001\t1001\nGid:\t1001\t1001\t1001\t1001\n",
+        )
+        .unwrap();
+        let snapshot = snapshot_from_list(list(record()), &root);
+        assert_eq!(snapshot.sessions[0].uid, Some(1001));
+        // F0 review: a scope in a person's slice names its owner from the
+        // tree itself, so a registered process that has exited (no status
+        // file) still leaves its session its owner's — never withheld as a
+        // stranger's.
+        fs::remove_file(root.join("42/status")).unwrap();
+        fs::write(
+            root.join("42/cgroup"),
+            "0::/user.slice/user-1002.slice/user@1002.service/app.slice/\
+punar-agent-agt_4f21c09ab3e1.scope\n",
+        )
+        .unwrap();
+        let snapshot = snapshot_from_list(list(record()), &root);
+        assert_eq!(snapshot.sessions[0].uid, Some(1002));
         fs::write(
             root.join("42/cgroup"),
             "0::/user.slice/punar-agent-agt_4f21c09ab3e1.scope-evil\n",
@@ -337,5 +396,29 @@ mod tests {
             Err(AgentdError::Refused { code, .. }) if code == "denied"
         ));
         assert!(decode_response::<AgentsListResult>(&json!({"v": 1}).to_string()).is_err());
+    }
+
+    /// Only systemd's own slice at the top of the user tree names an owner:
+    /// a `user-<n>.slice` a person made deeper in their delegated subtree
+    /// never does.
+    #[test]
+    fn the_scope_owner_is_the_top_user_slice_and_nothing_deeper() {
+        assert_eq!(
+            scope_owner_uid(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/punar-agent-x.scope"
+            ),
+            Some(1000)
+        );
+        assert_eq!(
+            scope_owner_uid(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/user-0.slice/x.scope"
+            ),
+            Some(1000)
+        );
+        assert_eq!(scope_owner_uid("/system.slice/user-0.slice/x.scope"), None);
+        assert_eq!(scope_owner_uid("/user.slice/punar-agent-x.scope"), None);
+        assert_eq!(scope_owner_uid("/user.slice/user-.slice/x"), None);
+        assert_eq!(scope_owner_uid("/user.slice/user-10a0.slice/x"), None);
+        assert_eq!(scope_owner_uid("user.slice/user-1000.slice/x"), None);
     }
 }

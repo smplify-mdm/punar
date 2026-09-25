@@ -1,0 +1,57 @@
+{
+  "apiVersion": "smplify.io/v1alpha1",
+  "kind": "DeviceDesiredState",
+  "metadata": {
+    "organization": "acme",
+    "device": "dev_123"
+  },
+  "spec": {
+    "security": {
+      "diskEncryption": {
+        "required": true
+      },
+      "secureBoot": {
+        "required": true
+      },
+      "firewall": {
+        "enabled": false,
+        "inboundDefault": "deny",
+        "outboundDefault": "allow"
+      }
+    },
+    "applications": {
+      "required": [
+        "git",
+        "podman"
+      ],
+      "denied": [
+        {
+          "origin": "https://social.example"
+        }
+      ],
+      "allowUserInstall": false
+    },
+    "browser": {
+      "ExtensionInstallBlocklist": [
+        "*"
+      ],
+      "DownloadRestrictions": 1,
+      "PromptForDownloadLocation": true,
+      "SitePerProcess": true,
+      "RemoteDebuggingAllowed": false,
+      "SSLErrorOverrideAllowed": false,
+      "InsecurePrivateNetworkRequestsAllowed": false
+    },
+    "ai": {
+      "policy": "engineering-standard"
+    },
+    "network": {
+      "privateRelay": {
+        "enabled": true
+      }
+    },
+    "update": {
+      "channel": "stable"
+    }
+  }
+}

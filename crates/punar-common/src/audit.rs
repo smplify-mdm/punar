@@ -58,9 +58,17 @@ use thiserror::Error;
 use crate::{CapabilityId, Decision, PrincipalKind};
 
 /// The audit trail path (docs/api/ipc.md section 6). Directory
-/// `/var/log/punar` is `0750 root:punar` via tmpfiles; the file is created
-/// `0640` by [`AuditWriter`]; group ownership is the daemon's job.
+/// `/var/log/punar` is `0750 root:punar-audit` via tmpfiles; the file is
+/// created `0640` by [`AuditWriter`], in [`AUDIT_GROUP`] when the daemon
+/// passes its gid ([`AuditWriter::open_in_group`]).
 pub const AUDIT_LOG_PATH: &str = "/var/log/punar/audit.jsonl";
+
+/// The group that may read the whole audit trail (F0-S3). **No person is a
+/// member.** Every person used to be able to read every person's events,
+/// because the trail was group `punar` — the group every account is in. A
+/// person now reads their own events, and the device's, through `audit.tail`,
+/// which says how many others it withheld.
+pub const AUDIT_GROUP: &str = "punar-audit";
 
 /// Sentinel `agent_session_id` for events with no AI agent involved
 /// (pattern-valid against `^agt_[A-Za-z0-9]+$`; see module docs).
@@ -511,6 +519,12 @@ pub struct AuditWriter {
     /// Rotation threshold — [`AUDIT_ROTATE_BYTES`] in production; tests
     /// shrink it to exercise rotation without writing 8 MiB.
     rotate_bytes: u64,
+    /// The group every file this writer creates is given ([`AUDIT_GROUP`]'s
+    /// gid in production). Applied to the live file on open, to the fresh
+    /// file a rotation starts, and to the rotation lock — a trail that was
+    /// `root:punar-audit` until its first rotation and `root:root` after it
+    /// would be a mode nobody chose.
+    group: Option<u32>,
 }
 
 /// Advisory cross-process lock held for the duration of one rotation
@@ -526,7 +540,7 @@ pub struct AuditWriter {
 struct RotationLock(Option<File>);
 
 impl RotationLock {
-    fn acquire(path: &Path) -> RotationLock {
+    fn acquire(path: &Path, group: Option<u32>) -> RotationLock {
         let mut options = OpenOptions::new();
         options.create(true).write(true);
         #[cfg(unix)]
@@ -537,6 +551,7 @@ impl RotationLock {
         let Ok(file) = options.open(path) else {
             return RotationLock(None);
         };
+        set_group(&file, group);
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive) {
             Ok(()) => RotationLock(Some(file)),
             Err(_) => RotationLock(None),
@@ -554,20 +569,44 @@ impl Drop for RotationLock {
     }
 }
 
+/// Give `file` the trail's group, best effort. Meaningful only as root; a
+/// test running unprivileged gets EPERM for any group it is not in, and the
+/// file keeps the mode that makes it root-only, which is the safe direction.
+fn set_group(file: &File, group: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(gid) = group {
+        let _ = std::os::unix::fs::fchown(file, None, Some(gid));
+    }
+    #[cfg(not(unix))]
+    let _ = (file, group);
+}
+
 impl AuditWriter {
-    /// Open (or create, mode `0640`) the audit log for appending.
+    /// Open (or create, mode `0640`) the audit log for appending. The file
+    /// keeps whatever group it has; a daemon writing the device's trail uses
+    /// [`AuditWriter::open_in_group`].
     pub fn open(path: impl Into<PathBuf>) -> io::Result<AuditWriter> {
+        AuditWriter::open_in_group(path, None)
+    }
+
+    /// Open (or create, mode `0640`) the audit log for appending, giving it —
+    /// and every file a later rotation creates — the group `gid` (F0-S3:
+    /// [`AUDIT_GROUP`]'s gid, `root:punar-audit`). `None` leaves the group
+    /// alone, which for a file root creates means `root:root`: readable by
+    /// root only, never by a group nobody chose.
+    pub fn open_in_group(path: impl Into<PathBuf>, gid: Option<u32>) -> io::Result<AuditWriter> {
         let path = path.into();
-        let file = Self::open_live(&path)?;
+        let file = Self::open_live(&path, gid)?;
         Ok(AuditWriter {
             file,
             path,
             rotate_bytes: AUDIT_ROTATE_BYTES,
+            group: gid,
         })
     }
 
-    /// Open/create the live file (append mode, `0640` asserted).
-    fn open_live(path: &Path) -> io::Result<File> {
+    /// Open/create the live file (append mode, `0640` asserted, group set).
+    fn open_live(path: &Path, group: Option<u32>) -> io::Result<File> {
         let mut options = OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
@@ -581,6 +620,7 @@ impl AuditWriter {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(std::fs::Permissions::from_mode(0o640))?;
         }
+        set_group(&file, group);
         Ok(file)
     }
 
@@ -629,14 +669,14 @@ impl AuditWriter {
         if self.file.metadata()?.len() < self.rotate_bytes {
             return Ok(());
         }
-        let _guard = RotationLock::acquire(&self.lock_path());
+        let _guard = RotationLock::acquire(&self.lock_path(), self.group);
         // Re-check under the lock: a peer writer may have rotated while we
         // waited, in which case the live file is small (or absent) again.
         let live_len = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         if live_len >= self.rotate_bytes {
             std::fs::rename(&self.path, self.rotated_path())?;
         }
-        self.file = Self::open_live(&self.path)?;
+        self.file = Self::open_live(&self.path, self.group)?;
         Ok(())
     }
 
@@ -747,6 +787,43 @@ mod tests {
             policy_ids: vec!["eng-ai-v3".to_string()],
             result: "success".to_string(),
         }
+    }
+
+    /// F0-S3: every file the writer creates — the live file, the one a
+    /// rotation starts, and the rotation lock — takes the group it was
+    /// opened with, and stays 0640. Unprivileged, the only group a test can
+    /// hand out is its own; the property that matters is that the writer
+    /// asks for it on every file, not only the first.
+    #[test]
+    fn every_file_the_writer_creates_takes_its_group() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!(
+            "punar-audit-group-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.jsonl");
+        let gid = std::fs::metadata(&dir).unwrap().gid();
+        let mut writer = AuditWriter::open_in_group(&path, Some(gid)).unwrap();
+        writer.rotate_bytes = 1;
+        for _ in 0..3 {
+            writer
+                .append(&AuditEvent::reconcile(
+                    "dev_test",
+                    &AuditActor::daemon(),
+                    AuditOutcome::Clean,
+                ))
+                .unwrap();
+        }
+        for name in ["audit.jsonl", "audit.jsonl.1", "audit.jsonl.lock"] {
+            let meta = std::fs::metadata(dir.join(name)).unwrap();
+            assert_eq!(meta.gid(), gid, "{name}");
+            assert_eq!(meta.permissions().mode() & 0o777, 0o640, "{name}");
+        }
+        assert_eq!(writer.group, Some(gid));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

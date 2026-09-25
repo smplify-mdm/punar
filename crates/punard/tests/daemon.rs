@@ -48,7 +48,11 @@ fn write_nss_files(dir: &Path) -> (PathBuf, PathBuf) {
     // /etc/{group,passwd} substitutes so username resolution is
     // deterministic regardless of the host.
     let group_file = dir.join("group");
-    fs::write(&group_file, "root:x:0:\npunar:x:970:\n").unwrap();
+    fs::write(
+        &group_file,
+        "root:x:0:\npunar:x:970:\npunar-admin:x:971:punar\n",
+    )
+    .unwrap();
     let passwd_file = dir.join("passwd");
     fs::write(
         &passwd_file,
@@ -198,9 +202,11 @@ fn app_catalog_fixture(dir: &Path) -> (PathBuf, PathBuf, String) {
     fs::write(
         &flatpak,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\nremote-info) cat '{}' ;;\nlist) if [ -f '{}' ]; then printf 'com.spotify.Client\\t%s\\n' \"$(cat '{}')\"; fi ;;\ninfo) [ -f '{}' ] && cat '{}' || exit 1 ;;\nremote-add) : ;;\nupdate) for a in \"$@\"; do case \"$a\" in --commit=*) printf '%s\\n' \"${{a#--commit=}}\" > '{}' ;; esac; done ;;\ninstall) printf '%s\\n' '{}' > '{}' ;;\nuninstall) rm -f '{}' ;;\n*) exit 1 ;;\nesac\n",
             argv_path.display(), metadata_path.display(), state_path.display(),
-            state_path.display(), state_path.display(), state_path.display(), commit,
+            state_path.display(), state_path.display(), state_path.display(),
+            // the `update --commit=` arm writes the commit it was given
+            state_path.display(), commit,
             state_path.display(), state_path.display()
         ),
     )
@@ -362,7 +368,7 @@ fn configure_update_fixture(
         repository_url_file: dir.join("update-repository.url"),
         repository_url_owner_uid: rustix::process::geteuid().as_raw(),
         repository_dir: repository,
-        curl_bin: dir.join("curl"),
+        fetch_socket: dir.join("fetch.sock"),
         trusted_keys_dir: keys,
         cached_channel: cfg.state_dir.join("update/verified-channel.json"),
         cached_signature: cfg.state_dir.join("update/verified-channel.json.sig"),
@@ -579,11 +585,7 @@ fn capabilities_list_returns_schema_shaped_descriptors() {
 fn catalog_install_is_digest_bound_human_available_and_audited() {
     let mock = MockCapability::new("mock.widget", json!("off"));
     let td = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         mock,
         |_| {},
         |cfg, dir| {
@@ -591,6 +593,8 @@ fn catalog_install_is_digest_bound_human_available_and_audited() {
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let detail = td.call("apps.catalog", Some(json!({ "id": "spotify" })));
@@ -606,24 +610,28 @@ fn catalog_install_is_digest_bound_human_available_and_audited() {
         .as_str()
         .unwrap();
 
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "apps.install");
     let stale = td.call(
         "apps.install",
         Some(json!({
             "id": "spotify",
-            "confirm_metadata_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "confirm_metadata_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "ticket": FIRST_TICKET
         })),
     );
     assert_eq!(stale["error"]["code"], "verify_failed");
     assert!(!td.dir.join("app-state").exists());
 
+    mint_ticket(&td.dir, 1000, SECOND_TICKET, "apps.install");
     let installed = td.call(
         "apps.install",
         Some(json!({
             "id": "spotify",
             "confirm_metadata_sha256": digest,
+            "ticket": SECOND_TICKET
         })),
     );
-    assert_eq!(installed["result"]["installed"], true);
+    assert_eq!(installed["result"]["installed"], true, "{installed}");
     assert_eq!(installed["result"]["changed"], true);
     let events = td.audit_lines();
     let event = events.last().unwrap();
@@ -638,11 +646,7 @@ fn catalog_install_is_digest_bound_human_available_and_audited() {
 fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits() {
     let mock = MockCapability::new("mock.widget", json!("off"));
     let td = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         mock,
         |_| {},
         |cfg, dir| {
@@ -650,9 +654,15 @@ fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits()
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
-    let absent = td.call("apps.update", Some(json!({ "id": "spotify" })));
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "apps.update");
+    let absent = td.call(
+        "apps.update",
+        Some(json!({ "id": "spotify", "ticket": FIRST_TICKET })),
+    );
     assert_eq!(absent["error"]["code"], "conflict", "{absent}");
     assert_eq!(absent["error"]["details"]["installed"], false);
 
@@ -673,7 +683,11 @@ fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits()
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     );
 
-    let updated = td.call("apps.update", Some(json!({ "all": true })));
+    mint_ticket(&td.dir, 1000, SECOND_TICKET, "apps.update");
+    let updated = td.call(
+        "apps.update",
+        Some(json!({ "all": true, "ticket": SECOND_TICKET })),
+    );
     assert_eq!(updated["result"]["eligible"], 1, "{updated}");
     assert_eq!(updated["result"]["updated"], 1);
     assert_eq!(updated["result"]["current"], 0);
@@ -688,7 +702,11 @@ fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits()
     assert_eq!(event["resource"], "spotify");
     assert_eq!(event["result"], "success");
 
-    let current = td.call("apps.update", Some(json!({ "id": "spotify" })));
+    mint_ticket(&td.dir, 1000, THIRD_TICKET, "apps.update");
+    let current = td.call(
+        "apps.update",
+        Some(json!({ "id": "spotify", "ticket": THIRD_TICKET })),
+    );
     assert_eq!(current["result"]["updated"], 0, "{current}");
     assert_eq!(current["result"]["current"], 1);
     assert_eq!(current["result"]["apps"][0]["status"], "current");
@@ -699,11 +717,7 @@ fn catalog_update_all_updates_only_installed_apps_to_signed_targets_and_audits()
 fn managed_required_app_installs_but_cannot_be_removed() {
     let mock = MockCapability::new("mock.widget", json!("off"));
     let td = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         mock,
         |state_dir| {
             prepare_enrolled_application_policy(
@@ -720,21 +734,27 @@ fn managed_required_app_installs_but_cannot_be_removed() {
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let detail = td.call("apps.catalog", Some(json!({"id": "spotify"})));
     let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
         .as_str()
         .unwrap();
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "apps.install");
     let installed = td.call(
         "apps.install",
         Some(json!({
             "id": "spotify",
-            "confirm_metadata_sha256": digest
+            "confirm_metadata_sha256": digest,
+            "ticket": FIRST_TICKET
         })),
     );
     assert_eq!(installed["result"]["installed"], true, "{installed}");
 
+    // The organization's rule is a fact about the device, settled before
+    // who is asking: refused without a password being asked for.
     let removed = td.call("apps.remove", Some(json!({"id": "spotify"})));
     assert_eq!(removed["error"]["code"], "denied", "{removed}");
     assert_eq!(removed["error"]["details"]["reason"], "required");
@@ -749,11 +769,7 @@ fn managed_required_app_installs_but_cannot_be_removed() {
 fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
     let mock = MockCapability::new("mock.widget", json!("off"));
     let denied = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         mock,
         |state_dir| {
             prepare_enrolled_application_policy(
@@ -770,6 +786,8 @@ fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let detail = denied.call("apps.catalog", Some(json!({"id": "spotify"})));
@@ -783,16 +801,13 @@ fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
             "confirm_metadata_sha256": digest
         })),
     );
+    // Refused by the organization before any password is asked for.
     assert_eq!(response["error"]["code"], "denied", "{response}");
     assert_eq!(response["error"]["details"]["reason"], "denied");
     assert!(!denied.dir.join("app-state").exists());
 
     let optional = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         MockCapability::new("mock.widget", json!("off")),
         |state_dir| {
             prepare_enrolled_application_policy(
@@ -809,25 +824,142 @@ fn managed_denied_app_is_not_installed_and_optional_remove_is_allowed() {
             cfg.app_catalog_path = Some(catalog);
             cfg.flatpak_bin = flatpak;
             cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let detail = optional.call("apps.catalog", Some(json!({"id": "spotify"})));
     let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
         .as_str()
         .unwrap();
+    mint_ticket(&optional.dir, 1000, FIRST_TICKET, "apps.install");
     assert_eq!(
         optional.call(
             "apps.install",
             Some(json!({
                 "id": "spotify",
-                "confirm_metadata_sha256": digest
+                "confirm_metadata_sha256": digest,
+                "ticket": FIRST_TICKET
             }))
         )["result"]["installed"],
         true
     );
-    let removed = optional.call("apps.remove", Some(json!({"id": "spotify"})));
+    mint_ticket(&optional.dir, 1000, SECOND_TICKET, "apps.remove");
+    let removed = optional.call(
+        "apps.remove",
+        Some(json!({"id": "spotify", "ticket": SECOND_TICKET})),
+    );
     assert_eq!(removed["result"]["installed"], false, "{removed}");
     assert_eq!(removed["result"]["changed"], true);
+}
+
+/// F0 review, finding 2: installing, updating or removing an application
+/// for everyone needs a device administrator's fresh password. A person
+/// without the role is refused before anything is spent; an administrator
+/// without a password is told to confirm; a ticket typed for another call
+/// does nothing.
+#[test]
+fn app_changes_need_a_device_administrators_password() {
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1001,
+            gid: 1001,
+            pid: Some(PERSON_PID),
+        }),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
+            // uid 1001 is an account, and not an administrator.
+            fs::write(
+                &cfg.passwd_file,
+                "root:x:0:0::/root:/bin/bash\npunar:x:1000:1000::/home/punar:/bin/nologin\n\
+                 other:x:1001:1001::/home/other:/bin/nologin\n",
+            )
+            .unwrap();
+        },
+    );
+    let detail = td.call("apps.catalog", Some(json!({ "id": "spotify" })));
+    let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let ticket = mint_ticket(&td.dir, 1001, FIRST_TICKET, "apps.install");
+    for (method, params) in [
+        (
+            "apps.install",
+            json!({"id": "spotify", "confirm_metadata_sha256": digest, "ticket": FIRST_TICKET}),
+        ),
+        (
+            "apps.remove",
+            json!({"id": "spotify", "ticket": FIRST_TICKET}),
+        ),
+        ("apps.update", json!({"all": true, "ticket": FIRST_TICKET})),
+    ] {
+        let refused = td.call(method, Some(params));
+        assert_eq!(
+            refused["error"]["details"]["reason"], "device_admin_required",
+            "{method}: {refused}"
+        );
+        assert!(ticket.exists(), "{method}: the role is checked first");
+    }
+    assert!(!td.dir.join("app-state").exists(), "nothing was installed");
+    assert!(td.audit_lines().iter().any(|e| {
+        e["action"] == "system.install_package" && e["result"] == "device_admin_required"
+    }));
+}
+
+/// The administrator's side of the same rule: no password, no change; a
+/// ticket typed for another call does nothing.
+#[test]
+fn an_administrators_app_change_is_confirmed_by_its_own_ticket() {
+    let td = TestDaemon::start_configured(
+        person_peer(),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        |cfg, dir| {
+            let (catalog, flatpak, _digest) = app_catalog_fixture(dir);
+            cfg.app_catalog_path = Some(catalog);
+            cfg.flatpak_bin = flatpak;
+            cfg.app_arch_override = Some("x86_64".to_string());
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
+        },
+    );
+    let detail = td.call("apps.catalog", Some(json!({ "id": "spotify" })));
+    let digest = detail["result"]["app"]["inspection"]["metadata_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bare = td.call(
+        "apps.install",
+        Some(json!({"id": "spotify", "confirm_metadata_sha256": digest})),
+    );
+    assert_eq!(
+        bare["error"]["details"]["reason"], "reauthentication_required",
+        "{bare}"
+    );
+    assert!(
+        bare["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("punarctl app install spotify")
+    );
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "policy.set");
+    let wrong = td.call(
+        "apps.install",
+        Some(json!({"id": "spotify", "confirm_metadata_sha256": digest, "ticket": FIRST_TICKET})),
+    );
+    assert_eq!(
+        wrong["error"]["details"]["reason"], "reauthentication_wrong_action",
+        "{wrong}"
+    );
+    assert!(!td.dir.join("app-state").exists(), "nothing was installed");
 }
 
 #[test]
@@ -902,6 +1034,169 @@ fn set_as_non_root_is_denied_audited_and_does_not_mutate() {
     assert_eq!(ev["policy_ids"], json!(["personal-defaults"]));
 }
 
+/// SMP-1405 WP-02 and F0: a daemon around a `system.keymap` mock whose
+/// person (uid 1000, `punar`) can present tickets, with `admins` as the
+/// members of `punar-admin`.
+fn keymap_daemon(admins: &str) -> TestDaemon {
+    let admins = admins.to_string();
+    TestDaemon::start_configured(
+        person_peer(),
+        MockCapability::new("system.keymap", json!("us")),
+        |_| {},
+        move |cfg, dir| {
+            fs::write(
+                &cfg.group_file,
+                format!("root:x:0:\npunar:x:970:\npunar-admin:x:971:{admins}\n"),
+            )
+            .unwrap();
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
+        },
+    )
+}
+
+/// The device's keyboard layout is /etc/vconsole.conf: what the login screen,
+/// the console and every account without a layout of its own type in. A
+/// device administrator sets it directly with a fresh password (contract
+/// sections 5.4 and 23.2), no privilege request; the change is validated,
+/// applied through the typed backend and audited under their name, and the
+/// ticket is spent and never written down.
+#[test]
+fn a_device_administrator_sets_the_keyboard_layout_with_their_password() {
+    let td = keymap_daemon("punar");
+    let ticket = mint_ticket(&td.dir, 1000, FIRST_TICKET, "capabilities.set");
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({
+            "capability": "system.keymap",
+            "desired_state": "ru",
+            "ticket": FIRST_TICKET
+        })),
+    );
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert_eq!(resp["result"]["changed"], true);
+    assert_eq!(td.mock.state(), json!("ru"));
+    assert!(!ticket.exists(), "the ticket was spent, not merely checked");
+    let event = td.audit_lines().last().cloned().unwrap();
+    assert_schema_shaped(&event);
+    assert_eq!(event["action"], "capabilities.set");
+    assert_eq!(event["resource"], "system.keymap");
+    assert_eq!(event["decision"], "allow");
+    assert_eq!(event["user_id"], "punar");
+    let audit = fs::read_to_string(td.dir.join("audit.jsonl")).unwrap();
+    assert!(!audit.contains(FIRST_TICKET), "a ticket is never audited");
+
+    // A spent ticket sets nothing a second time.
+    let replayed = td.call(
+        "capabilities.set",
+        Some(json!({
+            "capability": "system.keymap",
+            "desired_state": "de",
+            "ticket": FIRST_TICKET
+        })),
+    );
+    assert_eq!(
+        replayed["error"]["details"]["reason"], "reauthentication_missing",
+        "{replayed}"
+    );
+    assert_eq!(td.mock.state(), json!("ru"));
+}
+
+/// Being an administrator is not enough on its own: the change is confirmed
+/// at the moment it is made, with a ticket minted for this call. The refusal
+/// names the command that asks for the password.
+#[test]
+fn an_administrator_without_a_fresh_password_cannot_set_the_keyboard_layout() {
+    let td = keymap_daemon("punar");
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({ "capability": "system.keymap", "desired_state": "ru" })),
+    );
+    assert_asks_for_the_persons_password(
+        &resp["error"],
+        "punarctl keyboard layout set --device ru",
+    );
+    assert_eq!(td.audit_lines().last().unwrap()["decision"], "deny");
+
+    // A confirmation typed for another change is not this one's.
+    mint_ticket(&td.dir, 1000, SECOND_TICKET, "policy.set");
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({
+            "capability": "system.keymap",
+            "desired_state": "ru",
+            "ticket": SECOND_TICKET
+        })),
+    );
+    assert_eq!(resp["error"]["code"], "denied", "{resp}");
+    assert!(
+        resp["error"]["details"]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("reauthentication_"),
+        "{resp}"
+    );
+    assert_eq!(td.mock.state(), json!("us"));
+    assert_eq!(td.mock.apply_calls(), 0);
+}
+
+/// Someone who is not a device administrator cannot change what the login
+/// screen types in for everyone, even at the machine and with a valid
+/// ticket, and the ticket is left unspent: the role is checked first
+/// (contract section 23.1). Their own layout stays theirs to set, which
+/// never reaches punard.
+#[test]
+fn a_person_who_is_not_an_administrator_cannot_set_the_keyboard_layout() {
+    let td = keymap_daemon("");
+    let ticket = mint_ticket(&td.dir, 1000, FIRST_TICKET, "capabilities.set");
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({
+            "capability": "system.keymap",
+            "desired_state": "ru",
+            "ticket": FIRST_TICKET
+        })),
+    );
+    assert_eq!(resp["error"]["code"], "denied", "{resp}");
+    assert_eq!(resp["error"]["details"]["reason"], "device_admin_required");
+    assert!(
+        ticket.exists(),
+        "the role is checked before the ticket is spent"
+    );
+    assert_eq!(td.mock.state(), json!("us"));
+    assert_eq!(td.mock.apply_calls(), 0);
+    let event = td.audit_lines().last().cloned().unwrap();
+    assert_eq!(event["decision"], "deny");
+    assert_eq!(event["result"], "device_admin_required");
+}
+
+/// The direct path is the keyboard layout's alone: on any other capability
+/// an administrator's password buys nothing without a privilege request.
+#[test]
+fn only_the_keyboard_layout_takes_an_administrators_password_directly() {
+    let td = TestDaemon::start_configured(
+        person_peer(),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        |cfg, dir| {
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
+        },
+    );
+    let ticket = mint_ticket(&td.dir, 1000, FIRST_TICKET, "capabilities.set");
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({
+            "capability": "mock.widget",
+            "desired_state": "on",
+            "ticket": FIRST_TICKET
+        })),
+    );
+    assert_eq!(resp["error"]["code"], "denied", "{resp}");
+    assert_eq!(td.mock.apply_calls(), 0);
+    assert!(ticket.exists());
+}
+
 #[test]
 fn reads_are_open_to_non_root_peers_and_are_not_audited() {
     let td = TestDaemon::start_as_uid(1000);
@@ -928,8 +1223,127 @@ fn reads_are_open_to_non_root_peers_and_are_not_audited() {
     assert_eq!(td.audit_lines().len(), baseline);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn update_check_is_root_only_authenticated_cached_and_audited() {
+fn mail_open_passes_only_kernel_identity_to_the_fixed_broker() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(4242),
+        }),
+        mock,
+        |_| {},
+        |cfg, dir| {
+            let broker = dir.join("mail-broker");
+            let record = dir.join("mail-broker-args");
+            fs::write(
+                &broker,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    record.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&broker, fs::Permissions::from_mode(0o700)).unwrap();
+            cfg.pim_launch_broker = broker;
+        },
+    );
+
+    let opened = td.call("pim.mail.open", None);
+    assert_eq!(opened["result"]["opening"], true, "{opened}");
+    assert_eq!(opened["result"]["application"], "mail");
+    assert_eq!(
+        fs::read_to_string(td.dir.join("mail-broker-args")).unwrap(),
+        "mail\n1000\n4242\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mail_account_add_passes_only_kernel_identity_to_the_fixed_broker() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(4242),
+        }),
+        mock,
+        |_| {},
+        |cfg, dir| {
+            let broker = dir.join("mail-account-broker");
+            let record = dir.join("mail-account-broker-args");
+            fs::write(
+                &broker,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    record.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&broker, fs::Permissions::from_mode(0o700)).unwrap();
+            cfg.pim_launch_broker = broker;
+        },
+    );
+
+    let opened = td.call("pim.mail.account_add", None);
+    assert_eq!(opened["result"]["opening"], true, "{opened}");
+    assert_eq!(opened["result"]["application"], "mail-account-setup");
+    assert_eq!(
+        fs::read_to_string(td.dir.join("mail-account-broker-args")).unwrap(),
+        "account-add\n1000\n4242\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mail_account_manage_passes_only_kernel_identity_to_the_fixed_broker() {
+    let mock = MockCapability::new("mock.widget", json!("off"));
+    let td = TestDaemon::start_configured(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(4242),
+        }),
+        mock,
+        |_| {},
+        |cfg, dir| {
+            let broker = dir.join("mail-accounts-broker");
+            let record = dir.join("mail-accounts-broker-args");
+            fs::write(
+                &broker,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                    record.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&broker, fs::Permissions::from_mode(0o700)).unwrap();
+            cfg.pim_launch_broker = broker;
+        },
+    );
+
+    let opened = td.call("pim.mail.account_manage", None);
+    assert_eq!(opened["result"]["opening"], true, "{opened}");
+    assert_eq!(opened["result"]["application"], "mail-accounts");
+    assert_eq!(
+        fs::read_to_string(td.dir.join("mail-accounts-broker-args")).unwrap(),
+        "account-manage\n1000\n4242\n"
+    );
+}
+
+#[test]
+fn mail_open_refuses_an_unverifiable_session_before_spawning() {
+    let td = TestDaemon::start_as_uid(1000);
+    let denied = td.call("pim.mail.open", None);
+    assert_eq!(denied["error"]["code"], "denied", "{denied}");
+    assert_eq!(denied["error"]["details"]["reason"], "missing_peer_pid");
+}
+
+#[test]
+fn update_check_by_root_is_authenticated_cached_and_audited() {
     let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
         configure_update_fixture(cfg, dir, true, false)
     });
@@ -967,6 +1381,282 @@ fn update_check_is_root_only_authenticated_cached_and_audited() {
     assert_eq!(cached["result"]["cached"], true);
 }
 
+/// No person on a Punar device is root, so a person reaches the update verbs
+/// the way they reach enrollment: with a password confirmation. A request
+/// without one is refused before anything is read or fetched, and the refusal
+/// names the command that asks for it — never `sudo`, and never a grant for a
+/// resource that is not a capability.
+fn assert_asks_for_the_persons_password(error: &Value, retry: &str) {
+    assert_eq!(error["code"], "denied", "{error}");
+    assert_eq!(error["details"]["reason"], "reauthentication_required");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("needs your password"), "{message}");
+    assert!(message.contains(retry), "{message}");
+    assert!(!message.contains("sudo"), "{message}");
+    assert!(!message.contains("privilege request"), "{message}");
+}
+
+/// A ticket exactly as punar-authd mints one: a file named by the token, in a
+/// 0700 directory named by the uid that proved its password, holding the boot
+/// clock's reading at mint time (SMP-1405) — the daemon under test reads the
+/// same system clock and judges the ticket's age against it.
+///
+/// Bound, as punar-authd binds every ticket, to the one call it was typed
+/// for (`action`) and to the one process that may present it: the person's
+/// peer process, [`PERSON_PID`], whose fake `/proc` entry
+/// [`fake_person_process`] writes.
+fn mint_ticket(dir: &Path, uid: u32, token: &str, action: &str) -> PathBuf {
+    use punar_common::reauth_ticket::{Spender, TicketBody};
+    use punar_common::trusted_time::{SystemClock, TrustedClock};
+    use std::os::unix::fs::DirBuilderExt;
+    let per_uid = dir.join("tickets").join(uid.to_string());
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&per_uid)
+        .unwrap();
+    let path = per_uid.join(token);
+    let body = TicketBody {
+        minted: SystemClock::new().now().expect("this machine's boot clock"),
+        action: action.to_string(),
+        spender: Spender {
+            pid: PERSON_PID as u32,
+            start: PERSON_START,
+        },
+    };
+    fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+    path
+}
+
+/// The person's process every ticket in this file is minted for.
+const PERSON_PID: i32 = 4300;
+const PERSON_START: u64 = 430_000;
+
+/// A fake `/proc` under `dir` holding the person's process, and its path.
+fn fake_person_process(dir: &Path) -> PathBuf {
+    let proc_root = dir.join("proc");
+    let entry = proc_root.join(PERSON_PID.to_string());
+    fs::create_dir_all(&entry).unwrap();
+    fs::write(
+        entry.join("stat"),
+        format!(
+            "{PERSON_PID} (punarctl) S 1 {PERSON_PID} {PERSON_PID} 0 -1 4194560 0 0 0 0 0 0 0 0 \
+             20 0 1 0 {PERSON_START} 0 0\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        entry.join("cgroup"),
+        "0::/user.slice/user-1000.slice/session-2.scope\n",
+    )
+    .unwrap();
+    proc_root
+}
+
+const FIRST_TICKET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const SECOND_TICKET: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const THIRD_TICKET: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+fn person_peer() -> PeerSource {
+    PeerSource::Fixed(Peer {
+        uid: 1000,
+        gid: 1000,
+        pid: Some(PERSON_PID),
+    })
+}
+
+fn person_update_daemon() -> TestDaemon {
+    TestDaemon::start_update(person_peer(), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        cfg.reauth_ticket_dir = dir.join("tickets");
+        cfg.proc_root = fake_person_process(dir);
+    })
+}
+
+/// The person who owns a device checks for, installs and rolls back updates
+/// with their own password, one confirmation per change, spent by the call
+/// it was typed for and attributed to them. Nobody else's ticket and no
+/// replayed one does anything.
+#[test]
+fn a_person_checks_installs_and_rolls_back_with_their_password() {
+    let td = person_update_daemon();
+
+    let check = mint_ticket(&td.dir, 1000, FIRST_TICKET, "update.check");
+    let checked = td.call(
+        "update.check",
+        Some(json!({ "force": true, "ticket": FIRST_TICKET })),
+    );
+    assert_eq!(checked["result"]["admissible"], true, "{checked}");
+    assert!(!check.exists(), "the ticket was spent, not merely checked");
+    assert!(td.state_path("update/verified-channel.json").is_file());
+
+    // Someone else's confirmation is not theirs.
+    let foreign = mint_ticket(&td.dir, 1001, SECOND_TICKET, "update.apply");
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+    let refused = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false,
+            "ticket": SECOND_TICKET
+        })),
+    );
+    assert_eq!(
+        refused["error"]["details"]["reason"],
+        "reauthentication_missing"
+    );
+    assert!(foreign.exists());
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+
+    let apply = mint_ticket(&td.dir, 1000, SECOND_TICKET, "update.apply");
+    let applied = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": false,
+            "ticket": SECOND_TICKET
+        })),
+    );
+    assert_eq!(applied["result"]["staged_slot"], "b", "{applied}");
+    assert!(!apply.exists());
+    assert!(td.state_path("update/pending-uefi.json").is_file());
+
+    // A spent ticket rolls nothing back.
+    let replayed = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": null, "ticket": SECOND_TICKET })),
+    );
+    assert_eq!(
+        replayed["error"]["details"]["reason"],
+        "reauthentication_missing"
+    );
+    assert!(td.state_path("update/pending-uefi.json").is_file());
+
+    mint_ticket(&td.dir, 1000, THIRD_TICKET, "update.rollback");
+    let rolled_back = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": null, "ticket": THIRD_TICKET })),
+    );
+    assert_eq!(
+        rolled_back["result"]["new_default"], "punar_2026.08.20.1*.efi",
+        "{rolled_back}"
+    );
+
+    let events = td.audit_lines();
+    for action in ["update.check", "update.apply", "update.rollback"] {
+        assert!(
+            events.iter().any(|e| e["action"] == action
+                && e["decision"] == "allow"
+                && e["user_id"] == "punar"),
+            "{action} is attributed to the person who confirmed it: {events:?}"
+        );
+    }
+    let audit = fs::read_to_string(td.dir.join("audit.jsonl")).unwrap();
+    for token in [FIRST_TICKET, SECOND_TICKET, THIRD_TICKET] {
+        assert!(!audit.contains(token), "a ticket is never audited");
+    }
+}
+
+/// A password buys a person root's authority over updates and nothing more:
+/// the same signed-head refresh and admission refuse a halted channel, and
+/// settling a Raspberry Pi candidate stays the boot service's alone.
+#[test]
+fn a_persons_update_gets_the_same_admission_as_roots_and_nothing_more() {
+    let td = person_update_daemon();
+    let repository = td.dir.join("update-source");
+    let channel_path = repository.join("channel.json");
+    let mut channel: Value = serde_json::from_slice(&fs::read(&channel_path).unwrap()).unwrap();
+    channel["halted"] = json!(true);
+    let document = serde_json::to_vec_pretty(&channel).unwrap();
+    let signing = SigningKey::from_bytes(&[17; 32]);
+    fs::write(&channel_path, &document).unwrap();
+    fs::write(
+        repository.join("channel.json.sig"),
+        signing.sign(&document).to_bytes(),
+    )
+    .unwrap();
+
+    mint_ticket(&td.dir, 1000, FIRST_TICKET, "update.apply");
+    let root_b_before = fs::read(td.dir.join("root-b")).unwrap();
+    let response = td.call(
+        "update.apply",
+        Some(json!({
+            "version": "2026.08.27.1",
+            "allow_downgrade": true,
+            "ticket": FIRST_TICKET
+        })),
+    );
+    assert_eq!(
+        response["error"]["code"], "untrusted_artifact",
+        "{response}"
+    );
+    assert_eq!(response["error"]["details"]["stage"], "channel_admission");
+    assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+
+    let response = td.call("update.reconcile_candidate", None);
+    assert_eq!(response["error"]["code"], "denied");
+    assert_eq!(response["error"]["details"]["resource"], "system_image");
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("punar-update-health.service"), "{message}");
+    assert!(!message.contains("sudo punarctl"), "{message}");
+}
+
+/// An AI agent may not check, install or roll back the operating system as a
+/// person either, even carrying that person's valid confirmation, which is
+/// left unspent.
+#[test]
+fn an_agent_cannot_use_a_persons_confirmation_for_an_update() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(4244),
+        }),
+        |cfg, dir| {
+            configure_update_apply_fixture(cfg, dir);
+            cfg.reauth_ticket_dir = dir.join("tickets");
+            let proc_root = dir.join("proc");
+            fs::create_dir_all(proc_root.join("4244")).unwrap();
+            fs::write(
+                proc_root.join("4244/cgroup"),
+                "0::/user.slice/punar-agent-agt_updateperson.scope\n",
+            )
+            .unwrap();
+            cfg.proc_root = proc_root;
+        },
+    );
+    let ticket = mint_ticket(&td.dir, 1000, FIRST_TICKET, "update.apply");
+    for (method, params) in [
+        (
+            "update.check",
+            json!({ "force": true, "ticket": FIRST_TICKET }),
+        ),
+        (
+            "update.apply",
+            json!({
+                "version": "2026.08.27.1",
+                "allow_downgrade": false,
+                "ticket": FIRST_TICKET
+            }),
+        ),
+        (
+            "update.rollback",
+            json!({ "to_version": null, "ticket": FIRST_TICKET }),
+        ),
+    ] {
+        let response = td.call(method, Some(params));
+        assert_eq!(response["error"]["code"], "denied", "{method}: {response}");
+        assert_eq!(response["error"]["details"]["rule"], "host.system_update");
+    }
+    assert!(
+        ticket.exists(),
+        "an agent's attempt must not burn the ticket"
+    );
+    assert!(!td.state_path("update/verified-channel.json").exists());
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+}
+
 #[test]
 fn update_check_non_root_denial_writes_no_cache_and_is_audited() {
     let td = TestDaemon::start_update(
@@ -978,7 +1668,7 @@ fn update_check_non_root_denial_writes_no_cache_and_is_audited() {
         |cfg, dir| configure_update_fixture(cfg, dir, true, false),
     );
     let response = td.call("update.check", Some(json!({ "force": true })));
-    assert_eq!(response["error"]["code"], "denied");
+    assert_asks_for_the_persons_password(&response["error"], "punarctl update check");
     assert!(!td.state_path("update/verified-channel.json").exists());
     let event = td.audit_lines().pop().unwrap();
     assert_eq!(event["action"], "update.check");
@@ -1140,6 +1830,492 @@ fn first_update_preserves_recovery_and_root_b_until_a_is_blessed() {
     assert!(!td.state_path("update/pending-uefi.json").exists());
 }
 
+/// Publish another signed UEFI release at `version` and make it the channel
+/// head, with root images filled with `fill_a` / `fill_b` so a test can tell
+/// which release a slot holds.
+fn publish_uefi_release(dir: &Path, version: &str, fill_a: u8, fill_b: u8) {
+    let repository = dir.join("update-source");
+    let signing = SigningKey::from_bytes(&[17; 32]);
+    let release = repository.join(format!("releases/{version}"));
+    fs::create_dir_all(&release).unwrap();
+    let root_a = vec![fill_a; 4096];
+    let root_b = vec![fill_b; 4096];
+    let uki_a = test_uki(punard::install::ROOT_A_PARTUUID);
+    let uki_b = test_uki(punard::install::ROOT_B_PARTUUID);
+    for (name, bytes) in [
+        ("slot-a.raw.zst", root_a.as_slice()),
+        ("slot-b.raw.zst", root_b.as_slice()),
+        ("slot-a.efi", uki_a.as_slice()),
+        ("slot-b.efi", uki_b.as_slice()),
+    ] {
+        fs::write(release.join(name), bytes).unwrap();
+    }
+    let payload = |filename: &str, bytes: &[u8]| {
+        json!({
+            "filename": filename,
+            "digest_sha256": punard::util::sha256_hex(bytes),
+            "size_bytes": bytes.len(),
+            "uncompressed_digest_sha256": punard::util::sha256_hex(bytes),
+            "uncompressed_size_bytes": bytes.len(),
+            "compression": "zstd"
+        })
+    };
+    let boot = |filename: &str, bytes: &[u8]| {
+        json!({
+            "kind": "uki",
+            "filename": filename,
+            "digest_sha256": punard::util::sha256_hex(bytes),
+            "size_bytes": bytes.len()
+        })
+    };
+    let manifest = serde_json::to_vec_pretty(&json!({
+        "schema_version": 1,
+        "release_id": format!("punar-desktop-stable-aarch64-uefi-{version}"),
+        "image_id": "punar-desktop",
+        "architecture": "aarch64",
+        "boot_platform": "uefi",
+        "version": version,
+        "channel": "stable",
+        "snapshot_pin": "20260820T000000Z",
+        "overlay_pin": null,
+        "payload": payload("slot-a.raw.zst", &root_a),
+        "boot_artifact": boot("slot-a.efi", &uki_a),
+        "uefi_slots": {
+            "a": {
+                "payload": payload("slot-a.raw.zst", &root_a),
+                "boot_artifact": boot("slot-a.efi", &uki_a)
+            },
+            "b": {
+                "payload": payload("slot-b.raw.zst", &root_b),
+                "boot_artifact": boot("slot-b.efi", &uki_b)
+            }
+        },
+        "min_from": null,
+        "security": {"severity": "none", "advisory_ids": []},
+        "provenance": {
+            "git_commit": "0123456789abcdef0123456789abcdef01234567",
+            "ci_run_id": "daemon-integration",
+            "builder_base_digest": format!("sha256:{}", "3".repeat(64)),
+            "source_date_epoch": 1787184000,
+            "built_at": "2026-09-03T22:00:00Z"
+        },
+        "sbom": null
+    }))
+    .unwrap();
+    fs::write(release.join("release.json"), &manifest).unwrap();
+    fs::write(
+        release.join("release.json.sig"),
+        signing.sign(&manifest).to_bytes(),
+    )
+    .unwrap();
+    let channel = serde_json::to_vec_pretty(&json!({
+        "schema_version": 1,
+        "image_id": "punar-desktop",
+        "architecture": "aarch64",
+        "boot_platform": "uefi",
+        "channel": "stable",
+        "current": version,
+        "release_manifest": format!("releases/{version}/release.json"),
+        "rollout_bps": 10000,
+        "halted": false,
+        "published_at": "2026-09-03T22:00:00Z",
+        "min_supported_version": "2026.08.01.1"
+    }))
+    .unwrap();
+    fs::write(repository.join("channel.json"), &channel).unwrap();
+    fs::write(
+        repository.join("channel.json.sig"),
+        signing.sign(&channel).to_bytes(),
+    )
+    .unwrap();
+}
+
+/// Boot into the staged candidate on `slot`, and let boot counting bless it:
+/// the running kernel names the slot, the counted UKI loses its counter, and
+/// the running system reports its release.
+fn boot_and_bless(td: &TestDaemon, version: &str, partuuid: &str) {
+    fs::write(
+        td.dir.join("update-cmdline"),
+        format!("root=PARTUUID={partuuid} ro\n"),
+    )
+    .unwrap();
+    let uki_dir = td.dir.join("esp/EFI/Linux");
+    fs::rename(
+        uki_dir.join(format!("punar_{version}+3-0.efi")),
+        uki_dir.join(format!("punar_{version}.efi")),
+    )
+    .unwrap();
+    fs::write(
+        td.dir.join("os-release"),
+        format!("IMAGE_ID=punar-desktop\nIMAGE_VERSION={version}\n"),
+    )
+    .unwrap();
+}
+
+fn apply_version(td: &TestDaemon, version: &str) -> Value {
+    td.call(
+        "update.apply",
+        Some(json!({ "version": version, "allow_downgrade": false })),
+    )
+}
+
+/// Two updates, then a rollback to the oldest release. The first release's
+/// UKI boots the slot the second update rewrites, so it is retired before
+/// that slot is written, and the rollback finds nothing to select. The old
+/// kernel never boots the newer root, uncounted, on every boot. On the way,
+/// the first update, now running and blessed, stops blocking the second.
+#[test]
+fn a_rewritten_slot_keeps_no_boot_entry_for_the_release_it_no_longer_holds() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let uki_dir = td.dir.join("esp/EFI/Linux");
+    let loader = td.dir.join("esp/loader/loader.conf");
+
+    // 2026.08.20.1 runs on A. Update 1 writes 2026.08.27.1 into B, which then
+    // boots and is blessed.
+    let first = apply_version(&td, "2026.08.27.1");
+    assert_eq!(first["result"]["staged_slot"], "b", "{first}");
+    boot_and_bless(&td, "2026.08.27.1", punard::install::ROOT_B_PARTUUID);
+
+    // Update 2 writes 2026.09.03.1 into A. The first update's pending record
+    // is settled, not treated as still staged.
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let second = apply_version(&td, "2026.09.03.1");
+    assert_eq!(second["result"]["staged_slot"], "a", "{second}");
+    assert_eq!(
+        &fs::read(td.dir.join("root-a")).unwrap()[..4096],
+        &vec![0xa3_u8; 4096]
+    );
+    assert!(
+        !uki_dir.join("punar_2026.08.20.1.efi").exists(),
+        "the entry for the release slot A no longer holds was retired first"
+    );
+    assert!(
+        uki_dir.join("punar_2026.08.27.1.efi").is_file(),
+        "the running release stays"
+    );
+    assert!(uki_dir.join("punar_2026.09.03.1+3-0.efi").is_file());
+
+    // Rollback to the oldest release: there is nothing left to select.
+    let oldest = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.20.1" })),
+    );
+    assert_eq!(oldest["error"]["code"], "not_found", "{oldest}");
+    assert!(
+        fs::read_to_string(&loader)
+            .unwrap()
+            .contains("preferred punar_2026.09.03.1*.efi")
+    );
+    // A plain rollback cancels to the running release, which is intact.
+    let cancel = td.call("update.rollback", Some(json!({ "to_version": null })));
+    assert_eq!(
+        cancel["result"]["new_default"], "punar_2026.08.27.1*.efi",
+        "{cancel}"
+    );
+}
+
+/// Rolling back to the other slot and then applying before restarting would
+/// overwrite the slot the next boot is aimed at, and a failure part-way would
+/// leave that boot pointing at a half-written root. Refused, nothing written.
+#[test]
+fn an_update_never_overwrites_the_slot_the_next_boot_is_aimed_at() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let first = apply_version(&td, "2026.08.27.1");
+    assert_eq!(first["result"]["staged_slot"], "b", "{first}");
+    boot_and_bless(&td, "2026.08.27.1", punard::install::ROOT_B_PARTUUID);
+    let back = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.20.1" })),
+    );
+    assert_eq!(
+        back["result"]["new_default"], "punar_2026.08.20.1*.efi",
+        "{back}"
+    );
+
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let root_a_before = fs::read(td.dir.join("root-a")).unwrap();
+    let aimed = apply_version(&td, "2026.09.03.1");
+    assert_eq!(aimed["error"]["code"], "conflict", "{aimed}");
+    assert!(
+        aimed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("next boot is set to slot A"),
+        "{aimed}"
+    );
+    assert_eq!(fs::read(td.dir.join("root-a")).unwrap(), root_a_before);
+    assert!(
+        td.dir
+            .join("esp/EFI/Linux/punar_2026.08.20.1.efi")
+            .is_file()
+    );
+}
+
+/// Put the device in the state an older build could leave: running
+/// `running` on slot B, with the given extra entries on the ESP and the next
+/// boot aimed at `preferred`.
+fn legacy_esp(td: &TestDaemon, running: &str, entries: &[(&str, &str)], preferred: &str) {
+    fs::write(
+        td.dir.join("update-cmdline"),
+        format!("root=PARTUUID={} ro\n", punard::install::ROOT_B_PARTUUID),
+    )
+    .unwrap();
+    fs::write(
+        td.dir.join("os-release"),
+        format!("IMAGE_ID=punar-desktop\nIMAGE_VERSION={running}\n"),
+    )
+    .unwrap();
+    for (name, partuuid) in entries {
+        fs::write(
+            td.dir.join(format!("esp/EFI/Linux/{name}")),
+            test_uki(partuuid),
+        )
+        .unwrap();
+    }
+    fs::write(
+        td.dir.join("esp/loader/loader.conf"),
+        format!("preferred punar_{preferred}*.efi\ntimeout 0\neditor no\n"),
+    )
+    .unwrap();
+}
+
+/// Review finding #1. An older build left a blessed 2026.08.27.1 entry bound
+/// to B, then staged 2026.09.03.1 into B; that release is running there in
+/// its trial, still counted. A plain rollback must not select the leftover:
+/// it would boot 2026.08.27.1's kernel on B's 2026.09.03.1 root, uncounted,
+/// on every boot. It takes A's release instead.
+#[test]
+fn a_plain_rollback_never_selects_a_leftover_bound_to_the_running_slot() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let b = punard::install::ROOT_B_PARTUUID;
+    legacy_esp(
+        &td,
+        "2026.09.03.1",
+        &[
+            ("punar_2026.08.27.1.efi", b),
+            ("punar_2026.09.03.1+2-1.efi", b),
+        ],
+        "2026.09.03.1",
+    );
+    let rolled = td.call("update.rollback", Some(json!({ "to_version": null })));
+    assert_eq!(
+        rolled["result"]["new_default"], "punar_2026.08.20.1*.efi",
+        "{rolled}"
+    );
+}
+
+/// Review finding #3. The same leftover, plus an update to A that then failed
+/// its tries. The running release is B's 2026.09.03.1, which this device
+/// knows because it is running it. A plain rollback selects it and clears
+/// the failed update's record, so the device can take updates again.
+#[test]
+fn a_leftover_and_a_failed_update_never_trap_the_device() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let (a, b) = (
+        punard::install::ROOT_A_PARTUUID,
+        punard::install::ROOT_B_PARTUUID,
+    );
+    fs::remove_file(td.dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi")).unwrap();
+    legacy_esp(
+        &td,
+        "2026.09.03.1",
+        &[
+            ("punar_2026.08.27.1.efi", b),
+            ("punar_2026.09.03.1.efi", b),
+            ("punar_2026.09.10.1+0-3.efi", a),
+        ],
+        "2026.09.10.1",
+    );
+    let pending = td.state_path("update/pending-uefi.json");
+    fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    fs::write(
+        &pending,
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "release_id": "punar-desktop-stable-aarch64-uefi-2026.09.10.1",
+            "version": "2026.09.10.1",
+            "previous_slot": "b",
+            "candidate_slot": "a",
+            "previous_default": "punar_2026.09.03.1*.efi",
+            "new_default": "punar_2026.09.10.1*.efi",
+            "manifest_sha256": "0".repeat(64),
+            "payload_sha256": "1".repeat(64),
+            "uki_sha256": "2".repeat(64),
+            "staged_at": "2026-09-10T00:00:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let rolled = td.call("update.rollback", Some(json!({ "to_version": null })));
+    assert_eq!(
+        rolled["result"]["new_default"], "punar_2026.09.03.1*.efi",
+        "{rolled}"
+    );
+    assert!(!pending.exists(), "the failed update's record is cleared");
+    // The leftover stays unselectable.
+    let leftover = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.27.1" })),
+    );
+    assert_eq!(leftover["error"]["code"], "conflict", "{leftover}");
+}
+
+/// Review finding #4. An apply refused before its first write — here a slot
+/// too small for the release — must not have cost the device its rollback
+/// target: the entry for the release slot A still holds is kept.
+#[test]
+fn a_refused_apply_keeps_the_rollback_target() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let first = apply_version(&td, "2026.08.27.1");
+    assert_eq!(first["result"]["staged_slot"], "b", "{first}");
+    boot_and_bless(&td, "2026.08.27.1", punard::install::ROOT_B_PARTUUID);
+
+    fs::File::options()
+        .write(true)
+        .open(td.dir.join("root-a"))
+        .unwrap()
+        .set_len(1024)
+        .unwrap();
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let refused = apply_version(&td, "2026.09.03.1");
+    assert_eq!(refused["error"]["code"], "insufficient_space", "{refused}");
+    assert!(
+        td.dir
+            .join("esp/EFI/Linux/punar_2026.08.20.1.efi")
+            .is_file(),
+        "a refused apply retires nothing"
+    );
+    let back = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.20.1" })),
+    );
+    assert_eq!(
+        back["result"]["new_default"], "punar_2026.08.20.1*.efi",
+        "{back}"
+    );
+}
+
+/// Review finding #5. Reinstalling the running release into the other slot
+/// is refused before anything is retired: its boot entry could never be
+/// blessed under a name the running entry already has, and the next-boot
+/// check would then block every later apply. Separately, an exhausted entry
+/// is not where the next boot goes, and does not block an update.
+#[test]
+fn the_running_release_is_not_reinstalled_and_exhausted_entries_aim_nothing() {
+    let td = TestDaemon::start_update(
+        PeerSource::Fixed(Peer::root()),
+        configure_update_apply_fixture,
+    );
+    let first = apply_version(&td, "2026.08.27.1");
+    assert_eq!(first["result"]["staged_slot"], "b", "{first}");
+    boot_and_bless(&td, "2026.08.27.1", punard::install::ROOT_B_PARTUUID);
+
+    let again = td.call(
+        "update.apply",
+        Some(json!({ "version": "2026.08.27.1", "allow_downgrade": true })),
+    );
+    assert_eq!(again["error"]["code"], "conflict", "{again}");
+    assert!(
+        td.dir
+            .join("esp/EFI/Linux/punar_2026.08.20.1.efi")
+            .is_file()
+    );
+
+    // A's release failed its tries after an earlier stage, and the selector
+    // still names it. That entry aims no boot, so an update may rewrite A.
+    let uki_dir = td.dir.join("esp/EFI/Linux");
+    fs::rename(
+        uki_dir.join("punar_2026.08.20.1.efi"),
+        uki_dir.join("punar_2026.08.20.1+0-3.efi"),
+    )
+    .unwrap();
+    fs::write(
+        td.dir.join("esp/loader/loader.conf"),
+        "preferred punar_2026.08.20.1*.efi\ntimeout 0\neditor no\n",
+    )
+    .unwrap();
+    let _ = fs::remove_file(td.state_path("update/pending-uefi.json"));
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let next = apply_version(&td, "2026.09.03.1");
+    assert_eq!(next["result"]["staged_slot"], "a", "{next}");
+}
+
+/// A device updated by an older build can still carry two uncounted entries
+/// for one slot. It cannot tell which release that slot holds, so rollback
+/// selects neither.
+#[test]
+fn rollback_refuses_a_slot_the_esp_names_twice() {
+    let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        fs::write(
+            dir.join("esp/EFI/Linux/punar_2026.08.10.1.efi"),
+            test_uki(punard::install::ROOT_A_PARTUUID),
+        )
+        .unwrap();
+    });
+    let before = fs::read(td.dir.join("esp/loader/loader.conf")).unwrap();
+    // The running slot A holds 2026.08.20.1, whatever else is bound to it.
+    let response = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.10.1" })),
+    );
+    assert_eq!(response["error"]["code"], "conflict", "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("boots slot A, which is running 2026.08.20.1"),
+        "{response}"
+    );
+    // The other slot, named twice, holds one of them — which, this device
+    // cannot tell.
+    for version in ["2026.08.01.1", "2026.08.02.1"] {
+        fs::write(
+            td.dir.join(format!("esp/EFI/Linux/punar_{version}.efi")),
+            test_uki(punard::install::ROOT_B_PARTUUID),
+        )
+        .unwrap();
+    }
+    let response = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.02.1" })),
+    );
+    assert_eq!(response["error"]["code"], "conflict", "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("names 2 releases for slot B"),
+        "{response}"
+    );
+    assert_eq!(
+        fs::read(td.dir.join("esp/loader/loader.conf")).unwrap(),
+        before
+    );
+}
+
+/// The documented repair path, on the layout a real install leaves: the
+/// blessed `punar_<v>.efi` bound to A and preferred, the factory recovery
+/// entry bound to B. Root A is damaged, so the person started recovery B by
+/// hand. The preferred entry points at A, the slot this apply rewrites; that
+/// is the repair, not a reason to refuse. The recovery entry is the running
+/// slot's last-known-good, and the damaged A entry is retired first.
 #[test]
 fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
     let td = TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
@@ -1147,11 +2323,6 @@ fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
         fs::write(
             &cfg.update_transaction_sources.cmdline,
             format!("root=PARTUUID={} ro\n", punard::install::ROOT_B_PARTUUID),
-        )
-        .unwrap();
-        fs::write(
-            dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi"),
-            test_uki(punard::install::ROOT_B_PARTUUID),
         )
         .unwrap();
         add_factory_recovery_uki(dir);
@@ -1172,10 +2343,99 @@ fn update_apply_from_the_recovery_slot_keeps_the_recovery_entry_and_stages_a() {
         recovery.is_file(),
         "a candidate that rewrites only root A must keep the B-bound recovery entry"
     );
+    assert!(
+        !td.dir.join("esp/EFI/Linux/punar_2026.08.20.1.efi").exists(),
+        "the entry for the damaged slot A is retired before A is rewritten"
+    );
     assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
     assert_eq!(
         &fs::read(td.dir.join("root-a")).unwrap()[..4096],
         &vec![0xa1_u8; 4096],
+    );
+}
+
+/// A device started from recovery by hand, on the real install layout:
+/// `punar_2026.08.20.1.efi` bound to A (damaged) and preferred, the factory
+/// recovery entry bound to B and running.
+fn start_from_recovery() -> TestDaemon {
+    TestDaemon::start_update(PeerSource::Fixed(Peer::root()), |cfg, dir| {
+        configure_update_apply_fixture(cfg, dir);
+        fs::write(
+            &cfg.update_transaction_sources.cmdline,
+            format!("root=PARTUUID={} ro\n", punard::install::ROOT_B_PARTUUID),
+        )
+        .unwrap();
+        add_factory_recovery_uki(dir);
+    })
+}
+
+/// An update staged from recovery can be cancelled: the running release's own
+/// entry is the recovery one, and a rollback selects it and clears the
+/// record. The repair can then be applied again.
+#[test]
+fn an_update_applied_from_recovery_can_be_cancelled() {
+    let td = start_from_recovery();
+    let pending = td.state_path("update/pending-uefi.json");
+    let staged = apply_version(&td, "2026.08.27.1");
+    assert_eq!(staged["result"]["staged_slot"], "a", "{staged}");
+    assert!(pending.exists());
+
+    let cancelled = td.call("update.rollback", Some(json!({ "to_version": null })));
+    assert_eq!(
+        cancelled["result"]["new_default"], "punar-recovery_2026.08.20.1*.efi",
+        "{cancelled}"
+    );
+    assert!(!pending.exists());
+    assert!(
+        fs::read_to_string(td.dir.join("esp/loader/loader.conf"))
+            .unwrap()
+            .contains("preferred punar-recovery_2026.08.20.1*.efi")
+    );
+
+    let again = apply_version(&td, "2026.08.27.1");
+    assert_eq!(again["result"]["staged_slot"], "a", "{again}");
+}
+
+/// An update staged from recovery that then fails its tries leaves the device
+/// in recovery with the failed record. Applying is refused while the record
+/// stands, and a rollback — here named by version — returns to the running
+/// release's recovery entry and clears it, so the device can take updates
+/// again instead of being stuck.
+#[test]
+fn a_failed_update_from_recovery_never_traps_the_device() {
+    let td = start_from_recovery();
+    let staged = apply_version(&td, "2026.08.27.1");
+    assert_eq!(staged["result"]["staged_slot"], "a", "{staged}");
+    let uki_dir = td.dir.join("esp/EFI/Linux");
+    fs::rename(
+        uki_dir.join("punar_2026.08.27.1+3-0.efi"),
+        uki_dir.join("punar_2026.08.27.1+0-3.efi"),
+    )
+    .unwrap();
+
+    publish_uefi_release(&td.dir, "2026.09.03.1", 0xa3, 0xb3);
+    let blocked = apply_version(&td, "2026.09.03.1");
+    assert_eq!(blocked["error"]["code"], "conflict", "{blocked}");
+
+    let back = td.call(
+        "update.rollback",
+        Some(json!({ "to_version": "2026.08.20.1" })),
+    );
+    assert_eq!(
+        back["result"]["new_default"], "punar-recovery_2026.08.20.1*.efi",
+        "{back}"
+    );
+    assert!(!td.state_path("update/pending-uefi.json").exists());
+
+    let next = apply_version(&td, "2026.09.03.1");
+    assert_eq!(next["result"]["staged_slot"], "a", "{next}");
+    assert!(
+        !uki_dir.join("punar_2026.08.27.1+0-3.efi").exists(),
+        "the failed entry for slot A is retired with the rest"
+    );
+    assert!(
+        uki_dir.join("punar-recovery_2026.08.20.1.efi").is_file(),
+        "recovery stays while the device runs from it"
     );
 }
 
@@ -1272,7 +2532,7 @@ fn update_apply_denies_non_root_before_release_or_slot_access() {
             "allow_downgrade": false
         })),
     );
-    assert_eq!(response["error"]["code"], "denied");
+    assert_asks_for_the_persons_password(&response["error"], "punarctl update apply 2026.08.27.1");
     assert_eq!(fs::read(td.dir.join("root-b")).unwrap(), root_b_before);
     assert!(!td.state_path("update/pending-uefi.json").exists());
 }
@@ -1444,6 +2704,23 @@ fn remediation_loop_protection_engages_and_resets() {
     td.mock.set_state(json!("tampered"));
     td.mock.fail_next_applies(true);
 
+    // The last remediation event, and the compliance changes so far.
+    let last_remediation = |audit: &[Value]| {
+        audit
+            .iter()
+            .rev()
+            .find(|e| e["action"] == "reconcile.remediate")
+            .cloned()
+            .unwrap()
+    };
+    let compliance_changes = |audit: &[Value]| -> Vec<String> {
+        audit
+            .iter()
+            .filter(|e| e["action"] == "reconcile.compliance" && e["resource"] == "mock.widget")
+            .map(|e| e["result"].as_str().unwrap().to_string())
+            .collect()
+    };
+
     // Attempts 1 and 2: apply fails, capability is remediating.
     for attempt in 1..=2 {
         let resp = td.call("reconcile", None);
@@ -1452,9 +2729,14 @@ fn remediation_loop_protection_engages_and_resets() {
         assert_eq!(resp["result"]["remediated_count"], 0);
         assert_eq!(resp["result"]["compliance"]["overall"], "remediating");
         let audit = td.audit_lines();
-        let ev = &audit[audit.len() - 2];
-        assert_eq!(ev["action"], "reconcile.remediate");
+        let ev = last_remediation(&audit);
         assert_eq!(ev["result"], "apply_failed", "attempt {attempt}");
+        // Compliant to remediating is news once, not on every attempt.
+        assert_eq!(
+            compliance_changes(&audit),
+            ["remediating"],
+            "attempt {attempt}"
+        );
     }
 
     // Attempt 3: the transition — attempts_exhausted, non_compliant.
@@ -1463,10 +2745,17 @@ fn remediation_loop_protection_engages_and_resets() {
     assert_eq!(entry["remediation"], "apply_failed");
     assert_eq!(resp["result"]["compliance"]["overall"], "non_compliant");
     let audit = td.audit_lines();
-    let ev = &audit[audit.len() - 2];
-    assert_schema_shaped(ev);
-    assert_eq!(ev["action"], "reconcile.remediate");
+    let ev = last_remediation(&audit);
+    assert_schema_shaped(&ev);
     assert_eq!(ev["result"], "attempts_exhausted");
+    let change = audit
+        .iter()
+        .rev()
+        .find(|e| e["action"] == "reconcile.compliance")
+        .unwrap();
+    assert_schema_shaped(change);
+    assert_eq!(change["policy_ids"], json!(["personal-defaults"]));
+    assert_eq!(compliance_changes(&audit), ["remediating", "non_compliant"]);
     let exhausted_events = audit
         .iter()
         .filter(|e| e["result"] == "attempts_exhausted")
@@ -1510,6 +2799,12 @@ fn remediation_loop_protection_engages_and_resets() {
     assert_eq!(resp["result"]["capabilities"][0]["remediation"], "applied");
     assert_eq!(resp["result"]["compliance"]["overall"], "compliant");
     assert_eq!(td.mock.state(), json!("on"));
+    // The manual set settled it: the audit trail records the recovery, and
+    // does not go on saying non_compliant.
+    assert_eq!(
+        compliance_changes(&td.audit_lines()),
+        ["remediating", "non_compliant", "compliant"]
+    );
 }
 
 #[test]
@@ -1517,6 +2812,14 @@ fn reconcile_is_root_only_and_denials_are_audited() {
     let td = TestDaemon::start_as_uid(1000);
     let resp = td.call("reconcile", None);
     assert_eq!(resp["error"]["code"], "denied");
+    // Nobody on a Punar device is root, and nobody needs to be: the refusal
+    // says the device reconciles on its own, and offers no grant, because
+    // the registry as a whole is not a capability.
+    let message = resp["error"]["message"].as_str().unwrap();
+    assert!(message.contains("reconciles on its own"), "{message}");
+    assert!(!message.contains("sudo punarctl"), "{message}");
+    assert!(!message.contains("privilege request"), "{message}");
+    assert_eq!(resp["error"]["details"]["resource"], "capability_registry");
     let ev = td.audit_lines().pop().unwrap();
     assert_schema_shaped(&ev);
     assert_eq!(ev["action"], "reconcile");
@@ -1726,33 +3029,25 @@ fn a_policy_change_without_a_reason_is_refused() {
 ///
 /// The ticket directory is injected rather than reached at `/run` so this can
 /// run on a build machine — but the ticket itself is created exactly as
-/// punar-authd creates one (a 0700 per-uid directory, an empty 0600 file named
-/// by the token), because a test that mints them a different way would prove
-/// something about the test.
+/// punar-authd creates one (a 0700 per-uid directory, a file named by the
+/// token holding the boot-clock stamp of the moment it was minted), because a
+/// test that mints them a different way would prove something about the test.
 #[test]
 fn a_valid_ticket_authorizes_an_ordinary_user_and_is_spent() {
-    use std::os::unix::fs::DirBuilderExt;
-
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let td = TestDaemon::start_configured(
-        PeerSource::Fixed(Peer {
-            uid: 1000,
-            gid: 1000,
-            pid: None,
-        }),
+        person_peer(),
         MockCapability::new("mock.widget", json!("off")),
         |_| {},
         |cfg, dir| {
             cfg.reauth_ticket_dir = dir.join("tickets");
+            cfg.proc_root = fake_person_process(dir);
         },
     );
     let per_uid = td.dir.join("tickets/1000");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&per_uid)
-        .unwrap();
-    fs::File::create(per_uid.join(TOKEN)).unwrap();
+    // Stamped on the boot clock at mint time, typed for this call and bound
+    // to the person's process, as punar-authd mints it.
+    mint_ticket(&td.dir, 1000, TOKEN, "policy.set");
 
     let set = td.call(
         "policy.set",
@@ -1790,6 +3085,104 @@ fn a_valid_ticket_authorizes_an_ordinary_user_and_is_spent() {
     assert_eq!(
         explained["result"]["effective_value"], "on",
         "the replay changed nothing"
+    );
+}
+
+/// An administrator can always WITHDRAW their own entry, even after an
+/// organization has come to outrank it.
+///
+/// The trap this closes: the precedence gate looks at who wins *now*. An entry
+/// pinned while nothing outranked it becomes un-removable the moment an org
+/// layer arrives — inert while enrolled, and silently back in force the day the
+/// device unenrolls. A rule nobody can see, nobody can delete, and that returns.
+#[test]
+fn an_administrator_can_withdraw_a_pin_an_organization_has_come_to_outrank() {
+    let envelope = json!({
+        "policy_id": "eng-baseline-v12",
+        "source_kind": "organization_baseline",
+        "precedence_rank": 2,
+        "source_name": "Acme Engineering Baseline",
+        "policy": {
+            "apiVersion": "smplify.io/v1alpha1",
+            "kind": "DeviceDesiredState",
+            "metadata": {"organization": "acme", "device": "dev_test"},
+            "spec": {
+                "security": {"firewall": {"enabled": true}},
+                "update": {"channel": "off"}
+            }
+        }
+    });
+    // The administrator pinned this earlier, when nothing outranked them.
+    let stored = json!({
+        "version": 1,
+        "policies": {
+            "system.update_channel": {
+                "value": "beta",
+                "set_at": "2026-09-01T09:00:00Z",
+                "set_by": "owner",
+                "reason": "we were testing the beta channel"
+            }
+        }
+    });
+    let mock = MockCapability::new("system.update_channel", json!("beta"));
+    let td = TestDaemon::start_with(PeerSource::Fixed(Peer::root()), mock, move |state_dir| {
+        let policy_dir = state_dir.join("policy.d");
+        fs::create_dir_all(&policy_dir).unwrap();
+        fs::write(
+            policy_dir.join("eng-baseline-v12.json"),
+            serde_json::to_string(&envelope).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            state_dir.join("local-policy.json"),
+            serde_json::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+    });
+
+    // The org wins, so the administrator's entry is inert — and un-pinnable.
+    let explained = td.call(
+        "policy.explain",
+        Some(json!({ "path": "system.update_channel" })),
+    );
+    assert_eq!(
+        explained["result"]["source"]["kind"],
+        "organization_baseline"
+    );
+    assert_eq!(explained["result"]["admin_override_permitted"], false);
+    let repin = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "system.update_channel",
+            "value": "beta",
+            "reason": "trying to pin it again"
+        })),
+    );
+    assert_eq!(repin["error"]["code"], "denied", "{repin}");
+
+    // But withdrawing it must work: a clear can only ever remove a local
+    // opinion, so there is nothing for the precedence gate to protect.
+    let cleared = td.call(
+        "policy.set",
+        Some(json!({
+            "capability": "system.update_channel",
+            "value": null,
+            "reason": "the beta test is over"
+        })),
+    );
+    assert!(cleared.get("error").is_none(), "{cleared}");
+    assert_eq!(cleared["result"]["pinned_value"], Value::Null);
+    assert_eq!(cleared["result"]["source"]["kind"], "organization_baseline");
+
+    let stored_after: Value = serde_json::from_str(
+        &std::fs::read_to_string(td.dir.join("state/local-policy.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        stored_after["policies"]
+            .get("system.update_channel")
+            .is_none(),
+        "the entry is gone from the store, not merely outranked: {stored_after}"
     );
 }
 

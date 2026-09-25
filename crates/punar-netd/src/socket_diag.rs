@@ -5,8 +5,6 @@
 //! cgroup-v2 directory attributes a socket without reading another user's
 //! `/proc/<pid>/fd`, holding `CAP_SYS_PTRACE`, or tracing the process.
 
-#![cfg(target_os = "linux")]
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 

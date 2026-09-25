@@ -1,0 +1,43 @@
+{
+  "note": "Every System Control view, and the punarctl verb a terminal uses for the same answer (terminal parity: docs/api/ipc.md section 7). A view with no verb names why in `exception`; a view whose verb covers only part of it names the rest in `gap`. tests/desktop/terminal-parity-gate-test.sh checks that every view id in SystemControl/ControlData.qml is here and nothing stale is; punarctl's unit tests check that every verb parses.",
+  "views": {
+    "device": { "verb": ["device"] },
+    "encryption": { "verb": ["device", "posture"] },
+    "secureboot": { "verb": ["device", "posture"] },
+    "firewall": { "verb": ["capabilities", "get", "security.firewall"] },
+    "compliance": { "verb": ["compliance"] },
+    "policies": { "verb": ["policy", "effective"] },
+    "privilege": { "verb": ["privilege", "status"] },
+    "network": {
+      "verb": ["network", "status"],
+      "gap": "The interface, gateway, link state and MAC rows are read from /proc/net/route and /sys/class/net; `punarctl network links` (parity plan section 2, gap 2) is not built yet."
+    },
+    "datetime": { "verb": ["capabilities", "get", "time.timezone"] },
+    "bluetooth": {
+      "exception": "No Bluetooth stack ships, and the view is a statement of that absence; there is nothing for a verb to report."
+    },
+    "displays": { "verb": ["display", "list"] },
+    "keyboard": { "verb": ["keyboard", "layout", "status"] },
+    "audio": { "verb": ["audio", "status"] },
+    "power": { "verb": ["device"] },
+    "applications": { "verb": ["app", "list", "--all"] },
+    "agents": { "verb": ["agents", "list"] },
+    "aipermissions": { "verb": ["agents", "list"] },
+    "models": {
+      "exception": "No local model registry exists; the view is a statement of that absence."
+    },
+    "mcp": {
+      "exception": "MCP servers are not observed yet; the view is a statement of that absence."
+    },
+    "projects": { "verb": ["workspace", "list"] },
+    "containers": {
+      "exception": "Environments belong to punar-env, which has its own command line (`punar-env up`); the view points there rather than reading a container runtime nothing mediates."
+    },
+    "toolchains": {
+      "exception": "No toolchain registry exists; the view is a statement of that absence."
+    },
+    "connections": { "verb": ["privacy", "connections"] },
+    "relay": { "verb": ["relay", "status"] },
+    "enrollment": { "verb": ["enroll", "status"] }
+  }
+}

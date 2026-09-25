@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Mail Account Settings
+GenericName=Email Account Settings
+Comment=Review or securely remove accounts connected to Mail
+Exec=punarctl mail account-manage
+TryExec=punarctl
+Icon=preferences-system-symbolic
+Terminal=false
+Categories=Settings;Network;Email;
+Keywords=mail;email;account;remove;sign out;settings;
+StartupNotify=true
+StartupWMClass=org.punar.MailAccounts
+X-Punar-FirstParty=true

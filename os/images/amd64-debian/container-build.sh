@@ -61,7 +61,8 @@ stage_punar_binaries() {
             cargo build --release --locked \
                 -p punard -p punarctl -p punar-env -p punar-agentd \
                 -p punar-secrets -p punar-netd -p punar-onboard -p punar-auth \
-                -p punar-mock-smplify
+                -p punar-pimd -p punar-smplifyd \
+                -p punar-mock-smplify -p punar-signin-probe
     )
 
     install -d "${extra}/usr/bin"
@@ -77,9 +78,23 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-greet" \
         "${cargo_target}/release/punar-auth" \
         "${cargo_target}/release/punar-authd" \
+        "${cargo_target}/release/punar-pimd" \
+        "${cargo_target}/release/punar-mail-bridge" \
+        "${cargo_target}/release/punar-mail-account-bridge" \
+        "${cargo_target}/release/punar-smplifyd" \
         "${extra}/usr/bin/"
+    install -d "${extra}/usr/lib/punar"
+    install -m 0750 "${cargo_target}/release/punar-pim-launch" \
+        "${extra}/usr/lib/punar/punar-pim-launch"
+    # punard's unprivileged download helper. World-executable because it runs
+    # as punar-fetch@.service's dynamic user, never as root.
+    install -m 0755 "${cargo_target}/release/punar-fetch" \
+        "${extra}/usr/lib/punar/punar-fetch"
+    # The dev/CI harnesses: the mock control plane, and the sign-in probe
+    # surfaces-check.sh group 8k drives the greetd PAM stack with.
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
+        "${cargo_target}/release/punar-signin-probe" \
         "${dev_extra}/usr/bin/"
 
     "${REPO_ROOT}/tests/images/check-staged-service-executables.sh" \
@@ -110,7 +125,8 @@ stage_env_base_oci() {
     local pkg_sha256='26801f17e6c88e813be104effc0ea3b43d912bd59ca6295fcd1260528ebb4d41'
     local ref='localhost/punar-env-base:m6'
     local max_bytes=$((16 * 1024 * 1024))
-    local created='2026-08-20T00:00:00Z'
+    local created
+    created="$(date -u -d "@${PUNAR_DEBIAN_SOURCE_DATE_EPOCH}" '+%Y-%m-%dT%H:%M:%SZ')"
 
     install -d "${cache_dir}"
     if ! echo "${pkg_sha256}  ${cache_dir}/${pkg}" \
@@ -216,6 +232,7 @@ stage_env_base_oci() {
 reset_staged_architecture_content() {
     rm -rf \
         "${TARGET_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/bin" \
+        "${TARGET_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-pim-launch" \
         "${TARGET_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/share/punar/oci" \
         "${TARGET_DIR}/mkosi.profiles/dev/mkosi.extra/usr/bin"
     install -d \

@@ -40,7 +40,7 @@ REPO_ROOT="$(cd "${IMAGES_DIR}/../.." && pwd)"
 # location without copying the security-sensitive ISO assembler.
 RELEASE_SNAPSHOT_PIN="${PUNAR_RELEASE_SNAPSHOT_PIN:-${PUNAR_SNAPSHOT_DATE}}"
 RELEASE_BUILDER_BASE="${PUNAR_RELEASE_BUILDER_BASE:-${PUNAR_BUILDER_BASE}}"
-RELEASE_SOURCE_DATE_EPOCH="${PUNAR_RELEASE_SOURCE_DATE_EPOCH:-1787184000}"
+RELEASE_SOURCE_DATE_EPOCH="${PUNAR_RELEASE_SOURCE_DATE_EPOCH:-${PUNAR_SOURCE_DATE_EPOCH}}"
 RELEASE_TOOL="${PUNAR_RELEASE_TOOL:-${IMAGES_DIR}/cache/cargo-target/release/punar-release-tool}"
 RELEASE_BUILDER_DIGEST="${RELEASE_BUILDER_BASE##*@}"
 
@@ -64,8 +64,8 @@ WORK="$(mktemp -d /var/tmp/punar-installer-iso.XXXXXX)"
 ROOT_LOOP=''
 ESP_LOOP=''
 cleanup() {
-    mountpoint -q "${WORK}/esp" && umount "${WORK}/esp" || true
-    mountpoint -q "${WORK}/root" && umount "${WORK}/root" || true
+    if mountpoint -q "${WORK}/esp"; then umount "${WORK}/esp" || true; fi
+    if mountpoint -q "${WORK}/root"; then umount "${WORK}/root" || true; fi
     if [ -n "${ESP_LOOP}" ]; then losetup --detach "${ESP_LOOP}" 2>/dev/null || true; fi
     if [ -n "${ROOT_LOOP}" ]; then losetup --detach "${ROOT_LOOP}" 2>/dev/null || true; fi
     rm -rf "${WORK}"
@@ -114,8 +114,10 @@ extract_uki() {
     local disk=$1 destination=$2
     local esp_start esp_sectors uki
     read -r esp_start esp_sectors < <(partition_bounds "${disk}" 1)
-    [ -n "${esp_start}" ] && [ -n "${esp_sectors}" ] \
-        || { echo "error: no ESP partition in ${disk}" >&2; exit 1; }
+    if [ -z "${esp_start}" ] || [ -z "${esp_sectors}" ]; then
+        echo "error: no ESP partition in ${disk}" >&2
+        exit 1
+    fi
     ESP_LOOP="$(losetup --find --show --offset "$((esp_start * 512))" \
         --sizelimit "$((esp_sectors * 512))" "${disk}")"
     mkdir -p "${WORK}/esp"
@@ -171,8 +173,10 @@ PY
 mkdir -p "${WORK}/root" "${WORK}/iso-root/punar/keys" "${WORK}/erofs-extract"
 
 read -r root_start root_sectors < <(partition_bounds "${RELEASE_RAW}" 2)
-[ -n "${root_start}" ] && [ -n "${root_sectors}" ] \
-    || { echo "error: no root-A partition in ${RELEASE_RAW}" >&2; exit 1; }
+if [ -z "${root_start}" ] || [ -z "${root_sectors}" ]; then
+    echo "error: no root-A partition in ${RELEASE_RAW}" >&2
+    exit 1
+fi
 ROOT_BYTES=$((root_sectors * 512))
 SLOT_RAW="${WORK}/slot.raw"
 SLOT_B_RAW="${WORK}/slot-b.raw"

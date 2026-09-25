@@ -1,0 +1,47 @@
+# Punar defaults for the Evolution Flatpak, seeded through /etc/skel so every
+# home carries them from the moment it is created — which is necessarily before
+# that user's first Evolution launch, and that ordering is the whole mechanism.
+# Flatpak's own settings migration writes this exact path ONLY when it does not
+# already exist, so whoever writes first wins.
+#
+# WHY THIS FILE AND NOT A HOST dconf SEED. Evolution is a Flatpak with no
+# ca.desrt.dconf access, so GLib gives its keyfile backend priority 110 over
+# dconf's 100 and the sandbox never reads host dconf: a drop-in under
+# /etc/dconf/db/*.d/ would be inert. Granting --talk-name=ca.desrt.dconf is
+# worse than useless — it lets dconf outrank the keyfile backend while the
+# in-sandbox dconf engine has no system database to read, so it disables the
+# only mechanism that was working. Measured, not assumed.
+#
+# These land as USER values, not vendor defaults. The person can change every
+# one of them from Evolution's own preferences and Punar will not fight them;
+# GLib rewrites this file when they do, comments included.
+
+[org/gnome/evolution/mail]
+# The complaint this fixes: a "make Evolution your default mail client?" modal
+# stacked on top of the account assistant on first run, two dialogs deep before
+# a single word of mail. Punar registers no mailto handler, so the question had
+# no good answer either way.
+prompt-check-if-default-mailer=false
+
+# Read like the rest of the desktop. The font families are shipped by the image
+# at /usr/share/fonts/punar and flatpak exposes host fonts to every sandbox, so
+# these resolve; the names are the families the TTFs actually declare.
+use-custom-font=true
+variable-width-font='Instrument Sans 11'
+monospace-font='Geist Mono 10'
+
+# One list, read top to bottom, with the header block out of the way.
+layout=1
+thread-flat=true
+headers-collapsed=true
+prefer-symbolic-icons='yes'
+
+# DELIBERATELY NOT SET, both of them, and for opposite reasons.
+#
+# show-startup-wizard=false would remove the assistant — and with it the only
+# path to adding an account, leaving a mail client with no mail. The stacked
+# modal is answered by prompt-check-if-default-mailer alone.
+#
+# buttons-hide=['calendar','tasks','memos'] would make this a focused mail
+# reader by deleting the calendar and reminders, which are the other two things
+# this device is supposed to do.

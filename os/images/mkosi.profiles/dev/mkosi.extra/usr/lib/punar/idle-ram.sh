@@ -16,6 +16,11 @@ SAMPLE_INTERVAL="${PUNAR_RAM_SAMPLE_INTERVAL:-10}"
 RUN_DIR=/run/punar
 EXPORT_PORT=/dev/virtio-ports/punar.export
 RUNTIME_REPORT="${RUN_DIR}/runtime-report.txt"
+# The resident first-party services. punar-smplifyd is deliberately not one:
+# it is dormant until the device enrolls (smplify-enrollment.md section 3.4),
+# so on the measured, unenrolled image it has no process at all, and the
+# sampler reports that count (PUNAR_SMPLIFYD_PROCS) for check-budgets.sh to
+# hold at zero instead of summing a daemon that is not there.
 PUNAR_SERVICE_UNITS="punard.service punar-agentd.service punar-secrets.service punar-netd.service"
 
 mkdir -p "${RUN_DIR}"
@@ -53,22 +58,89 @@ capture_cgroup_counters() {
     if [ -r "${cgroup}/cpu.stat" ]; then
         cpu_usec="$(awk '$1 == "usage_usec" {print $2; exit}' "${cgroup}/cpu.stat")"
     fi
-    if [ -r "${cgroup}/io.stat" ]; then
-        write_bytes="$(awk '
-            {
-                for (i = 1; i <= NF; i++) {
-                    if ($i ~ /^wbytes=/) {
-                        split($i, pair, "=")
-                        total += pair[2]
-                    }
-                }
-            }
-            END {printf "%.0f\n", total + 0}
-        ' "${cgroup}/io.stat")"
-    fi
+    # The same physical disks as every whole-guest figure below (BLOCK_DEVICES,
+    # by MAJ:MIN): swap-out to zram and a loop device's traffic are no disk's
+    # wear, and summing them here made "every other cgroup" in the breakdown
+    # mix a filtered counter with an unfiltered one.
+    write_bytes="$(io_write_bytes "${cgroup}/io.stat")"
     case "${cpu_usec}" in ''|*[!0-9]*) cpu_usec=absent ;; esac
     case "${write_bytes}" in ''|*[!0-9]*) write_bytes=absent ;; esac
     printf '%s %s %s\n' "${label}" "${cpu_usec}" "${write_bytes}" >> "${destination}"
+}
+
+# WHERE THE WHOLE GUEST'S WRITES GO, without counting any byte twice. The
+# first-party figure above is a small share of what the disk takes at idle,
+# and on its own it left the rest "unattributed". Three figures account for
+# the device's total over the same window:
+#   - systemd-journald.service, the durable journal, as its own counter;
+#   - every top-level cgroup (/sys/fs/cgroup/*/: system.slice, user.slice,
+#     init.scope, punar.slice, ...), summed: everything a process was charged
+#     for, the journal and Punar's services included;
+#   - the device total minus that sum: writes no cgroup was charged for,
+#     which is the kernel and filesystem metadata (btrfs commits and their
+#     writeback), reported as its own figure.
+# The device total is the root cgroup's io.stat, which is the whole disk's
+# own counter (the kernel keeps it there for the root, it is not a sum of the
+# children), or the diskstats figure when the root's is unreadable. Adding
+# the root and its children would count every charged byte twice; the
+# remainder is a subtraction and nothing else. Every figure, the first-party
+# services' included, covers the same physical disks block_write_sectors
+# counts, by MAJ:MIN, so zram and loop devices are in none of them. A
+# top-level cgroup created inside the window is counted from zero; one
+# removed inside it falls into the remainder. The remainder is what no
+# top-level cgroup was charged for; that this is the kernel's and the
+# filesystem's own writes (metadata commits, writeback of pages whose writer
+# has gone) is the reading of it, not something the sampler measures.
+block_devices() {
+    for dev in /sys/block/vd* /sys/block/sd* /sys/block/nvme*n* /sys/block/mmcblk*; do
+        [ -r "${dev}/dev" ] || continue
+        cat "${dev}/dev"
+    done | tr '\n' ' '
+}
+
+# io_write_bytes IO_STAT — wbytes summed over BLOCK_DEVICES, or "absent".
+io_write_bytes() {
+    if [ ! -r "$1" ]; then
+        echo absent
+        return
+    fi
+    awk -v devices="${BLOCK_DEVICES}" '
+        BEGIN {
+            n = split(devices, list, " ")
+            for (i = 1; i <= n; i++) want[list[i]] = 1
+        }
+        ($1 in want) {
+            for (i = 2; i <= NF; i++) {
+                if ($i ~ /^wbytes=/) {
+                    split($i, pair, "=")
+                    total += pair[2]
+                }
+            }
+        }
+        END { printf "%.0f\n", total + 0 }
+    ' "$1"
+}
+
+# capture_write_attribution DESTINATION — one "name bytes" line for the
+# journal, the device total and each top-level cgroup.
+capture_write_attribution() {
+    destination="$1"
+    : > "${destination}"
+    printf 'journald %s\n' \
+        "$(io_write_bytes /sys/fs/cgroup/system.slice/systemd-journald.service/io.stat)" \
+        >> "${destination}"
+    printf 'device %s\n' "$(io_write_bytes /sys/fs/cgroup/io.stat)" >> "${destination}"
+    for cgroup in /sys/fs/cgroup/*/; do
+        [ -r "${cgroup}io.stat" ] || continue
+        name="${cgroup%/}"
+        printf 'cgroup:%s %s\n' "${name##*/}" "$(io_write_bytes "${cgroup}io.stat")" \
+            >> "${destination}"
+    done
+}
+
+# attribution_value FILE NAME — the recorded bytes, "absent" when not there.
+attribution_value() {
+    awk -v wanted="$2" '$1 == wanted { print $2; found = 1; exit } END { if (!found) print "absent" }' "$1"
 }
 
 system_cpu_counters() {
@@ -132,9 +204,13 @@ emit_fact "PUNAR_NETWORK_ONLINE=${network_online}"
 
 counter_start="${RUN_DIR}/idle-counters-start.txt"
 counter_end="${RUN_DIR}/idle-counters-end.txt"
+writes_start="${RUN_DIR}/idle-writes-start.txt"
+writes_end="${RUN_DIR}/idle-writes-end.txt"
+BLOCK_DEVICES="$(block_devices)"
 cp /proc/meminfo "${RUN_DIR}/ram-meminfo-start.txt"
 window_start_ms="$(monotonic_ms)"
 capture_service_counters "${counter_start}"
+capture_write_attribution "${writes_start}"
 system_cpu_counters > "${RUN_DIR}/idle-system-cpu-start.txt"
 block_write_sectors > "${RUN_DIR}/idle-block-write-start.txt"
 sum=0
@@ -159,6 +235,7 @@ mean=$((sum / SAMPLE_COUNT))
 
 window_end_ms="$(monotonic_ms)"
 capture_service_counters "${counter_end}"
+capture_write_attribution "${writes_end}"
 system_cpu_counters > "${RUN_DIR}/idle-system-cpu-end.txt"
 block_write_sectors > "${RUN_DIR}/idle-block-write-end.txt"
 cp /proc/meminfo "${RUN_DIR}/ram-meminfo-end.txt"
@@ -231,12 +308,129 @@ case "${block_start}:${block_end}" in
         ;;
 esac
 
+# The whole guest's writes, attributed (see capture_write_attribution): the
+# journal, every top-level cgroup together, and the kernel/filesystem
+# remainder, which with the cgroups adds up to the device total.
+write_delta() {
+    # write_delta NAME — end minus start, a name absent at the start counting
+    # from zero; "absent" when it is not there at the end.
+    end_bytes="$(attribution_value "${writes_end}" "$1")"
+    start_bytes="$(attribution_value "${writes_start}" "$1")"
+    case "${end_bytes}" in ''|*[!0-9]*) echo absent; return ;; esac
+    case "${start_bytes}" in ''|*[!0-9]*) start_bytes=0 ;; esac
+    echo $((end_bytes - start_bytes))
+}
+journald_write_bytes="$(write_delta journald)"
+device_write_source="cgroup-root"
+device_write_bytes="$(write_delta device)"
+case "${device_write_bytes}" in
+    ''|absent|-*)
+        # No root io.stat: the diskstats total over the same disks.
+        device_write_source="diskstats"
+        device_write_bytes="${block_write_bytes}"
+        ;;
+esac
+cgroups_write_bytes=0
+while read -r name _bytes; do
+    case "${name}" in cgroup:*) ;; *) continue ;; esac
+    delta="$(write_delta "${name}")"
+    case "${delta}" in
+        ''|absent|-*)
+            runtime_complete=no
+            echo "punar: idle-runtime: write counter unusable for ${name#cgroup:}" >&2
+            continue
+            ;;
+    esac
+    cgroups_write_bytes=$((cgroups_write_bytes + delta))
+done < "${writes_end}"
+kernel_fs_write_bytes=0
+if [ "${cgroups_write_bytes}" -le "${device_write_bytes}" ]; then
+    kernel_fs_write_bytes=$((device_write_bytes - cgroups_write_bytes))
+else
+    # The cgroups' counters are charged at submission and the disk's at
+    # completion, so writes in flight at a window edge can put them a little
+    # ahead; the remainder is then nothing, not negative. check-budgets.sh
+    # bounds "a little": far ahead is a sum that counts something twice.
+    echo "punar: idle-runtime: top-level cgroups report $((cgroups_write_bytes - device_write_bytes)) bytes more than the device" >&2
+fi
+case "${journald_write_bytes}" in
+    ''|absent|-*) runtime_complete=no ;;
+esac
+
 emit_fact "PUNAR_IDLE_RUNTIME_PRESENT=${runtime_complete}"
 emit_fact "PUNAR_IDLE_WINDOW_MS=${window_ms}"
 emit_fact "PUNAR_IDLE_CPU_MAX_BPS=${service_cpu_max_bps}"
 emit_fact "PUNAR_IDLE_SERVICE_WRITE_BYTES=${service_write_bytes}"
 emit_fact "PUNAR_IDLE_SYSTEM_CPU_BPS=${system_cpu_bps}"
 emit_fact "PUNAR_IDLE_BLOCK_WRITE_BYTES=${block_write_bytes}"
+emit_fact "PUNAR_IDLE_WRITE_DEVICE_BYTES=${device_write_bytes}"
+emit_fact "PUNAR_IDLE_WRITE_DEVICE_SOURCE=${device_write_source}"
+emit_fact "PUNAR_IDLE_WRITE_JOURNALD_BYTES=${journald_write_bytes}"
+emit_fact "PUNAR_IDLE_WRITE_CGROUPS_BYTES=${cgroups_write_bytes}"
+emit_fact "PUNAR_IDLE_WRITE_KERNEL_FS_BYTES=${kernel_fs_write_bytes}"
+
+# --- initramfs release facts (begin) ---------------------------------------
+# What the initrd's punar-release-initramfs.service did before switch-root
+# (PERFORMANCE_BUDGETS.md §4.1). On the arm64 release image with Linux 7.1 the
+# unpacked initramfs otherwise stayed resident as Unevictable memory for the
+# whole boot (MEASURED); the helper acts on Linux 7.0 to 7.2 and says "not
+# needed" elsewhere. check-budgets.sh decides; these are the facts:
+#   RELEASED        yes, not-needed or no (refused, failed or absent)
+#   FREED_KB        bytes the release unlinked for good, in KiB
+#   KEPT_KB         the keep set it left, in KiB
+#   DROP_KB         how far Unevictable + Shmem fell across the unlinking,
+#                   in KiB: the kernel's own word that the pages went
+#   LATE_WARNINGS   warning-or-worse userspace journal entries between the
+#                   release and the switch (a program it deleted and something
+#                   still needed shows up here); "unknown" without both marks
+initramfs_released=no
+initramfs_freed_kb=absent
+initramfs_kept_kb=absent
+initramfs_drop_kb=absent
+initramfs_late_warnings=unknown
+initramfs_line="$(journalctl -b -u punar-release-initramfs.service -o cat --no-pager 2>/dev/null \
+    | grep -E '^(released the initramfs|initramfs release not needed|keeping the initramfs): ' \
+    | tail -n 1)"
+case "${initramfs_line}" in
+    'initramfs release not needed: '*)
+        initramfs_released=not-needed
+        ;;
+    'released the initramfs: '*)
+        initramfs_numbers="$(printf '%s\n' "${initramfs_line}" | sed -nE \
+            's/^released the initramfs: deleted [0-9]+ files \(([0-9]+) bytes\) and [0-9]+ symlinks, kept [0-9]+ paths \(([0-9]+) bytes\); Unevictable ([0-9]+) kB -> ([0-9]+) kB, Shmem ([0-9]+) kB -> ([0-9]+) kB; find status 0, 0 errors$/\1 \2 \3 \4 \5 \6/p')"
+        if [ -n "${initramfs_numbers}" ]; then
+            # shellcheck disable=SC2086 # six numbers, split on purpose
+            set -- ${initramfs_numbers}
+            initramfs_released=yes
+            initramfs_freed_kb=$(($1 / 1024))
+            initramfs_kept_kb=$(($2 / 1024))
+            initramfs_drop_kb=$((($3 + $5) - ($4 + $6)))
+            initramfs_window="$(journalctl -b -o short-monotonic --no-pager 2>/dev/null | awk '
+                function ts(line) { sub(/^\[ */, "", line); sub(/\].*/, "", line); return line + 0 }
+                !start && / punar-release-initramfs\[[0-9]+\]: released the initramfs: / { start = ts($0); next }
+                start && !stop && (/ systemd\[1\]: Switching root\.$/ || / systemd\[1\]: systemd [0-9]+ running in system mode/) { stop = ts($0) }
+                END { if (start && stop) printf "%.6f %.6f\n", start, stop }')"
+            if [ -n "${initramfs_window}" ]; then
+                initramfs_late_warnings="$(journalctl -b -p warning -o short-monotonic --no-pager 2>/dev/null \
+                    | awk -v window="${initramfs_window}" '
+                        BEGIN { split(window, w, " ") }
+                        / kernel: / { next }
+                        { t = $0; sub(/^\[ */, "", t); sub(/\].*/, "", t); t += 0 }
+                        t > w[1] + 0 && t <= w[2] + 0 { n++ }
+                        END { print n + 0 }')"
+            fi
+        fi
+        ;;
+esac
+emit_fact "PUNAR_IDLE_INITRAMFS_RELEASED=${initramfs_released}"
+emit_fact "PUNAR_IDLE_INITRAMFS_FREED_KB=${initramfs_freed_kb}"
+emit_fact "PUNAR_IDLE_INITRAMFS_KEPT_KB=${initramfs_kept_kb}"
+emit_fact "PUNAR_IDLE_INITRAMFS_DROP_KB=${initramfs_drop_kb}"
+emit_fact "PUNAR_IDLE_INITRAMFS_LATE_WARNINGS=${initramfs_late_warnings}"
+emit_fact "PUNAR_IDLE_KERNEL=$(uname -r)"
+# --- initramfs release facts (end) -----------------------------------------
+unevictable_kb="$(awk '/^Unevictable:/ {print $2}' "${RUN_DIR}/ram-meminfo-end.txt")"
+emit_fact "PUNAR_IDLE_UNEVICTABLE_KB=${unevictable_kb:-absent}"
 
 # The line the CI desktop test greps for (gates: fail mean > 1536 MB hard
 # ceiling, warn > 1024 MB target; TCG runs are warn-only, labeled emulated).
@@ -295,6 +489,33 @@ fi
 emit_fact "PUNAR_SERVICES_RSS_MB=${services_rss}"
 echo "punar: idle-ram: summed PSS over: ${PUNAR_SERVICE_UNITS}"
 
+# DORMANT UNTIL ENROLLED, observed on the running machine at the same moment.
+# A device that never enrolled runs no Smplify code: systemd holds the agent's
+# listening socket and nothing behind it runs until a call arrives. Two facts:
+# the process count of the agent's own cgroup now (a missing cgroup is none),
+# and when systemd last started the agent's main process this boot, on the
+# monotonic clock, 0 for never. The second is the one that matters: an agent
+# something started during boot has exited 75 thirty seconds later and left
+# no process to count. The socket's state says the door is there for the day
+# the device does enroll. check-budgets.sh fails the image unless the agent
+# never started and the socket is active.
+#
+# What this image cannot show is punard's side: here punard dials the mock
+# control plane (punard.service.d/10-mock-control-plane.conf), never the
+# agent's socket, so a punard that called the agent while unenrolled would
+# not start it on this image. That is held by punard's own test
+# (a_device_that_never_enrolled_never_calls_the_agent counts connections, not
+# calls). The agent's enrolled cost is measured on an enrolled device, never
+# inferred from this image.
+smplifyd_procs=0
+smplifyd_cgroup=/sys/fs/cgroup/system.slice/punar-smplifyd.service/cgroup.procs
+if [ -r "${smplifyd_cgroup}" ]; then
+    smplifyd_procs="$(awk 'END { print NR }' "${smplifyd_cgroup}")"
+fi
+emit_fact "PUNAR_SMPLIFYD_PROCS=${smplifyd_procs}"
+emit_fact "PUNAR_SMPLIFYD_START_MONOTONIC_US=$(systemctl show -p ExecMainStartTimestampMonotonic --value punar-smplifyd.service 2>/dev/null || true)"
+emit_fact "PUNAR_SMPLIFYD_SOCKET=$(systemctl is-active punar-smplifyd.socket 2>/dev/null || true)"
+
 # WHO IS ACTUALLY HOLDING THE MEMORY. The whole-system idle figure has drifted
 # 115 MB above its target and the only attribution available was "the commit
 # that added thirteen surfaces" — true, but not actionable: that commit also
@@ -328,6 +549,19 @@ else
     emit_fact "PUNAR_ZRAM_PRESENT=no"
     emit_fact "PUNAR_ZRAM_SWAP_ACTIVE=no"
 fi
+
+# SETTINGS THAT CHANGE WHAT "USED" MEANS, recorded beside the figure and
+# never changed here. Transparent huge pages raise min_free_kbytes (khugepaged
+# sizes the watermarks for them), and MemAvailable leaves that reserve out, so
+# a system with THP off reports roughly 130 MiB less "used" at 8 GiB without
+# using less memory. No comparison may quietly trade one for the other; the
+# benchmark harness (tools/bench) records the same facts on every system it
+# measures. The PUNAR_IDLE_ prefix carries them into ram-report.txt.
+thp_mode="$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)"
+thp_defrag="$(sed -n 's/.*\[\([a-z+]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null)"
+emit_fact "PUNAR_IDLE_THP_MODE=${thp_mode:-unsupported}"
+emit_fact "PUNAR_IDLE_THP_DEFRAG=${thp_defrag:-unsupported}"
+emit_fact "PUNAR_IDLE_MIN_FREE_KBYTES=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null || echo absent)"
 
 ram_procs="${RUN_DIR}/ram-processes.txt"
 ram_process_memory="${RUN_DIR}/ram-process-memory.txt"
@@ -430,6 +664,13 @@ systemctl start punar-surface-cost-check.service \
 # its own signal and is a HARD failure there (the m8 lesson).
 systemctl start punar-surfaces-check.service \
     || echo "punar: idle-ram: punar-surfaces-check.service failed to start" >&2
+
+# Keys, keyboard layout and window grammar (SMP-1405 WP-02), pressed as real
+# keys by the host's QMP driver. After the surfaces exercise, so the untouched
+# shell is proven first; before the milestone checks, because it puts the
+# device's layout back and closes its own windows, and they inherit nothing.
+systemctl start punar-keys-check.service \
+    || echo "punar: idle-ram: punar-keys-check.service failed to start" >&2
 
 # M2 exercise ordering hook (milestone-2.md §7): start punar-m2-check
 # SYNCHRONOUSLY (Type=oneshot blocks until done) strictly AFTER the

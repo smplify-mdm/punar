@@ -1,0 +1,47 @@
+[Unit]
+Description=Punar profile-scoped personal information service for UID %i
+Documentation=file:/usr/share/doc/punar/pim-ipc.md
+Requires=punar-pimd-application@%i.socket punar-pimd-account-helper@%i.socket
+After=punar-pimd-application@%i.socket punar-pimd-account-helper@%i.socket
+
+[Service]
+Type=simple
+User=punar-pim
+Group=punar-pim
+Environment=PUNAR_PROFILE_UID=%i
+ExecStart=/usr/bin/punar-pimd
+Sockets=punar-pimd-application@%i.socket punar-pimd-account-helper@%i.socket
+StateDirectory=punar-pim/%i
+StateDirectoryMode=0700
+UMask=0077
+Restart=no
+TimeoutStopSec=5s
+
+# The service needs outbound IMAP/SMTP plus its inherited AF_UNIX controls,
+# and no privilege or write surface outside the encrypted /var state directory.
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+CPUAccounting=yes
+IOAccounting=yes
+IPAccounting=yes
+StandardOutput=journal
+StandardError=journal
+
+# Deliberately no [Install]. Profile activation belongs to the fixed broker;
+# an idle or signed-out device has no resident PIM process.

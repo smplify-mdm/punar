@@ -130,10 +130,11 @@ Requests `{"v":1,"id":"…","method":"…","params":{…}}`, responses
 |---|---|---|---|
 | `org.discover` | `{domain}` | the `org.json` fixture **verbatim** as `{"organization": {…}}` | unknown domain → `not_found` |
 | `enroll.register` | `{device_id, bootstrap}` | `{"device_token": "tok_<32 hex>", "attestation": "simulated", "organization": {…}}` | bootstrap must be ≥32 hex chars ("simulated-accept" logged); device recorded in `devices.json`; re-register of a known `device_id` rotates the token (idempotent re-enroll) |
-| `policy.fetch` | `{device_token}` | `{"policies": [ <envelope> ]}` | see 4.4; bad token → `unauthorized` |
+| `policy.fetch` | `{device_token}` | `{"policies": [ <envelope> ], "assignment": "policies"\|"none"\|"unusable"}` | the **published** set, see 4.4; the marker says what an empty list means (ipc.md §5.9); bad token → `unauthorized` |
 | `compliance.report` | `{device_token, report}` | `{"accepted": true}` | appended verbatim + `received_at`/`device_id` to `received-compliance.jsonl` |
-| `inventory.report` | `{device_token, inventory}` | `{"accepted": true}` | appended likewise to `received-inventory.jsonl` |
+| `inventory.report` | `{device_token, inventory}` | `{"accepted": true}` | appended likewise to `received-inventory.jsonl`. The built-in agent answers `{"sent": <the Smplify body>}` instead (smplify-enrollment.md §3.3); without `sent`, punard records the inventory itself as what the control plane received (§6) |
 | `admin.devices`, `admin.device` | — | `unknown_method` | **names reserved for M10** (spec 51 remote queries); documented so nobody invents a different admin surface later |
+| `admin.policy_publish` | `{admin, set}` | `{"published", "assignment", "policy_ids", "identity_verified": false}` | chooses which fixture policy set (§4.4) every `policy.fetch` serves from now on, so the device's live refresh (§5.1) has something to refresh to. Its own permission (`policy_publish_roles` in `admins.json`; none named → nobody), fixture identities only, every attempt audited (§4.5); only a set **name** crosses the wire |
 
 ### 4.4 Fixtures served verbatim; the one mechanical composition
 
@@ -159,6 +160,18 @@ Consequence, stated for the mockup-literate: in-VM compliance has exactly
 the three registered capability rows, not the system-control mockup's full
 eight-row list — the mockup depicts the M5+ hero device.
 
+**Policy sets — what the organization serves can change.** The composition
+above is the set named `default`, served until `admin.policy_publish` names
+another. The others live in `fixtures/organizations/acme/policy-sets/<name>/
+set.json` (`{v, assignment, envelopes: [{envelope, desired_state}]}`; each
+file looked up in the set's own directory first, then in `acme/`), are
+staged with the rest (`cp -r`), validated by `./tools/validate-schemas.sh`,
+and loaded at startup with the same fail-loudly checks: `firewall-off` (the
+baseline with its firewall rule off), `plus-role` (adds the rank-3
+`eng-role-sre` envelope), `none` (`assignment: "none"`, no envelopes) and
+`duplicate-id` (the baseline twice — every file schema-valid, the **set**
+invalid by design, for the device to refuse).
+
 ### 4.5 Mock state (what the server RECEIVED)
 
 `StateDirectory=punar-mock-smplify` → `/var/lib/punar-mock-smplify/`
@@ -167,7 +180,13 @@ eight-row list — the mockup depicts the M5+ hero device.
 - `devices.json` — `{device_id: {device_token, registered_at,
   attestation: "simulated"}}` (atomic rewrite);
 - `received-compliance.jsonl`, `received-inventory.jsonl` — append-only,
-  one received report per line with `received_at` + resolved `device_id`.
+  one received report per line with `received_at` + resolved `device_id`;
+- `published-policy.json` — `{v, set, published_at, admin}`, which policy
+  set `policy.fetch` serves (absent: `default`); a name the fixture tree no
+  longer has refuses startup;
+- `policy-publications.jsonl` — append-only, one line per
+  `admin.policy_publish` attempt: `{occurred_at, admin, set, outcome:
+  published | denied | not_found, identity_verified: false}`.
 
 State **persists across mock restarts** deliberately: the m5-check
 stop→start (offline recovery, §10) must not invalidate the device token,
@@ -195,7 +214,7 @@ exactly like the M4 additions per ipc.md §3.3). Design here.
 ### 5.1 `enroll.start {org_domain}` — root-only, audited
 
 Pipeline (one synchronous request; ipc.md documents the raised per-request
-processing bound of 60 s for this method — the chain contains a full
+processing bound of 70 s for this method — the chain contains a full
 reconcile pass and, on TCG, nft operations are slow):
 
 1. **Guard** — already enrolled → error `conflict` (new additive error
@@ -206,7 +225,9 @@ reconcile pass and, on TCG, nft operations are slow):
    control plane running?"), nothing written.
 3. **Register** — generate a 32-byte hex bootstrap secret (`rand`, in
    memory only, never persisted, never logged); `enroll.register{device_id
-   (from /var/lib/punar/device-id), bootstrap}` → `device_token`.
+   (from /var/lib/punar/device-id), bootstrap}` → `device_token`, waited
+   for 14 s (the built-in agent's 12 s register budget and a margin: a
+   registration the organization recorded must not be given up on).
    **Attestation is simulated**: punard stores the mock's literal
    `"attestation": "simulated"` string and surfaces it in `enroll.start`
    / `enroll.status` results — the honesty label travels with the data.
@@ -214,25 +235,38 @@ reconcile pass and, on TCG, nft operations are slow):
    immediately (Serialize/Debug print the placeholder — the audit trail
    cannot leak what the type cannot print, spec 53); written alone to
    `/var/lib/punar/device-token`, 0600 root, atomic.
-5. **Fetch policy** — `policy.fetch{device_token}` → envelopes.
-6. **Validate** — the M4 loader's strict serde parse + its
-   rank-contradiction check per envelope (milestone-4.md §3.2). Full
-   JSON-Schema validation remains host-side
-   (`./tools/validate-schemas.sh` covers the fixtures the mock serves —
-   same bytes), stated honestly: in-daemon validation is the loader's
-   strictness, not a JSON-Schema engine.
-7. **Write policy.d** — each envelope → `/var/lib/punar/policy.d/
-   <policy_id>.json`, 0600 root, atomic. Invalid envelope → abort: remove
-   anything written this call, delete the token file, error out —
-   enrollment is all-or-nothing.
-8. **Recompute + reconcile** — reload policy.d layers, recompute the
+5. **Fetch policy** — `policy.fetch{device_token}` → envelopes and the
+   `assignment` marker (ipc.md §5.9).
+6. **Validate** — the set rules every refresh shares
+   (`crates/punard/src/policy_set.rs`; the table in ipc.md §5.9): bounds,
+   safe unique policy ids, only organizational source kinds (no layer at the
+   OS's hard-safety rung, by kind or by rank), then the M4 loader's strict
+   serde parse + rank-contradiction check and the browser renderer, over the
+   set staged in `/var/lib/punar/.policy.d.next` and then again with every
+   root drop from `policy.d` hard-linked beside it. Full JSON-Schema
+   validation remains host-side (`./tools/validate-schemas.sh` covers the
+   fixtures the mock serves — same bytes), stated honestly: in-daemon
+   validation is the loader's strictness, not a JSON-Schema engine.
+7. **Commit** — the token and `enrollment.json` first (the record is
+   `fsync`ed, so no crash leaves organization policy enforced on a device
+   that reads as personal), then the staged directory replaces `policy.d`
+   whole in one `renameat2(RENAME_EXCHANGE)`, then the rendered browser
+   document. Each step undoes the ones before it on failure, and the
+   identity `enroll.register` issued is released — enrollment is
+   all-or-nothing.
+8. **Recompute + reconcile** — load the new layers (the set together with
+   the root drops, exactly what the next start loads), recompute the
    effective document, run one full section 42 pass (daemon-initiated:
    audit actor `punard`/`service`, exactly like the boot reconcile). This
-   is M4's "policy.d hot-reload arrives with M5 enrollment": **the
-   enrollment path reloads live; a manual root file-drop into policy.d
-   still requires a daemon restart** (documented limit — the authoritative
-   policy.d writer is now the enrollment chain, and a restart-free path
-   for hand-drops is not worth an inotify mesh).
+   is M4's "policy.d hot-reload arrives with M5 enrollment", and since the
+   live refresh it covers the organization's policy **for as long as the
+   device is enrolled**: every `reconcile` call first fetches the
+   organization's current set and, when it changed, installs it the same
+   way and enforces it in that pass (ipc.md §5.6). A manual root file-drop
+   into policy.d is preserved by every such change, but still takes effect
+   only at the next restart or refresh commit (documented limit — the
+   authoritative policy.d writer is the enrollment chain, and a
+   restart-free path for hand-drops is not worth an inotify mesh).
 9. **First sync** — compliance report + inventory report (§6). Failures
    here do **not** fail enrollment (section 55: sync degrades, enrollment
    does not) — they mark the queue pending.
@@ -253,9 +287,21 @@ reconcile pass and, on TCG, nft operations are slow):
   "attestation": "simulated",
   "policy_files": ["eng-baseline-v12.json"],
   "last_sync": {"at": null, "result": null},
-  "last_inventory_hash": null
+  "last_inventory_hash": null,
+  "policy_hash": "sha256:5c1e…",
+  "policy_fetched_at": "2026-08-26T09:00:00Z",
+  "policy_changed_at": "2026-08-26T09:00:00Z",
+  "policy_refresh": {"at": "2026-08-26T09:02:00Z", "result": "unchanged"}
 }
 ```
+
+`policy_files` are the files the enrollment owns **now** (a refresh
+rewrites them; while one is committing they hold the old and the new
+names together, and the next start trims them to what `policy.d` holds).
+The four `policy_*` fields are optional — a file written before them loads,
+and an older punard that drops them costs nothing: the revision is derived
+again from the files at the next refresh. A refresh writes only these five
+fields, through one function that cannot name a term.
 
 The token is **not** in this file (separate 0600 file, separate blast
 radius; m5-check asserts both modes and asserts the token string appears
@@ -275,7 +321,10 @@ about being fake* — grep for `simulated` finds every place it surfaces
 
 `{"enrolled", "org"|null, "policy_ids", "enrolled_at"|null,
 "attestation"|null, "last_sync": {"at", "result": "success"|"unreachable"|null,
-"pending": bool}}`. Never the token. `status` (5.1) additionally flips
+"pending": bool}}`, and later additions (removal and ownership terms, the
+organization view, and `policy`: which set the device enforces, when it was
+fetched and changed, and the last refresh's result and reason —
+docs/api/ipc.md §5.10). `policy_ids` are the ids enforced now. Never the token. `status` (5.1) additionally flips
 `enrolled: true`, `mode: "managed"` (the M3 contract said "personal until
 M5"), and gains the optional `org` object — additive fields, never a
 redraw (design §8).
@@ -283,7 +332,8 @@ redraw (design §8).
 ### 5.4 `enroll.stop` — root-only, audited, local restore
 
 Guard: not enrolled → `conflict`. Then: delete exactly the
-`policy_files` recorded in `enrollment.json` from policy.d → delete
+`policy_files` the enrollment owns now (the last refresh's set; a root drop
+stays) from policy.d → delete
 `enrollment.json` + `device-token` → recompute merge → one reconcile pass →
 rewrite `status.json` → audit `enroll.stop`. Result
 `{"enrolled": false, "removed_policy_ids": [...]}`.
@@ -346,7 +396,13 @@ every full reconcile pass — boot, 120 s timer, manual, and the passes
 inside enroll.start/stop — **when enrolled**. The 120 s
 `punard-reconcile.timer` cadence (justified in milestone-4.md §6) is
 therefore also the sync cadence; a second timer would add a wakeup source
-for nothing.
+for nothing. The policy refresh rides the same cadence from the other end:
+before the pass, on the timer's and manual `reconcile` calls only (not at
+boot, not in enroll.start/stop's own passes), so a policy the organization
+changed is enforced and then reported by one pass. Fleet cost: one extra
+`GET /devices/{id}/bundle` per device per pass against Smplify — the rate
+of the compliance POST each pass already makes; a conditional fetch waits
+for backend support (an ETag or delivery id to compare).
 
 **Compliance report — category states only** (spec 54: the org sees
 security-audit/operational categories, not activity; spec 24: no automatic
@@ -366,17 +422,16 @@ timezone, nft contents, audit events, or anything behavioral. m5-check
 asserts the received line's key set **exactly** (jq allowlist) — absence of
 extra keys is a first-class privacy assertion, not a hope.
 
-**Inventory — device info + capability states, nothing behavioral**
+**Inventory — device info + which capabilities exist, nothing behavioral**
 (spec 50 "inventory"; spec 54 "software inventory" category):
 
 ```json
 {"os": {"id": "...", "version_id": "...", "pretty_name": "..."},
  "kernel": "...",
- "hostname": "...",
  "capabilities": [
-   {"capability": "security.firewall", "supported": true, "current_state": "enabled"},
-   {"capability": "system.hostname",   "supported": true, "current_state": "..."},
-   {"capability": "time.timezone",     "supported": true, "current_state": "UTC"}
+   {"capability": "security.firewall", "supported": true},
+   {"capability": "system.hostname",   "supported": true},
+   {"capability": "time.timezone",     "supported": true}
  ]}
 ```
 
@@ -386,6 +441,86 @@ changed**: SHA-256 of the canonically-serialized inventory is stored as
 `last_inventory_hash` in `enrollment.json`; the sync hook compares and
 skips (the hash gate). m5-check asserts the second reconcile grows the
 compliance file but not the inventory file.
+
+**The body holds only what may leave the device**, because the gate hashes
+it. It carries no hostname and no capability's observed value. Both were
+here once, and neither was ever sent to Smplify, but both moved the hash: a
+laptop that joined a network handing out another timezone sent a whole
+inventory at once, off its daily schedule, and so told the organization
+when its owner travelled. Capability states reach the organization only as
+the compliance report's category states; the hostname, once, at
+registration.
+
+**Managed-device sections (SMP-1405).** `crates/punard/src/inventory.rs`
+adds, beside the keys above, `os.architecture` and three sections, collected
+from injectable procfs/sysfs/image paths:
+
+- `posture` — `secure_boot`, `uefi`, `tpm_present`, `tpm_version`,
+  `is_virtual`, `virtualization`, `disk_encryption_enabled` (every member
+  under `/var` and `/home` proven LUKS2, `punar_common::storage`, judged
+  from the system's mount table `/proc/1/mountinfo` because punard's
+  `ProtectHome=yes` hides `/home`; `null` when that evidence cannot be seen),
+  `firewall_enabled`, `firewall` (`"nftables"`), `os_patch_status`
+  (`updates-available`, with `reboot_required`, while a staged release waits
+  for a restart; otherwise `unknown`) and `reboot_required`. States; `null`
+  where nothing could be established. `os_patch_status` never says
+  `up-to-date` and never reads the channel check: the only check is one a
+  person runs, so a verdict from it would tell the organization when they
+  looked for updates. A check the device schedules itself, independent of
+  any person's action, is what would let it say more.
+- `hardware` — `manufacturer`, `model_name`, `bios_version`, `cpu_model`,
+  `cpu_vendor`, `cpu_cores`, `cpu_threads`, `memory_total_bytes`,
+  `device_capacity_bytes` (whole GB), `root_filesystem_type`,
+  `battery_present`. Read once per boot.
+- `applications` — `{name, display_name, version, source, managed}` rows.
+  Every managed device: the image's first-party desktop entries
+  (`X-Punar-FirstParty=true`, shown in the launcher) at `IMAGE_VERSION`, and
+  the image browser at its package version (`source: "punar-image"`).
+  Only when `enrollment.json` says `organization_owned` (the organization's
+  `enrollment.ownership: "organization"`, accepted by the person at
+  `enroll.start` — docs/api/ipc.md section 5.9 step 6,
+  docs/development/smplify-enrollment.md section 3.2) also every
+  system Flatpak (`flatpak list --system --app`, re-run only when the
+  installation changed, or 30 minutes after a failed read; output past
+  512 KiB withholds the list as too large) and installed catalog vendor apps — and a fourth
+  section, `identifiers: {serial_number}`. A personal enrollment never reads
+  them. The list is a complete snapshot to its receiver and is never
+  truncated: over 2,000 rows, over 512 KiB of inventory, or with a row that
+  cannot be represented, it is sent as `null` and `enroll.inventory` is
+  audited on the transition.
+
+Never in any tier: anything under `/home` or per user, addresses, network
+names, location or timezone, the hostname, users or sessions, usage
+samples, `/etc/machine-id`, base OS packages.
+
+**What reaches Smplify is narrower than this body.** The built-in agent
+translates it key by key into Smplify's `systemInfo` sections through a
+fixed allowlist and gathers nothing (smplify-enrollment.md §3.3, the
+visibility manifest): `os.id`, `capabilities` and anything else the
+allowlist does not name stay on the device. The development mock, which
+keeps what punard hands it, receives this body as shown.
+
+**The person's record of what left** (SPEC section 24.2). After a successful
+send punard writes `/var/lib/punar/organization-view.json` (0640
+root:`punar`): `{version, org_id, enrolled_at, sent_at, sent}`, where `sent`
+is the body the control plane received — the agent's `{sent}` answer, or the
+inventory itself from a control plane that gives none. It is bound to the
+enrollment (organization and enrollment time), untouched by a failed send,
+and removed by `enroll.stop` under the enrollment lock. A sync pass writes it,
+and the inventory hash, only while the enrollment it began with is still the
+current one (an epoch bumped at every enroll and unenroll), so a reply that
+arrives after unenrolling never recreates it and never lands in a later
+enrollment. The same holds for the rest of what a pass learns: the pending
+flags (§7), the outcome `enroll.start` reports, and the `enroll.sync` and
+`enroll.inventory` transitions it audits. A pass that outlived its
+enrollment fails against a token that no longer exists, and that failure is
+not the later enrollment's. `enroll.status.organization_view` summarizes it
+as categories and field names; `punarctl enroll status` shows them under
+"Your organization can see".
+
+**Resend floor.** A 2xx proves the request arrived, not that it was kept, so
+an unchanged inventory is still sent once `last_inventory_sent_at` is a day
+old. The time is written only after a send succeeds.
 
 Send order per pass: compliance, then inventory-if-changed; each is one
 RPC with the stored token; per-call failure marks that report pending (§7).
@@ -398,11 +533,28 @@ RPC with the stored token; per-call failure marks that report pending (§7).
 - **Policy stays enforceable**: the merge reads policy.d from disk at
   startup and holds it in memory; reconcile remediates against the cached
   org layer with the mock stopped — the m5-check offline phase is exactly
-  spec 55's "local policy remains enforceable".
+  spec 55's "local policy remains enforceable". The refresh fetch that
+  starts each pass fails as `unreachable` and changes nothing; after the
+  n-th consecutive failure the next `2^(n-1) - 1` passes (at most 15, about
+  half an hour) do not ask, in memory like the queue flags. A set the
+  organization serves that fails a check is `rejected` the same way: the
+  last valid policy stays enforced, audited once per set.
 - **Queue — bounded, latest-wins (decision)**: two in-memory slots,
   `pending_compliance: bool` and `pending_inventory: bool`. A failed
   report sets its flag; every subsequent reconcile pass (≤120 s later via
-  the timer) rebuilds the *current* report and retries. No spool of
+  the timer) rebuilds the *current* report and retries. An inventory that
+  failed waits before the same body goes again: a minute, doubled after each
+  further failure up to 30 minutes, kept in memory with the flags. A body
+  that changed goes at once, and a send that gets through starts the waits
+  afresh. Only a failure in a pass whose compliance report got through
+  counts (a link that carries reports but not the inventory); while nothing
+  gets through the device is offline, and the first pass whose report gets
+  through again clears the wait. Only a send a pass made moves the recorded
+  hash and send time, so an overlapping pass that failed cannot undo one
+  that sent. Otherwise an inventory too large to upload within the agent's
+  budget on a slow link, or one the receiver kept although its answer came
+  late, went up on every pass, indefinitely. The compliance report is a few
+  hundred bytes and still retries every pass. No spool of
   historical reports: compliance/inventory are **state snapshots**, so an
   intermediate report that never got through carries no information the
   next snapshot doesn't supersede — latest-wins is the correct semantics,
@@ -601,7 +753,9 @@ Sync (received side):
     `inventory.os.id` and `inventory.kernel` non-empty;
     `inventory.capabilities | length == 3`; key-set allowlist holds.
     Second `reconcile` → compliance file grew, inventory file **still 1
-    line** (hash gate).
+    line** (hash gate). `organization-view.json` is `root:punar 0640` and
+    its `sent` equals the received line's `inventory` exactly; `enroll
+    status` names the sections `device`, `hardware`, `os`, `posture` (§6).
 11. `status.json`: `enrolled == true`, `org_name == "Acme Engineering"`,
     `compliance_overall == "compliant"`, mode `0644`;
     `punarctl status --json` → `mode == "managed"`, `org.id == "acme"`.
@@ -622,11 +776,25 @@ Offline (spec 55) and recovery:
     the queue is a flag, not a spool); recovery `enroll.sync` /
     `result == "success"` event present.
 
+Live policy refresh (the mock back up):
+
+14b. As `secops@acme.com`, `admin.policy_publish` `firewall-off` →
+    reconcile (up to three passes, spending the backoff steps 13–14 left)
+    → `enroll status` `policy.last_refresh.result == "applied"`, `explain`
+    `disabled` from `eng-baseline-v12`, and the same pass's reconcile result
+    remediated the firewall; `duplicate-id` → `rejected` /
+    `duplicate_policy_id`, `policy.d` byte-identical, no staging directory
+    left; `plus-role` → `policy_ids == ["eng-baseline-v12",
+    "eng-role-sre"]`, the new file 0600; `default` again → the baseline
+    alone, byte-identical to the enrolled file, nft table back; audit: 3
+    `enroll.policy` `applied` events, 1 `rejected`; the token nowhere.
+
 Unenroll (offline, deliberately):
 
 15. `systemctl stop punar-mock-smplify`; `punarctl --json enroll stop` →
     exit 0 with the mock **down** (local restore needs no counterparty);
-    `policy.d` empty; `enrollment.json` and `device-token` absent.
+    `policy.d` empty; `enrollment.json`, `device-token` and
+    `organization-view.json` absent.
 16. Back to personal: `punarctl --json policy explain security.firewall`
     → `source.kind == "local_user_preference"`, `source.rank == 5`,
     `user_override_permitted == true`; human greps `Personal preference`,
@@ -725,7 +893,7 @@ compliance grammar; DESIGN_LANGUAGE §8.
 
 Asserted, not yet verified (lands with implementation, checked by CI):
 every §10.2 assertion; enroll.start total latency under TCG within the
-60 s processing / 90 s client bounds; FileView pickup latency vs the ≤10 s
+70 s processing / 90 s client bounds; FileView pickup latency vs the ≤10 s
 screenshot wait; mock RSS; the m5-report/screenshot export additions.
 M4's CI run was **in flight** at planning time — if it lands red, its
 fixes precede M5 implementation; nothing in this plan assumes its outcome

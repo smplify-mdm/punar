@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "note": "Desktop entries the launcher leaves out because they are a package's implementation, not a product a person would look for: a person should see the products, not their process topology. Exact desktop-file ids only (lower-case, without .desktop), never a pattern, so an ordinary third-party application can never be caught by a name filter. The launcher (shell/punar-shell/Services/Apps.qml) hides these; `punarctl app list --all` still lists them, marked with the reason given here, so the graphical launcher and the terminal disagree only on purpose and visibly. Both read this one file from /usr/share/punar/catalog/launcher-hidden-entries.json.",
+  "entries": {
+    "footclient": "Another way to reach Foot, the terminal Punar's Terminal entry opens.",
+    "foot-server": "Another way to reach Foot: it starts Foot's server process, not a window of its own.",
+    "chromium": "The package's own entry for the browser Punar's Browser entry opens.",
+    "chromium-browser": "The package's own entry for the browser Punar's Browser entry opens.",
+    "org.chromium.chromium": "The package's own entry for the browser Punar's Browser entry opens.",
+    "thunar-settings": "Thunar's settings helper, which is not a working standalone application in Punar.",
+    "thunar-bulk-rename": "A helper that ships with Thunar, not a separate product.",
+    "xfce4-about": "A helper that ships with an Xfce package, not a separate product.",
+    "bssh": "A helper that ships with Avahi, not a separate product.",
+    "bvnc": "A helper that ships with Avahi, not a separate product.",
+    "avahi-discover": "A helper that ships with Avahi, not a separate product."
+  }
+}

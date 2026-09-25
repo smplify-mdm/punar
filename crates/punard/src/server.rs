@@ -11,10 +11,12 @@
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,7 +28,7 @@ use punar_common::approval::{
     RequesterPeer, ResolvedBy,
 };
 use punar_common::audit::{
-    AGENT_SESSION_NONE, AuditActor, AuditOutcome, AuditWriter, PROJECT_ID_SYSTEM,
+    AGENT_SESSION_NONE, AUDIT_GROUP, AuditActor, AuditOutcome, AuditWriter, PROJECT_ID_SYSTEM,
     RESOURCE_CAPABILITY_REGISTRY, count_events, next_event_id, tail,
 };
 use punar_common::install::{
@@ -34,21 +36,26 @@ use punar_common::install::{
     InstallRecoveryAckParams, InstallRecoveryMode, InstallStatusResult,
 };
 use punar_common::ipc::{
-    ApprovalIdParams, ApprovalsConsumeResult, ApprovalsCreateParams, ApprovalsListResult,
-    ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams, AppsRemoveParams,
-    AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams, CapabilitiesSetParams,
-    CapabilityCompliance, Classification as WireClassification, ComplianceBlock, ComplianceState,
-    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopResult, ErrorCode,
-    FirstSync, IpcError, LastQuery, LastSync, LocalAdminStatus, MAX_REQUEST_LINE_BYTES, Method,
-    Mode, OrgInfo, PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult,
-    PolicyExplainParams, PolicyExplainResult, PolicySetParams, PolicySetResult, PolicySourceRef,
+    AdminsSetParams, ApprovalIdParams, ApprovalsConsumeResult, ApprovalsCreateParams,
+    ApprovalsListResult, ApprovalsResolveParams, AppsCatalogParams, AppsInstallParams,
+    AppsRemoveParams, AppsUpdateParams, AuditStatus, AuditTailParams, CapabilitiesGetParams,
+    CapabilitiesSetParams, CapabilityCompliance, Classification as WireClassification,
+    ComplianceBlock, ComplianceState, ENROLLMENT_TERMS_NOT_ACCEPTED, EnrollPolicyStatus,
+    EnrollStartParams, EnrollStartResult, EnrollStatusResult, EnrollStopParams, EnrollStopResult,
+    EnrollmentTerm, ErrorCode, FirstSync, IdentityRelease, IpcError, LastQuery, LastSync,
+    LocalAdminStatus, MAX_REQUEST_LINE_BYTES, ManagementStatus, Method, Mode, OrgInfo,
+    PROTOCOL_VERSION, PolicyEffectiveEntry, PolicyEffectiveResult, PolicyExplainParams,
+    PolicyExplainResult, PolicyRefresh, PolicySetParams, PolicySetResult, PolicySourceRef,
     PrivilegeRequestParams, PrivilegeRevokeParams, PrivilegeRevokeResult, PrivilegeStatusResult,
     ReconcileEntry, ReconcileResult, RemediationOutcome, Request, ResolveDecision, Response,
     SERVER_READ_TIMEOUT, StatusResult, WebAppsContextCreateParams, WebAppsContextDeleteParams,
     WebAppsGetParams, WebAppsInstallParams, WebAppsListParams, WebAppsUninstallParams,
+    organization_name, term_safe_name,
 };
 use punar_common::query::MAX_QUERIES_PER_SYNC;
+use punar_common::reauth_ticket::Spender;
 use punar_common::time::utc_now_rfc3339;
+use punar_common::trusted_time::{BootStamp, BootWindow, SystemClock, TrustedClock};
 use punar_common::update::{
     UpdateApplyParams, UpdateApplyResult, UpdateChannel, UpdateCheckParams, UpdateCheckResult,
     UpdateRollbackParams, UpdateStatusResult,
@@ -61,27 +68,37 @@ use punar_policy::{Classification, EffectiveEntry, Provenance};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use crate::approvals::{self, ApprovalStore};
+use crate::approvals::{self, ApprovalStore, SummaryReader};
 use crate::apps::{AppError, AppManager};
 use crate::authz::{Peer, PeerSource, authorize_mutation};
-use crate::browser_policy::{persist_rendered_browser_policy, render_effective_browser_policy};
+use crate::browser_policy::persist_rendered_browser_policy;
 use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
-    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, InventorySources,
-    LastQueryRecord, LastSyncRecord, OrgRecord, StatusSummary, UpstreamError,
-    compliance_report_body, inventory_body, load_device_token, load_enrollment, save_device_token,
-    save_enrollment, write_status_summary,
+    AgentFault, AgentIdentity, AgentQueue, AgentUnavailableRecord, Assignment, CallBudget,
+    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, ENROLL_CONTROL_PLANE_BUDGET, Enrollment,
+    IDENTITY_RELEASE_FILE, INVENTORY_RETRY_BASE, IdentityReleaseRecord, InventoryRetry,
+    InventorySources, LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE, OrgRecord,
+    OrganizationViewRecord, PolicyRefreshRecord, RECONCILE_CONTROL_PLANE_BUDGET, ReleaseState,
+    StatusSummary, UpstreamError, compliance_report_body, inventory_body, inventory_resend_due,
+    load_device_token, load_enrollment, load_identity_release, load_organization_view,
+    organization_view_summary, save_device_token, save_enrollment, save_enrollment_durable,
+    save_identity_release, save_organization_view, write_status_summary,
 };
 use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
 };
+use crate::inventory::{
+    CollectorSources, ImageRelease, InventoryCollector, PassInputs, Withheld, patch_posture,
+};
 use crate::pi_update::{PiUpdateEngine, PiUpdateError, PiUpdateSources};
 use crate::policy::{
-    ApplicationPolicyAction, ApplicationPolicyLayer, ApplicationPolicyReason, DEVICE_ADMIN_RANK,
-    EffectiveDocument, Layer, LocalAdminLayer, compute_effective, evaluate_application_policy,
-    evaluate_webapp_policy, load_policy_dir, resolve_local_admin, write_effective_debug_copy,
+    AdminRosterLayer, ApplicationPolicyAction, ApplicationPolicyLayer, ApplicationPolicyReason,
+    DEVICE_ADMIN_RANK, EffectiveDocument, Layer, LocalAdminLayer, compute_effective,
+    evaluate_application_policy, evaluate_webapp_policy, load_policy_dir, resolve_local_admin,
+    write_effective_debug_copy,
 };
+use crate::policy_set::{self, CanonicalSet, PrepareError, Rejection};
 use crate::state::{
     ADMIN_POLICY_FILE, AdminPolicyEntry, AdminPolicyStore, MigrationOutcome, OsDefaultsStore,
     PreferenceEntry, PreferencesStore, load_or_create_device_id, migrate_m3_store,
@@ -91,15 +108,113 @@ use crate::update_status::{UpdateStatusEngine, UpdateStatusSources};
 use crate::update_transaction::{
     UpdateTransactionEngine, UpdateTransactionError, UpdateTransactionSources,
 };
-use crate::util::{lookup_gid, lookup_username, random_hex, sha256_hex};
+use crate::util::{
+    lookup_gid, lookup_username, random_hex, remove_synced, sha256_hex, write_atomic_synced,
+};
 use crate::webapps::{WebAppError, WebAppManager};
 
+mod admins;
 mod m9;
+mod policy_refresh;
 
+use admins::RosterScope;
 use m9::MutationAuthority;
+use policy_refresh::{
+    REASON_ANSWER_TOO_LARGE, REASON_UNUSABLE_ASSIGNMENT, RefreshBackoff, RefreshResult,
+};
 
 /// Audit `resource` for the M5 enrollment mutations (ipc.md section 6).
 pub const RESOURCE_ENROLLMENT: &str = "enrollment";
+
+/// A registration enroll.start has not committed yet. The control plane
+/// issues a device identity at `register`; a refusal after that (a policy
+/// fetch the server answers badly, an envelope the loader rejects, a store
+/// that will not write) used to leave the agent holding that identity while
+/// punard reported the device unenrolled — so the next attempt met a stale
+/// one. Dropping this releases it, exactly like `enroll.stop`'s release
+/// ([`Inner::release_uncommitted`]): the agent wipes it locally, and when it
+/// does not confirm that, the release record enroll.start wrote before it
+/// registered stays, with the token, and every pass asks again
+/// ([`Inner::release_pending_identity`]). The registration replaced any
+/// identity the agent held before, so a release still pending from an
+/// earlier unenrollment is settled either way.
+struct UncommittedRegistration<'a> {
+    inner: &'a Inner,
+    actor: AuditActor,
+    token: Option<Redacted<String>>,
+}
+
+impl UncommittedRegistration<'_> {
+    /// The enrollment is committed: keep the identity.
+    fn commit(mut self) {
+        self.token = None;
+    }
+}
+
+impl Drop for UncommittedRegistration<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.inner.release_uncommitted(&self.actor, token);
+        }
+    }
+}
+
+/// Why an identity release was not confirmed: the agent's fault, or
+/// `refused` when it answered with an error.
+fn release_failure_reason(error: &UpstreamError) -> String {
+    match error {
+        UpstreamError::AgentUnavailable(fault) => fault.as_str().to_string(),
+        UpstreamError::Refused { .. } | UpstreamError::TooLarge => "refused".to_string(),
+        UpstreamError::Unreachable(_) => "not_sent".to_string(),
+    }
+}
+
+/// What punard's liveness call found ([`Inner::agent_liveness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    Available,
+    Unavailable(AgentFault),
+    /// This pass cannot tell: the call was not sent, because it did not fit
+    /// what was left of the pass's budget. Nothing changes.
+    Unknown,
+}
+
+/// How the enrollment gate names the change it is guarding, in its messages.
+struct EnrollmentWords {
+    /// Sentence-initial gerund: "Enrolling this device in an organization".
+    doing: &'static str,
+    /// Infinitive: "enroll this device in an organization".
+    verb: &'static str,
+    /// What the retry command asks the person for.
+    asks: &'static str,
+}
+
+const ENROLL_START_WORDS: EnrollmentWords = EnrollmentWords {
+    doing: "Enrolling this device in an organization",
+    verb: "enroll this device in an organization",
+    asks: "the enrollment code and then your password",
+};
+
+/// How an update verb names itself in its refusals.
+struct UpdateWords {
+    /// Sentence-initial gerund: "Installing an update".
+    doing: &'static str,
+    /// What an agent is refused: "replace or roll back the operating system".
+    agent_may_not: &'static str,
+    /// The command a person runs to do it themselves.
+    retry: String,
+    /// Whether this verb changes what everyone on the device runs, and so
+    /// needs the device-administrator role (F0-S1). Installing and rolling
+    /// back do; checking only refreshes the verified channel cache, reaches
+    /// nobody, and stays open to any person who confirms their password.
+    reaches_everyone: bool,
+}
+
+const ENROLL_STOP_WORDS: EnrollmentWords = EnrollmentWords {
+    doing: "Unenrolling this device",
+    verb: "unenroll this device",
+    asks: "your password",
+};
 /// M10 `--trigger` value punard sends to the data owner on an enrollment
 /// transition (milestone-10.md sections 3.3, 13.1).
 pub const SCAN_TRIGGER_ENROLL: &str = "enroll";
@@ -107,15 +222,35 @@ pub const SCAN_TRIGGER_ENROLL: &str = "enroll";
 /// Audit `resource` for the M5 `enroll.sync` transition events.
 pub const RESOURCE_CONTROL_PLANE: &str = "control_plane";
 
-/// RAII guard serializing enrollment transitions (compare-exchange on a
-/// flag; released on drop).
+/// RAII guard serializing enrollment transitions and the commit of a policy
+/// refresh (compare-exchange on a flag; released on drop).
 struct EnrollGuard<'a>(&'a AtomicBool);
+
+/// How long `enroll.start` and `enroll.stop` wait for the guard. A policy
+/// refresh holds it only while it checks and commits files on this device,
+/// and a person who already spent their password confirmation must not be
+/// told "conflict" because a background pass happened to be committing.
+const ENROLL_GUARD_PATIENCE: Duration = Duration::from_secs(2);
 
 impl<'a> EnrollGuard<'a> {
     fn acquire(flag: &'a AtomicBool) -> Option<Self> {
         flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .ok()
             .map(|_| EnrollGuard(flag))
+    }
+
+    /// [`EnrollGuard::acquire`], retried every 10 ms for up to `patience`.
+    fn acquire_within(flag: &'a AtomicBool, patience: Duration) -> Option<Self> {
+        let deadline = Instant::now() + patience;
+        loop {
+            if let Some(guard) = Self::acquire(flag) {
+                return Some(guard);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -195,13 +330,17 @@ pub struct DaemonConfig {
     pub os_release_path: PathBuf,
     /// M5 inventory source (injectable for tests).
     pub kernel_release_path: PathBuf,
-    /// M9: the approval summary the shell watches (docs/api/ipc.md section
-    /// 15). `/run/punard/approvals.json` in production — deliberately
-    /// inside the `0750 root:punar` runtime directory, not beside the
-    /// world-readable `status.json` summary. Defaults to a
-    /// state-dir file so embedded/test daemons never write outside their
-    /// tempdir.
-    pub approvals_file: PathBuf,
+    /// Where the managed inventory's posture, hardware and application facts
+    /// are read ([`crate::inventory`]). Production paths by default; tests
+    /// inject a fixture tree so no assertion depends on the host.
+    pub inventory_sources: CollectorSources,
+    /// M9: where the shell's approval views go, one `<uid>.json` per person
+    /// (docs/api/ipc.md section 15; F0 review). `/run/punard/approvals` in
+    /// production — deliberately inside the `0750 root:punar` runtime
+    /// directory, not beside the world-readable `status.json` summary.
+    /// Defaults to a state-dir directory so embedded/test daemons never
+    /// write outside their tempdir.
+    pub approvals_dir: PathBuf,
     /// M9: the shipped AI authority document (SPEC section 20).
     pub ai_defaults_file: PathBuf,
     /// Where `punar-authd` mints re-authentication tickets
@@ -209,6 +348,20 @@ pub struct DaemonConfig {
     /// prove the ACCEPT half of `policy.set` — the half that matters and the
     /// one a hardcoded `/run` path leaves to the VM gate alone.
     pub reauth_ticket_dir: PathBuf,
+    /// Onboarding's persistent account records
+    /// (`/var/lib/punar/identity/accounts`): where the device-administrator
+    /// role of an onboarded account lives (F0-S1, [`crate::admins`]).
+    pub identity_accounts_dir: PathBuf,
+    /// The nss-systemd drop-in directory (`/run/userdb`) the role is
+    /// published to, and read back from, as a login would see it.
+    pub userdb_dir: PathBuf,
+    /// The boot clock every expiry decision reads — grants, approvals and
+    /// re-authentication tickets (SMP-1405). [`SystemClock`] in production;
+    /// tests substitute a `ManualClock` to prove expiry and reboot without
+    /// sleeping. Not reachable from the command line or the environment: a
+    /// daemon whose clock could be chosen from outside would be a daemon
+    /// whose expiries could be, too.
+    pub trusted_clock: Arc<dyn TrustedClock>,
     /// M9: the uid an agent-raised approval is routed to — the console
     /// user. 1000 in the image (`punar`); injectable for tests. Not a
     /// presence check: see `Inner::console_user`.
@@ -232,6 +385,10 @@ pub struct DaemonConfig {
     /// Cross-architecture integration-test seam. Production always leaves
     /// this unset and uses the compiled target architecture.
     pub app_arch_override: Option<String>,
+    /// Root-only fixed broker used to hand least-privilege PIM and Wayland
+    /// capabilities to first-party desktop applications. Production never
+    /// accepts this path over IPC; the field is injectable only for tests.
+    pub pim_launch_broker: PathBuf,
     /// Root-private, freshly rendered Chromium policy source consumed by
     /// the `browser.policy` capability backend.
     pub browser_policy_source: PathBuf,
@@ -251,12 +408,39 @@ pub struct DaemonConfig {
     pub update_transaction_sources: UpdateTransactionSources,
     /// Fixed Raspberry Pi firmware/slot paths for the same public method.
     pub pi_update_sources: PiUpdateSources,
+    /// How long an inventory that failed to go out first waits before it is
+    /// sent again ([`INVENTORY_RETRY_BASE`]); shorter in tests.
+    pub inventory_retry_base: Duration,
+    /// What one reconcile pass may spend on the control plane
+    /// ([`RECONCILE_CONTROL_PLANE_BUDGET`]); shorter in tests.
+    pub reconcile_control_plane_budget: Duration,
+    /// How the management chain's own units are checked on every pass while
+    /// enrolled, and whether a connection to the agent must reach systemd's
+    /// listener ([`crate::agent_units`], [`ControlPlaneClient::requiring_systemd_listener`]).
+    /// Set by `main.rs` when punard dials the built-in agent's own socket;
+    /// `None` for the development mock and in tests.
+    pub agent_integrity: Option<crate::agent_units::AgentIntegrity>,
+    /// `main.rs` was asked to point punard at another control-plane socket
+    /// on an image that ships no development control plane, and refused:
+    /// audited once at start (`enroll.agent` `denied`).
+    pub control_plane_override_refused: bool,
+    /// The current boot's id, for the reconcile-gap record
+    /// (`/proc/sys/kernel/random/boot_id`).
+    pub boot_id_path: PathBuf,
+    /// The longest two reconcile passes of an enrolled device may be apart,
+    /// suspend excluded, before the gap is audited ([`RECONCILE_GAP_LIMIT`]).
+    pub reconcile_gap_limit: Duration,
 }
+
+/// Three periods of `punard-reconcile.timer` (120 s) and a minute: a pass
+/// runs every two minutes while enrolled, so passes further apart than this
+/// mean the timer, or punard, did not run them (`enroll.gap`).
+pub const RECONCILE_GAP_LIMIT: Duration = Duration::from_secs(3 * 120 + 60);
 
 impl DaemonConfig {
     pub fn new(socket_path: PathBuf, state_dir: PathBuf, audit_path: PathBuf) -> Self {
         let status_file = state_dir.join("status.json");
-        let approvals_file = state_dir.join("approvals.json");
+        let approvals_dir = state_dir.join("approval-views");
         let update_check_sources = UpdateCheckSources {
             cached_channel: state_dir.join("update/verified-channel.json"),
             cached_signature: state_dir.join("update/verified-channel.json.sig"),
@@ -286,8 +470,12 @@ impl DaemonConfig {
             status_file,
             os_release_path: PathBuf::from("/etc/os-release"),
             kernel_release_path: PathBuf::from("/proc/sys/kernel/osrelease"),
-            approvals_file,
+            inventory_sources: CollectorSources::default(),
+            approvals_dir,
             reauth_ticket_dir: PathBuf::from(crate::reauth::TICKET_DIR),
+            identity_accounts_dir: PathBuf::from("/var/lib/punar/identity/accounts"),
+            userdb_dir: PathBuf::from("/run/userdb"),
+            trusted_clock: Arc::new(SystemClock::new()),
             ai_defaults_file: PathBuf::from(punar_common::aipolicy::AI_DEFAULTS_FILE),
             console_uid: DEFAULT_CONSOLE_UID,
             agentd_socket: PathBuf::from(crate::agentd::DEFAULT_AGENTD_SOCKET),
@@ -296,6 +484,7 @@ impl DaemonConfig {
             app_catalog_path: None,
             flatpak_bin: PathBuf::from("/usr/bin/flatpak"),
             app_arch_override: None,
+            pim_launch_broker: PathBuf::from("/usr/lib/punar/punar-pim-launch"),
             browser_policy_source,
             live_mode: false,
             installer_sources: InstallerSources::default(),
@@ -303,6 +492,12 @@ impl DaemonConfig {
             update_check_sources,
             update_transaction_sources,
             pi_update_sources,
+            inventory_retry_base: INVENTORY_RETRY_BASE,
+            reconcile_control_plane_budget: RECONCILE_CONTROL_PLANE_BUDGET,
+            agent_integrity: None,
+            control_plane_override_refused: false,
+            boot_id_path: PathBuf::from("/proc/sys/kernel/random/boot_id"),
+            reconcile_gap_limit: RECONCILE_GAP_LIMIT,
         }
     }
 }
@@ -375,10 +570,17 @@ struct Inner {
     /// edit local policy at all (SPEC section 44.5). Reloaded with the org
     /// layers on every enrollment transition.
     local_admin: Mutex<Vec<LocalAdminLayer>>,
+    /// Organization opinions about who administers this device (F0-S1,
+    /// contract section 23.4). Reloaded and cleared exactly where
+    /// `local_admin` is, for the same reason: an org's roster must not
+    /// outlive its enrollment.
+    admin_roster: Mutex<Vec<AdminRosterLayer>>,
     /// Ranks 1–4 (and stored-rank overrides): policy.d drops. Loaded at
     /// startup; since M5 the **enrollment chain** reloads them live
-    /// (`enroll.start` writes + reloads, `enroll.stop` empties). A manual
-    /// root file-drop into policy.d still requires a daemon restart —
+    /// (`enroll.start` writes + reloads, `enroll.stop` empties), and every
+    /// policy refresh that changes the organization's set reloads the whole
+    /// directory as a restart would. A manual root file-drop into policy.d
+    /// still takes effect only at the next restart or refresh commit —
     /// documented limit (milestone-5.md section 5.1): the authoritative
     /// policy.d writer is the enrollment chain.
     org_layers: Mutex<Vec<Layer>>,
@@ -389,6 +591,12 @@ struct Inner {
     /// startup and on every `capabilities.set`.
     effective: Mutex<EffectiveDocument>,
     tracker: Mutex<ComplianceTracker>,
+    /// The state the audit trail last recorded for each capability it
+    /// recorded as anything but `compliant` ([`COMPLIANCE_AUDITED_FILE`]):
+    /// what `reconcile.compliance` compares against, so a recovery is
+    /// recorded however it came (a manual set, a restart that finds it
+    /// healed), and a restart does not record a state again.
+    compliance_audited: Mutex<BTreeMap<String, ComplianceState>>,
     device_id: String,
     /// Read-only observed fact. Never enters the capability reconcile loop.
     device_profile: punar_common::DeviceProfile,
@@ -396,15 +604,43 @@ struct Inner {
     last_reconcile: Mutex<Option<String>>,
     /// M5 enrollment state (mirrors `enrollment.json`); `None` = personal.
     enrollment: Mutex<Option<Enrollment>>,
+    /// Which enrollment the slot holds: bumped, under the `enrollment` lock,
+    /// whenever one is committed or ended. A sync pass works from a copy
+    /// taken at its start and may outlive it (a report can be in flight for
+    /// seconds while `enroll.stop` runs, and `enroll.start` after it). It
+    /// writes back only while this is still the value it started with, so
+    /// an ended enrollment is never written again and never into another
+    /// one. Two enrollments of one organization in the same second carry the
+    /// same `org.id` and `enrolled_at`; they never carry the same epoch.
+    enrollment_epoch: AtomicU64,
     /// M5: the device token, [`Redacted`] the moment it exists in memory —
-    /// no formatter or serializer can print it (SPEC section 53).
+    /// no formatter or serializer can print it (SPEC section 53). Kept past
+    /// an unenrollment until the agent confirms it wiped the identity the
+    /// token names ([`Inner::release_pending_identity`]); what punard does
+    /// with a token while no enrollment is held is the release record's to
+    /// say (`identity_release`), never the token's.
     device_token: Mutex<Option<Redacted<String>>>,
+    /// Why the last attempt to release that identity did not confirm it.
+    release_failure: Mutex<Option<String>>,
+    /// punard's record of an identity it holds or may have left with the
+    /// agent while no enrollment is committed (mirrors
+    /// [`IDENTITY_RELEASE_FILE`]): one to release, or one it keeps because
+    /// nothing says the enrollment it belonged to was ended. Only a record
+    /// makes punard ask the agent to wipe anything; a token alone never does.
+    identity_release: Mutex<Option<IdentityReleaseRecord>>,
     /// M5 offline queue (SPEC section 55): bounded latest-wins — two
     /// booleans, not a spool. Compliance/inventory are state snapshots; a
     /// missed intermediate report carries nothing the next snapshot does
     /// not supersede.
     pending_compliance: AtomicBool,
     pending_inventory: AtomicBool,
+    /// When a pending inventory may be sent again ([`InventoryRetry`]).
+    inventory_retry: Mutex<Option<InventoryRetry>>,
+    /// The managed inventory's collectors and their per-boot caches.
+    inventory: InventoryCollector,
+    /// Whether the last inventory went out with its application list
+    /// withheld; the audit records the transitions, not every pass.
+    applications_withheld: AtomicBool,
     /// Outcome of the most recent sync attempt, for `enroll.start`'s
     /// `first_sync` result field.
     last_sync_outcome: Mutex<Option<FirstSync>>,
@@ -417,9 +653,30 @@ struct Inner {
     /// M9: the effective AI authority (SPEC section 20). Reloaded on every
     /// enrollment transition, because an org layer may carry one.
     ai: Mutex<AiAuthority>,
-    /// Serializes `enroll.start`/`enroll.stop` without holding the state
-    /// lock across the network + reconcile pipeline.
+    /// Serializes `enroll.start`/`enroll.stop`, and a policy refresh's
+    /// commit, without holding the state lock across the network + reconcile
+    /// pipeline.
     enroll_in_progress: AtomicBool,
+    /// Every control-plane call in flight, so each waits behind the others
+    /// ([`AgentQueue`]).
+    control_plane_queue: Arc<AgentQueue>,
+    /// How many refresh opportunities a failing policy fetch still skips
+    /// ([`RefreshBackoff`]). In memory: a restart tries at once.
+    policy_refresh_backoff: Mutex<RefreshBackoff>,
+    /// The last set this daemon refused, for which enrollment (its epoch),
+    /// and why: the same set is not checked again on every pass. In memory,
+    /// so a new build, whose checks may differ, looks at it once more.
+    policy_rejected_offer: Mutex<Option<(u64, String, &'static str)>>,
+    /// The last refusal that depended on this device's own files as well as
+    /// on the set offered (a set that names a root drop, or cannot be loaded
+    /// or installed beside what policy.d holds), and what it depended on: not
+    /// staged again until the offer or policy.d changes.
+    policy_local_refusal: Mutex<Option<policy_refresh::LocalRefusal>>,
+    /// The revision of the organization's files the in-memory layers and the
+    /// rendered browser document were made from. `None` when they may not
+    /// match `policy.d` (a change that could not be undone): the next
+    /// refresh then commits again, whatever it fetches.
+    org_policy_loaded: Mutex<Option<String>>,
     /// One destructive install per live boot. This is a compare-exchange
     /// guard rather than a blocking mutex so a duplicate Apply receives an
     /// immediate, truthful conflict while status and recovery acknowledgement
@@ -436,6 +693,12 @@ struct Inner {
     /// but their human-paced mutations still serialize per daemon.
     webapps: WebAppManager,
     webapp_mutation: Mutex<()>,
+    /// Held by `admins.set` from the moment it counts who else administers
+    /// the device until the role has changed (F0 review): punard serves each
+    /// connection on its own thread, and two administrators removing each
+    /// other at the same instant must not both see "one other remains" and
+    /// leave the device with none.
+    admins_change: Mutex<()>,
     installer: Installer,
     update_status: UpdateStatusEngine,
     update_check: UpdateCheckEngine,
@@ -488,7 +751,12 @@ impl Daemon {
         installer_sources.live_audit_path = cfg.audit_path.clone();
         let installer = Installer::new(installer_sources);
         let update_status = UpdateStatusEngine::new(cfg.update_status_sources.clone());
-        let update_check = UpdateCheckEngine::new(cfg.update_check_sources.clone());
+        let update_check = UpdateCheckEngine::with_clock(
+            cfg.update_check_sources.clone(),
+            cfg.trusted_clock.clone(),
+        );
+        let inventory =
+            InventoryCollector::new(cfg.inventory_sources.clone(), cfg.flatpak_bin.clone());
         let update_transaction =
             UpdateTransactionEngine::new(cfg.update_transaction_sources.clone());
         let pi_update = PiUpdateEngine::new(cfg.pi_update_sources.clone());
@@ -497,13 +765,12 @@ impl Daemon {
                 .initialize_status_file()
                 .map_err(|error| io::Error::other(error.to_string()))?;
         }
-        let audit = AuditWriter::open(&cfg.audit_path)?;
-        // Group ownership (root:punar) is the daemon's job, not the
-        // writer's; meaningful only when running as root (tests are not).
-        if let Some(gid) = lookup_gid(&cfg.group_file, &cfg.group) {
-            let _ = std::os::unix::fs::chown(&cfg.audit_path, Some(0), Some(gid));
-        }
-        let mut audit = audit;
+        // The trail is root:punar-audit, a group no person is in (F0-S3): a
+        // person reads their own events through `audit.tail`. With no such
+        // group (an image from before it) the file stays root:root 0640 —
+        // never falling back to `punar`, which is every account.
+        let mut audit =
+            AuditWriter::open_in_group(&cfg.audit_path, lookup_gid(&cfg.group_file, AUDIT_GROUP))?;
         let mut audit_events = count_events(&cfg.audit_path)?;
 
         // Layer stores. Migration must run before regular seeding so the
@@ -535,7 +802,7 @@ impl Daemon {
                 continue;
             }
             let seed = cap
-                .observe()
+                .first_boot_default()
                 .unwrap_or_else(|_| Value::String("unknown".to_string()));
             os_defaults.seed(&id, seed)?;
         }
@@ -543,17 +810,37 @@ impl Daemon {
         // Org layers (empty directory in the shipped image; loader + tests
         // run against fixtures). Load errors refuse start.
         let loaded = load_policy_dir(&cfg.state_dir.join("policy.d"))?;
+        // The paths are the organization's own keys, and a refresh can put
+        // new ones in policy.d at any time: escaped, like every other string
+        // from it that reaches the journal, on every boot.
         for unmapped in &loaded.unmapped {
             eprintln!(
-                "punard: policy.d: no registered capability for {unmapped}; ignored \
-                 (its capability lands in a later milestone)"
+                "punard: policy.d: no registered capability for {}; ignored \
+                 (its capability lands in a later milestone)",
+                journal_detail(unmapped)
             );
         }
-        persist_rendered_browser_policy(
+        // The browser document for what was just loaded. A document that
+        // cannot be written (a full disk) is logged, not fatal: refusing to
+        // start would leave the device without its control plane, its
+        // reconcile and its management, and the document on disk stays the
+        // last one written either way. The next policy refresh writes it
+        // again (nothing is named as loaded below), and until then
+        // `browser.policy` observes the difference.
+        let rendered = match persist_rendered_browser_policy(
             &cfg.browser_policy_source,
             &loaded.applications,
             &loaded.browsers,
-        )?;
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!(
+                    "punard: could not write the rendered browser policy ({e}); starting \
+                     with the document already on disk"
+                );
+                false
+            }
+        };
 
         let effective = compute_effective(
             &registry,
@@ -570,7 +857,75 @@ impl Daemon {
         // same posture as the layer stores; a missing token on an enrolled
         // device degrades to unreachable syncs, never to a silent
         // unenroll.
-        let enrollment = load_enrollment(&cfg.state_dir.join("enrollment.json"))?;
+        let mut enrollment = load_enrollment(&cfg.state_dir.join("enrollment.json"))?;
+        // An enroll.start or policy refresh that was interrupted leaves its
+        // staging directory beside policy.d, and a refresh leaves a record
+        // naming both sets' files, its change pending. Both are settled from
+        // what policy.d holds before anything reads them (policy_set::settle).
+        let settled = match policy_set::settle(&cfg.state_dir, enrollment.as_mut()) {
+            Ok(settled) => settled,
+            Err(e) => {
+                eprintln!("punard: could not clear an interrupted policy change: {e}");
+                policy_set::Settled::default()
+            }
+        };
+        if settled.changed {
+            if let Some(record) = &enrollment {
+                if let Err(e) = policy_set::step(policy_set::Step::RecordSettled).and_then(|()| {
+                    save_enrollment_durable(&cfg.state_dir.join("enrollment.json"), record)
+                }) {
+                    eprintln!(
+                        "punard: could not save the settled policy record ({e}); \
+                         it is settled again at the next start"
+                    );
+                }
+            }
+        }
+        // A change that landed before the crash is audited as the refresh
+        // would have, under the event id it fixed before the swap: once,
+        // whether the refresh got as far as writing it or not. Whether or not
+        // the settled record could be saved: this daemon keeps running on the
+        // settled record in memory, and the next sync pass saves it without
+        // the pending change, so waiting for "the next start" would lose the
+        // event the moment the disk recovers. The event id makes a second
+        // start that settles it again find it already written.
+        if let Some(change) = &settled.landed {
+            if audit_log_holds(&cfg.audit_path, &change.event_id) {
+                eprintln!(
+                    "punard: the organization's policy was {} ({}) before the last stop",
+                    change.result, change.revision
+                );
+            } else {
+                let mut event = enrollment_event(
+                    &device_id,
+                    &AuditActor::daemon(),
+                    "enroll.policy",
+                    RESOURCE_CONTROL_PLANE,
+                    &change.result,
+                    change.policy_ids.clone(),
+                );
+                event.event_id = change.event_id.clone();
+                match audit.append(&event) {
+                    Ok(()) => {
+                        audit_events += 1;
+                        eprintln!(
+                            "punard: the organization's policy was {} ({}) before the last \
+                             stop; recorded now",
+                            change.result, change.revision
+                        );
+                    }
+                    Err(e) => eprintln!("punard: FAILED to append enroll.policy audit event: {e}"),
+                }
+            }
+        }
+        // What the in-memory layers below were loaded from, as far as the
+        // organization's files go: a refresh that finds the same set commits
+        // nothing only while this still names it.
+        let org_policy_loaded = enrollment.as_ref().filter(|_| rendered).and_then(|record| {
+            CanonicalSet::read_owned(&cfg.state_dir.join("policy.d"), &record.policy_files)
+                .ok()
+                .map(|owned| owned.revision())
+        });
         let device_token = load_device_token(&cfg.state_dir.join("device-token"))?;
         if enrollment.is_some() && device_token.is_none() {
             eprintln!(
@@ -578,18 +933,103 @@ impl Daemon {
                  compliance/inventory sync will fail until re-enrollment"
             );
         }
+        // What punard does with an identity while no enrollment is committed
+        // is decided by its release record alone (IDENTITY_RELEASE_FILE). A
+        // device token with neither an enrollment nor a record is not an
+        // unenrollment waiting to finish: nothing ended the enrollment it
+        // belonged to (deleting enrollment.json would otherwise make punard
+        // wipe the organization's identity itself, recorded as an ordinary
+        // release). It is kept, never released, audited once as
+        // `enroll.release` `kept`, and shown; a new enrollment replaces it.
+        let release_path = cfg.state_dir.join(IDENTITY_RELEASE_FILE);
+        let keep = |cause: &str, audit: &mut AuditWriter, audit_events: &mut u64| {
+            let record = IdentityReleaseRecord::new(ReleaseState::Kept, cause, utc_now_rfc3339());
+            if let Err(e) = save_identity_release(&release_path, &record) {
+                eprintln!("punard: could not record the kept Smplify identity ({e})");
+            }
+            eprintln!(
+                "punard: a Smplify identity is held with no enrollment and no record of ending \
+                 one ({cause}); it is kept, not released, until a new enrollment replaces it"
+            );
+            let event = enrollment_event(
+                &device_id,
+                &AuditActor::daemon(),
+                "enroll.release",
+                &format!("agent.{cause}"),
+                ReleaseState::Kept.as_str(),
+                Vec::new(),
+            );
+            match audit.append(&event) {
+                Ok(()) => *audit_events += 1,
+                Err(e) => eprintln!("punard: FAILED to append enroll.release audit event: {e}"),
+            }
+            record
+        };
+        if cfg.control_plane_override_refused {
+            // Someone set PUNAR_CONTROL_PLANE_SOCKET or --control-plane-socket
+            // on an image with no development control plane: punard dials
+            // the built-in agent regardless, and says so once per start.
+            let event = enrollment_event(
+                &device_id,
+                &AuditActor::daemon(),
+                "enroll.agent",
+                "agent.control_plane_override",
+                "denied",
+                enrollment
+                    .as_ref()
+                    .map(Enrollment::policy_ids)
+                    .unwrap_or_default(),
+            );
+            match audit.append(&event) {
+                Ok(()) => audit_events += 1,
+                Err(e) => eprintln!("punard: FAILED to append enroll.agent audit event: {e}"),
+            }
+        }
+        let identity_release = match (&enrollment, load_identity_release(&release_path)) {
+            // Enrolled: the enrollment the record was written for was
+            // committed, or never ended. Nothing is to be released.
+            (Some(_), Ok(None)) => None,
+            (Some(_), _) => {
+                if let Err(e) = remove_synced(&release_path) {
+                    eprintln!("punard: could not remove a settled identity release record: {e}");
+                }
+                None
+            }
+            (None, Ok(Some(record))) => {
+                if record.state == ReleaseState::Release {
+                    eprintln!(
+                        "punard: the Smplify agent has not confirmed it wiped an identity \
+                         ({}); it is asked again on the next pass",
+                        record.cause
+                    );
+                }
+                Some(record)
+            }
+            (None, Ok(None)) if device_token.is_some() => Some(keep(
+                "enrollment_record_missing",
+                &mut audit,
+                &mut audit_events,
+            )),
+            (None, Ok(None)) => None,
+            (None, Err(e)) => {
+                eprintln!("punard: the identity release record is unreadable ({e})");
+                Some(keep(
+                    "release_record_unreadable",
+                    &mut audit,
+                    &mut audit_events,
+                ))
+            }
+        };
 
         // M9: the approval store and the AI authority document. A store
         // that will not open is fatal — a daemon that cannot record an
         // approval must not serve a gate it cannot honour.
-        let approvals = ApprovalStore::load(
-            &cfg.state_dir,
-            cfg.approvals_file.clone(),
-            lookup_gid(&cfg.group_file, &cfg.group),
-        )?;
+        let approvals = ApprovalStore::load(&cfg.state_dir, cfg.approvals_dir.clone())?;
         let ai =
             crate::aipolicy::load_authority(&cfg.ai_defaults_file, &cfg.state_dir.join("policy.d"));
 
+        let compliance_audited =
+            load_compliance_audited(&cfg.state_dir.join(COMPLIANCE_AUDITED_FILE));
         let daemon = Daemon {
             inner: Arc::new(Inner {
                 cfg,
@@ -601,22 +1041,35 @@ impl Daemon {
                 admin_policy,
                 org_layers: Mutex::new(loaded.layers),
                 local_admin: Mutex::new(loaded.local_admin),
+                admin_roster: Mutex::new(loaded.admin_roster),
                 application_policy: Mutex::new(loaded.applications),
                 effective: Mutex::new(effective),
                 tracker: Mutex::new(ComplianceTracker::default()),
+                compliance_audited: Mutex::new(compliance_audited),
                 device_id,
                 device_profile,
                 started_at: utc_now_rfc3339(),
                 last_reconcile: Mutex::new(None),
                 enrollment: Mutex::new(enrollment),
+                enrollment_epoch: AtomicU64::new(0),
                 device_token: Mutex::new(device_token),
+                release_failure: Mutex::new(None),
+                identity_release: Mutex::new(identity_release),
                 pending_compliance: AtomicBool::new(false),
                 pending_inventory: AtomicBool::new(false),
+                inventory_retry: Mutex::new(None),
+                inventory,
+                applications_withheld: AtomicBool::new(false),
                 last_sync_outcome: Mutex::new(None),
                 status_written: Mutex::new(None),
                 approvals: Mutex::new(approvals),
                 ai: Mutex::new(ai),
                 enroll_in_progress: AtomicBool::new(false),
+                control_plane_queue: Arc::new(AgentQueue::default()),
+                policy_refresh_backoff: Mutex::new(RefreshBackoff::default()),
+                policy_rejected_offer: Mutex::new(None),
+                policy_local_refusal: Mutex::new(None),
+                org_policy_loaded: Mutex::new(org_policy_loaded),
                 install_in_progress: AtomicBool::new(false),
                 shutdown: AtomicBool::new(false),
                 active: Mutex::new(0),
@@ -625,6 +1078,7 @@ impl Daemon {
                 app_mutation: Mutex::new(()),
                 webapps,
                 webapp_mutation: Mutex::new(()),
+                admins_change: Mutex::new(()),
                 installer,
                 update_status,
                 update_check,
@@ -655,7 +1109,8 @@ impl Daemon {
     /// every capability has a section 52 state before the socket opens.
     pub fn boot_reconcile(&self) {
         let inner = &self.inner;
-        let report = inner.reconcile_and_remediate(&AuditActor::daemon());
+        let budget = CallBudget::new(inner.cfg.reconcile_control_plane_budget);
+        let report = inner.reconcile_and_remediate(&AuditActor::daemon(), &budget);
         *inner.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
     }
 
@@ -686,6 +1141,7 @@ impl DaemonHandle {
 
     /// Request shutdown, wake the accept loop, and join it.
     pub fn stop(self) {
+        self.inner.record_stop();
         self.inner.shutdown.store(true, Ordering::SeqCst);
         self.inner.slot_freed.notify_all();
         // Nudge a blocked accept(2) with a throwaway connection.
@@ -921,8 +1377,67 @@ fn wire_classification(classification: Classification) -> WireClassification {
 /// This is what lets a surface OFFER editing only where editing would work,
 /// instead of discovering the answer from a refusal after the fact.
 fn admin_may_override(entry: &punar_policy::EffectiveEntry<Value>) -> bool {
+    // The second clause is RANK-SCOPED, and the difference matters because
+    // `device_specific_override` is not exclusively the local administrator's
+    // kind: its rank is stored data, so an organization may publish one, and at
+    // rank 1-3 that layer outranks this device exactly as an organization
+    // baseline does. Matching on the kind alone would have handed an org's own
+    // pinned value to the local administrator to edit, purely because of the
+    // word it was labelled with.
     entry.provenance.rank > DEVICE_ADMIN_RANK
-        || entry.provenance.kind == punar_policy::SourceKind::DeviceSpecificOverride
+        || (entry.provenance.kind == punar_policy::SourceKind::DeviceSpecificOverride
+            && entry.provenance.rank >= DEVICE_ADMIN_RANK)
+}
+
+/// A catalog id as it may appear inside a suggested command: the id shape
+/// punarctl accepts, or a placeholder, so nothing a caller sent is echoed into
+/// something a person might paste.
+fn app_id_word(id: &str) -> String {
+    let ok = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    if ok {
+        id.to_string()
+    } else {
+        "<id>".to_string()
+    }
+}
+
+/// Whether an audit event belongs to the device rather than to a person
+/// (F0-S3): it names no person — a daemon, the device, the organization — or
+/// it is root administering the device. Root is not a person on a Punar
+/// device (nobody signs in as root), and what root changed is what every
+/// person on the device lives with.
+///
+/// AN EVENT ABOUT A PERSON'S WORK IS NEVER THE DEVICE'S (F0 review), whoever
+/// wrote it. punar-netd refusing an agent's connection and punar-agentd
+/// reaping a session write their events as themselves, a service, but they
+/// name that person's agent session and project — which is exactly what one
+/// person must not read of another's. Such an event is shown to its person
+/// when it carries their name, and to root; the person also reads it in
+/// their session's access ledger (`punarctl agents access`).
+fn audit_event_is_the_devices(event: &AuditEvent) -> bool {
+    !audit_event_names_a_persons_work(event)
+        && (matches!(
+            event.source,
+            PrincipalKind::Service | PrincipalKind::Device | PrincipalKind::Organization
+        ) || event.user_id.as_deref() == Some("root"))
+}
+
+/// Whether an audit event names an agent session or a project — anything
+/// but the "none" sentinels the schema requires when no agent or project is
+/// involved.
+fn audit_event_names_a_persons_work(event: &AuditEvent) -> bool {
+    event
+        .agent_session_id
+        .as_deref()
+        .is_some_and(|session| session != punar_common::audit::AGENT_SESSION_NONE)
+        || event
+            .project_id
+            .as_deref()
+            .is_some_and(|project| project != punar_common::audit::PROJECT_ID_SYSTEM)
 }
 
 fn source_ref(provenance: &Provenance) -> PolicySourceRef {
@@ -932,6 +1447,137 @@ fn source_ref(provenance: &Provenance) -> PolicySourceRef {
         policy_id: provenance.policy_id.clone(),
         name: provenance.source_name.clone(),
     }
+}
+
+/// Who can end this enrollment, said as a next step a person can act on
+/// (docs/development/smplify-enrollment.md section 3.1).
+fn unenroll_next_step(enrollment: &Enrollment) -> String {
+    if enrollment.removable {
+        "`punarctl enroll stop` unenrolls it; it asks for your password.".to_string()
+    } else {
+        format!(
+            "{org} enrolled this device as not removable, so nobody on it can unenroll it: \
+             only erasing and reinstalling the device ends the enrollment. A release sent by \
+             {org} is not built yet.",
+            org = enrollment.org.display_name
+        )
+    }
+}
+
+/// `enrollment.removable` from an organization document: whether a person on
+/// the device may later unenroll it. Absent means removable — the organization
+/// stated no restriction, and the device's owner administers it, as for
+/// `spec.security.localAdmin`. A value that is present but not a boolean is an
+/// error, never the permissive default: an organization that tried to say
+/// something about removal and could not be understood must not get the
+/// opposite of what it meant.
+fn org_document_removable(org_doc: &Value) -> Result<bool, String> {
+    match org_doc.get("enrollment").and_then(|e| e.get("removable")) {
+        None => Ok(true),
+        Some(Value::Bool(removable)) => Ok(*removable),
+        Some(other) => Err(org_document_value_shown(other)),
+    }
+}
+
+/// A value from the organization's document, as the refusal that names it
+/// quotes it. The organization chose it, and punarctl prints the refusal to
+/// a terminal, which obeys what is in it: a bidirectional override could
+/// reorder the sentence around it, a line separator could start what looks
+/// like a line of Punar's own, and a megabyte of text would bury the next
+/// step. So it is cleaned and bounded exactly as the organization's name is
+/// ([`organization_name`]).
+fn org_document_value_shown(value: &Value) -> String {
+    organization_name(&value.to_string()).unwrap_or_else(|| "unprintable".to_string())
+}
+
+/// `enrollment.ownership` from an organization document: whether the
+/// organization owns this device, so that its inventory also carries the
+/// serial number and every application installed for all users
+/// (docs/development/smplify-enrollment.md section 3.2). Absent or
+/// `"personal"` is personal; `"organization"` claims the device, which the
+/// person must then accept. Anything else is an error, never either reading:
+/// guessing personal would enroll a device its organization cannot manage as
+/// it said, and guessing organization would report more than anyone agreed
+/// to.
+fn org_document_organization_owned(org_doc: &Value) -> Result<bool, String> {
+    match org_doc.get("enrollment").and_then(|e| e.get("ownership")) {
+        None => Ok(false),
+        Some(Value::String(ownership)) if ownership == "personal" => Ok(false),
+        Some(Value::String(ownership)) if ownership == "organization" => Ok(true),
+        Some(other) => Err(org_document_value_shown(other)),
+    }
+}
+
+/// How an organization states a term, as the first sentence of the refusal
+/// that names it alone.
+fn term_statement(term: EnrollmentTerm) -> &'static str {
+    match term {
+        EnrollmentTerm::NonRemovable => "enrolls devices so that nobody on them can unenroll them",
+        EnrollmentTerm::OrganizationOwned => "enrolls devices as owned by the organization",
+    }
+}
+
+/// The one `denied` refusal for every enrollment term the request did not
+/// accept (docs/api/ipc.md section 5.9 step 6). Every term is named at once,
+/// with what it means and the flag that accepts it, so a person is asked
+/// once for everything rather than refused again after each yes.
+/// `details.terms` lists them for a client to send back; `details.reason`
+/// keeps the single term's own reason when there is one.
+fn unaccepted_terms_refusal(
+    org: &OrgRecord,
+    domain: &str,
+    unaccepted: &[EnrollmentTerm],
+) -> IpcError {
+    // The name is the organization's, quoted so it reads as a name, and it
+    // stays out of the sentences a person agrees to: each term's meaning is
+    // fixed text (EnrollmentTerm::meaning).
+    let name = &format!("\"{}\"", term_safe_name(&org.display_name));
+    let (statement, meaning, reason) = match unaccepted {
+        [term] => (
+            format!(
+                "{name} {}, and this request did not accept that",
+                term_statement(*term)
+            ),
+            term.meaning().to_string(),
+            term.refusal_reason(),
+        ),
+        _ => (
+            format!(
+                "{name} enrolls devices on terms this request did not accept: {}",
+                unaccepted
+                    .iter()
+                    .map(|term| term.title().to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+            unaccepted
+                .iter()
+                .map(|term| format!("{}: {}", term.title(), term.meaning()))
+                .collect::<Vec<_>>()
+                .join(". "),
+            ENROLLMENT_TERMS_NOT_ACCEPTED,
+        ),
+    };
+    let flags = unaccepted
+        .iter()
+        .map(|term| term.flag())
+        .collect::<Vec<_>>()
+        .join(" ");
+    IpcError::with_details(
+        ErrorCode::Denied,
+        format!(
+            "{statement}. Nothing was changed: this device was not registered with {name}.\n\
+             Policy: the organization's enrollment terms — {meaning}.\n\
+             Next step: if that is what you want, run `punarctl enroll start {domain} {flags}`."
+        ),
+        json!({
+            "decision": "deny",
+            "reason": reason,
+            "terms": unaccepted.iter().map(|term| term.as_str()).collect::<Vec<_>>(),
+            "organization": org.id,
+            "organization_name": org.display_name,
+        }),
+    )
 }
 
 /// The wire `org` object for a persisted [`OrgRecord`].
@@ -986,7 +1632,9 @@ fn app_ipc_error(error: AppError) -> IpcError {
         AppError::InvalidCatalog(_) => (
             ErrorCode::Internal,
             "The application catalog could not be trusted",
-            "verify the signed OS image and restart punard",
+            // Not "restart punard": it refuses a manual stop or restart
+            // (docs/development/smplify-enrollment.md section 3.4).
+            "verify the signed OS image and restart the device",
         ),
         AppError::NotFound(_) => (
             ErrorCode::NotFound,
@@ -1018,6 +1666,14 @@ fn app_ipc_error(error: AppError) -> IpcError {
         code,
         format!("{what}.\nWhy: {error}.\nNext step: {next}."),
         json!({ "component": "application_catalog" }),
+    )
+}
+
+fn mail_launch_unavailable(reason: &str) -> IpcError {
+    IpcError::with_details(
+        ErrorCode::ApplyFailed,
+        "Mail could not establish its protected desktop connection. No mailbox capability was issued. Next step: sign in to the desktop again, then reopen Mail.",
+        json!({ "component": "pim_mail_launch", "reason": reason }),
     )
 }
 
@@ -1147,7 +1803,7 @@ fn update_check_ipc_error(error: UpdateCheckError) -> IpcError {
             format!(
                 "Punar could not reach its configured update source: {error}. The running release and verified cache were not changed.\n\
                  Policy: governed updates never fall through to another channel or an unverified mirror.\n\
-                 Next step: reconnect the configured update source and retry `sudo punarctl update check`."
+                 Next step: reconnect the configured update source and retry `punarctl update check`."
             ),
             json!({ "stage": stage }),
         );
@@ -1427,7 +2083,7 @@ impl Inner {
         let desired = self
             .effective_value_of(meta.capability.as_str())
             .unwrap_or_else(|| current.clone());
-        meta.describe(current, desired)
+        meta.describe(current, desired, cap.mutable())
     }
 
     /// The effective value for one capability path, if the document has an
@@ -1442,8 +2098,14 @@ impl Inner {
     }
 
     /// Recompute the effective document from the layers (startup, every
-    /// `capabilities.set`, and the M5 enrollment transitions) and refresh
-    /// the debug copy.
+    /// `capabilities.set`, the M5 enrollment transitions and every policy
+    /// refresh that changes the set) and refresh the debug copy.
+    ///
+    /// A capability whose effective value or classification changed leaves
+    /// remediation suppression here: the loop-protection promise is "until the
+    /// effective value changes" (contract section 5.6), and a new value is a
+    /// new thing to try, not the fourth attempt at the old one. The two locks
+    /// are taken one after the other, never together.
     fn recompute_effective(&self) {
         let doc = {
             let org_layers = self.org_layers.lock().unwrap();
@@ -1457,7 +2119,18 @@ impl Inner {
             )
         };
         let _ = write_effective_debug_copy(&self.cfg.state_dir.join("effective.json"), &doc);
-        *self.effective.lock().unwrap() = doc;
+        let changed = {
+            let mut effective = self.effective.lock().unwrap();
+            let changed = changed_effective_paths(&effective, &doc);
+            *effective = doc;
+            changed
+        };
+        if !changed.is_empty() {
+            let mut tracker = self.tracker.lock().unwrap();
+            for path in changed {
+                tracker.fail_counts.remove(&path);
+            }
+        }
     }
 
     /// M9: re-read the AI authority documents (SPEC section 20) after an
@@ -1490,6 +2163,7 @@ impl Inner {
         }
         match &request.method {
             Method::Status => Ok(to_value(self.handle_status())),
+            Method::DevicePosture => Ok(to_value(self.handle_device_posture())),
             Method::CapabilitiesList => {
                 let capabilities: Vec<punar_common::CapabilityDescriptor> =
                     self.registry.iter().map(|cap| self.describe(cap)).collect();
@@ -1497,17 +2171,17 @@ impl Inner {
             }
             Method::CapabilitiesGet(params) => self.handle_capabilities_get(params),
             Method::CapabilitiesSet(params) => self.handle_capabilities_set(peer, params),
-            Method::AuditTail(params) => self.handle_audit_tail(params),
+            Method::AuditTail(params) => self.handle_audit_tail(peer, params),
             Method::Reconcile => self.handle_reconcile(peer),
             Method::PolicyEffective => Ok(to_value(self.handle_policy_effective())),
             Method::PolicyExplain(params) => self.handle_policy_explain(params),
             Method::PolicySet(params) => self.handle_policy_set(peer, params),
             Method::EnrollStart(params) => self.handle_enroll_start(peer, params),
             Method::EnrollStatus => Ok(to_value(self.handle_enroll_status())),
-            Method::EnrollStop => self.handle_enroll_stop(peer),
+            Method::EnrollStop(params) => self.handle_enroll_stop(peer, params),
             // M9 (contract section 14.2).
-            Method::ApprovalsList => self.handle_approvals_list(),
-            Method::ApprovalsGet(params) => self.handle_approvals_get(params),
+            Method::ApprovalsList => self.handle_approvals_list(peer),
+            Method::ApprovalsGet(params) => self.handle_approvals_get(peer, params),
             Method::ApprovalsCreate(params) => self.handle_approvals_create(peer, params),
             Method::ApprovalsResolve(params) => self.handle_approvals_resolve(peer, params),
             Method::ApprovalsConsume(params) => self.handle_approvals_consume(peer, params),
@@ -1529,6 +2203,9 @@ impl Inner {
             Method::WebAppsContextDelete(params) => {
                 self.handle_webapps_context_delete(peer, params)
             }
+            Method::PimMailOpen => self.handle_pim_mail_open(peer),
+            Method::PimMailAccountAdd => self.handle_pim_mail_account_add(peer),
+            Method::PimMailAccountManage => self.handle_pim_mail_account_manage(peer),
             Method::UpdateStatus => Ok(to_value(self.handle_update_status())),
             Method::UpdateCheck(params) => self.handle_update_check(peer, params),
             Method::UpdateApply(params) => self.handle_update_apply(peer, params),
@@ -1543,6 +2220,8 @@ impl Inner {
             Method::InstallApply(params) => self.handle_install_apply(peer, params),
             Method::InstallRecoveryAck(params) => self.handle_install_recovery_ack(peer, params),
             Method::InstallStatus => Ok(to_value(self.installer.status())),
+            Method::AdminsList => self.handle_admins_list(peer),
+            Method::AdminsSet(params) => self.handle_admins_set(peer, params),
         }
     }
 
@@ -1575,20 +2254,18 @@ impl Inner {
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.check";
         const RESOURCE: &str = "update_channel";
-        let actor = self.actor_of(peer);
-        if authorize_mutation(peer) != Decision::Allow {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                ACTION,
-                RESOURCE,
-            ));
-            return Err(IpcError::denied_needs_root(
-                "checking the governed update channel",
-                Some(RESOURCE),
-                "sudo punarctl update check",
-            ));
-        }
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            RESOURCE,
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Checking for updates",
+                agent_may_not: "check this device's update channel",
+                retry: "punarctl update check".to_string(),
+                reaches_everyone: false,
+            },
+        )?;
 
         let channel = self
             .effective
@@ -1655,64 +2332,121 @@ impl Inner {
         }
     }
 
-    fn authorize_system_update(&self, peer: &Peer, action: &str) -> Result<AuditActor, IpcError> {
+    /// Who may change what the operating system runs (docs/development/
+    /// update-and-rollback.md section 7.3): root, or a person who has just
+    /// confirmed their password — the `enroll.start` shape. Order:
+    ///
+    /// 1. **No agent, at any uid** — the M9 `host.system_update` boundary,
+    ///    widened to any peer whose cgroup names an agent scope. A ticket the
+    ///    agent carried is left unspent.
+    /// 2. **A non-root peer must carry a ticket**, refused before anything is
+    ///    read or fetched.
+    /// 3. **The ticket is spent** before any update-source request and before
+    ///    any allow-shaped audit event, so every later outcome names a caller
+    ///    who proved who they are.
+    ///
+    /// A person gets exactly root's authority and no more: the same channel,
+    /// halt, rollout, minimum-version and downgrade admission run after this,
+    /// and the channel is still the precedence-resolved
+    /// `system.update_channel`, which an organization pins.
+    fn admit_update_change(
+        &self,
+        peer: &Peer,
+        action: &str,
+        resource: &str,
+        ticket: Option<&str>,
+        words: &UpdateWords,
+    ) -> Result<AuditActor, IpcError> {
         let actor = self.actor_of(peer);
-        if actor.source == PrincipalKind::AiAgent {
-            let ruling = self.ai.lock().unwrap().host_ruling("system_update");
-            // An update/rollback is an OS hard-safety boundary for agents,
-            // not an authority an organization can grant back. Cite a loaded
-            // policy only when it actually denies the named rule; otherwise
-            // cite the non-overridable boundary instead of falsely claiming
-            // that an `allow` ruling caused this denial.
-            let denying_ruling = ruling
-                .as_ref()
-                .filter(|value| value.decision == Decision::Deny);
-            let policy_id = denying_ruling
-                .map(|value| value.policy_id.as_str())
-                .unwrap_or("os-hard-safety");
-            let source_name = denying_ruling
-                .map(|value| value.source_name.as_str())
-                .unwrap_or("Punar OS hard safety constraint");
-            let mut event = AuditEvent::action(
-                &self.device_id,
+        self.refuse_agent_system_update(peer, &actor, action, resource, words.agent_may_not)?;
+        if words.reaches_everyone {
+            self.require_device_admin(
+                peer,
                 &actor,
                 action,
-                "system_image",
-                Decision::Deny,
-                AuditOutcome::Denied,
-            );
-            event.policy_ids = vec![policy_id.to_string()];
-            self.log_audit(event);
-            return Err(IpcError::with_details(
-                ErrorCode::Denied,
-                format!(
-                    "An AI agent may not replace or roll back the operating system.\n\
-                     Policy: {source_name} ({policy_id}) — host.system_update is denied to agents.\n\
-                     Next step: make the change yourself with `sudo punarctl update apply <version>` or `sudo punarctl update rollback`."
-                ),
-                json!({
-                    "decision": "deny",
-                    "resource": "system_image",
-                    "rule": "host.system_update",
-                    "agent_session_id": actor.agent_session_id,
-                    "policy_ids": [policy_id],
-                }),
-            ));
+                resource,
+                words.doing,
+                RosterScope::Governed,
+            )?;
         }
-        if authorize_mutation(peer) != Decision::Allow {
+        if peer.uid != 0 && ticket.is_none() {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
                 &actor,
                 action,
-                "system_image",
+                resource,
             ));
-            return Err(IpcError::denied_needs_root(
-                "changing the operating-system boot slots",
-                Some("system_image"),
-                "sudo punarctl update apply <version>",
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "{} needs your password, and this request did not carry a \
+                     confirmation.\n\
+                     Policy: personal defaults — what the operating system runs is an \
+                     administrative change, confirmed at the moment it is made.\n\
+                     Next step: run `{}` in a terminal; it asks for your password.",
+                    words.doing, words.retry
+                ),
+                json!({ "decision": "deny", "reason": "reauthentication_required" }),
             ));
         }
+        self.spend_reauth_ticket(peer, &actor, action, action, resource, ticket, &words.retry)?;
         Ok(actor)
+    }
+
+    /// The M9 boundary for every update verb: an AI agent never replaces,
+    /// rolls back or checks the operating system, at any uid, whatever a
+    /// policy says.
+    fn refuse_agent_system_update(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        resource: &str,
+        agent_may_not: &str,
+    ) -> Result<(), IpcError> {
+        if actor.source != PrincipalKind::AiAgent && self.agent_shaped_peer(peer, actor).is_none() {
+            return Ok(());
+        }
+        let ruling = self.ai.lock().unwrap().host_ruling("system_update");
+        // An update/rollback is an OS hard-safety boundary for agents,
+        // not an authority an organization can grant back. Cite a loaded
+        // policy only when it actually denies the named rule; otherwise
+        // cite the non-overridable boundary instead of falsely claiming
+        // that an `allow` ruling caused this denial.
+        let denying_ruling = ruling
+            .as_ref()
+            .filter(|value| value.decision == Decision::Deny);
+        let policy_id = denying_ruling
+            .map(|value| value.policy_id.as_str())
+            .unwrap_or("os-hard-safety");
+        let source_name = denying_ruling
+            .map(|value| value.source_name.as_str())
+            .unwrap_or("Punar OS hard safety constraint");
+        let mut event = AuditEvent::action(
+            &self.device_id,
+            actor,
+            action,
+            resource,
+            Decision::Deny,
+            AuditOutcome::Denied,
+        );
+        event.policy_ids = vec![policy_id.to_string()];
+        self.log_audit(event);
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "An AI agent may not {agent_may_not}.\n\
+                 Policy: {source_name} ({policy_id}) — host.system_update is denied to agents.\n\
+                 Next step: leave it to a person; `punarctl update status` shows what is available."
+            ),
+            json!({
+                "decision": "deny",
+                "resource": resource,
+                "rule": "host.system_update",
+                "agent_session_id": actor.agent_session_id,
+                "policy_ids": [policy_id],
+            }),
+        ))
     }
 
     fn effective_update_channel(&self) -> Result<UpdateChannel, IpcError> {
@@ -1736,7 +2470,18 @@ impl Inner {
         params: &UpdateApplyParams,
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.apply";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            "system_image",
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Installing an update",
+                agent_may_not: "replace or roll back the operating system",
+                retry: format!("punarctl update apply {}", params.version),
+                reaches_everyone: true,
+            },
+        )?;
         let _guard = self.update_lock.lock().unwrap();
         let result = (|| -> Result<UpdateApplyResult, IpcError> {
             // Keep even a corrupt/missing effective channel inside the audited
@@ -1800,6 +2545,7 @@ impl Inner {
                     requires_reboot: true,
                     bytes_written: staged.bytes_written,
                     verified: staged.verified,
+                    one_shot_trial: staged.requires_tryboot_reboot,
                 })
             } else {
                 self.update_transaction
@@ -1840,7 +2586,30 @@ impl Inner {
     /// then exact pending-record removal.
     fn handle_update_reconcile_candidate(&self, peer: &Peer) -> Result<Value, IpcError> {
         const ACTION: &str = "update.reconcile_candidate";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.actor_of(peer);
+        self.refuse_agent_system_update(
+            peer,
+            &actor,
+            ACTION,
+            "system_image",
+            "replace or roll back the operating system",
+        )?;
+        // Not a person's verb: it blesses or reverts a Raspberry Pi candidate
+        // from firmware observation, and the boot health service calls it.
+        if authorize_mutation(peer) != Decision::Allow {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                ACTION,
+                "system_image",
+            ));
+            return Err(IpcError::denied_root_only(
+                "Settling a Raspberry Pi update candidate",
+                "system_image",
+                "none needed — punar-update-health.service settles it at boot, after \
+                 the health checks it depends on have run.",
+            ));
+        }
         let _guard = self.update_lock.lock().unwrap();
         let result = if !self.cfg.pi_update_sources.boot_partition_property.exists() {
             Err(PiUpdateError::Conflict(
@@ -1900,7 +2669,18 @@ impl Inner {
         params: &UpdateRollbackParams,
     ) -> Result<Value, IpcError> {
         const ACTION: &str = "update.rollback";
-        let actor = self.authorize_system_update(peer, ACTION)?;
+        let actor = self.admit_update_change(
+            peer,
+            ACTION,
+            "system_image",
+            params.ticket.as_deref(),
+            &UpdateWords {
+                doing: "Rolling back the operating system",
+                agent_may_not: "replace or roll back the operating system",
+                retry: "punarctl update rollback".to_string(),
+                reaches_everyone: true,
+            },
+        )?;
         let _guard = self.update_lock.lock().unwrap();
         let result = if self.cfg.pi_update_sources.boot_partition_property.exists() {
             self.pi_update
@@ -1908,10 +2688,26 @@ impl Inner {
                 .map(to_value)
                 .map_err(pi_update_ipc_error)
         } else {
-            self.update_transaction
-                .rollback(params.to_version)
-                .map(to_value)
-                .map_err(update_transaction_ipc_error)
+            // The running root's own release: the one fact that settles which
+            // release its slot holds when an older build left more than one
+            // entry bound to it.
+            match self.update_check.current_version() {
+                Ok(running) => self
+                    .update_transaction
+                    .rollback(params.to_version, running)
+                    .map(to_value)
+                    .map_err(update_transaction_ipc_error),
+                Err(error) => Err(IpcError::with_details(
+                    ErrorCode::Internal,
+                    format!(
+                        "Punar could not read the running release's version ({error}), so it \
+                         cannot tell which boot entry is safe to select. No selector was \
+                         changed.\n\
+                         Next step: inspect `punarctl update status`."
+                    ),
+                    json!({ "stage": "local_identity" }),
+                )),
+            }
         };
         match result {
             Ok(value) => {
@@ -1954,10 +2750,11 @@ impl Inner {
                 ACTION,
                 RESOURCE,
             ));
-            return Err(IpcError::denied_needs_root(
-                "installation planning",
-                Some(RESOURCE),
-                "run the installer through its privileged local service",
+            return Err(IpcError::denied_root_only(
+                "Planning an installation",
+                RESOURCE,
+                "use the installer on the Punar live medium, which runs as root there; \
+                 an installed device's accounts never plan a disk install.",
             ));
         }
         match self.installer.plan(params) {
@@ -2034,10 +2831,11 @@ impl Inner {
                 ACTION,
                 RESOURCE,
             ));
-            return Err(IpcError::denied_needs_root(
-                "installation",
-                Some(RESOURCE),
-                "run the signed installer through its privileged local service",
+            return Err(IpcError::denied_root_only(
+                "Installing Punar to a disk",
+                RESOURCE,
+                "use the signed installer on the Punar live medium, which runs as root \
+                 there; an installed device's accounts never write a disk install.",
             ));
         }
         let Some(_guard) = InstallGuard::acquire(&self.install_in_progress) else {
@@ -2214,7 +3012,7 @@ impl Inner {
                     recovery_key,
                     identity,
                 )?;
-                let client = ControlPlaneClient::new(self.cfg.control_plane_socket.clone());
+                let client = self.control_plane();
                 loop {
                     match self.installer.attempt_organization_recovery(
                         &params.plan_token,
@@ -2368,6 +3166,108 @@ impl Inner {
         self.apps.list().map_err(app_ipc_error)
     }
 
+    /// Open Mail through a fixed, root-only broker. The caller contributes
+    /// only its kernel-attested uid and pid; it cannot select an executable,
+    /// path, account, endpoint, environment value, or capability.
+    #[cfg(target_os = "linux")]
+    fn handle_pim_mail_open(&self, peer: &Peer) -> Result<Value, IpcError> {
+        self.handle_pim_launch(peer, "pim.mail.open", "mail", "mail")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_pim_mail_account_add(&self, peer: &Peer) -> Result<Value, IpcError> {
+        self.handle_pim_launch(
+            peer,
+            "pim.mail.account_add",
+            "account-add",
+            "mail-account-setup",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_pim_mail_account_manage(&self, peer: &Peer) -> Result<Value, IpcError> {
+        self.handle_pim_launch(
+            peer,
+            "pim.mail.account_manage",
+            "account-manage",
+            "mail-accounts",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_pim_launch(
+        &self,
+        peer: &Peer,
+        action: &str,
+        broker_mode: &str,
+        application: &str,
+    ) -> Result<Value, IpcError> {
+        let actor = self.actor_of(peer);
+        if actor.source == PrincipalKind::AiAgent {
+            self.log_audit(AuditEvent::action(
+                &self.device_id,
+                &actor,
+                action,
+                "mail",
+                Decision::Deny,
+                AuditOutcome::Denied,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "An AI agent may not open a personal mailbox. Policy: personal defaults — Mail must be opened by the person at the device. Next step: open Mail from Command Center yourself.",
+                json!({ "decision": "deny", "policy_ids": ["personal-defaults"] }),
+            ));
+        }
+        let pid = peer.pid.filter(|pid| *pid > 0).ok_or_else(|| {
+            IpcError::with_details(
+                ErrorCode::Denied,
+                "Mail could not verify the desktop session that requested it. No mailbox capability was issued. Next step: open Mail from the signed desktop session.",
+                json!({ "decision": "deny", "reason": "missing_peer_pid" }),
+            )
+        })?;
+        if peer.uid == 0 {
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                "Mail does not open inside the system account. No mailbox capability was issued. Next step: sign in to your desktop account and open Mail there.",
+                json!({ "decision": "deny", "reason": "system_profile" }),
+            ));
+        }
+        let status = Command::new(&self.cfg.pim_launch_broker)
+            .args([broker_mode, &peer.uid.to_string(), &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            // The fixed, root-owned broker emits only a closed error category;
+            // keep it in punard's journal so a refused desktop handoff is
+            // diagnosable without ever reflecting process paths, account data,
+            // or credentials into the user-facing protocol response.
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|_| mail_launch_unavailable("broker_spawn_failed"))?;
+        if !status.success() {
+            let reason = status
+                .code()
+                .map(|code| format!("broker_exit_{code}"))
+                .unwrap_or_else(|| "broker_signal".to_string());
+            return Err(mail_launch_unavailable(&reason));
+        }
+        Ok(json!({ "opening": true, "application": application }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn handle_pim_mail_open(&self, _peer: &Peer) -> Result<Value, IpcError> {
+        Err(mail_launch_unavailable("unsupported_platform"))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn handle_pim_mail_account_add(&self, _peer: &Peer) -> Result<Value, IpcError> {
+        Err(mail_launch_unavailable("unsupported_platform"))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn handle_pim_mail_account_manage(&self, _peer: &Peer) -> Result<Value, IpcError> {
+        Err(mail_launch_unavailable("unsupported_platform"))
+    }
+
     fn app_mutation_authorized(
         &self,
         peer: &Peer,
@@ -2479,6 +3379,18 @@ impl Inner {
                 json!({ "param": "confirm_metadata_sha256" }),
             ));
         }
+        // F0 review: an application installed for everyone changes what
+        // every person on the device runs — the role, then the password.
+        self.admit_device_change(
+            peer,
+            &actor,
+            "apps.install",
+            action,
+            &params.id,
+            params.ticket.as_deref(),
+            "Installing an application for everyone on this device",
+            &format!("punarctl app install {}", app_id_word(&params.id)),
+        )?;
         let _guard = self.app_mutation.lock().unwrap();
         match self.apps.install(
             &params.id,
@@ -2527,6 +3439,18 @@ impl Inner {
     ) -> Result<Value, IpcError> {
         let action = "system.remove_package";
         let actor = self.app_mutation_authorized(peer, action, &params.id)?;
+        // F0 review: removing an application takes it away from everyone
+        // who uses it — the role, then the password.
+        self.admit_device_change(
+            peer,
+            &actor,
+            "apps.remove",
+            action,
+            &params.id,
+            params.ticket.as_deref(),
+            "Removing an application for everyone on this device",
+            &format!("punarctl app remove {}", app_id_word(&params.id)),
+        )?;
         let _guard = self.app_mutation.lock().unwrap();
         match self.apps.remove(&params.id) {
             Ok(result) => {
@@ -2593,6 +3517,22 @@ impl Inner {
                 json!({ "application": resource, "decision": "deny", "policy_ids": ["personal-defaults"] }),
             ));
         }
+        // F0 review: an update changes what everyone on the device runs —
+        // the role, then the password, once for the whole request.
+        let resource = params.id.as_deref().unwrap_or("installed_applications");
+        self.admit_device_change(
+            peer,
+            &requester,
+            "apps.update",
+            action,
+            resource,
+            params.ticket.as_deref(),
+            "Updating applications for everyone on this device",
+            &match params.id.as_deref() {
+                Some(id) => format!("punarctl app update {}", app_id_word(id)),
+                None => "punarctl app update --all".to_string(),
+            },
+        )?;
         // Hold the same transaction lock used by install/remove while
         // discovering installed state. Otherwise a concurrent removal could
         // make an app disappear between selection and update.
@@ -3166,6 +4106,27 @@ impl Inner {
         }
     }
 
+    /// `device.posture`: the posture and hardware the managed inventory would
+    /// send, from the same collector and the same inputs (this read's
+    /// firewall observation and the update engines' patch evidence), plus
+    /// the batteries. One answer for the person and their organization, and
+    /// one LUKS2 answer for every surface on the device.
+    fn handle_device_posture(&self) -> punar_common::ipc::DevicePostureResult {
+        let firewall_state = self
+            .registry
+            .get(crate::backends::firewall::CAPABILITY_ID)
+            .map(|cap| self.describe(cap).current_state);
+        punar_common::ipc::DevicePostureResult {
+            posture: self.inventory.posture(
+                firewall_state.as_ref(),
+                patch_posture(self.update_status.staged_release()),
+            ),
+            hardware: self.inventory.hardware(),
+            power: self.inventory.power(),
+            checked_at: utc_now_rfc3339(),
+        }
+    }
+
     fn handle_status(&self) -> StatusResult {
         let hostname = self
             .registry
@@ -3270,7 +4231,9 @@ impl Inner {
             // `details` field; M9 does not extend it, and inventing one to
             // carry a grant id would be the tail wagging the schema.)
             MutationAuthority::Grant { grant_id } => vec![grant_id.clone()],
-            MutationAuthority::Root | MutationAuthority::AiAllowed { .. } => Vec::new(),
+            MutationAuthority::Root
+            | MutationAuthority::DeviceAdministrator
+            | MutationAuthority::AiAllowed { .. } => Vec::new(),
         };
         self.execute_capability_set(&actor, cap, params, &extra_policy_ids)
             .0
@@ -3483,7 +4446,17 @@ impl Inner {
         tracker.fail_counts.remove(capability);
     }
 
-    fn handle_audit_tail(&self, params: &AuditTailParams) -> Result<Value, IpcError> {
+    /// `audit.tail` (contract section 5.5, scoped by F0-S3): the last `n`
+    /// events of the trail as THIS caller may see them.
+    ///
+    /// Root sees everything. Anyone else sees their own events and the
+    /// device's — events no person is attributed to (a daemon, the device,
+    /// the organization) and root's administration of the device — and every
+    /// other person's are withheld and only counted. The window is the last
+    /// `n` lines of the trail, filtered, so a busy neighbour shortens what a
+    /// person sees rather than making the read scan further back; `withheld`
+    /// says by how much, which is the honest answer to "is this everything?".
+    fn handle_audit_tail(&self, peer: &Peer, params: &AuditTailParams) -> Result<Value, IpcError> {
         let n = params.effective_n() as usize;
         let tail = tail(&self.cfg.audit_path, n)
             .map_err(|e| self.internal(&format!("reading the audit log failed: {e}")))?;
@@ -3494,7 +4467,19 @@ impl Inner {
                 tail.malformed_lines
             );
         }
-        Ok(json!({ "events": tail.events }))
+        if peer.uid == 0 {
+            return Ok(json!({ "events": tail.events, "withheld": 0 }));
+        }
+        let mut own = vec![format!("uid:{}", peer.uid), self.actor_of(peer).user_id];
+        if let Some(name) = self.admin_sources().username_of(peer.uid) {
+            own.push(name);
+        }
+        let (events, withheld): (Vec<AuditEvent>, Vec<AuditEvent>) =
+            tail.events.into_iter().partition(|event| {
+                let user = event.user_id.as_deref().unwrap_or_default();
+                own.iter().any(|name| name == user) || audit_event_is_the_devices(event)
+            });
+        Ok(json!({ "events": events, "withheld": withheld.len() }))
     }
 
     /// M4 reconcile (contract section 5.6): one synchronous pass of the
@@ -3510,14 +4495,32 @@ impl Inner {
                 "reconcile",
                 RESOURCE_CAPABILITY_REGISTRY,
             ));
-            return Err(IpcError::denied_needs_root(
-                "the capability registry (reconcile)",
-                Some(RESOURCE_CAPABILITY_REGISTRY),
-                "sudo punarctl reconcile",
+            return Err(IpcError::denied_root_only(
+                "Reconciling the capability registry",
+                RESOURCE_CAPABILITY_REGISTRY,
+                "none needed — punard reconciles on its own at boot and every two \
+                 minutes (punard-reconcile.timer). `punarctl status` shows when it \
+                 last ran; `punarctl policy explain <capability>` shows what it enforces.",
             ));
         }
 
-        let report = self.reconcile_and_remediate(&actor);
+        // The organization's policy first, so a changed set is what this
+        // pass enforces and reports (SPEC section 42: load desired state,
+        // then diff). A no-op on a personal device.
+        // One budget for the pass's calls to the control plane, the fetch
+        // and the reports together (RECONCILE_CONTROL_PLANE_BUDGET), so a
+        // pass on a slow or black-holed link still answers inside
+        // punarctl's wait for it.
+        let budget = CallBudget::new(self.cfg.reconcile_control_plane_budget);
+        // The agent before anything is asked of it: one that cannot be used
+        // is management interrupted (the enroll.agent episode), and a policy
+        // fetch through it would only fail the same way, recorded as the
+        // network's.
+        let agent = self.check_agent(&actor, &budget);
+        if !matches!(agent, Some((_, Liveness::Unavailable(_)))) {
+            self.refresh_policy_if_enrolled(&actor, &budget);
+        }
+        let report = self.reconcile_with(&actor, &budget, agent);
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
         Ok(to_value(report))
     }
@@ -3533,7 +4536,18 @@ impl Inner {
     ///
     /// M3 result fields keep their M3 meaning: `drift` / `drift_count`
     /// describe the **pre-remediation** observation.
-    fn reconcile_and_remediate(&self, actor: &AuditActor) -> ReconcileResult {
+    fn reconcile_and_remediate(&self, actor: &AuditActor, budget: &CallBudget) -> ReconcileResult {
+        self.reconcile_with(actor, budget, None)
+    }
+
+    /// [`Inner::reconcile_and_remediate`], with what [`Inner::check_agent`]
+    /// already found at the start of the pass, so the agent is asked once.
+    fn reconcile_with(
+        &self,
+        actor: &AuditActor,
+        budget: &CallBudget,
+        agent: Option<(u64, Liveness)>,
+    ) -> ReconcileResult {
         // M9: the lazy expiry sweep rides the existing reconcile timer, so
         // an unattended device still retires lapsed approvals and grants
         // without punard growing a timer of its own (SPEC section 6.3).
@@ -3588,7 +4602,12 @@ impl Inner {
                 actor,
                 &mut remediated_count,
             );
-            self.tracker.lock().unwrap().states.insert(id, state);
+            self.tracker
+                .lock()
+                .unwrap()
+                .states
+                .insert(id.clone(), state);
+            self.audit_compliance(actor, &id, &policy_id, state);
 
             entries.push(ReconcileEntry {
                 capability: meta.capability,
@@ -3614,7 +4633,7 @@ impl Inner {
         // reconcile timer is the sync cadence; no new timers, no new
         // wakeup sources. The section 9 summary file is refreshed
         // afterwards (write-on-change only).
-        self.sync_if_enrolled(actor);
+        self.sync_if_enrolled(actor, budget, agent);
         self.publish_status_summary();
 
         let compliance = self.tracker.lock().unwrap().block(&self.registry);
@@ -3655,6 +4674,23 @@ impl Inner {
             // observed state matches the effective value).
             self.tracker.lock().unwrap().fail_counts.remove(id);
             return (RemediationOutcome::None, ComplianceState::Compliant);
+        }
+        if !cap.mutable() {
+            // DRIFT THAT NOTHING ON THIS DEVICE CAN FIX. Retrying an apply here
+            // would fail once per reconcile cycle forever, filling the audit
+            // trail with a failure that is not a fault — the value is a
+            // property of the image, and the honest report is the same one
+            // alert_only makes: this is not compliant, and remediation was not
+            // attempted. An organization reading the compliance report learns
+            // the true state; nobody is told a lie about it being fixable.
+            // No audit event, deliberately: the classification-driven
+            // alert_only branch below emits none either, and reconcile runs on
+            // a timer — an event per cycle for a state that cannot change would
+            // be the trail's loudest entry and its least informative. The
+            // reconcile result carries `remediation: alert_only` and the
+            // tracker records non_compliant, which is what the compliance
+            // report an organization reads is built from.
+            return (RemediationOutcome::AlertOnly, ComplianceState::NonCompliant);
         }
         match classification {
             // approval_required classifies as such but behaves as
@@ -3746,6 +4782,51 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// Audit a capability's state when it differs from the one the audit
+    /// trail last recorded for it ([`compliance_is_news`]), and remember what
+    /// was recorded. Compared with the audit trail, not with the last pass:
+    /// a manual set that settles a capability, or a restart after it healed,
+    /// used to leave its last record `non_compliant` for good. Written only
+    /// when a record is made, which is rare.
+    fn audit_compliance(
+        &self,
+        actor: &AuditActor,
+        capability: &str,
+        policy_id: &str,
+        state: ComplianceState,
+    ) {
+        let mut audited = self.compliance_audited.lock().unwrap();
+        if !compliance_is_news(audited.get(capability).copied(), state) {
+            return;
+        }
+        self.log_audit(self.compliance_event(actor, capability, policy_id, state));
+        if state == ComplianceState::Compliant {
+            audited.remove(capability);
+        } else {
+            audited.insert(capability.to_string(), state);
+        }
+        if let Err(e) =
+            save_compliance_audited(&self.cfg.state_dir.join(COMPLIANCE_AUDITED_FILE), &audited)
+        {
+            eprintln!("punard: could not record the audited compliance states: {e}");
+        }
+    }
+
+    /// A capability's SPEC section 52 state changed (docs/api/ipc.md section
+    /// 6, `reconcile.compliance`): resource the capability, result the new
+    /// state, citing the policy that decided it.
+    fn compliance_event(
+        &self,
+        actor: &AuditActor,
+        capability: &str,
+        policy_id: &str,
+        state: ComplianceState,
+    ) -> AuditEvent {
+        let mut event = self.remediation_event(actor, capability, policy_id, state.as_str());
+        event.action = "reconcile.compliance".to_string();
+        event
     }
 
     /// One schema-conformant audit event per remediation attempt
@@ -3848,7 +4929,7 @@ impl Inner {
     /// security boundary. docs/design/execution-trust.md says it plainly — "A
     /// local root user defeats local policy" — and nothing here changes that. A
     /// person who can become root on this machine can edit
-    /// `/var/lib/punar/policy/local.json` directly. What this method adds is
+    /// `/var/lib/punar/local-policy.json` directly. What this method adds is
     /// that the ORDINARY route is authenticated, bounded, explained and
     /// recorded, so a change has an author and a reason attached to it.
     ///
@@ -3883,8 +4964,11 @@ impl Inner {
             IpcError::with_details(ErrorCode::Denied, message, details)
         };
 
-        // 1. No agent, at any uid.
-        if let Some(session) = actor.agent_session_id.clone() {
+        // 1. No agent, at any uid — and "agent" in the wide sense of
+        //    contract section 23.1: a proven agent session, or any process
+        //    whose cgroup merely names an agent scope it could not be
+        //    attributed to.
+        if let Some(session) = self.agent_shaped_peer(peer, &actor) {
             self.log_audit(AuditEvent::denial(
                 &self.device_id,
                 &actor,
@@ -3962,6 +5046,16 @@ impl Inner {
         // 5. Whether this particular path is one the administrator's rung can
         //    move. A value an organization pins is not editable here, and the
         //    refusal names who pinned it rather than saying "no".
+        //
+        //    WITHDRAWING IS EXEMPT, and it has to be. This test looks at who
+        //    wins *now*, and an organization can come to outrank an entry the
+        //    administrator recorded earlier — at which point the same test that
+        //    stops them pinning also stops them removing what they already
+        //    pinned. The entry then sits in the store, inert while enrolled and
+        //    silently reactivating the day the device unenrolls: a rule nobody
+        //    can see, nobody can delete, and that comes back. A clear can only
+        //    ever remove a local opinion, so it can never contest the layer
+        //    that outranks it, and there is nothing for this check to protect.
         let current = self
             .effective
             .lock()
@@ -3969,7 +5063,8 @@ impl Inner {
             .get(id)
             .cloned()
             .ok_or_else(|| self.internal(&format!("{id} has no effective entry")))?;
-        if !admin_may_override(&current) {
+        let pinning = params.value.is_some();
+        if pinning && !admin_may_override(&current) {
             let mut event = AuditEvent::denial(&self.device_id, &actor, "policy.set", id);
             event.policy_ids = vec![current.provenance.policy_id.clone()];
             self.log_audit(event);
@@ -3980,9 +5075,21 @@ impl Inner {
             ));
         }
 
-        // 6. Who is asking. Root needs no ticket — it has no lock screen to
+        // 6. Who is asking. Device policy binds everyone who uses this
+        //    machine, so a person must hold the administrator role (F0-S1,
+        //    contract section 23) — checked before their ticket is spent, so
+        //    a password is never used up on a change they may not make. Root
+        //    needs no role and no ticket — it has no lock screen to
         //    re-authenticate against, and it could edit the store directly in
         //    any case, so demanding one would be theatre.
+        self.require_device_admin(
+            peer,
+            &actor,
+            "policy.set",
+            id,
+            "Changing device policy",
+            RosterScope::Governed,
+        )?;
         if peer.uid != 0 {
             let Some(ticket) = params.ticket.as_deref() else {
                 self.log_audit(AuditEvent::denial(
@@ -3991,50 +5098,50 @@ impl Inner {
                     "policy.set",
                     id,
                 ));
+                let command = if params.value.is_some() {
+                    format!("punarctl policy set {id} <value> --reason \"<why>\"")
+                } else {
+                    format!("punarctl policy clear {id} --reason \"<why>\"")
+                };
                 return Err(deny(
                     json!({
                         "decision": "deny",
                         "capability": id,
                         "reason": "reauthentication_required",
                     }),
-                    "Changing device policy needs your password again, and this \
-                     request did not carry a confirmation.\n\
-                     Policy: personal defaults — an administrative change is \
-                     confirmed at the moment it is made, not by having been \
-                     signed in for a while.\n\
-                     Next step: make the change from System Control · Policy, \
-                     which asks for your password first."
-                        .to_string(),
-                ));
-            };
-            if let Err(why) = crate::reauth::consume(
-                &self.cfg.reauth_ticket_dir,
-                peer.uid,
-                ticket,
-                SystemTime::now(),
-            ) {
-                self.log_audit(AuditEvent::denial(
-                    &self.device_id,
-                    &actor,
-                    "policy.set",
-                    id,
-                ));
-                return Err(deny(
-                    json!({
-                        "decision": "deny",
-                        "capability": id,
-                        "reason": format!("reauthentication_{}", why.as_str()),
-                    }),
                     format!(
-                        "Your password confirmation was not accepted: {}.\n\
-                         Policy: personal defaults — a confirmation is good once, for \
-                         two minutes, for the account that made it.\n\
-                         Next step: try the change again and enter your password when \
-                         asked.",
-                        why.as_message()
+                        "Changing device policy needs your password again, and this \
+                         request did not carry a confirmation.\n\
+                         Policy: personal defaults — an administrative change is \
+                         confirmed at the moment it is made, not by having been \
+                         signed in for a while.\n\
+                         Next step: run `{command}` in a terminal, which asks for your \
+                         password, or make the change from System Control · Policy."
                     ),
                 ));
-            }
+            };
+            let retry = if params.value.is_some() {
+                format!("punarctl policy set {id} <value> --reason \"<why>\"")
+            } else {
+                format!("punarctl policy clear {id} --reason \"<why>\"")
+            };
+            self.spend_reauth_ticket(
+                peer,
+                &actor,
+                "policy.set",
+                "policy.set",
+                id,
+                Some(ticket),
+                &retry,
+            )
+            .map_err(|mut error| {
+                // The shared refusal, with the capability named as this
+                // method's refusals always have.
+                if let Some(details) = error.details.as_mut() {
+                    details["capability"] = json!(id);
+                }
+                error
+            })?;
         }
 
         // Authorized. Record the entry, then let the shared settle path apply
@@ -4087,24 +5194,7 @@ impl Inner {
         result: &str,
         policy_ids: Vec<String>,
     ) -> AuditEvent {
-        AuditEvent {
-            event_id: next_event_id(),
-            timestamp: utc_now_rfc3339(),
-            device_id: self.device_id.clone(),
-            user_id: Some(actor.user_id.clone()),
-            agent_session_id: Some(AGENT_SESSION_NONE.to_string()),
-            project_id: Some(PROJECT_ID_SYSTEM.to_string()),
-            source: actor.source,
-            action: action.to_string(),
-            resource: Some(resource.to_string()),
-            decision: Decision::Allow,
-            policy_ids: if policy_ids.is_empty() {
-                vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()]
-            } else {
-                policy_ids
-            },
-            result: result.to_string(),
-        }
+        enrollment_event(&self.device_id, actor, action, resource, result, policy_ids)
     }
 
     /// Map a control-plane failure during `enroll.start` to the contract
@@ -4144,11 +5234,258 @@ impl Inner {
                 ),
                 json!({ "stage": stage }),
             ),
+            UpstreamError::AgentUnavailable(fault) => IpcError::with_details(
+                ErrorCode::UpstreamUnreachable,
+                format!(
+                    "The built-in Smplify agent at {} could not be used during the {stage} step \
+                     ({}).\n\
+                     Policy: os default — enrollment is all-or-nothing; nothing was changed.\n\
+                     Next step: `systemctl status punar-smplifyd.socket punar-smplifyd` shows \
+                     whether the agent can start.",
+                    self.cfg.control_plane_socket.display(),
+                    fault.as_str()
+                ),
+                json!({ "stage": stage, "reason": "agent_unavailable", "agent": fault.as_str() }),
+            ),
+            // It answered, with more than this device reads: asking again
+            // gets the same answer, so it is not reported as unreachable.
+            UpstreamError::TooLarge => IpcError::with_details(
+                ErrorCode::InvalidParams,
+                format!(
+                    "The control plane's answer to the {stage} step is larger than this \
+                     device reads ({} MiB).\n\
+                     Policy: os default — punard bounds what it reads from the control plane \
+                     (docs/api/ipc.md section 5.9), and enrollment is all-or-nothing; nothing \
+                     was changed.\n\
+                     Next step: report this to your administrator.",
+                    crate::enroll::MAX_ANSWER_BYTES / (1024 * 1024)
+                ),
+                json!({ "stage": stage, "reason": REASON_ANSWER_TOO_LARGE }),
+            ),
         }
     }
 
     fn conflict(&self, state: &str, message: String) -> IpcError {
         IpcError::with_details(ErrorCode::Conflict, message, json!({ "state": state }))
+    }
+
+    /// Who may change this device's enrollment (contract sections 5.9, 5.11).
+    ///
+    /// Root has no account for Punar's lock screen to re-authenticate against,
+    /// so it needs no ticket, exactly as for `policy.set`. A person is never
+    /// root on a Punar device: root is locked and no account holds sudo
+    /// (onboarding.md section 1.6). A person therefore proves their password
+    /// to punar-authd, which mints a single-use ticket for their uid, and
+    /// [`Inner::spend_enrollment_ticket`] spends it. Reaching punar-authd at
+    /// all takes membership of the `punar` group, so a ticket also says "this
+    /// is the device's administrator".
+    ///
+    /// This half runs first and costs the caller nothing: an agent-shaped
+    /// peer is refused at any uid (enrollment decides who manages the device,
+    /// and SPEC section 60 gives an agent no say in that), and a person who
+    /// brought no confirmation is refused before anything is parsed or sent.
+    /// `enroll.stop` runs the two checks separately, so that a refusal which
+    /// does not depend on who is asking (a non-removable enrollment) comes
+    /// between them and nobody is asked for a password only to be refused.
+    fn admit_enrollment_change(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        ticket: Option<&str>,
+        words: &EnrollmentWords,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        self.refuse_agent_enrollment_change(peer, actor, action, words, retry)?;
+        // Who manages a device decides for everyone on it (F0-S1).
+        self.require_device_admin(
+            peer,
+            actor,
+            action,
+            RESOURCE_ENROLLMENT,
+            words.doing,
+            RosterScope::Governed,
+        )?;
+        self.require_enrollment_ticket(peer, actor, action, ticket, words, retry)
+    }
+
+    /// An agent-shaped peer may not change who manages the device, at any
+    /// uid. First, always.
+    fn refuse_agent_enrollment_change(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        words: &EnrollmentWords,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        if let Some(who) = self.agent_shaped_peer(peer, actor) {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                actor,
+                action,
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "An AI agent may not {}.\n\
+                     Requested by: {who}\n\
+                     Policy: personal defaults — enrollment decides who manages this \
+                     device, and only a person who has just proved their password may \
+                     change it (SPEC section 60).\n\
+                     Next step: run `{retry}` yourself.",
+                    words.verb
+                ),
+                json!({ "decision": "deny", "reason": "agent_scope" }),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A person must bring a confirmation; root has none to bring.
+    fn require_enrollment_ticket(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        ticket: Option<&str>,
+        words: &EnrollmentWords,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        if peer.uid != 0 && ticket.is_none() {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                actor,
+                action,
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(IpcError::with_details(
+                ErrorCode::Denied,
+                format!(
+                    "{} needs your password, and this request did not carry a \
+                     confirmation.\n\
+                     Policy: personal defaults — who manages a device is an \
+                     administrative change, confirmed at the moment it is made.\n\
+                     Next step: run `{retry}` in a terminal; it asks for {}.",
+                    words.doing, words.asks
+                ),
+                json!({ "decision": "deny", "reason": "reauthentication_required" }),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuse to end an enrollment its organization made non-removable, for
+    /// every caller. Audited as a denial.
+    fn refuse_kept_enrollment(&self, actor: &AuditActor) -> Result<(), IpcError> {
+        let terms = self
+            .enrollment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|e| !e.removable)
+            .map(|e| (e.org.id.clone(), e.org.display_name.clone()));
+        let Some((org_id, org_name)) = terms else {
+            return Ok(());
+        };
+        self.log_audit(AuditEvent::denial(
+            &self.device_id,
+            actor,
+            "enroll.stop",
+            RESOURCE_ENROLLMENT,
+        ));
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "This device's enrollment with {org_name} cannot be undone from the \
+                 device.\n\
+                 Policy: {org_name}'s enrollment terms — it enrolls devices as not \
+                 removable, and that was accepted when this device enrolled \
+                 (docs/development/smplify-enrollment.md section 3.1).\n\
+                 Next step: only erasing and reinstalling the device ends the \
+                 enrollment. A release sent by {org_name} is not built yet."
+            ),
+            json!({
+                "decision": "deny",
+                "reason": "enrollment_not_removable",
+                "organization": org_id,
+            }),
+        ))
+    }
+
+    /// Spend a person's confirmation (root has none to spend). The unlink is
+    /// the commit, so a replayed ticket finds nothing; a ticket is never
+    /// forwarded, audited, stored or returned.
+    fn spend_enrollment_ticket(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        action: &str,
+        ticket: Option<&str>,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        self.spend_reauth_ticket(
+            peer,
+            actor,
+            action,
+            action,
+            RESOURCE_ENROLLMENT,
+            ticket,
+            retry,
+        )
+    }
+
+    /// Spend a person's `punar-authd` confirmation for the IPC `method` —
+    /// audited as `action` on `resource` — (root has none to spend). Shared by
+    /// every method a person reaches with their password: the rule — good
+    /// once, for two minutes, for the account that made it, on the call it was
+    /// typed for, presented by the process it was minted for (contract section
+    /// 23.1) — is one rule, not one per method.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spend_reauth_ticket(
+        &self,
+        peer: &Peer,
+        actor: &AuditActor,
+        method: &str,
+        action: &str,
+        resource: &str,
+        ticket: Option<&str>,
+        retry: &str,
+    ) -> Result<(), IpcError> {
+        if peer.uid == 0 {
+            return Ok(());
+        }
+        let spender = peer
+            .pid
+            .and_then(|pid| u32::try_from(pid).ok())
+            .and_then(|pid| Spender::of(&self.cfg.proc_root, pid));
+        let Err(why) = crate::reauth::consume(
+            &self.cfg.reauth_ticket_dir,
+            peer.uid,
+            ticket.unwrap_or_default(),
+            self.cfg.trusted_clock.as_ref(),
+            method,
+            spender,
+        ) else {
+            return Ok(());
+        };
+        self.log_audit(AuditEvent::denial(&self.device_id, actor, action, resource));
+        Err(IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "Your password confirmation was not accepted: {}.\n\
+                 Policy: personal defaults — a confirmation is good once, for two \
+                 minutes, for the account that made it, on the change it was given \
+                 for, sent by the program it was given to.\n\
+                 Next step: run `{retry}` again and enter your password when asked.",
+                why.as_message()
+            ),
+            json!({
+                "decision": "deny",
+                "reason": format!("reauthentication_{}", why.as_str()),
+            }),
+        ))
     }
 
     /// `enroll.start` (contract section 5.9): guard → discover → register
@@ -4165,19 +5502,20 @@ impl Inner {
         params: &EnrollStartParams,
     ) -> Result<Value, IpcError> {
         let actor = self.actor_of(peer);
-        if authorize_mutation(peer) != Decision::Allow {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                "enroll.start",
-                RESOURCE_ENROLLMENT,
-            ));
-            return Err(IpcError::denied_needs_root(
-                "device enrollment",
-                None,
-                &format!("sudo punarctl enroll start {}", params.org_domain),
-            ));
-        }
+        let shown = if domain_syntax_ok(params.org_domain.trim()) {
+            params.org_domain.trim()
+        } else {
+            "<domain>"
+        };
+        let retry = format!("punarctl enroll start {shown}");
+        self.admit_enrollment_change(
+            peer,
+            &actor,
+            "enroll.start",
+            params.ticket.as_deref(),
+            &ENROLL_START_WORDS,
+            &retry,
+        )?;
         let domain = params.org_domain.trim();
         if !domain_syntax_ok(domain) {
             return Err(IpcError::with_details(
@@ -4192,21 +5530,42 @@ impl Inner {
                 json!({ "param": "org_domain", "reason": "not a domain name" }),
             ));
         }
+        // The confirmation is spent here: after the one refusal that costs
+        // nothing to check (a malformed domain, which a person fixes by
+        // retyping), and before anything else, so every later outcome — the
+        // conflict below included — is audited against a caller who proved
+        // who they are, and nothing leaves the device for one who did not.
+        // punarctl reads `enroll.status` first, so a person is not asked for
+        // a password on a device that is already enrolled.
+        self.spend_enrollment_ticket(
+            peer,
+            &actor,
+            "enroll.start",
+            params.ticket.as_deref(),
+            &retry,
+        )?;
         // Serialize enrollment transitions without holding the state lock
         // across the network/reconcile pipeline.
-        let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
-            Some(guard) => guard,
-            None => {
-                return Err(self.conflict(
-                    "changing",
-                    "An enrollment change is already in progress.\n\
+        let _guard =
+            match EnrollGuard::acquire_within(&self.enroll_in_progress, ENROLL_GUARD_PATIENCE) {
+                Some(guard) => guard,
+                None => {
+                    return Err(self.conflict(
+                        "changing",
+                        "An enrollment change is already in progress.\n\
                      Policy: os default — enrollment transitions run one at a time.\n\
                      Next step: retry in a moment."
-                        .to_string(),
-                ));
-            }
-        };
-        if self.enrollment.lock().unwrap().is_some() {
+                            .to_string(),
+                    ));
+                }
+            };
+        let current = self
+            .enrollment
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(unenroll_next_step);
+        if let Some(unenroll) = current {
             self.log_audit(self.enroll_event(
                 &actor,
                 "enroll.start",
@@ -4216,15 +5575,15 @@ impl Inner {
             ));
             return Err(self.conflict(
                 "enrolled",
-                "This device is already enrolled.\n\
-                 Policy: os default — one organization at a time (docs/api/ipc.md \
-                 section 5.9).\n\
-                 Next step: `punarctl enroll status` shows the current organization; \
-                 `sudo punarctl enroll stop` unenrolls."
-                    .to_string(),
+                format!(
+                    "This device is already enrolled.\n\
+                     Policy: os default — one organization at a time (docs/api/ipc.md \
+                     section 5.9).\n\
+                     Next step: `punarctl enroll status` shows the current organization. \
+                     {unenroll}"
+                ),
             ));
         }
-
         let fail_audit = |stage_error: IpcError| {
             self.log_audit(self.enroll_event(
                 &actor,
@@ -4236,8 +5595,31 @@ impl Inner {
             stage_error
         };
 
+        // The enrollment code exists only in memory, only for the register
+        // call, and is never audited, logged or returned (SPEC section 49).
+        let code = params
+            .code
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(|c| Redacted::new(c.to_string()));
+        // Nothing, the enrollment code least of all, goes to an agent whose
+        // units are not the image's (a drop-in replacing its ExecStart= would
+        // run anything as the agent), or while another socket unit listens at
+        // its path.
+        if let Some(integrity) = &self.cfg.agent_integrity {
+            if let Err(finding) = integrity.check() {
+                eprintln!("punard: enroll.start refused: {finding}");
+                return Err(fail_audit(self.upstream_error(
+                    "discover",
+                    UpstreamError::AgentUnavailable(finding.fault()),
+                )));
+            }
+        }
         // Discover.
-        let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+        let client = self
+            .control_plane()
+            .within(CallBudget::new(ENROLL_CONTROL_PLANE_BUDGET));
         let org_doc = client
             .org_discover(domain)
             .map_err(|e| fail_audit(self.upstream_error("discover", e)))?;
@@ -4275,13 +5657,96 @@ impl Inner {
                     .collect()
             })
             .unwrap_or_default();
+        // Every string here is the organization's choice, and punard shows
+        // the names to a person: beside the terms they are asked to accept,
+        // in every view of the enrollment, in the shell's bar. They are
+        // cleaned once, here, before anything stores or prints them —
+        // invisible and control characters dropped, whitespace collapsed,
+        // at most 64 characters (punar_common::ipc::organization_name) — and
+        // a domain that is not a domain name is the one the person typed.
+        let name = organization_name(&org_name);
+        let display_name = field(&org_doc, &["enrollment", "display_name"])
+            .as_deref()
+            .and_then(organization_name)
+            .or_else(|| name.clone())
+            .unwrap_or_else(|| domain.to_string());
         let org = OrgRecord {
-            display_name: field(&org_doc, &["enrollment", "display_name"])
-                .unwrap_or_else(|| org_name.clone()),
-            domain: field(&org_doc, &["discovery", "domain"]).unwrap_or_else(|| domain.to_string()),
+            name: name.unwrap_or_else(|| display_name.clone()),
+            display_name,
+            domain: field(&org_doc, &["discovery", "domain"])
+                .filter(|shown| domain_syntax_ok(shown))
+                .unwrap_or_else(|| domain.to_string()),
             id: org_id,
-            name: org_name,
         };
+        // Removability is the organization's decision, read from its document
+        // once, here, and fixed in enrollment.json — like the remote-query
+        // grant above, never re-read from a later policy fetch, so it cannot be
+        // tightened after the person agreed to it. A non-removable enrollment
+        // needs the person's explicit yes; both refusals come before register,
+        // so the organization never learns of a device that did not enroll.
+        let removable = match org_document_removable(&org_doc) {
+            Ok(removable) => removable,
+            Err(found) => {
+                return Err(fail_audit(IpcError::with_details(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "{}'s organization document says enrollment.removable is {found}, \
+                         which is not true or false, so this device cannot tell whether it \
+                         could be unenrolled later. Nothing was changed.\n\
+                         Policy: os default — an unreadable enrollment term refuses \
+                         enrollment rather than guessing (docs/development/\
+                         smplify-enrollment.md section 3.1).\n\
+                         Next step: ask {} to correct its organization document.",
+                        org.display_name, org.display_name
+                    ),
+                    json!({ "stage": "discover", "reason": "enrollment.removable" }),
+                )));
+            }
+        };
+        // Ownership is read the same way, once and here. Punar has no
+        // Automated Device Enrollment, so nothing proves an organization owns
+        // the hardware: its document can claim the device, and only the
+        // person's acceptance makes the claim widen what the inventory
+        // carries (docs/development/smplify-enrollment.md section 3.2).
+        let organization_owned = match org_document_organization_owned(&org_doc) {
+            Ok(owned) => owned,
+            Err(found) => {
+                return Err(fail_audit(IpcError::with_details(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "{}'s organization document says enrollment.ownership is {found}, \
+                         which is neither \"personal\" nor \"organization\", so this device \
+                         cannot tell what the organization would receive from it. Nothing was \
+                         changed.\n\
+                         Policy: os default — an unreadable enrollment term refuses \
+                         enrollment rather than guessing (docs/development/\
+                         smplify-enrollment.md section 3.2).\n\
+                         Next step: ask {} to correct its organization document.",
+                        org.display_name, org.display_name
+                    ),
+                    json!({ "stage": "discover", "reason": "enrollment.ownership" }),
+                )));
+            }
+        };
+        // Every term the request left unaccepted is named in one refusal, so
+        // a person who says yes once is not refused again for the next one.
+        let unaccepted: Vec<EnrollmentTerm> = EnrollmentTerm::ALL
+            .into_iter()
+            .filter(|term| match term {
+                EnrollmentTerm::NonRemovable => !removable,
+                EnrollmentTerm::OrganizationOwned => organization_owned,
+            })
+            .filter(|term| !params.accepts(*term))
+            .collect();
+        if !unaccepted.is_empty() {
+            self.log_audit(AuditEvent::denial(
+                &self.device_id,
+                &actor,
+                "enroll.start",
+                RESOURCE_ENROLLMENT,
+            ));
+            return Err(unaccepted_terms_refusal(&org, domain, &unaccepted));
+        }
 
         // Register. The bootstrap secret exists only in memory, only for
         // this call, and only behind Redacted; the returned token likewise
@@ -4290,163 +5755,166 @@ impl Inner {
             random_hex(crate::enroll::BOOTSTRAP_SECRET_BYTES)
                 .map_err(|e| fail_audit(self.internal(&format!("bootstrap secret: {e}"))))?,
         );
-        let (token, attestation) = client
-            .register(&self.device_id, &bootstrap)
-            .map_err(|e| fail_audit(self.upstream_error("register", e)))?;
+        // Before register, durably: the agent keeps the identity Smplify
+        // issues before it answers, so a registration whose answer never
+        // arrives (punard killed, the machine off, a broken connection)
+        // leaves an identity with the agent and none with punard. This
+        // record is what lets a later pass wipe it (docs/api/ipc.md section
+        // 5.11). It covers a release still pending from an earlier
+        // unenrollment too; a registration that commits removes it.
+        let release_path = self.cfg.state_dir.join(IDENTITY_RELEASE_FILE);
+        let prior_release = self.identity_release.lock().unwrap().clone();
+        let registering =
+            IdentityReleaseRecord::new(ReleaseState::Release, "registration", utc_now_rfc3339());
+        save_identity_release(&release_path, &registering).map_err(|e| {
+            fail_audit(self.internal(&format!("identity release record store: {e}")))
+        })?;
+        *self.identity_release.lock().unwrap() = Some(registering);
+        let (token, attestation) = match client.register(&self.device_id, &bootstrap, code.as_ref())
+        {
+            Ok(registered) => registered,
+            Err(e) => {
+                // Refused by the organization's server: the agent keeps an
+                // identity only once Smplify has accepted the code, so only
+                // what was owed before is still owed. Anything else (no
+                // answer, a broken connection, the agent's own failure) may
+                // have left one, and the record stays.
+                let refused =
+                    matches!(&e, UpstreamError::Refused { code, .. } if code != "internal");
+                if refused {
+                    let restored = match &prior_release {
+                        Some(prior) => save_identity_release(&release_path, prior),
+                        None => remove_synced(&release_path),
+                    };
+                    match restored {
+                        Ok(()) => *self.identity_release.lock().unwrap() = prior_release,
+                        Err(e) => eprintln!(
+                            "punard: could not restore the identity release record ({e}); the \
+                             agent is asked to release what it holds on the next pass"
+                        ),
+                    }
+                }
+                return Err(fail_audit(self.upstream_error("register", e)));
+            }
+        };
+        // From here to the commit point every refusal releases the identity
+        // the control plane just issued; see [`UncommittedRegistration`].
+        let registration = UncommittedRegistration {
+            inner: self,
+            actor: actor.clone(),
+            token: Some(token.clone()),
+        };
         // The attestation step is SIMULATED (milestone-5.md section 5.2):
         // the label is stored and surfaced verbatim; nothing was measured.
 
-        // Fetch and validate the policy envelopes with the M4 loader's own
-        // strict parse, over a staging directory — enrollment is
-        // all-or-nothing up through the policy.d write.
-        let envelopes = client
+        // Fetch the organization's policy and check it by the rules every
+        // later refresh applies too (crate::policy_set): the set is staged
+        // beside policy.d, loaded and rendered there exactly as startup would
+        // load it, together with any file a root administrator dropped, and
+        // only a set that passed all of it replaces policy.d, whole.
+        // Enrollment is all-or-nothing up to that swap.
+        let fetched = client
             .policy_fetch(&token)
             .map_err(|e| fail_audit(self.upstream_error("policy.fetch", e)))?;
-        let staging = self.cfg.state_dir.join(".policy.d.enroll-staging");
-        let cleanup_staging = || {
-            let _ = std::fs::remove_dir_all(&staging);
+        // Something is assigned that the control plane cannot turn into Punar
+        // policy. The device enrolls with none and says so, rather than
+        // refusing an enrollment the organization asked for; a later refresh
+        // picks the policy up once it is usable.
+        let held_unusable =
+            fetched.assignment == Assignment::Unusable && fetched.policies.is_empty();
+        let set = CanonicalSet::from_envelopes(&fetched.policies, fetched.assignment)
+            .map_err(|rejection| fail_audit(enroll_policy_refusal(&rejection)))?;
+        let prepared = match policy_set::prepare(&self.cfg.state_dir, &set, &[]) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                policy_set::discard_staging(&self.cfg.state_dir);
+                return Err(fail_audit(match error {
+                    PrepareError::Rejected(rejection) => enroll_policy_refusal(&rejection),
+                    PrepareError::Local(failure) => {
+                        self.internal(&format!("staging the organization's policy: {failure}"))
+                    }
+                }));
+            }
         };
-        cleanup_staging();
-        std::fs::create_dir_all(&staging)
-            .map_err(|e| fail_audit(self.internal(&format!("staging dir: {e}"))))?;
-        let mut policy_files: Vec<String> = Vec::new();
-        for envelope in &envelopes {
-            let policy_id = envelope
-                .get("policy_id")
-                .and_then(Value::as_str)
-                .filter(|id| {
-                    !id.is_empty()
-                        && id
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-                })
-                .ok_or_else(|| {
-                    cleanup_staging();
-                    fail_audit(IpcError::with_details(
-                        ErrorCode::InvalidParams,
-                        "The control plane served a policy envelope without a usable \
-                         policy_id.\n\
-                         Policy: os default — enrollment writes only validated envelopes \
-                         (docs/api/ipc.md section 5.9).\n\
-                         Next step: report this to your administrator; nothing was changed."
-                            .to_string(),
-                        json!({ "param": "policy", "reason": "envelope without policy_id" }),
-                    ))
-                })?;
-            let file = format!("{policy_id}.json");
-            let bytes =
-                serde_json::to_vec_pretty(envelope).expect("fetched envelopes re-serialize");
-            crate::util::write_atomic(&staging.join(&file), &bytes, 0o600).map_err(|e| {
-                cleanup_staging();
-                fail_audit(self.internal(&format!("staging write: {e}")))
-            })?;
-            policy_files.push(file);
-        }
-        let loaded = load_policy_dir(&staging).map_err(|e| {
-            cleanup_staging();
-            fail_audit(IpcError::with_details(
-                ErrorCode::InvalidParams,
-                format!(
-                    "A fetched policy envelope failed validation: {e}.\n\
-                     Policy: os default — enrollment is all-or-nothing; nothing was \
-                     written (docs/api/ipc.md section 5.9).\n\
-                     Next step: report this to your administrator."
-                ),
-                json!({ "param": "policy", "reason": "envelope failed the loader's validation" }),
-            ))
-        })?;
-        // Validate the complete effective Chromium document before the
-        // enrollment commit point. Unknown or weakening policy therefore
-        // cannot leave a partially enrolled device or touch /etc.
-        render_effective_browser_policy(&loaded.applications, &loaded.browsers).map_err(|e| {
-            cleanup_staging();
-            fail_audit(IpcError::with_details(
-                ErrorCode::InvalidParams,
-                format!(
-                    "The fetched browser policy could not be rendered safely: {e}.\n\
-                     Policy: browser/integration/policy-allowlist.json — enrollment is all-or-nothing.\n\
-                     Next step: correct the browser policy in Smplify; nothing was changed."
-                ),
-                json!({ "param": "policy.spec.browser", "reason": "browser policy refused" }),
-            ))
-        })?;
-        for unmapped in &loaded.unmapped {
+        for unmapped in &prepared.loaded.unmapped {
             eprintln!(
-                "punard: enrollment policy: no registered capability for {unmapped}; \
-                 ignored (its capability lands in a later milestone)"
+                "punard: enrollment policy: no registered capability for {}; \
+                 ignored (its capability lands in a later milestone)",
+                journal_detail(unmapped)
             );
         }
 
-        // Commit point: move the validated envelopes into policy.d, then
-        // persist token + enrollment and flip the in-memory state.
-        let policy_dir = self.cfg.state_dir.join("policy.d");
-        if let Err(e) = std::fs::create_dir_all(&policy_dir) {
-            cleanup_staging();
-            return Err(fail_audit(self.internal(&format!("policy.d: {e}"))));
-        }
-        for file in &policy_files {
-            if let Err(e) = std::fs::rename(staging.join(file), policy_dir.join(file)) {
-                // Roll back anything moved so far — all-or-nothing.
-                for moved in &policy_files {
-                    let _ = std::fs::remove_file(policy_dir.join(moved));
-                }
-                cleanup_staging();
-                return Err(fail_audit(self.internal(&format!("policy.d write: {e}"))));
-            }
-        }
-        cleanup_staging();
-
-        let rollback_files = |files: &[String]| {
-            for file in files {
-                let _ = std::fs::remove_file(policy_dir.join(file));
-            }
-        };
-
-        if let Err(e) = persist_rendered_browser_policy(
-            &self.cfg.browser_policy_source,
-            &loaded.applications,
-            &loaded.browsers,
-        ) {
-            rollback_files(&policy_files);
-            return Err(fail_audit(
-                self.internal(&format!("rendered browser policy store: {e}")),
-            ));
-        }
-
+        // Commit point (install_enrollment): the record first, durably, then
+        // policy.d swapped in whole, then the browser document.
+        let enrolled_at = utc_now_rfc3339();
         let enrollment = Enrollment {
             version: 1,
             org,
-            enrolled_at: utc_now_rfc3339(),
+            enrolled_at: enrolled_at.clone(),
             attestation,
-            policy_files: policy_files.clone(),
+            policy_files: set.names(),
             last_sync: LastSyncRecord::default(),
             last_inventory_hash: None,
             remote_query_scopes,
             last_query: None,
+            removable,
+            organization_owned,
+            last_inventory_sent_at: None,
+            policy_hash: Some(set.revision()),
+            policy_fetched_at: Some(enrolled_at.clone()),
+            policy_changed_at: Some(enrolled_at.clone()),
+            policy_refresh: held_unusable.then(|| PolicyRefreshRecord {
+                at: enrolled_at.clone(),
+                result: RefreshResult::Held.as_str().to_string(),
+                reason: Some(REASON_UNUSABLE_ASSIGNMENT.to_string()),
+                offered_hash: None,
+            }),
+            policy_pending: None,
+            agent_unavailable: None,
+            last_pass: None,
+            stopped: None,
         };
-        if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token) {
-            rollback_files(&policy_files);
-            let _ = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]);
-            return Err(fail_audit(
-                self.internal(&format!("device token store: {e}")),
-            ));
-        }
-        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), &enrollment) {
-            rollback_files(&policy_files);
-            let _ = std::fs::remove_file(self.cfg.state_dir.join("device-token"));
-            let _ = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]);
-            return Err(fail_audit(self.internal(&format!("enrollment store: {e}"))));
-        }
+        let installed = self
+            .install_enrollment(&enrollment, &token, &prepared)
+            .map_err(fail_audit)?;
+        let loaded = prepared.loaded;
 
         let policy_ids = enrollment.policy_ids();
         let org_result = org_info(&enrollment.org);
-        let enrolled_at = enrollment.enrolled_at.clone();
         let attestation_label = enrollment.attestation.clone();
+        registration.commit();
+        // The registration replaced whatever identity the agent held, one an
+        // earlier unenrollment was still releasing, or punard was keeping,
+        // included: nothing is left to release. A record that cannot be
+        // removed now is removed at the next start, which finds it beside
+        // the committed enrollment.
         *self.device_token.lock().unwrap() = Some(token);
-        *self.enrollment.lock().unwrap() = Some(enrollment);
+        *self.release_failure.lock().unwrap() = None;
+        if let Err(e) = remove_synced(&release_path) {
+            eprintln!("punard: could not remove the registration's release record: {e}");
+        }
+        *self.identity_release.lock().unwrap() = None;
+        {
+            let mut slot = self.enrollment.lock().unwrap();
+            *slot = Some(enrollment);
+            self.enrollment_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        // A new enrollment's first refresh is not held back by the last one's
+        // failures.
+        *self.policy_refresh_backoff.lock().unwrap() = RefreshBackoff::default();
+        // What startup would load from the new policy.d: the organization's
+        // set with every root drop beside it, not the set alone. When the
+        // browser document could not be written, and the directory could not
+        // be put back either, nothing names what was loaded, and the first
+        // refresh commits the set again, document included.
         *self.org_layers.lock().unwrap() = loaded.layers;
         *self.local_admin.lock().unwrap() = loaded.local_admin;
+        *self.admin_roster.lock().unwrap() = loaded.admin_roster;
         *self.application_policy.lock().unwrap() = loaded.applications;
+        *self.org_policy_loaded.lock().unwrap() = match installed {
+            Installed::Whole => Some(set.revision()),
+            Installed::WithoutBrowserDocument => None,
+        };
         self.reload_ai_authority();
         self.recompute_effective();
 
@@ -4462,7 +5930,10 @@ impl Inner {
         // the first compliance + inventory report; failures there queue
         // per SPEC section 55 — they never fail enrollment.
         *self.last_sync_outcome.lock().unwrap() = None;
-        let report = self.reconcile_and_remediate(&actor);
+        let report = self.reconcile_and_remediate(
+            &actor,
+            &CallBudget::new(self.cfg.reconcile_control_plane_budget),
+        );
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
         let first_sync = self
             .last_sync_outcome
@@ -4488,13 +5959,115 @@ impl Inner {
             attestation: attestation_label,
             enrolled_at,
             first_sync,
+            removable: Some(removable),
+            organization_owned: Some(organization_owned),
         }))
+    }
+
+    /// Put an enrollment on disk: the token, then the record, durably, so no
+    /// crash can leave the organization's files enforced on a device whose
+    /// record says it is personal or owns none of them; then policy.d,
+    /// swapped in whole; then the browser document. Each step undoes the ones
+    /// before it, and `Err` means nothing of the enrollment is left. The one
+    /// exception is a directory that could not be verifiably put back: then
+    /// the organization's files may be live, so the enrollment stands, record
+    /// and token included, and the caller commits it without the browser
+    /// document ([`Installed::WithoutBrowserDocument`]).
+    fn install_enrollment(
+        &self,
+        enrollment: &Enrollment,
+        token: &Redacted<String>,
+        prepared: &policy_set::Prepared,
+    ) -> Result<Installed, IpcError> {
+        let enrollment_path = self.cfg.state_dir.join("enrollment.json");
+        let token_path = self.cfg.state_dir.join("device-token");
+        let policy_dir = self.cfg.state_dir.join(policy_set::POLICY_DIR);
+        let unwind_stores = || {
+            let _ = remove_synced(&token_path);
+            let _ = crate::enroll::remove_terms(&enrollment_path);
+            let _ = remove_synced(&enrollment_path);
+        };
+        let refuse = |detail: String| {
+            policy_set::discard_staging(&self.cfg.state_dir);
+            self.internal(&detail)
+        };
+        if let Err(e) = save_device_token(&token_path, token) {
+            return Err(refuse(format!("device token store: {e}")));
+        }
+        if let Err(e) = policy_set::step(policy_set::Step::RecordBoth)
+            .and_then(|()| save_enrollment_durable(&enrollment_path, enrollment))
+        {
+            unwind_stores();
+            return Err(refuse(format!("enrollment store: {e}")));
+        }
+        // A root drop added, replaced or removed since the set was staged
+        // would be lost with the directory it was changed in.
+        if let Err(failure) = prepared.still_current(&policy_dir, &[]) {
+            unwind_stores();
+            return Err(refuse(format!("policy.d swap: {failure}")));
+        }
+        let swapped = match policy_set::step(policy_set::Step::Swap)
+            .map_err(policy_set::LocalFailure::Io)
+            .and_then(|()| policy_set::swap_in(prepared.staging(), &policy_dir))
+        {
+            Ok(swapped) => swapped,
+            Err(failure) => {
+                unwind_stores();
+                return Err(refuse(format!("policy.d swap: {failure}")));
+            }
+        };
+        let previous_rendered = read_if_present(&self.cfg.browser_policy_source);
+        let failed = match swapped.replaced_only_what_was_carried(prepared, &[]) {
+            Err(failure) => Some(failure.to_string()),
+            Ok(()) => policy_set::step(policy_set::Step::Render)
+                .and_then(|()| {
+                    persist_rendered_browser_policy(
+                        &self.cfg.browser_policy_source,
+                        &prepared.loaded.applications,
+                        &prepared.loaded.browsers,
+                    )
+                })
+                .err()
+                .map(|e| format!("rendered browser policy store: {e}")),
+        };
+        if let Some(detail) = failed {
+            return match swapped.roll_back() {
+                Ok(()) => {
+                    restore_rendered(&self.cfg.browser_policy_source, previous_rendered);
+                    unwind_stores();
+                    Err(self.internal(&detail))
+                }
+                Err(stuck) => {
+                    // policy.d may hold the organization's files, which the
+                    // durable record owns: unwinding it now would leave them
+                    // enforced on a device that reads as personal after the
+                    // next start. The enrollment stands; the previous
+                    // directory stays where the exchange left it, for the
+                    // next start or change to remove.
+                    eprintln!(
+                        "punard: enroll.start could not put policy.d back after {detail} \
+                         ({stuck}); the enrollment stands, and its first policy refresh \
+                         writes the browser document"
+                    );
+                    Ok(Installed::WithoutBrowserDocument)
+                }
+            };
+        }
+        if let Err(e) = swapped.finish() {
+            // The previous directory is left beside policy.d, where the next
+            // start removes it (policy_set::settle).
+            eprintln!("punard: enroll.start could not remove the replaced policy.d: {e}");
+        }
+        Ok(Installed::Whole)
     }
 
     /// `enroll.status` (contract section 5.10): read-only, any connected
     /// peer, not audited. Never the token.
     fn handle_enroll_status(&self) -> EnrollStatusResult {
-        match &*self.enrollment.lock().unwrap() {
+        // Cloned so the view file below is read without holding the lock a
+        // sync pass needs.
+        let enrollment = self.enrollment.lock().unwrap().clone();
+        match &enrollment {
             // Personal device: no organization, therefore no grant and no
             // query history — not an empty grant that could be widened, but
             // the absence of the concept (milestone-10.md section 11).
@@ -4507,6 +6080,12 @@ impl Inner {
                 last_sync: None,
                 remote_query_scopes: None,
                 last_query: None,
+                removable: None,
+                organization_owned: None,
+                organization_view: None,
+                policy: None,
+                management: None,
+                identity_release: self.pending_release(),
             },
             Some(e) => EnrollStatusResult {
                 enrolled: true,
@@ -4529,45 +6108,185 @@ impl Inner {
                     scope: q.scope.clone(),
                     decision: q.decision.clone(),
                 }),
+                removable: Some(e.removable),
+                organization_owned: Some(e.organization_owned),
+                // What the organization can see, read from what actually
+                // left (SPEC section 24.2), not from what the tier says
+                // should have.
+                organization_view: Some(organization_view_summary(
+                    load_organization_view(&self.cfg.state_dir.join(ORGANIZATION_VIEW_FILE), e)
+                        .as_ref(),
+                )),
+                // An enrollment made before these were recorded has enforced
+                // the policy it enrolled with since it enrolled.
+                policy: Some(EnrollPolicyStatus {
+                    revision: e.policy_hash.clone(),
+                    fetched_at: e
+                        .policy_fetched_at
+                        .clone()
+                        .unwrap_or_else(|| e.enrolled_at.clone()),
+                    changed_at: e
+                        .policy_changed_at
+                        .clone()
+                        .unwrap_or_else(|| e.enrolled_at.clone()),
+                    last_refresh: e.policy_refresh.as_ref().map(|r| PolicyRefresh {
+                        at: r.at.clone(),
+                        result: r.result.clone(),
+                        reason: r.reason.clone(),
+                    }),
+                }),
+                management: Some(match &e.agent_unavailable {
+                    None => ManagementStatus {
+                        state: "active".to_string(),
+                        reason: None,
+                        since: None,
+                    },
+                    Some(record) => ManagementStatus {
+                        state: "interrupted".to_string(),
+                        reason: Some(record.reason.clone()),
+                        since: Some(record.since.clone()),
+                    },
+                }),
+                identity_release: None,
             },
         }
     }
 
-    /// `enroll.stop` (contract section 5.11): root-only local restore —
-    /// remove exactly the policy.d files this enrollment wrote, delete the
-    /// stores, recompute, one reconcile pass (recorded user preferences
-    /// resurface per SPEC section 39), rewrite the status file. Local-only
-    /// by design: M5 has no unregister RPC — the control plane keeps its
-    /// device record and received history (unenrollment stops future flow;
-    /// it cannot retract the past). Works with the control plane down.
-    fn handle_enroll_stop(&self, peer: &Peer) -> Result<Value, IpcError> {
-        let actor = self.actor_of(peer);
-        if authorize_mutation(peer) != Decision::Allow {
-            self.log_audit(AuditEvent::denial(
-                &self.device_id,
-                &actor,
-                "enroll.stop",
-                RESOURCE_ENROLLMENT,
-            ));
-            return Err(IpcError::denied_needs_root(
-                "device enrollment",
-                None,
-                "sudo punarctl enroll stop",
-            ));
+    /// What punard's release record says, for `enroll.status` and the
+    /// status file: an identity the agent has not confirmed wiped
+    /// (`pending`, with the last attempt's reason), or one punard keeps
+    /// because nothing ended the enrollment it belonged to (`kept`, with
+    /// why). A registration still in progress is not shown as either.
+    fn pending_release(&self) -> Option<IdentityRelease> {
+        let record = self.identity_release.lock().unwrap().clone()?;
+        match record.state {
+            ReleaseState::Release => {
+                if record.cause == "registration"
+                    && self.enroll_in_progress.load(Ordering::SeqCst)
+                    && self.release_failure.lock().unwrap().is_none()
+                {
+                    return None;
+                }
+                Some(IdentityRelease {
+                    state: ReleaseState::Release.as_str().to_string(),
+                    reason: self.release_failure.lock().unwrap().clone(),
+                })
+            }
+            ReleaseState::Kept => Some(IdentityRelease {
+                state: ReleaseState::Kept.as_str().to_string(),
+                reason: Some(record.cause),
+            }),
         }
-        let _guard = match EnrollGuard::acquire(&self.enroll_in_progress) {
-            Some(guard) => guard,
-            None => {
-                return Err(self.conflict(
-                    "changing",
-                    "An enrollment change is already in progress.\n\
+    }
+
+    /// `enroll.stop` (contract section 5.11): local restore — remove exactly
+    /// the policy.d files this enrollment wrote, delete the stores,
+    /// recompute, one reconcile pass (recorded user preferences resurface per
+    /// SPEC section 39), rewrite the status file. The control plane is asked
+    /// to forget the device best-effort; unenrollment cannot retract what it
+    /// already received, and works with it down.
+    ///
+    /// Who may: no agent at any uid; nobody at all for an enrollment its
+    /// organization made non-removable; otherwise root, or a person with a
+    /// fresh confirmation (docs/development/smplify-enrollment.md section 3.1).
+    fn handle_enroll_stop(
+        &self,
+        peer: &Peer,
+        params: &EnrollStopParams,
+    ) -> Result<Value, IpcError> {
+        let actor = self.actor_of(peer);
+        let retry = "punarctl enroll stop";
+        self.refuse_agent_enrollment_change(
+            peer,
+            &actor,
+            "enroll.stop",
+            &ENROLL_STOP_WORDS,
+            retry,
+        )?;
+        // An organization may keep its device: an enrollment it made
+        // non-removable, with the enrolling person's explicit yes, cannot be
+        // undone here by anyone — root included, because the term is enforced
+        // by the one process that can end an enrollment, not merely implied by
+        // nobody holding root (docs/development/smplify-enrollment.md section
+        // 3.1). Checked here, before a password is asked for or spent: the
+        // answer does not depend on who is asking, and `enroll.status` already
+        // tells anyone. Checked again under the guard below, because this read
+        // holds no lock against an enroll.start that commits a non-removable
+        // enrollment in between.
+        self.refuse_kept_enrollment(&actor)?;
+        // Leaving decides for everyone on the device, so it needs the role —
+        // the device's OWN list, never the organization's: an organization
+        // that could forbid every local administrator could keep a device it
+        // enrolled as removable (F0-S1, contract section 23.4).
+        self.require_device_admin(
+            peer,
+            &actor,
+            "enroll.stop",
+            RESOURCE_ENROLLMENT,
+            ENROLL_STOP_WORDS.doing,
+            RosterScope::DeviceOnly,
+        )?;
+        self.require_enrollment_ticket(
+            peer,
+            &actor,
+            "enroll.stop",
+            params.ticket.as_deref(),
+            &ENROLL_STOP_WORDS,
+            retry,
+        )?;
+        self.spend_enrollment_ticket(peer, &actor, "enroll.stop", params.ticket.as_deref(), retry)?;
+        let _guard =
+            match EnrollGuard::acquire_within(&self.enroll_in_progress, ENROLL_GUARD_PATIENCE) {
+                Some(guard) => guard,
+                None => {
+                    return Err(self.conflict(
+                        "changing",
+                        "An enrollment change is already in progress.\n\
                      Policy: os default — enrollment transitions run one at a time.\n\
                      Next step: retry in a moment."
-                        .to_string(),
-                ));
+                            .to_string(),
+                    ));
+                }
+            };
+        // The authoritative check: under the guard no enrollment can be
+        // committed or ended, so what is taken next is what was judged.
+        self.refuse_kept_enrollment(&actor)?;
+        // Before anything of the enrollment is removed, durably: from here
+        // on the identity is one to release, and a crash anywhere below
+        // leaves a record that says so (without it a token with no
+        // enrollment is kept, never released).
+        let release_path = self.cfg.state_dir.join(IDENTITY_RELEASE_FILE);
+        let releasing =
+            IdentityReleaseRecord::new(ReleaseState::Release, "unenroll", utc_now_rfc3339());
+        if self.enrollment.lock().unwrap().is_some() {
+            if let Err(e) = save_identity_release(&release_path, &releasing) {
+                return Err(self.internal(&format!("identity release record store: {e}")));
             }
+        }
+        let taken = {
+            let mut slot = self.enrollment.lock().unwrap();
+            let taken = slot.take();
+            if taken.is_some() {
+                self.enrollment_epoch.fetch_add(1, Ordering::SeqCst);
+                // The organization view describes this enrollment only, and
+                // goes with it here, under the same lock a sync pass must
+                // hold to write it: a pass whose report is still in flight
+                // finds the slot changed and cannot write it back. What the
+                // organization received is not retracted by removing it;
+                // enroll.status simply has no enrollment to describe any more.
+                if let Err(e) =
+                    std::fs::remove_file(self.cfg.state_dir.join(ORGANIZATION_VIEW_FILE))
+                {
+                    if e.kind() != io::ErrorKind::NotFound {
+                        eprintln!(
+                            "punard: enroll.stop could not remove {ORGANIZATION_VIEW_FILE}: {e}"
+                        );
+                    }
+                }
+            }
+            taken
         };
-        let Some(enrollment) = self.enrollment.lock().unwrap().take() else {
+        let Some(enrollment) = taken else {
             self.log_audit(self.enroll_event(
                 &actor,
                 "enroll.stop",
@@ -4585,6 +6304,19 @@ impl Inner {
             ));
         };
 
+        *self.identity_release.lock().unwrap() = Some(releasing);
+        // An episode of management interrupted open when the enrollment ends
+        // ends with it: one closing event, so every episode in the audit has
+        // both ends.
+        if let Some(open) = &enrollment.agent_unavailable {
+            self.log_audit(self.enroll_event(
+                &actor,
+                "enroll.agent",
+                &format!("agent.{}", open.reason),
+                "ended",
+                enrollment.policy_ids(),
+            ));
+        }
         let policy_dir = self.cfg.state_dir.join("policy.d");
         for file in &enrollment.policy_files {
             if let Err(e) = std::fs::remove_file(policy_dir.join(file)) {
@@ -4596,16 +6328,54 @@ impl Inner {
                 }
             }
         }
-        for name in ["enrollment.json", "device-token"] {
-            if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join(name)) {
-                if e.kind() != io::ErrorKind::NotFound {
-                    eprintln!("punard: enroll.stop could not remove {name}: {e}");
-                }
+        // Ask the agent to wipe the device identity. The wipe is local on
+        // the agent's side, so it works offline; unenrollment is a local
+        // restore that must succeed however it goes (SPEC section 55), and it
+        // never waits on it. What it may not do is forget the identity: until
+        // the agent confirms the wipe, the device token stays (and says an
+        // identity is still to be released, docs/api/ipc.md section 5.11), so
+        // a key is never left on disk with no way to finish, and every pass
+        // asks again (Inner::release_pending_identity).
+        // Asked even without a token: the agent may hold an identity punard
+        // lost its token for, and nothing of one may stay behind.
+        let token = self.device_token.lock().unwrap().clone();
+        let released = self.control_plane().unregister(token.as_ref());
+        if let Err(e) = crate::enroll::remove_terms(&self.cfg.state_dir.join("enrollment.json")) {
+            eprintln!("punard: enroll.stop could not remove the enrollment terms: {e}");
+        }
+        if let Err(e) = std::fs::remove_file(self.cfg.state_dir.join("enrollment.json")) {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("punard: enroll.stop could not remove enrollment.json: {e}");
             }
         }
-        *self.device_token.lock().unwrap() = None;
+        let identity_release = match released {
+            Ok(()) if self.forget_released_identity() => "released",
+            // Wiped, and punard's own token or record could not be removed:
+            // the next pass asks again, the agent confirms at once, and they
+            // go then.
+            Ok(()) => "pending",
+            Err(e) => {
+                eprintln!(
+                    "punard: enroll.stop: the Smplify agent did not confirm it wiped this \
+                     device's identity ({e}); the device token is kept and the wipe is asked \
+                     for again on every pass"
+                );
+                self.release_not_confirmed(&actor, &e, enrollment.policy_ids());
+                "pending"
+            }
+        };
         self.org_layers.lock().unwrap().clear();
+        *self.org_policy_loaded.lock().unwrap() = None;
         self.application_policy.lock().unwrap().clear();
+        // AND THE LOCAL-ADMIN VETO, which is the one that would otherwise
+        // outlive the organization that set it. An org document may turn local
+        // policy editing off; leaving that opinion in memory after its files
+        // are gone locks an unenrolled device's owner out of their own machine,
+        // citing a policy that no longer exists anywhere, until the daemon
+        // happens to restart. Every layer this enrollment installed is cleared
+        // in the same breath, and this one belongs in that list.
+        self.local_admin.lock().unwrap().clear();
+        self.admin_roster.lock().unwrap().clear();
         if let Err(e) = persist_rendered_browser_policy(&self.cfg.browser_policy_source, &[], &[]) {
             eprintln!("punard: enroll.stop could not remove rendered browser policy: {e}");
         }
@@ -4622,7 +6392,10 @@ impl Inner {
 
         // One pass against the restored personal document (the sync hook
         // no-ops — no enrollment — and the status file flips to personal).
-        let report = self.reconcile_and_remediate(&actor);
+        let report = self.reconcile_and_remediate(
+            &actor,
+            &CallBudget::new(self.cfg.reconcile_control_plane_budget),
+        );
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
 
         let removed_policy_ids = enrollment.policy_ids();
@@ -4636,31 +6409,121 @@ impl Inner {
         Ok(to_value(EnrollStopResult {
             enrolled: false,
             removed_policy_ids,
+            identity_release: Some(identity_release.to_string()),
         }))
     }
 
-    /// The hostname as observed by the registry (shared by `status` and
-    /// the inventory builder).
-    fn observed_hostname(&self) -> String {
-        self.registry
-            .get(crate::backends::hostname::CAPABILITY_ID)
-            .and_then(|cap| cap.observe().ok())
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_else(|| "unknown".to_string())
+    /// Keep what the organization just received as the person's view of it
+    /// (SPEC section 24.2). A failure to write it is logged and costs nothing
+    /// else: the send happened, and `enroll.status` then says nothing was
+    /// recorded rather than something untrue.
+    fn record_organization_view(&self, enrollment: &Enrollment, sent_at: &str, sent: Value) {
+        let record = OrganizationViewRecord {
+            version: 1,
+            org_id: enrollment.org.id.clone(),
+            enrolled_at: enrollment.enrolled_at.clone(),
+            sent_at: sent_at.to_string(),
+            sent,
+        };
+        if let Err(e) = save_organization_view(
+            &self.cfg.state_dir.join(ORGANIZATION_VIEW_FILE),
+            &record,
+            lookup_gid(&self.cfg.group_file, &self.cfg.group),
+        ) {
+            eprintln!("punard: could not record what the organization received: {e}");
+        }
+    }
+
+    /// An application list sent as `null` is a fact the device's owner can
+    /// see in the audit: once when withholding starts, once when a full list
+    /// goes out again — never once per pass, which would encode nothing new
+    /// (the `enroll.sync` precedent).
+    fn audit_applications_withheld(
+        &self,
+        actor: &AuditActor,
+        withheld: Option<Withheld>,
+        enrollment: &Enrollment,
+    ) {
+        let was_withheld = self
+            .applications_withheld
+            .swap(withheld.is_some(), Ordering::SeqCst);
+        let result = match (withheld, was_withheld) {
+            (Some(reason), false) => {
+                eprintln!(
+                    "punard: the inventory's application list is withheld ({}); \
+                     it is sent as null, never truncated",
+                    reason.as_str()
+                );
+                "applications_withheld"
+            }
+            (None, true) => AuditOutcome::Success.as_str(),
+            _ => return,
+        };
+        self.log_audit(self.enroll_event(
+            actor,
+            "enroll.inventory",
+            RESOURCE_CONTROL_PLANE,
+            result,
+            enrollment.policy_ids(),
+        ));
     }
 
     /// M5 sync hook (milestone-5.md sections 6, 7): runs at the end of
     /// every full reconcile pass **when enrolled** — compliance (category
     /// states only, SPEC sections 24/54), then inventory when its SHA-256
-    /// changed or a resend is pending. Failures queue (bounded latest-wins
-    /// booleans); `enroll.sync` is audited on **transitions only**.
-    fn sync_if_enrolled(&self, actor: &AuditActor) {
-        let Some(enrollment) = self.enrollment.lock().unwrap().clone() else {
-            *self.last_sync_outcome.lock().unwrap() = None;
+    /// changed, a resend is pending, or a day has passed since the last one
+    /// arrived. Failures queue (bounded latest-wins booleans), and an
+    /// inventory that failed waits before it is sent again unless it changed
+    /// ([`InventoryRetry`]); `enroll.sync` is audited on **transitions
+    /// only**.
+    fn sync_if_enrolled(
+        &self,
+        actor: &AuditActor,
+        budget: &CallBudget,
+        agent: Option<(u64, Liveness)>,
+    ) {
+        let (enrollment, epoch) = {
+            let slot = self.enrollment.lock().unwrap();
+            (slot.clone(), self.enrollment_epoch.load(Ordering::SeqCst))
+        };
+        let Some(enrollment) = enrollment else {
+            // Only while the device is still personal, and under the lock
+            // enroll.start commits under: one committed since this pass
+            // looked has its own first sync coming, whose outcome this must
+            // not erase.
+            {
+                let slot = self.enrollment.lock().unwrap();
+                if slot.is_none() {
+                    *self.last_sync_outcome.lock().unwrap() = None;
+                    self.applications_withheld.store(false, Ordering::SeqCst);
+                }
+            }
+            self.release_pending_identity(actor, budget);
             return;
         };
         let token = self.device_token.lock().unwrap().clone();
-        let client = ControlPlaneClient::new(&self.cfg.control_plane_socket);
+        let client = self.control_plane().within(budget.clone());
+        // Whether the last pass got nothing through: then a report that
+        // gets through now means the link is back.
+        let link_was_down = self.pending_compliance.load(Ordering::SeqCst);
+
+        // The agent first, with one local call that asks Smplify nothing: an
+        // agent that is frozen, stopped, or holds no identity is noticed on
+        // every pass, not only when a report happens to fail, and is told
+        // apart from the network. While it cannot be used nothing more is
+        // sent this pass (every call would fail the same way, a frozen agent
+        // only after its whole timeout): the reports stay pending. A pass
+        // that began with `check_agent` already knows.
+        let mut liveness = match agent {
+            Some((checked, liveness)) if checked == epoch => liveness,
+            _ => {
+                let liveness = self.agent_liveness(&client, token.as_ref());
+                self.note_agent(actor, epoch, liveness);
+                liveness
+            }
+        };
+        let noted = liveness;
+        let down = |liveness: &Liveness| matches!(liveness, Liveness::Unavailable(_));
 
         // Compliance: overall + per-category states. Nothing else — no
         // values, no hostnames, no events (SPEC sections 24, 54).
@@ -4674,113 +6537,639 @@ impl Inner {
                 )
             }),
         );
+        // A report the agent's own socket fails is the agent's too: the
+        // episode, never the network (it may have been killed since the
+        // liveness call).
         let compliance_ok = match &token {
-            Some(token) => client.compliance_report(token, &report).is_ok(),
-            None => false,
+            Some(token) if !down(&liveness) => match client.compliance_report(token, &report) {
+                Ok(()) => true,
+                Err(UpstreamError::AgentUnavailable(fault)) => {
+                    liveness = Liveness::Unavailable(fault);
+                    false
+                }
+                Err(_) => false,
+            },
+            _ => false,
         };
-        self.pending_compliance
-            .store(!compliance_ok, Ordering::SeqCst);
+        // The link is back. The waits an inventory and the policy refresh
+        // built up while nothing got through say nothing about either, and
+        // would hold a changed inventory back, and a policy the organization
+        // changed meanwhile (a tightening, a withdrawal) unfetched, for up to
+        // half an hour after the device is online again.
+        if compliance_ok && link_was_down {
+            *self.inventory_retry.lock().unwrap() = None;
+            *self.policy_refresh_backoff.lock().unwrap() = RefreshBackoff::default();
+        }
 
-        // Inventory: device info + capability states, hash-gated.
+        // Inventory: device facts, which capabilities are supported, posture
+        // states, and the tier's applications. Sent when its hash changed,
+        // when a resend is pending, or when a day has passed without one.
         let sources = InventorySources {
             os_release_path: self.cfg.os_release_path.clone(),
             kernel_release_path: self.cfg.kernel_release_path.clone(),
         };
-        let capabilities: Vec<(String, bool, Value)> = self
-            .registry
+        let descriptors: Vec<_> = self.registry.iter().map(|cap| self.describe(cap)).collect();
+        // The firewall's posture is the observation this pass already made,
+        // not a second nft run. It reaches the body only as a posture state:
+        // no capability's observed value is in the body (see inventory_body).
+        let firewall_state = descriptors
             .iter()
-            .map(|cap| {
-                let descriptor = self.describe(cap);
-                (
-                    descriptor.capability.as_str().to_string(),
-                    descriptor.supported,
-                    descriptor.current_state,
-                )
-            })
-            .collect();
-        let inventory = inventory_body(&sources, &self.observed_hostname(), capabilities);
+            .find(|d| d.capability.as_str() == crate::backends::firewall::CAPABILITY_ID)
+            .map(|d| d.current_state.clone());
+        let capabilities = descriptors
+            .iter()
+            .map(|d| (d.capability.as_str().to_string(), d.supported));
+        let collected = self.inventory.collect(
+            &PassInputs {
+                organization_owned: enrollment.organization_owned,
+                architecture: self.apps.architecture().to_string(),
+                firewall_state,
+                patch: patch_posture(self.update_status.staged_release()),
+            },
+            || ImageRelease {
+                version: sources.image_version(),
+                browser_version: self.update_status.browser_version(),
+            },
+            || self.apps.installed_vendor_apps(),
+        );
+        let (inventory, withheld) = inventory_body(
+            &sources,
+            capabilities,
+            &collected,
+            enrollment.organization_owned,
+        );
+        // The gate hashes exactly the body the control plane is handed,
+        // which carries nothing that may not leave the device: a value that
+        // is never sent must never be able to trigger a send.
         let hash = sha256_hex(&serde_json::to_vec(&inventory).expect("inventory serializes"));
-        let must_send = enrollment.last_inventory_hash.as_deref() != Some(hash.as_str())
-            || self.pending_inventory.load(Ordering::SeqCst);
-        let mut new_hash = enrollment.last_inventory_hash.clone();
-        let inventory_outcome = if !must_send {
+        let now = utc_now_rfc3339();
+        let due = enrollment.last_inventory_hash.as_deref() != Some(hash.as_str())
+            || self.pending_inventory.load(Ordering::SeqCst)
+            || inventory_resend_due(enrollment.last_inventory_sent_at.as_deref(), &now);
+        // An inventory that failed to go out waits before the same body goes
+        // again (InventoryRetry), and stays pending while it waits, rather
+        // than going up on every pass.
+        let attempted_at = Instant::now();
+        let deferred = due
+            && self
+                .inventory_retry
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|retry| retry.defers(epoch, &hash, attempted_at));
+        let mut delivered = None;
+        let mut failed_hash = None;
+        let inventory_outcome = if !due {
             "unchanged"
+        } else if down(&liveness) {
+            "agent_unavailable"
+        } else if deferred {
+            "unreachable"
         } else {
-            let sent = match &token {
-                Some(token) => client.inventory_report(token, &inventory).is_ok(),
-                None => false,
+            let answer = match &token {
+                Some(token) => match client.inventory_report(token, &inventory) {
+                    Ok(sent) => Some(sent),
+                    Err(UpstreamError::AgentUnavailable(fault)) => {
+                        liveness = Liveness::Unavailable(fault);
+                        None
+                    }
+                    Err(_) => None,
+                },
+                None => None,
             };
-            if sent {
-                new_hash = Some(hash);
-                "success"
-            } else {
-                "unreachable"
+            match answer {
+                Some(sent) => {
+                    // The agent's account of what it posted, or, from a
+                    // control plane that gives none (the development mock,
+                    // which keeps the inventory itself), what it was handed.
+                    // Recorded below, only if this enrollment is still the
+                    // one in the slot.
+                    delivered = Some((hash, now, sent.unwrap_or(inventory)));
+                    "success"
+                }
+                None if down(&liveness) => "agent_unavailable",
+                None => {
+                    failed_hash = Some(hash);
+                    "unreachable"
+                }
             }
         };
-        self.pending_inventory
-            .store(inventory_outcome == "unreachable", Ordering::SeqCst);
 
         // M10: the query pull, on the same hook and the same cadence. It is
         // deliberately last: compliance and inventory are this device's
         // obligations, and answering questions is a courtesy that must not
         // delay them.
         let last_query = match &token {
-            Some(token) => self.drain_pending_queries(&client, token),
-            None => None,
+            Some(token) if !down(&liveness) => self.drain_pending_queries(&client, token),
+            _ => None,
         };
+        // A report the agent's socket failed after the liveness call said it
+        // answered starts the episode now.
+        if liveness != noted {
+            self.note_agent(actor, epoch, liveness);
+        }
+        let agent_down = down(&liveness);
+
+        // Everything this pass learned is written back only while the
+        // enrollment it began with is still the one in the slot: the pending
+        // flags, the outcome `enroll.start` reports, the transitions it
+        // audits, last_sync, the inventory hash, and what the organization
+        // received as the person's view of it. A pass can outlive its
+        // enrollment (a report may still be in flight while enroll.stop runs,
+        // and enroll.start after it), and then it writes nothing: not into the
+        // ended enrollment, whose view enroll.stop removed under this lock,
+        // and not over the state of one started since, whose own passes keep
+        // it. Its failure, against a token that no longer exists, would
+        // otherwise show the new enrollment as pending, audit a sync failure
+        // that was not its own, and send its unchanged inventory again.
+        let mut slot = self.enrollment.lock().unwrap();
+        let still_current = self.enrollment_epoch.load(Ordering::SeqCst) == epoch;
+        let Some(current) = slot.as_mut().filter(|_| still_current) else {
+            return;
+        };
+        self.pending_compliance
+            .store(!compliance_ok, Ordering::SeqCst);
+        self.pending_inventory.store(
+            matches!(inventory_outcome, "unreachable" | "agent_unavailable"),
+            Ordering::SeqCst,
+        );
+        {
+            let mut retry = self.inventory_retry.lock().unwrap();
+            // A failure counts toward the inventory's wait only when the
+            // compliance report of the same pass got through: a link that
+            // carries a report but not the inventory. When nothing got
+            // through, the device is offline, and the failure says nothing
+            // about the inventory.
+            if let Some(hash) = failed_hash.filter(|_| compliance_ok) {
+                let next = InventoryRetry::after_failure(
+                    retry.as_ref(),
+                    epoch,
+                    &hash,
+                    attempted_at,
+                    self.cfg.inventory_retry_base,
+                );
+                eprintln!(
+                    "punard: the inventory did not reach the control plane; it is sent again \
+                     in {} s, or at once if it changes",
+                    next.wait_from(attempted_at).as_secs()
+                );
+                *retry = Some(next);
+            } else if inventory_outcome == "success" {
+                *retry = None;
+            }
+        }
+        *self.last_sync_outcome.lock().unwrap() = Some(FirstSync {
+            compliance: if compliance_ok {
+                "success"
+            } else if agent_down {
+                "agent_unavailable"
+            } else {
+                "unreachable"
+            }
+            .to_string(),
+            inventory: inventory_outcome.to_string(),
+        });
+        self.audit_applications_withheld(actor, withheld, current);
 
         // Transition-only audit (milestone-5.md section 7): once on
         // reachable→unreachable, once on recovery — never one event per
-        // 120 s retry.
+        // 120 s retry. A pass the agent could not carry is not a sync
+        // attempt at all: the network was never asked, so it neither starts
+        // nor ends an outage, and `last_sync` keeps the last sync that was
+        // attempted. The agent's own episode is `enroll.agent`, and
+        // `pending` says the reports wait.
         let overall = if compliance_ok && inventory_outcome != "unreachable" {
             "success"
         } else {
             "unreachable"
         };
-        let previous = enrollment.last_sync.result.clone();
-        if overall == "unreachable" && previous.as_deref() != Some("unreachable") {
+        let previous = current.last_sync.result.clone();
+        if !agent_down && overall == "unreachable" && previous.as_deref() != Some("unreachable") {
             self.log_audit(self.enroll_event(
                 actor,
                 "enroll.sync",
                 RESOURCE_CONTROL_PLANE,
                 "unreachable",
-                enrollment.policy_ids(),
+                current.policy_ids(),
             ));
         }
-        if overall == "success" && previous.as_deref() == Some("unreachable") {
+        if !agent_down && overall == "success" && previous.as_deref() == Some("unreachable") {
             self.log_audit(self.enroll_event(
                 actor,
                 "enroll.sync",
                 RESOURCE_CONTROL_PLANE,
                 AuditOutcome::Success.as_str(),
-                enrollment.policy_ids(),
+                current.policy_ids(),
             ));
         }
 
-        *self.last_sync_outcome.lock().unwrap() = Some(FirstSync {
-            compliance: if compliance_ok {
-                "success".to_string()
-            } else {
-                "unreachable".to_string()
-            },
-            inventory: inventory_outcome.to_string(),
-        });
-
-        // Persist last_sync / the inventory hash — only if still enrolled
-        // (a concurrent enroll.stop wins).
-        let mut slot = self.enrollment.lock().unwrap();
-        if let Some(current) = slot.as_mut() {
+        // Only a send this pass made moves the hash and the send time: two
+        // passes of this one enrollment can overlap, and one that sent
+        // nothing, or failed, must not put back the values it read at its
+        // start over what the other recorded meanwhile.
+        if let Some((hash, at, received)) = delivered {
+            self.record_organization_view(current, &at, received);
+            current.last_inventory_hash = Some(hash);
+            current.last_inventory_sent_at = Some(at);
+        }
+        if !agent_down {
             current.last_sync = LastSyncRecord {
                 at: Some(utc_now_rfc3339()),
                 result: Some(overall.to_string()),
             };
-            current.last_inventory_hash = new_hash;
-            if last_query.is_some() {
-                current.last_query = last_query;
+        }
+        if last_query.is_some() {
+            current.last_query = last_query;
+        }
+        // The passes themselves: one further from the last than the timer
+        // allows, suspend excluded, is what a stopped timer or punard leaves
+        // (masked, killed, a target that stops it, a rescue isolate), and it
+        // is audited once when passes resume, on this boot or, when the gap
+        // ended in a clean stop, on the next.
+        if let Some(mark) = self.pass_mark() {
+            let gap = crate::enroll::reconcile_gap(
+                current.last_pass.as_ref(),
+                current.stopped.as_ref(),
+                &mark,
+            );
+            if let Some(gap) = gap.filter(|gap| *gap > self.cfg.reconcile_gap_limit) {
+                eprintln!(
+                    "punard: no reconcile pass ran for {} min while enrolled; the timer or \
+                     punard was stopped",
+                    gap.as_secs() / 60
+                );
+                self.log_audit(self.enroll_event(
+                    actor,
+                    "enroll.gap",
+                    "reconcile",
+                    "interrupted",
+                    current.policy_ids(),
+                ));
             }
-            if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
-                eprintln!("punard: could not persist enrollment sync state: {e}");
+            current.last_pass = Some(mark);
+            current.stopped = None;
+        }
+        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
+            eprintln!("punard: could not persist enrollment sync state: {e}");
+        }
+    }
+
+    /// punard's liveness check of the built-in agent at the start of a pass
+    /// while enrolled ([`Inner::agent_liveness`]), recorded as the episode it
+    /// starts or ends: the enrollment epoch it was made for and what it
+    /// found, or `None` on a personal device.
+    fn check_agent(&self, actor: &AuditActor, budget: &CallBudget) -> Option<(u64, Liveness)> {
+        let epoch = {
+            let slot = self.enrollment.lock().unwrap();
+            slot.as_ref()?;
+            self.enrollment_epoch.load(Ordering::SeqCst)
+        };
+        let token = self.device_token.lock().unwrap().clone();
+        let client = self.control_plane().within(budget.clone());
+        let liveness = self.agent_liveness(&client, token.as_ref());
+        self.note_agent(actor, epoch, liveness);
+        Some((epoch, liveness))
+    }
+
+    /// punard's liveness check of the built-in agent: `identity.status` with
+    /// this device's token, which the agent answers locally. It FAILS
+    /// CLOSED: the one answer that means the agent is there and is this
+    /// device's is `enrolled: true` with `token_matches: true`, and anything
+    /// else is management interrupted, with the reason. An agent that holds
+    /// no identity, or not the one the token names, is as unusable as a
+    /// socket that is gone (every report would be refused), and an answer the
+    /// agent never gives (no `token_matches` for the token it was handed, an
+    /// error other than its own `internal`, a line that is not the protocol)
+    /// is something else answering on its socket. Without the token there is
+    /// nothing to ask: the device cannot be reported on at all. The only
+    /// pass that learns nothing is one whose call was not sent, because it
+    /// did not fit what the pass had left.
+    fn agent_liveness(
+        &self,
+        client: &ControlPlaneClient,
+        token: Option<&Redacted<String>>,
+    ) -> Liveness {
+        let Some(token) = token else {
+            return Liveness::Unavailable(AgentFault::TokenMissing);
+        };
+        let liveness = self.agent_answers(client, token);
+        let Some(integrity) = &self.cfg.agent_integrity else {
+            return liveness;
+        };
+        match liveness {
+            // Answering as this device's agent is not enough: it must be the
+            // image's agent, behind the image's units, alone at its path
+            // (crate::agent_units).
+            // What cannot be checked is not vouched for either (fails
+            // closed, `units_unreadable`).
+            Liveness::Available => match integrity.check() {
+                Ok(()) => Liveness::Available,
+                Err(finding) => {
+                    eprintln!("punard: the management units are not as shipped: {finding}");
+                    Liveness::Unavailable(finding.fault())
+                }
+            },
+            // A socket that is gone or no longer listened on is started
+            // again: punard's Wants= on it acts only when punard starts.
+            Liveness::Unavailable(AgentFault::SocketMissing | AgentFault::ConnectionRefused) => {
+                integrity.start_socket();
+                liveness
             }
+            _ => liveness,
+        }
+    }
+
+    /// [`Inner::agent_liveness`]'s call, classified.
+    fn agent_answers(&self, client: &ControlPlaneClient, token: &Redacted<String>) -> Liveness {
+        match client.identity_status(Some(token)) {
+            Ok(AgentIdentity {
+                enrolled: true,
+                token_matches: Some(true),
+            }) => Liveness::Available,
+            Ok(AgentIdentity {
+                enrolled: false, ..
+            }) => Liveness::Unavailable(AgentFault::IdentityMissing),
+            Ok(AgentIdentity {
+                token_matches: Some(false),
+                ..
+            }) => Liveness::Unavailable(AgentFault::IdentityMismatch),
+            Ok(AgentIdentity {
+                token_matches: None,
+                ..
+            }) => Liveness::Unavailable(AgentFault::UnexpectedAnswer),
+            Err(UpstreamError::AgentUnavailable(fault)) => Liveness::Unavailable(fault),
+            // It answered, and could not read its own identity.
+            Err(UpstreamError::Refused { code, .. }) if code == "internal" => {
+                Liveness::Unavailable(AgentFault::IdentityUnreadable)
+            }
+            Err(UpstreamError::Refused { .. } | UpstreamError::TooLarge) => {
+                Liveness::Unavailable(AgentFault::UnexpectedAnswer)
+            }
+            Err(UpstreamError::Unreachable(_)) => Liveness::Unknown,
+        }
+    }
+
+    /// Record what the liveness check found, for the enrollment this pass
+    /// began with only: an episode of management interrupted starts with
+    /// one `enroll.agent` `agent_unavailable` event and ends with one
+    /// `success`, whatever happens in between (docs/api/ipc.md section 6);
+    /// the reason `enroll.status` shows follows the latest pass. The record
+    /// is saved at once, so the pair survives a restart.
+    fn note_agent(&self, actor: &AuditActor, epoch: u64, liveness: Liveness) {
+        let fault = match liveness {
+            Liveness::Available => None,
+            Liveness::Unavailable(fault) => Some(fault),
+            Liveness::Unknown => return,
+        };
+        let mut slot = self.enrollment.lock().unwrap();
+        let Some(current) = slot
+            .as_mut()
+            .filter(|_| self.enrollment_epoch.load(Ordering::SeqCst) == epoch)
+        else {
+            return;
+        };
+        match (fault, current.agent_unavailable.clone()) {
+            (Some(fault), None) => {
+                eprintln!(
+                    "punard: management interrupted: the built-in Smplify agent cannot be used \
+                     ({}); reports are held until it answers",
+                    fault.as_str()
+                );
+                self.log_audit(self.enroll_event(
+                    actor,
+                    "enroll.agent",
+                    &format!("agent.{}", fault.as_str()),
+                    "agent_unavailable",
+                    current.policy_ids(),
+                ));
+                current.agent_unavailable = Some(AgentUnavailableRecord {
+                    reason: fault.as_str().to_string(),
+                    since: utc_now_rfc3339(),
+                });
+            }
+            (Some(fault), Some(record)) if record.reason != fault.as_str() => {
+                eprintln!(
+                    "punard: management still interrupted: the built-in Smplify agent is now \
+                     {} (was {} since {})",
+                    fault.as_str(),
+                    record.reason,
+                    record.since
+                );
+                current.agent_unavailable = Some(AgentUnavailableRecord {
+                    reason: fault.as_str().to_string(),
+                    since: record.since,
+                });
+            }
+            (None, Some(record)) => {
+                eprintln!(
+                    "punard: management restored: the built-in Smplify agent answers again \
+                     (unavailable since {}, {})",
+                    record.since, record.reason
+                );
+                self.log_audit(self.enroll_event(
+                    actor,
+                    "enroll.agent",
+                    &format!("agent.{}", record.reason),
+                    AuditOutcome::Success.as_str(),
+                    current.policy_ids(),
+                ));
+                current.agent_unavailable = None;
+            }
+            _ => return,
+        }
+        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
+            eprintln!("punard: could not persist the agent's state: {e}");
+        }
+    }
+
+    /// An identity punard's release record says to wipe and the agent has
+    /// not confirmed wiped (docs/api/ipc.md section 5.11): an unenrollment's,
+    /// or a registration's enroll.start did not commit or never heard the
+    /// answer to. Asked again on every pass until it is; then the token and
+    /// the record go and the release is audited. A token without a record
+    /// is never released ([`ReleaseState::Kept`]).
+    ///
+    /// The whole exchange holds the enrollment guard, and never waits for it:
+    /// the agent is asked to wipe whatever it holds (`any_identity`), which is
+    /// right only while no enrollment is committed or being made, and the
+    /// guard is what keeps an `enroll.start` from registering in between. The
+    /// call is local and short, so an enrollment that finds the guard taken
+    /// for it waits at most for one answer from an agent that is slow anyway.
+    fn release_pending_identity(&self, actor: &AuditActor, budget: &CallBudget) {
+        let releasing = self
+            .identity_release
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|record| record.state == ReleaseState::Release);
+        if !releasing || self.enrollment.lock().unwrap().is_some() {
+            return;
+        }
+        let Some(_guard) = EnrollGuard::acquire(&self.enroll_in_progress) else {
+            return;
+        };
+        if self.enrollment.lock().unwrap().is_some() {
+            return;
+        }
+        let token = self.device_token.lock().unwrap().clone();
+        match self
+            .control_plane()
+            .within(budget.clone())
+            .unregister(token.as_ref())
+        {
+            Ok(()) => {
+                if !self.forget_released_identity() {
+                    return;
+                }
+                eprintln!(
+                    "punard: the Smplify agent confirmed it wiped this device's identity; the \
+                     release is complete"
+                );
+                self.log_audit(self.enroll_event(
+                    actor,
+                    "enroll.release",
+                    "agent",
+                    AuditOutcome::Success.as_str(),
+                    Vec::new(),
+                ));
+            }
+            Err(e) => self.release_not_confirmed(actor, &e, Vec::new()),
+        }
+    }
+
+    /// A registration enroll.start could not commit, released at once and
+    /// under enroll.start's own guard: with its own client, outside the
+    /// budget, so it is released however long enrolling took. When the agent
+    /// does not confirm, the token is kept beside the release record
+    /// enroll.start wrote before it registered, `enroll.release` `pending` is
+    /// audited, and every pass asks again.
+    fn release_uncommitted(&self, actor: &AuditActor, token: Redacted<String>) {
+        match self.control_plane().unregister(Some(&token)) {
+            Ok(()) => {
+                self.forget_released_identity();
+            }
+            Err(e) => {
+                eprintln!(
+                    "punard: enroll.start could not release the uncommitted registration \
+                     ({e}); it is released on a later pass"
+                );
+                if let Err(e) = save_device_token(&self.cfg.state_dir.join("device-token"), &token)
+                {
+                    eprintln!(
+                        "punard: could not keep the device token of the identity still to be \
+                         released ({e}); the release record alone asks for it"
+                    );
+                }
+                *self.device_token.lock().unwrap() = Some(token);
+                self.release_not_confirmed(actor, &e, Vec::new());
+            }
+        }
+    }
+
+    /// The agent confirmed it wiped what it held: nothing of an identity is
+    /// left, so neither the device token nor the release record is. The
+    /// token goes first: a record left behind only asks the agent once more,
+    /// and it confirms at once, while a token left without its record would
+    /// read as one to keep. `false` when either could not be removed; the
+    /// next pass tries again.
+    fn forget_released_identity(&self) -> bool {
+        if let Err(e) = remove_synced(&self.cfg.state_dir.join("device-token")) {
+            eprintln!(
+                "punard: the Smplify agent wiped this device's identity, and the device token \
+                 could not be removed ({e}); retried on the next pass"
+            );
+            return false;
+        }
+        *self.device_token.lock().unwrap() = None;
+        if let Err(e) = remove_synced(&self.cfg.state_dir.join(IDENTITY_RELEASE_FILE)) {
+            eprintln!(
+                "punard: the Smplify agent wiped this device's identity, and its release record \
+                 could not be removed ({e}); retried on the next pass"
+            );
+            return false;
+        }
+        *self.identity_release.lock().unwrap() = None;
+        *self.release_failure.lock().unwrap() = None;
+        true
+    }
+
+    /// The agent did not confirm a wipe. `enroll.release` `pending` is
+    /// audited when the reason is news (the first failure, or one unlike the
+    /// last), never once per pass, and the reason is kept for
+    /// `enroll.status`.
+    fn release_not_confirmed(
+        &self,
+        actor: &AuditActor,
+        error: &UpstreamError,
+        policy_ids: Vec<String>,
+    ) {
+        let reason = release_failure_reason(error);
+        let news = {
+            let mut last = self.release_failure.lock().unwrap();
+            let news = last.as_deref() != Some(reason.as_str());
+            *last = Some(reason.clone());
+            news
+        };
+        if news {
+            eprintln!(
+                "punard: the Smplify agent has not confirmed it wiped this device's identity \
+                 ({error}); asked again on every pass"
+            );
+            self.log_audit(self.enroll_event(
+                actor,
+                "enroll.release",
+                &format!("agent.{reason}"),
+                "pending",
+                policy_ids,
+            ));
+        }
+    }
+
+    /// A control-plane client whose calls wait behind every other call this
+    /// daemon has in flight ([`AgentQueue`]).
+    fn control_plane(&self) -> ControlPlaneClient {
+        ControlPlaneClient::new(&self.cfg.control_plane_socket)
+            .behind(Arc::clone(&self.control_plane_queue))
+            .requiring_systemd_listener(
+                self.cfg
+                    .agent_integrity
+                    .as_ref()
+                    .is_some_and(|integrity| integrity.require_systemd_listener),
+            )
+    }
+
+    /// Now, on this boot's monotonic clock; `None` when the boot id cannot
+    /// be read.
+    fn pass_mark(&self) -> Option<crate::enroll::PassMark> {
+        let boot_id = std::fs::read_to_string(&self.cfg.boot_id_path).ok()?;
+        let boot_id = boot_id.trim();
+        if boot_id.is_empty() {
+            return None;
+        }
+        let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+        let monotonic_ms = u64::try_from(now.tv_sec)
+            .ok()?
+            .saturating_mul(1000)
+            .saturating_add(u64::try_from(now.tv_nsec / 1_000_000).ok()?);
+        Some(crate::enroll::PassMark {
+            boot_id: boot_id.to_string(),
+            monotonic_ms,
+        })
+    }
+
+    /// A clean stop, recorded on an enrolled device so the next boot can
+    /// measure a gap in the reconcile passes that ended in it.
+    fn record_stop(&self) {
+        let Some(mark) = self.pass_mark() else {
+            return;
+        };
+        let mut slot = self.enrollment.lock().unwrap();
+        let Some(current) = slot.as_mut() else {
+            return;
+        };
+        current.stopped = Some(mark);
+        if let Err(e) = save_enrollment(&self.cfg.state_dir.join("enrollment.json"), current) {
+            eprintln!("punard: could not record the clean stop: {e}");
         }
     }
 
@@ -4827,7 +7216,14 @@ impl Inner {
     ) -> Option<LastQueryRecord> {
         let pending = match client.queries_pending(token) {
             Ok(pending) => pending,
-            Err(UpstreamError::Unreachable(_)) => return None,
+            Err(UpstreamError::Unreachable(_) | UpstreamError::AgentUnavailable(_)) => return None,
+            Err(UpstreamError::TooLarge) => {
+                eprintln!(
+                    "punard: queries.pending answered with more than this device reads; \
+                     nothing is answered this pass"
+                );
+                return None;
+            }
             Err(UpstreamError::Refused { code, message }) => {
                 // `unknown_method` here means the control plane predates
                 // M10; anything else is a refusal on its side. Either way
@@ -4865,7 +7261,11 @@ impl Inner {
             if let Err(e) = client.queries_answer(token, &query.query_id, &answer) {
                 let why = match e {
                     UpstreamError::Unreachable(why) => why,
+                    UpstreamError::AgentUnavailable(fault) => {
+                        format!("the built-in agent is unavailable ({})", fault.as_str())
+                    }
                     UpstreamError::Refused { code, message } => format!("{code}: {message}"),
+                    UpstreamError::TooLarge => "its answer was too large".to_string(),
                 };
                 eprintln!(
                     "punard: could not post the answer to query {}: {why} — it stays \
@@ -4894,9 +7294,25 @@ impl Inner {
     /// (atomic tmp+rename, 0644). Best-effort: a write failure is logged,
     /// never fatal — the file is non-authoritative display data.
     fn publish_status_summary(&self) {
-        let (enrolled, org_name) = match &*self.enrollment.lock().unwrap() {
-            Some(e) => (true, Some(e.org.display_name.clone())),
-            None => (false, None),
+        let (enrolled, org_name, management) = match &*self.enrollment.lock().unwrap() {
+            Some(e) => (
+                true,
+                Some(e.org.display_name.clone()),
+                Some(
+                    if e.agent_unavailable.is_some() {
+                        "interrupted"
+                    } else {
+                        "active"
+                    }
+                    .to_string(),
+                ),
+            ),
+            None => (false, None, None),
+        };
+        let identity_release = if enrolled {
+            None
+        } else {
+            self.pending_release().map(|release| release.state)
         };
         let overall = self
             .tracker
@@ -4917,15 +7333,21 @@ impl Inner {
                 punar_common::DeviceClassSource::Forced => "forced",
             }
             .to_string(),
+            architecture: self.apps.architecture().to_string(),
+            management,
+            identity_release,
             ts: utc_now_rfc3339(),
         };
         let mut written = self.status_written.lock().unwrap();
         let unchanged = written.as_ref().is_some_and(|w| {
             w.enrolled == summary.enrolled
                 && w.org_name == summary.org_name
+                && w.management == summary.management
+                && w.identity_release == summary.identity_release
                 && w.compliance_overall == summary.compliance_overall
                 && w.device_class == summary.device_class
                 && w.device_class_source == summary.device_class_source
+                && w.architecture == summary.architecture
         });
         if unchanged {
             return;
@@ -4952,6 +7374,231 @@ impl Inner {
     }
 }
 
+/// Beside the layer stores: the state `reconcile.compliance` last recorded
+/// for each capability it recorded as anything but `compliant`, so the audit
+/// trail's view of compliance survives a restart and is corrected however a
+/// capability recovers. Small, and written only when an event is.
+pub const COMPLIANCE_AUDITED_FILE: &str = "compliance-audited.json";
+
+/// Load [`COMPLIANCE_AUDITED_FILE`]; empty when absent or unreadable (then
+/// every capability not `compliant` is recorded once more, which is the
+/// behaviour before the file existed).
+fn load_compliance_audited(path: &Path) -> BTreeMap<String, ComplianceState> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            eprintln!(
+                "punard: {} is unreadable ({e}); starting afresh",
+                path.display()
+            );
+            BTreeMap::new()
+        }),
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+fn save_compliance_audited(
+    path: &Path,
+    audited: &BTreeMap<String, ComplianceState>,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(audited).expect("compliance states serialize");
+    write_atomic_synced(path, &bytes, 0o600)
+}
+
+/// Whether a capability's compliance state is news for the audit trail
+/// (docs/api/ipc.md section 6, `reconcile.compliance`): a state other than
+/// the one the trail last recorded for it, where a capability it never
+/// recorded, or last recorded as recovered, reads as `compliant`
+/// (`previous: None`). The reconcile summary event says every pass whether
+/// drift was found; this says which capability left or returned to
+/// compliance, including drift nothing remediates (alert-only, awaiting
+/// approval, a value only the image can change), which no remediation event
+/// records. Never one per pass: a steady state encodes nothing new.
+fn compliance_is_news(previous: Option<ComplianceState>, state: ComplianceState) -> bool {
+    match previous {
+        Some(previous) => previous != state,
+        None => state != ComplianceState::Compliant,
+    }
+}
+
+/// `enroll.start`'s refusal of a policy set the organization served. The
+/// two cases enrollment always refused keep their words; the rules the live
+/// refresh brought (docs/api/ipc.md section 5.9) say which one failed.
+fn enroll_policy_refusal(rejection: &Rejection) -> IpcError {
+    match rejection {
+        Rejection::UnusablePolicyId => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            "The control plane served a policy envelope without a usable \
+             policy_id.\n\
+             Policy: os default — enrollment writes only validated envelopes \
+             (docs/api/ipc.md section 5.9).\n\
+             Next step: report this to your administrator; nothing was changed."
+                .to_string(),
+            json!({ "param": "policy", "reason": "envelope without policy_id" }),
+        ),
+        Rejection::InvalidEnvelope(e) => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!(
+                "A fetched policy envelope failed validation: {e}.\n\
+                 Policy: os default — enrollment is all-or-nothing; nothing was \
+                 written (docs/api/ipc.md section 5.9).\n\
+                 Next step: report this to your administrator."
+            ),
+            json!({ "param": "policy", "reason": "envelope failed the loader's validation" }),
+        ),
+        Rejection::BrowserPolicyRefused(e) => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!(
+                "The fetched browser policy could not be rendered safely: {e}.\n\
+                 Policy: browser/integration/policy-allowlist.json — enrollment is all-or-nothing.\n\
+                 Next step: correct the browser policy in Smplify; nothing was changed."
+            ),
+            json!({ "param": "policy.spec.browser", "reason": "browser policy refused" }),
+        ),
+        // The one refusal a person on the device can resolve: the file may
+        // be left from an earlier enrollment. It is theirs to remove; punard
+        // never takes over a file it did not write.
+        Rejection::ForeignFileCollision(name) => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!(
+                "The organization's policy set uses the name of a file already in \
+                 policy.d that this device did not receive from it: {name}.\n\
+                 Policy: os default — enrollment never overwrites a file an \
+                 administrator put in /var/lib/punar/policy.d (docs/api/ipc.md section \
+                 5.9); nothing was written.\n\
+                 Next step: if /var/lib/punar/policy.d/{name} is left from an earlier \
+                 enrollment, remove it and enroll again; otherwise ask your \
+                 administrator to rename the policy."
+            ),
+            json!({ "param": "policy", "reason": rejection.reason() }),
+        ),
+        other => IpcError::with_details(
+            ErrorCode::InvalidParams,
+            format!(
+                "The control plane served a policy set this device refuses: {}.\n\
+                 Policy: os default — enrollment writes only a set that passes every \
+                 policy check, and nothing was written (docs/api/ipc.md section 5.9).\n\
+                 Next step: report this to your administrator.",
+                other.describe()
+            ),
+            json!({ "param": "policy", "reason": other.reason() }),
+        ),
+    }
+}
+
+/// An enrollment audit event ([`Inner::enroll_event`]), for a caller that has
+/// no daemon yet: startup, recording a policy change that landed before a
+/// crash.
+fn enrollment_event(
+    device_id: &str,
+    actor: &AuditActor,
+    action: &str,
+    resource: &str,
+    result: &str,
+    policy_ids: Vec<String>,
+) -> AuditEvent {
+    AuditEvent {
+        event_id: next_event_id(),
+        timestamp: utc_now_rfc3339(),
+        device_id: device_id.to_string(),
+        user_id: Some(actor.user_id.clone()),
+        agent_session_id: Some(AGENT_SESSION_NONE.to_string()),
+        project_id: Some(PROJECT_ID_SYSTEM.to_string()),
+        source: actor.source,
+        action: action.to_string(),
+        resource: Some(resource.to_string()),
+        decision: Decision::Allow,
+        policy_ids: if policy_ids.is_empty() {
+            vec![punar_common::audit::POLICY_PERSONAL_DEFAULTS.to_string()]
+        } else {
+            policy_ids
+        },
+        result: result.to_string(),
+    }
+}
+
+/// Whether the audit log holds an event with this id. Read line by line,
+/// and only at a start that found a policy change landed.
+fn audit_log_holds(path: &Path, event_id: &str) -> bool {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .any(|line| {
+            serde_json::from_str::<Value>(&line)
+                .is_ok_and(|event| event.get("event_id").and_then(Value::as_str) == Some(event_id))
+        })
+}
+
+/// How far [`Inner::install_enrollment`] got.
+enum Installed {
+    Whole,
+    /// Everything but the browser document, which could not be written, and
+    /// the directory could not be verifiably put back.
+    WithoutBrowserDocument,
+}
+
+/// The longest control-plane or loader text the journal repeats.
+const JOURNAL_DETAIL_CHARS: usize = 512;
+
+/// Text the device did not write, fit for one journal line: cut to
+/// [`JOURNAL_DETAIL_CHARS`] and escaped, so it cannot forge a line of its own.
+/// For every line that repeats what an organization's policy or control plane
+/// chose, at startup as on a refresh.
+fn journal_detail(text: &str) -> String {
+    let cut: String = text.chars().take(JOURNAL_DETAIL_CHARS).collect();
+    format!("{cut:?}")
+}
+
+/// A file's bytes, or `None` when it is absent or unreadable: what to put
+/// back if a change after this point has to be undone.
+fn read_if_present(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+/// Put the rendered browser document back as it was before a policy change
+/// that is being undone: the same bytes, or no file.
+fn restore_rendered(path: &Path, previous: Option<Vec<u8>>) {
+    let restored = match previous {
+        Some(bytes) => write_atomic_synced(path, &bytes, 0o600),
+        None => remove_synced(path),
+    };
+    if let Err(e) = restored {
+        eprintln!(
+            "punard: could not restore the rendered browser policy ({e}); the next start \
+             renders it again from policy.d"
+        );
+    }
+}
+
+/// The capability paths whose effective value or classification differs
+/// between two documents, including a path only one of them has. Provenance
+/// alone moving (the same value, now from another layer) is not a change a
+/// capability could act on.
+fn changed_effective_paths(old: &EffectiveDocument, new: &EffectiveDocument) -> Vec<String> {
+    let differs = |a: &EffectiveEntry<Value>, b: &EffectiveEntry<Value>| {
+        a.value != b.value || a.classification != b.classification
+    };
+    let mut changed: BTreeSet<String> = BTreeSet::new();
+    for (path, entry) in &new.entries {
+        if old
+            .entries
+            .get(path)
+            .is_none_or(|before| differs(before, entry))
+        {
+            changed.insert(path.clone());
+        }
+    }
+    for path in old.entries.keys() {
+        if !new.entries.contains_key(path) {
+            changed.insert(path.clone());
+        }
+    }
+    changed.into_iter().collect()
+}
+
 fn effective_update_channel(value: &Value) -> Option<UpdateChannel> {
     match value.as_str()? {
         "stable" => Some(UpdateChannel::Stable),
@@ -4967,10 +7614,305 @@ fn to_value<T: serde::Serialize>(value: T) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// Suppression lifts when the value a capability is asked to reach
+    /// changes, or how it is classified; the same value from another source
+    /// is not a change.
+    #[test]
+    fn a_changed_effective_value_or_classification_is_a_change() {
+        use punar_policy::SourceKind;
+        let entry = |value: &str, classification: Classification, policy_id: &str| EffectiveEntry {
+            value: json!(value),
+            provenance: Provenance {
+                kind: SourceKind::OrganizationBaseline,
+                rank: 2,
+                policy_id: policy_id.to_string(),
+                source_name: policy_id.to_string(),
+            },
+            classification,
+            user_override_permitted: false,
+        };
+        let doc = |entries: Vec<(&str, EffectiveEntry<Value>)>| EffectiveDocument {
+            computed_at: "2026-09-24T00:00:00Z".to_string(),
+            entries: entries
+                .into_iter()
+                .map(|(path, entry)| (path.to_string(), entry))
+                .collect(),
+        };
+        let old = doc(vec![
+            ("a", entry("x", Classification::AutoRemediate, "p1")),
+            ("b", entry("x", Classification::AutoRemediate, "p1")),
+            ("c", entry("x", Classification::AutoRemediate, "p1")),
+            ("gone", entry("x", Classification::AutoRemediate, "p1")),
+        ]);
+        let new = doc(vec![
+            ("a", entry("x", Classification::AutoRemediate, "p2")),
+            ("b", entry("y", Classification::AutoRemediate, "p1")),
+            ("c", entry("x", Classification::AlertOnly, "p1")),
+            ("new", entry("x", Classification::AutoRemediate, "p1")),
+        ]);
+        assert_eq!(
+            changed_effective_paths(&old, &new),
+            ["b", "c", "gone", "new"]
+        );
+        assert!(changed_effective_paths(&old, &old).is_empty());
+    }
+
+    /// enroll.start and enroll.stop wait a moment for a refresh that is
+    /// committing, rather than answer "conflict", and no longer.
+    #[test]
+    fn the_enrollment_guard_waits_briefly_for_a_commit_in_progress() {
+        let flag = AtomicBool::new(false);
+        let held = EnrollGuard::acquire(&flag).unwrap();
+        let started = Instant::now();
+        assert!(EnrollGuard::acquire_within(&flag, Duration::from_millis(60)).is_none());
+        assert!(started.elapsed() >= Duration::from_millis(60));
+        let waited = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                drop(held);
+            });
+            EnrollGuard::acquire_within(&flag, Duration::from_secs(2))
+        });
+        assert!(waited.is_some(), "released within its patience");
+        assert!(flag.load(Ordering::SeqCst), "held by the waiter");
+        drop(waited);
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    /// The refusal that asks for the organization's terms states every one of
+    /// them in words the organization cannot tamper with: its display name is
+    /// its own choice, and an escape sequence in it must not be able to
+    /// conceal the term after it on the person's terminal.
+    #[test]
+    fn a_terms_refusal_cannot_be_rewritten_by_the_organizations_name() {
+        use punar_common::ipc::EnrollmentTerm;
+
+        let org = crate::enroll::OrgRecord {
+            id: "acme".into(),
+            name: "Acme".into(),
+            display_name: "Acme\u{1b}[8m\u{202e}".into(),
+            domain: "acme.com".into(),
+        };
+        let error = super::unaccepted_terms_refusal(&org, "acme.com", &EnrollmentTerm::ALL);
+        assert!(
+            !error.message.contains('\u{1b}') && !error.message.contains('\u{202e}'),
+            "{:?}",
+            error.message
+        );
+        assert!(error.message.contains("serial number"), "{}", error.message);
+        assert!(
+            error.message.contains("you included, can unenroll it"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// `device_specific_override` is not exclusively the local administrator's
+    /// kind — its rank is stored data, so an organization may publish one. At
+    /// rank 1-3 that layer outranks this device exactly as a baseline does, and
+    /// matching on the kind alone would hand an organization's own pinned value
+    /// to the local administrator to edit because of the word it was labelled
+    /// with.
+    #[test]
+    fn admin_may_override_is_decided_by_rank_and_not_by_a_label() {
+        use punar_policy::{Classification, EffectiveEntry, Provenance, SourceKind};
+        use serde_json::json;
+
+        let entry = |kind: SourceKind, rank: u32| EffectiveEntry {
+            value: json!("x"),
+            provenance: Provenance {
+                kind,
+                rank,
+                policy_id: "p".to_string(),
+                source_name: "s".to_string(),
+            },
+            classification: Classification::AutoRemediate,
+            user_override_permitted: rank >= 5,
+        };
+
+        // Below the administrator's rung: theirs to move.
+        assert!(super::admin_may_override(&entry(
+            SourceKind::LocalUserPreference,
+            5
+        )));
+        assert!(super::admin_may_override(&entry(
+            SourceKind::OsSecureDefault,
+            6
+        )));
+        // Their own entry, at their own rank.
+        assert!(super::admin_may_override(&entry(
+            SourceKind::DeviceSpecificOverride,
+            super::DEVICE_ADMIN_RANK
+        )));
+
+        // Above it: not theirs, whatever the kind is called.
+        for rank in 1..super::DEVICE_ADMIN_RANK {
+            assert!(
+                !super::admin_may_override(&entry(SourceKind::DeviceSpecificOverride, rank)),
+                "an organization-published device_specific_override at rank {rank} \
+                 must not be treated as the local administrator's own pin"
+            );
+        }
+        assert!(!super::admin_may_override(&entry(
+            SourceKind::OrganizationBaseline,
+            2
+        )));
+        assert!(!super::admin_may_override(&entry(
+            SourceKind::OrganizationRolePolicy,
+            3
+        )));
+        // A rank-4 approved exception wins the tie by push order, so it is not
+        // the administrator's to displace either.
+        assert!(!super::admin_may_override(&entry(
+            SourceKind::TemporaryApprovedException,
+            4
+        )));
+    }
+
     use super::*;
     use std::fs::{self, OpenOptions};
 
     use punar_common::audit::AUDIT_ROTATE_BYTES;
+
+    /// enroll.start is all-or-nothing up to the swap, and after it too while
+    /// the directory can be put back: a browser document that cannot be
+    /// written leaves no record, token or file of the enrollment. When the
+    /// directory cannot be verifiably put back, the organization's files may
+    /// be live, and then the enrollment stands whole (record, token and
+    /// files together): never its files on a device that reads as personal
+    /// after the next start.
+    #[test]
+    fn an_enrollment_whose_directory_cannot_be_put_back_stands_whole() {
+        use crate::policy_set::{Step, faults};
+        const ACME_ENVELOPE: &str = include_str!(
+            "../../../fixtures/organizations/acme/policy-source-eng-baseline-v12.json"
+        );
+        let root = std::env::temp_dir().join(format!(
+            "punard-install-enrollment-{}-{}",
+            std::process::id(),
+            next_event_id()
+        ));
+        let state = root.join("state");
+        fs::create_dir_all(state.join("policy.d")).unwrap();
+        fs::write(state.join("policy.d/local.note"), b"root's own").unwrap();
+        let config = DaemonConfig::new(
+            root.join("punard.sock"),
+            state.clone(),
+            root.join("audit.jsonl"),
+        );
+        let daemon = Daemon::new(config, Registry::new(Vec::new())).unwrap();
+        let envelope: Value = serde_json::from_str(ACME_ENVELOPE).unwrap();
+        let set =
+            CanonicalSet::from_envelopes(&[envelope], crate::enroll::Assignment::Policies).unwrap();
+        let enrollment: Enrollment = serde_json::from_value(json!({
+            "version": 1,
+            "org": {"id": "acme", "name": "Acme", "display_name": "Acme", "domain": "acme.com"},
+            "enrolled_at": "2026-09-24T00:00:00Z",
+            "attestation": "simulated",
+            "policy_files": set.names(),
+            "last_sync": {"at": null, "result": null},
+            "last_inventory_hash": null,
+            "policy_hash": set.revision(),
+        }))
+        .unwrap();
+        let token = Redacted::new("tok_install".to_string());
+        let org_file = state.join("policy.d/eng-baseline-v12.json");
+
+        let prepared = policy_set::prepare(&state, &set, &[]).unwrap();
+        {
+            let _hook = faults::install(|step| match step {
+                Step::Render => Err(io::Error::other("no space left on device")),
+                _ => Ok(()),
+            });
+            assert!(
+                daemon
+                    .inner
+                    .install_enrollment(&enrollment, &token, &prepared)
+                    .is_err()
+            );
+        }
+        assert!(!state.join("enrollment.json").exists());
+        assert!(!state.join("device-token").exists());
+        assert!(!org_file.exists());
+        assert!(!state.join(policy_set::STAGING_DIR).exists());
+        assert_eq!(
+            fs::read(state.join("policy.d/local.note")).unwrap(),
+            b"root's own"
+        );
+
+        let prepared = policy_set::prepare(&state, &set, &[]).unwrap();
+        let installed = {
+            let _hook = faults::install(|step| match step {
+                Step::Render | Step::RollBack => Err(io::Error::other("no space left on device")),
+                _ => Ok(()),
+            });
+            daemon
+                .inner
+                .install_enrollment(&enrollment, &token, &prepared)
+        };
+        assert!(matches!(installed, Ok(Installed::WithoutBrowserDocument)));
+        assert!(org_file.exists(), "the organization's files are live");
+        let saved = load_enrollment(&state.join("enrollment.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.policy_files, ["eng-baseline-v12.json"], "and owned");
+        assert!(state.join("device-token").exists());
+        assert_eq!(
+            fs::read(state.join("policy.d/local.note")).unwrap(),
+            b"root's own"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every start renders the browser document again, and one that cannot
+    /// be written (a full disk; here a directory where the file goes) is
+    /// logged, not a reason to refuse to start: the device keeps its control
+    /// plane and its management, and the document on disk stays the last
+    /// one written either way.
+    #[test]
+    fn a_browser_document_that_cannot_be_written_does_not_stop_a_start() {
+        let root = std::env::temp_dir().join(format!(
+            "punard-rendered-unwritable-{}-{}",
+            std::process::id(),
+            next_event_id()
+        ));
+        let state = root.join("state");
+        let config = DaemonConfig::new(
+            root.join("punard.sock"),
+            state.clone(),
+            root.join("audit.jsonl"),
+        );
+        fs::create_dir_all(config.browser_policy_source.join("in-the-way")).unwrap();
+        assert!(Daemon::new(config, Registry::new(Vec::new())).is_ok());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A capability's compliance is audited when it changes, and at the
+    /// first pass after a start when it is not compliant; a steady state is
+    /// never audited again.
+    #[test]
+    fn a_compliance_state_is_audited_when_it_changes() {
+        use ComplianceState::*;
+        assert!(
+            !compliance_is_news(None, Compliant),
+            "never recorded, and fine"
+        );
+        assert!(
+            compliance_is_news(None, NonCompliant),
+            "never recorded, and not"
+        );
+        assert!(compliance_is_news(Some(Compliant), NonCompliant));
+        assert!(
+            compliance_is_news(Some(NonCompliant), Compliant),
+            "the recovery"
+        );
+        assert!(compliance_is_news(Some(Remediating), Exception));
+        assert!(
+            !compliance_is_news(Some(NonCompliant), NonCompliant),
+            "steady"
+        );
+        assert!(!compliance_is_news(Some(Compliant), Compliant), "steady");
+    }
 
     #[test]
     fn update_status_channel_uses_only_the_closed_effective_value() {
@@ -5197,6 +8139,8 @@ mod tests {
             selector_mount_override: Some(selector.clone()),
             boot_b_mount_override: Some(boot_b),
             root_b_mount_override: Some(root_b_mount),
+            reboot_parameter: root.join("reboot-param"),
+            staged_marker: root.join("pi-update-staged"),
             ..PiUpdateSources::default()
         };
         let daemon = Daemon::new(config, Registry::new(Vec::new())).unwrap();

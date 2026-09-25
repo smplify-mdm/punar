@@ -89,6 +89,19 @@ DeferredSurfaceBase {
     property string appUpdatePhase: "idle"
     property int appUpdatesAvailable: 0
     property string appUpdateMessage: ""
+
+    // THE PASSWORD STEP (F0 review). Installing, updating or removing an
+    // application changes what everyone on the device runs, so it needs a
+    // device administrator who has just confirmed their password. A request
+    // waits here — "install", "remove" or "update" — until the password row
+    // answers it; the argv and the IPC method its ticket is for wait with it.
+    property string appConfirm: ""
+    // For an install: the verified digest the card showed, and whether the
+    // person answered its host-access question — the two things the install
+    // argv carries besides the id.
+    property string appConfirmDigest: ""
+    property bool appConfirmAcknowledged: false
+    property string appConfirmNote: ""
     // Browse mode expands this same lazy surface into the application library;
     // no second resident launcher/store process is introduced.
     property bool appBrowse: false
@@ -135,6 +148,10 @@ DeferredSurfaceBase {
         root.windowVisible = true;
         root.open = true;
         root.probeTargets();
+        // Whether this person may change what everyone runs, so an app
+        // change asks an administrator for a password and tells anyone else
+        // who can make it.
+        DeviceAdmin.refresh();
     }
 
     Component.onCompleted: {
@@ -159,6 +176,9 @@ DeferredSurfaceBase {
         root.appUpdateMessage = "";
         root.appBrowse = false;
         root.note = "";
+        // A pending password step is abandoned with the surface, and the
+        // typed password goes with it.
+        root.cancelAppConfirm();
         hideTimer.restart(); // keep the window alive for the exit animation
     }
 
@@ -469,20 +489,14 @@ DeferredSurfaceBase {
             root.finishAppInspect()
     }
 
-    Process {
-        id: appInstallProc
-        stdout: StdioCollector {
-            id: appInstallOut
-            waitForEnd: true
-            onStreamFinished: root.finishAppInstall()
+    // Install, remove and update run `punarctl` with `--ticket-from-parent`:
+    // the password goes from this surface to punar-authd, and punarctl gets a
+    // ticket bound to it and to the one method (PasswordRun, F0-S4).
+    PasswordRun {
+        id: installRun
+        onFinished: function (exitCode, said) {
+            root.finishAppInstall(said);
         }
-        stderr: StdioCollector {
-            id: appInstallErr
-            waitForEnd: true
-            onStreamFinished: root.finishAppInstall()
-        }
-        onRunningChanged: if (!appInstallProc.running)
-            root.finishAppInstall()
     }
 
     Process {
@@ -496,20 +510,11 @@ DeferredSurfaceBase {
         })
     }
 
-    Process {
-        id: appRemoveProc
-        stdout: StdioCollector {
-            id: appRemoveOut
-            waitForEnd: true
-            onStreamFinished: root.finishAppRemove()
+    PasswordRun {
+        id: removeRun
+        onFinished: function (exitCode, said) {
+            root.finishAppRemove(said);
         }
-        stderr: StdioCollector {
-            id: appRemoveErr
-            waitForEnd: true
-            onStreamFinished: root.finishAppRemove()
-        }
-        onRunningChanged: if (!appRemoveProc.running)
-            root.finishAppRemove()
     }
 
     Process {
@@ -528,20 +533,96 @@ DeferredSurfaceBase {
             root.finishAppList()
     }
 
-    Process {
-        id: appUpdateProc
-        stdout: StdioCollector {
-            id: appUpdateOut
-            waitForEnd: true
-            onStreamFinished: root.finishAppUpdateAll()
+    PasswordRun {
+        id: updateRun
+        onFinished: function (exitCode, said) {
+            root.finishAppUpdateAll(said);
         }
-        stderr: StdioCollector {
-            id: appUpdateErr
-            waitForEnd: true
-            onStreamFinished: root.finishAppUpdateAll()
+    }
+
+    /// Hold an app change until an administrator confirms it. A person the
+    /// device says is not one is told who can make the change instead, and
+    /// is never asked for a password (punarctl checks too, before it asks).
+    function beginAppConfirm(kind: string): void {
+        if (!DeviceAdmin.mayAdminister) {
+            var doing = kind === "install"
+                ? "Installing an application for everyone on this device"
+                : kind === "remove"
+                    ? "Removing an application for everyone on this device"
+                    : "Updating applications for everyone on this device";
+            if (kind === "update") {
+                root.appUpdatePhase = "failed";
+                root.appUpdateMessage = DeviceAdmin.refusal(doing);
+            } else {
+                root.appFailure = DeviceAdmin.refusal(doing);
+            }
+            return;
         }
-        onRunningChanged: if (!appUpdateProc.running)
-            root.finishAppUpdateAll()
+        root.appConfirm = kind;
+        root.appConfirmNote = "";
+    }
+
+    function cancelAppConfirm(): void {
+        root.appConfirm = "";
+        root.appConfirmDigest = "";
+        root.appConfirmAcknowledged = false;
+        root.appConfirmNote = "";
+        appPasswordInput.text = "";
+    }
+
+    /// The password row's answer: start the held change with it.
+    function submitAppPassword(password: string): void {
+        if (root.appConfirm === "")
+            return;
+        // An empty submit is a stray Enter, not an attempt: refused here, so
+        // it never reaches punar-authd's faillock tally.
+        if (password === "") {
+            root.appConfirmNote = "Enter your password to continue, or press Esc.";
+            return;
+        }
+        var kind = root.appConfirm;
+        var digest = root.appConfirmDigest;
+        var acknowledged = root.appConfirmAcknowledged;
+        root.cancelAppConfirm();
+        queryInput.forceActiveFocus();
+        var started = false;
+        if (kind === "install") {
+            root.appPhase = "installing";
+            var installArgv = [
+                "/usr/bin/punarctl", "--json", "app", "install", root.appId, "--yes",
+                "--confirm-metadata-sha256", digest, "--ticket-from-parent"
+            ];
+            // Sent only when the person actually acknowledged, so the flag
+            // cannot become a default that travels with every install.
+            if (acknowledged)
+                installArgv.push("--acknowledge-host-access");
+            started = installRun.start(installArgv, password, "apps.install");
+        } else if (kind === "remove") {
+            root.appPhase = "removing";
+            started = removeRun.start(
+                ["/usr/bin/punarctl", "--json", "app", "remove", root.appId, "--yes",
+                 "--ticket-from-parent"],
+                password, "apps.remove");
+        } else if (kind === "update") {
+            root.appUpdatePhase = "updating";
+            root.appUpdateMessage = "Updating " + root.appUpdatesAvailable
+                + (root.appUpdatesAvailable === 1 ? " application…" : " applications…");
+            started = updateRun.start(
+                ["/usr/bin/punarctl", "--json", "app", "update", "--all", "--yes",
+                 "--ticket-from-parent"],
+                password, "apps.update");
+        }
+        if (started)
+            return;
+        if (kind === "update") {
+            root.appUpdatePhase = "failed";
+            root.appUpdateMessage = "The application updater is unavailable. Select Try again.";
+        } else {
+            root.appFailure = kind === "install"
+                ? "The application installer is unavailable."
+                : "The application uninstaller is unavailable.";
+            root.appPhase = "failed";
+        }
     }
 
     function firstError(text: string, fallback: string): string {
@@ -650,28 +731,16 @@ DeferredSurfaceBase {
             root.appPhase = "failed";
             return;
         }
-        root.appPhase = "installing";
-        try {
-            var argv = [
-                "punarctl", "--json", "app", "install", root.appId, "--yes",
-                "--confirm-metadata-sha256", digest
-            ];
-            // Sent only when the person actually acknowledged, so the flag
-            // cannot become a default that travels with every install.
-            if (needsAcknowledgement)
-                argv.push("--acknowledge-host-access");
-            appInstallProc.command = argv;
-            appInstallProc.running = true;
-        } catch (e) {
-            root.appFailure = "The application installer is unavailable.";
-            root.appPhase = "failed";
-        }
+        root.appFailure = "";
+        root.appConfirmDigest = digest;
+        root.appConfirmAcknowledged = needsAcknowledgement;
+        root.beginAppConfirm("install");
     }
 
-    function finishAppInstall(): void {
+    function finishAppInstall(said: string): void {
         if (root.appId === "" || (root.appPhase !== "installing" && root.appPhase !== "failed"))
             return;
-        var parsed = root.parseLastLine(appInstallOut.text);
+        var parsed = root.parseLastLine(installRun.output);
         if (parsed !== null && typeof parsed === "object" && parsed.installed === true) {
             Apps.recordCatalogInstallState(root.appId, true);
             var updated = ({});
@@ -682,9 +751,7 @@ DeferredSurfaceBase {
             root.appPhase = "ready";
             return;
         }
-        if (appInstallProc.running)
-            return;
-        root.appFailure = root.firstError(appInstallErr.text, "The install did not complete.");
+        root.appFailure = root.firstError(said, "The install did not complete.");
         root.appPhase = "failed";
     }
 
@@ -700,20 +767,14 @@ DeferredSurfaceBase {
             return;
         }
         root.appRemoveArmed = false;
-        root.appPhase = "removing";
-        try {
-            appRemoveProc.command = ["punarctl", "--json", "app", "remove", root.appId, "--yes"];
-            appRemoveProc.running = true;
-        } catch (e) {
-            root.appFailure = "The application uninstaller is unavailable.";
-            root.appPhase = "failed";
-        }
+        root.appFailure = "";
+        root.beginAppConfirm("remove");
     }
 
-    function finishAppRemove(): void {
+    function finishAppRemove(said: string): void {
         if (root.appId === "" || (root.appPhase !== "removing" && root.appPhase !== "failed"))
             return;
-        var parsed = root.parseLastLine(appRemoveOut.text);
+        var parsed = root.parseLastLine(removeRun.output);
         if (parsed !== null && typeof parsed === "object" && parsed.installed === false) {
             Apps.recordCatalogInstallState(root.appId, false);
             var updated = ({});
@@ -726,15 +787,13 @@ DeferredSurfaceBase {
             root.appPhase = "ready";
             return;
         }
-        if (appRemoveProc.running)
-            return;
-        root.appFailure = root.firstError(appRemoveErr.text, "The uninstall did not complete. The application remains installed.");
+        root.appFailure = root.firstError(said, "The uninstall did not complete. The application remains installed.");
         root.appRemoveArmed = false;
         root.appPhase = "failed";
     }
 
     function refreshAppUpdates(): void {
-        if (!root.appBrowse || appUpdateProc.running)
+        if (!root.appBrowse || updateRun.running)
             return;
         if (appListProc.running)
             appListProc.running = false;
@@ -778,7 +837,7 @@ DeferredSurfaceBase {
     }
 
     function requestAppUpdateAll(): void {
-        if (appUpdateProc.running || appListProc.running)
+        if (updateRun.running || appListProc.running)
             return;
         if (root.appUpdatePhase === "failed") {
             root.refreshAppUpdates();
@@ -786,22 +845,13 @@ DeferredSurfaceBase {
         }
         if (root.appUpdatesAvailable < 1)
             return;
-        root.appUpdatePhase = "updating";
-        root.appUpdateMessage = "Updating " + root.appUpdatesAvailable
-            + (root.appUpdatesAvailable === 1 ? " application…" : " applications…");
-        try {
-            appUpdateProc.command = ["punarctl", "--json", "app", "update", "--all", "--yes"];
-            appUpdateProc.running = true;
-        } catch (e) {
-            root.appUpdatePhase = "failed";
-            root.appUpdateMessage = "The application updater is unavailable. Select Try again.";
-        }
+        root.beginAppConfirm("update");
     }
 
-    function finishAppUpdateAll(): void {
+    function finishAppUpdateAll(said: string): void {
         if (root.appUpdatePhase !== "updating")
             return;
-        var parsed = root.parseLastLine(appUpdateOut.text);
+        var parsed = root.parseLastLine(updateRun.output);
         if (parsed !== null && typeof parsed === "object"
                 && typeof parsed.updated === "number" && typeof parsed.failed === "number") {
             var updated = Number(parsed.updated);
@@ -821,11 +871,9 @@ DeferredSurfaceBase {
             }
             return;
         }
-        if (appUpdateProc.running)
-            return;
         root.appUpdatePhase = "failed";
         root.appUpdateMessage = root.firstError(
-            appUpdateErr.text,
+            said,
             "The update did not complete. Installed apps were left at their last verified versions."
         );
     }
@@ -882,6 +930,31 @@ DeferredSurfaceBase {
             "kind": "project",
             "state": "shipped",
             "arg": name
+        };
+    }
+
+    // A workspace addressed by number. It carries the live name when the
+    // workspace exists and has one, so a person typing "2" sees where they
+    // are going rather than a bare digit echoed back.
+    function workspaceRow(id: int, group: string): var {
+        var live = null;
+        var wss = Hyprland.workspaces.values;
+        for (var i = 0; i < wss.length; i++) {
+            if (wss[i].id === id) {
+                live = wss[i];
+                break;
+            }
+        }
+        var named = live !== null && WorkspaceState.isNamed(live);
+        return {
+            "group": group,
+            "glyph": "WS",
+            "name": named ? "Workspace " + id + " · " + root.titleCase(String(live.name)) : "Workspace " + id,
+            "meta": "Workspace(" + id + ") · " + (live !== null ? "switch" : "opens empty") + " · Punar " + (id <= 9 ? String(id) : "Tab"),
+            "cap": true,
+            "kind": "workspace",
+            "state": "shipped",
+            "arg": String(id)
         };
     }
 
@@ -1146,7 +1219,15 @@ DeferredSurfaceBase {
         // project verb (a bare "chrom" is a search, not an intent to make a
         // workspace), and no named verb may have answered already (typing
         // "open terminal" means the terminal).
-        if (normalized !== "" && !exact && namedVerbs === 0 && actions.projectVerbUsed(q))
+        // A number addresses a workspace. This row is offered whether or not
+        // a verb was used, because "2" on its own is the shortest thing a
+        // person types when they want workspace 2, and it is placed before
+        // the create row so Enter can never fall through to a rename.
+        var wsAddress = actions.workspaceAddress(q);
+        if (wsAddress > 0)
+            out.push(root.workspaceRow(wsAddress, "Workspaces"));
+        if (normalized !== "" && !exact && namedVerbs === 0 && wsAddress < 0
+                && actions.projectVerbUsed(q))
             out.push(root.projectRow(normalized, "Projects", false));
 
         // ---- applications ----
@@ -1199,6 +1280,15 @@ DeferredSurfaceBase {
                 root.openCatalogApp(item.arg, item.catalog);
             else
                 root.askApp(item.arg);
+            return;
+        case "workspace":
+            // Void, like every other case: ipcRun builds its report line
+            // from kind and meta BEFORE it calls this, so returning a
+            // string here would be a second, silently unused answer.
+            if (actions.focusWorkspaceId(Number(item.arg)))
+                root.dismiss();
+            else
+                root.note = "That workspace could not be reached";
             return;
         case "project":
             if (actions.openProject(item.arg) >= 0)
@@ -1459,6 +1549,7 @@ DeferredSurfaceBase {
                             root.appPhase = "";
                             root.appRecord = null;
                             root.appRemoveArmed = false;
+                            root.cancelAppConfirm();
                             // The set of explainable paths is fetched from
                             // punard once, the first time a question is
                             // actually asked — never on open, never on a
@@ -1544,6 +1635,75 @@ DeferredSurfaceBase {
                         font.weight: 400
                         color: Theme.shellInputBorder
                         elide: Text.ElideRight
+                    }
+                }
+
+                // The password step for an app change (F0 review): shown
+                // only while one waits, focused when it appears. The password
+                // goes to punar-authd from here and nowhere else
+                // (PasswordRun); Esc abandons the change.
+                Item {
+                    width: parent.width
+                    height: root.appConfirm !== "" ? 47 : 0
+                    visible: root.appConfirm !== ""
+
+                    Meta {
+                        id: appPasswordLabel
+                        anchors.left: parent.left
+                        anchors.leftMargin: 16
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.appConfirm === "install" ? "Password · install for everyone"
+                            : root.appConfirm === "remove" ? "Password · remove for everyone"
+                            : "Password · update for everyone"
+                    }
+
+                    TextInput {
+                        id: appPasswordInput
+                        anchors.left: appPasswordLabel.right
+                        anchors.leftMargin: 12
+                        anchors.right: parent.right
+                        anchors.rightMargin: 16
+                        anchors.verticalCenter: parent.verticalCenter
+                        echoMode: TextInput.Password
+                        passwordCharacter: "•"
+                        font.family: Theme.fontSans
+                        font.pixelSize: 17
+                        color: Theme.shellFg
+                        clip: true
+
+                        onVisibleChanged: if (appPasswordInput.visible)
+                            appPasswordInput.forceActiveFocus()
+
+                        Keys.onPressed: function (event) {
+                            if (event.key === Qt.Key_Escape) {
+                                root.cancelAppConfirm();
+                                queryInput.forceActiveFocus();
+                                event.accepted = true;
+                            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                var typed = appPasswordInput.text;
+                                appPasswordInput.text = "";
+                                root.submitAppPassword(typed);
+                                event.accepted = true;
+                            }
+                        }
+                    }
+
+                    Meta {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 16
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: 2
+                        visible: root.appConfirmNote !== ""
+                        text: root.appConfirmNote
+                        color: Theme.shellStatusBad
+                    }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        height: Theme.hairline
+                        color: Theme.shellBorder
                     }
                 }
 

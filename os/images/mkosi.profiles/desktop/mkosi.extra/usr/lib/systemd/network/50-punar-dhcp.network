@@ -41,3 +41,24 @@ UseDomains=yes
 # This receives a network setting; it does not call an IP-geolocation service
 # or disclose the device address to a third party. UTC remains the fallback.
 UseTimezone=yes
+# THE NETWORK DOES NOT CHOOSE THIS MACHINE'S CLOCK. networkd's default,
+# UseNTP=yes, hands systemd-timesyncd whatever NTP server a DHCP server names,
+# and timesyncd speaks unauthenticated SNTP — so whoever runs the network
+# could step the wall clock backward or forward, and with it every audit
+# timestamp and every deadline that must outlive a reboot. (Grants, approvals,
+# tickets and credentials expire on the boot clock since SMP-1405, which no
+# network can move.) timesyncd uses its
+# built-in FallbackNTP= servers instead, the same ones on every network. This
+# takes away the network's right to PICK the server; it does not authenticate
+# the one timesyncd talks to, so an on-path attacker can still lie about the
+# time.
+UseNTP=no
+
+[DHCPv6]
+# The same refusal on the IPv6 path. DHCP=ipv4 above does not keep DHCPv6
+# away: with IPv6AcceptRA=yes, networkd starts its DHCPv6 client whenever a
+# router advertisement sets the managed or other-configuration flag
+# (DHCPv6Client= defaults to yes), and a DHCPv6 reply carries NTP servers too.
+# Router advertisements themselves have no NTP option, so [IPv6AcceptRA]
+# needs no line.
+UseNTP=no

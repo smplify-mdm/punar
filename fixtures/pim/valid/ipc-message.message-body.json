@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "id": "body-1",
+  "method": "mail.message_body",
+  "result": {
+    "kind": "message_body_chunk",
+    "message_id": "message_A1",
+    "offset": 0,
+    "plain_text": "The complete plain-text message body.",
+    "next_offset": null,
+    "complete": true
+  }
+}

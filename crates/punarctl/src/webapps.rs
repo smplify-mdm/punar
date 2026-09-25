@@ -22,6 +22,7 @@ use punar_common::time::utc_now_rfc3339;
 use punar_common::webapp::{
     BrowserContext, WebAppArtifacts, WebAppIconRequest, WebAppInstallResult, WebAppManifest,
     WebAppRecord, origin_from_start_url, validate_context_id, validate_manifest,
+    validate_workspace_name,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -40,7 +41,7 @@ const MAX_MANIFEST_BYTES: u64 = 4096;
 // below into only one input among several.
 const CHROMIUM_PROGRAM: &str = "/usr/lib/chromium/chromium";
 const FIXED_DISABLE_FEATURES: &str = "PunarNone";
-const ALLOWED_FLAG_PREFIXES: [&str; 7] = [
+const ALLOWED_FLAG_PREFIXES: [&str; 8] = [
     "--app=",
     "--user-data-dir=",
     "--class=",
@@ -48,6 +49,7 @@ const ALLOWED_FLAG_PREFIXES: [&str; 7] = [
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-features=PunarNone",
+    "--password-store=basic",
 ];
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -160,7 +162,32 @@ pub enum BrowserContextCommand {
         id: String,
     },
     Status,
+    /// Bind a named workspace to a context: entering the workspace switches
+    /// new windows to it. This is the same binding System Control makes.
+    Bind {
+        /// The context id, like `atlas`.
+        id: String,
+        /// The workspace name: letters, digits, spaces, `_` or `-`, at most
+        /// 32 characters, starting with a letter or digit.
+        #[arg(long)]
+        workspace: String,
+        /// Also make it the active context now, as entering the workspace
+        /// would.
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Remove a workspace's binding. If that binding chose the active
+    /// context, new windows go back to personal, as leaving the workspace
+    /// would.
+    Unbind {
+        /// The workspace name.
+        #[arg(long)]
+        workspace: String,
+    },
 }
+
+/// At most this many workspace bindings, the limit System Control keeps.
+const MAX_BINDINGS: usize = 64;
 
 #[derive(Debug, Deserialize)]
 struct WebAppView {
@@ -446,6 +473,102 @@ fn context_command(
                 println!("ACTIVE · {id} · NEW WINDOWS USE THIS CONTEXT");
             }
         }
+        BrowserContextCommand::Bind {
+            id,
+            workspace,
+            activate,
+        } => {
+            validate_workspace_name(&workspace).map_err(|reason| {
+                format!(
+                    "Workspace {workspace:?} cannot be bound.\nWhy: the {reason}.\n\
+                     Next step: use the workspace's name as Hyprland shows it."
+                )
+            })?;
+            let list = list(client, false)?;
+            if !list.contexts.iter().any(|context| context.id == id) {
+                return Err(format!(
+                    "Browser context {id:?} does not exist, so nothing was bound.\n\
+                     Next step: run `punarctl web-apps context list`."
+                )
+                .into());
+            }
+            let (mut state, _) =
+                repaired_active_state(read_active_state().ok(), &list.contexts, utc_now_rfc3339());
+            state
+                .bindings
+                .retain(|binding| binding.workspace != workspace);
+            if state.bindings.len() >= MAX_BINDINGS {
+                return Err(format!(
+                    "Workspace {workspace:?} was not bound.\n\
+                     Why: at most {MAX_BINDINGS} workspaces can be bound.\n\
+                     Next step: `punarctl web-apps context unbind --workspace <name>` frees one."
+                )
+                .into());
+            }
+            state.bindings.push(ContextBinding {
+                workspace: workspace.clone(),
+                context: id.clone(),
+            });
+            if activate {
+                state.active = id.clone();
+                state.active_cause = format!("workspace:{workspace}");
+            }
+            state.updated = utc_now_rfc3339();
+            write_json_atomic(&context_state_path()?, &state, USER_FILE_MODE)?;
+            if json_output {
+                print_json(&serde_json::to_value(&state).map_err(|e| e.to_string())?)?;
+            } else {
+                let mut out = fmt::verdict(
+                    style,
+                    Slot::Ok,
+                    &format!("Bound · workspace {workspace} · {id}"),
+                );
+                out.push_str(&render_bindings(style, &state.bindings));
+                print!("{out}");
+            }
+        }
+        BrowserContextCommand::Unbind { workspace } => {
+            validate_workspace_name(&workspace).map_err(|reason| {
+                format!(
+                    "Workspace {workspace:?} cannot be unbound.\nWhy: the {reason}.\n\
+                     Next step: `punarctl web-apps context status` lists the bound workspaces."
+                )
+            })?;
+            let mut state = read_active_state().map_err(|_| {
+                format!(
+                    "Workspace {workspace:?} is not bound, so nothing was removed.\n\
+                     Next step: `punarctl web-apps context status` lists the bound workspaces."
+                )
+            })?;
+            let before = state.bindings.len();
+            state
+                .bindings
+                .retain(|binding| binding.workspace != workspace);
+            if state.bindings.len() == before {
+                return Err(format!(
+                    "Workspace {workspace:?} is not bound, so nothing was removed.\n\
+                     Next step: `punarctl web-apps context status` lists the bound workspaces."
+                )
+                .into());
+            }
+            if state.active_cause == format!("workspace:{workspace}") {
+                state.active = "personal".into();
+                state.active_cause = "default".into();
+            }
+            state.updated = utc_now_rfc3339();
+            write_json_atomic(&context_state_path()?, &state, USER_FILE_MODE)?;
+            if json_output {
+                print_json(&serde_json::to_value(&state).map_err(|e| e.to_string())?)?;
+            } else {
+                let mut out = fmt::verdict(
+                    style,
+                    Slot::Ok,
+                    &format!("Unbound · workspace {workspace} · active {}", state.active),
+                );
+                out.push_str(&render_bindings(style, &state.bindings));
+                print!("{out}");
+            }
+        }
         BrowserContextCommand::Status => {
             let state = read_active_state().unwrap_or(ActiveContext {
                 version: 1,
@@ -476,11 +599,44 @@ fn context_command(
                         ),
                     ],
                 ));
+                out.push_str(&render_bindings(style, &state.bindings));
                 print!("{out}");
             }
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The workspace bindings: which named workspace switches new windows to
+/// which context. The same list System Control keeps.
+fn render_bindings(style: &Style, bindings: &[ContextBinding]) -> String {
+    let mut out = fmt::section(
+        style,
+        "Workspace bindings",
+        "entering one switches new windows",
+    );
+    if bindings.is_empty() {
+        out.push_str(&fmt::note(
+            style,
+            "No workspace is bound · punarctl web-apps context bind <context> --workspace <name>",
+        ));
+        return out;
+    }
+    // Workspace names are case-sensitive and row labels are upper-cased, so
+    // the name is printed verbatim in the description.
+    let rows: Vec<Row> = bindings
+        .iter()
+        .map(|binding| {
+            Row::new(
+                &binding.context,
+                "bound",
+                Slot::Neutral,
+                &format!("workspace {}", binding.workspace),
+            )
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    out
 }
 
 fn call(client: &Client, method: &str, params: Option<Value>) -> WebResult<Value> {
@@ -990,6 +1146,27 @@ fn chromium_args_for_target(
         OsString::from("--no-first-run"),
         OsString::from("--no-default-browser-check"),
         OsString::from(format!("--disable-features={FIXED_DISABLE_FEATURES}")),
+        // THE BROWSER PUNAR SHIPS IS NOT A CLIENT OF THE DEVICE-WIDE SECRET
+        // STORE. Left to itself Chromium asks org.freedesktop.secrets for its
+        // "Safe Storage" key on every start — observed on the pinned snapshot's
+        // own Chromium 151 under XDG_CURRENT_DESKTOP=Hyprland, which is not a
+        // desktop it recognizes. The image ships gnome-keyring so that
+        // third-party apps have a Secret Service at all, and
+        // docs/design/third-party-apps.md says in as many words what that
+        // protocol is: there is NO per-application access control, so every
+        // caller holding the bus name can read every unlocked item. Chromium's
+        // key is the one that decrypts its saved passwords and cookies, so
+        // leaving it there hands the browser's credentials to any app whose
+        // Flatpak metadata asks for `org.freedesktop.secrets=talk`. Punar's
+        // enforcement point is the sandbox, and the sandbox withholds the
+        // user's home — it deliberately does not withhold that bus name.
+        //
+        // `basic` keeps the key in the profile directory instead, obfuscated
+        // rather than protected. That is the honest trade and it is the right
+        // way round: it is weaker only against something already reading this
+        // user's home as this user, which can read the whole profile anyway,
+        // and the disk is encrypted at rest.
+        OsString::from("--password-store=basic"),
     ]);
     for arg in &args {
         let arg = arg.to_string_lossy();
@@ -1283,8 +1460,13 @@ mod tests {
     fn chromium_builder_has_only_the_closed_flag_vocabulary() {
         let args =
             chromium_args_for_profile(Some(&app()), Path::new("/home/alice/atlas"), true).unwrap();
-        assert_eq!(args.len(), 7);
+        assert_eq!(args.len(), 8);
         assert!(args.contains(&OsString::from("--ozone-platform=wayland")));
+        // The browser keeps its own key rather than asking the device-wide
+        // Secret Service for it. Asserted by value, not by prefix: `basic` is
+        // the whole point, and `--password-store=gnome-libsecret` would satisfy
+        // a prefix check while doing exactly what this flag exists to stop.
+        assert!(args.contains(&OsString::from("--password-store=basic")));
         for arg in args {
             let arg = arg.to_string_lossy();
             assert!(
@@ -1304,7 +1486,7 @@ mod tests {
             chromium_args_for_profile(Some(&app()), Path::new("/home/alice/atlas"), true).unwrap();
         let preview = launch_preview(&args);
         assert_eq!(preview["program"], json!("/usr/lib/chromium/chromium"));
-        assert_eq!(preview["argv"].as_array().unwrap().len(), 7);
+        assert_eq!(preview["argv"].as_array().unwrap().len(), 8);
         assert!(preview.get("command").is_none());
         assert!(preview.get("shell").is_none());
     }
@@ -1314,8 +1496,8 @@ mod tests {
         let mut args =
             chromium_args_for_profile(None, Path::new("/home/alice/personal"), false).unwrap();
         append_navigation_urls(&mut args, &["https://example.com/docs".into()]).unwrap();
-        assert_eq!(args[5], OsString::from("--"));
-        assert_eq!(args[6], OsString::from("https://example.com/docs"));
+        assert_eq!(args[6], OsString::from("--"));
+        assert_eq!(args[7], OsString::from("https://example.com/docs"));
 
         assert!(append_navigation_urls(&mut args, &["--no-sandbox".into()]).is_err());
     }

@@ -158,6 +158,13 @@ pub struct EnrollStart {
     pub enrolled_at: Option<String>,
     #[serde(default)]
     pub first_sync: Option<FirstSync>,
+    /// Whether a person on this device may unenroll it later.
+    #[serde(default)]
+    pub removable: Option<bool>,
+    /// Whether the organization owns this device, and so also receives its
+    /// serial number and every app installed for all users.
+    #[serde(default)]
+    pub organization_owned: Option<bool>,
 }
 
 /// The `first_sync` object of [`EnrollStart`].
@@ -182,6 +189,89 @@ pub struct EnrollStatus {
     pub attestation: Option<String>,
     #[serde(default)]
     pub last_sync: Option<LastSync>,
+    /// Whether a person on this device may unenroll it.
+    #[serde(default)]
+    pub removable: Option<bool>,
+    /// Whether the organization owns this device.
+    #[serde(default)]
+    pub organization_owned: Option<bool>,
+    /// What the organization can see: the fields of the inventory it last
+    /// received. Absent from a daemon that predates it.
+    #[serde(default)]
+    pub organization_view: Option<OrganizationView>,
+    /// The organization's policy as the device enforces it, and how the last
+    /// check for a newer one went. Absent from a daemon that predates it.
+    #[serde(default)]
+    pub policy: Option<EnrollPolicy>,
+    /// Whether the organization can manage the device right now. Absent from
+    /// a daemon that predates it.
+    #[serde(default)]
+    pub management: Option<Management>,
+    /// A Smplify identity an unenrollment has not finished releasing.
+    #[serde(default)]
+    pub identity_release: Option<IdentityRelease>,
+}
+
+/// The `management` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct Management {
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+/// The `identity_release` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct IdentityRelease {
+    /// `pending` or `kept`.
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// The `policy` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct EnrollPolicy {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub revision: Option<String>,
+    /// When the device fetched the policy it enforces.
+    #[serde(default)]
+    pub fetched_at: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub changed_at: Option<String>,
+    #[serde(default)]
+    pub last_refresh: Option<PolicyRefresh>,
+}
+
+/// The `last_refresh` object of [`EnrollPolicy`].
+#[derive(Deserialize)]
+pub struct PolicyRefresh {
+    pub result: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// The `organization_view` object of [`EnrollStatus`].
+#[derive(Deserialize)]
+pub struct OrganizationView {
+    #[serde(default)]
+    pub sent_at: Option<String>,
+    #[serde(default)]
+    pub categories: Vec<OrganizationViewCategory>,
+}
+
+/// One category of [`OrganizationView`].
+#[derive(Deserialize)]
+pub struct OrganizationViewCategory {
+    pub category: String,
+    #[serde(default)]
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub counts: std::collections::BTreeMap<String, u64>,
 }
 
 /// The `last_sync` object of [`EnrollStatus`].
@@ -201,6 +291,9 @@ pub struct EnrollStop {
     #[allow(dead_code)]
     pub enrolled: bool,
     pub removed_policy_ids: Vec<String>,
+    /// `released` or `pending`; absent from a daemon that predates it.
+    #[serde(default)]
+    pub identity_release: Option<String>,
 }
 
 /// `audit.tail` result (contract section 5.5). Events are
@@ -209,6 +302,10 @@ pub struct EnrollStop {
 #[derive(Deserialize)]
 pub struct AuditTail {
     pub events: Vec<AuditEventView>,
+    /// Other people's events inside the window, counted and never shown
+    /// (F0-S3). Absent from a daemon older than the scoping.
+    #[serde(default)]
+    pub withheld: Option<u64>,
 }
 
 #[derive(Deserialize)]

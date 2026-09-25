@@ -26,6 +26,14 @@ QMP_PORT="${PUNAR_QMP_PORT:-4445}"
 VNC_PORT="$((5900 + VNC_DISPLAY))"
 DISPLAY_BACKEND="${PUNAR_VM_DISPLAY:-auto}"
 VNC_PASSWORD="${PUNAR_VNC_PASSWORD:-}"
+# EIGHT CHARACTERS, AND THE PROTOCOL DECIDES THAT, NOT US. RFB's VNC
+# authentication derives a DES key from the first 8 bytes of the password and
+# discards the rest, so QEMU silently truncates. A longer value does not fail —
+# it works, as its own first 8 characters, which is how a correct-looking
+# password gets rejected and sends somebody looking for a broken viewer.
+if [ "${#VNC_PASSWORD}" -gt 8 ]; then
+    die "PUNAR_VNC_PASSWORD is ${#VNC_PASSWORD} characters; RFB VNC authentication uses only the first 8, so pick a password of 8 characters or fewer"
+fi
 OPEN_VIEWER="${PUNAR_VM_OPEN_VIEWER:-1}"
 
 die() {

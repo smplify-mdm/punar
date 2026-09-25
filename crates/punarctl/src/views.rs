@@ -334,7 +334,11 @@ pub fn update_apply(style: &Style, result: &Value) -> Result<String, String> {
                 } else {
                     Slot::Neutral
                 },
-                "use --reboot or restart when ready",
+                if applied.one_shot_trial {
+                    "use --reboot or restart when ready · switching off instead discards it"
+                } else {
+                    "use --reboot or restart when ready"
+                },
             ),
         ],
     ));
@@ -402,6 +406,7 @@ fn compliance_label(capability: &str) -> &str {
         "system.hostname" => "Hostname",
         "time.timezone" => "Timezone",
         "system.update_channel" => "Update channel",
+        "system.keymap" => "Keyboard",
         other => other,
     }
 }
@@ -486,6 +491,255 @@ fn device_context(hostname: &str, enrolled: bool) -> String {
     )
 }
 
+/// A byte count as a person reads it: binary units for memory.
+fn gibibytes(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+/// `punarctl device`: who this device is (from `status`, when that read
+/// answered), what it is made of, and its power.
+pub fn device(
+    style: &Style,
+    result: &Value,
+    status: Option<&Value>,
+    hostname: &str,
+) -> Result<String, String> {
+    let answer: punar_common::ipc::DevicePostureResult = parse(result)?;
+    let status: Option<model::Status> = status.and_then(|value| parse(value).ok());
+    let context = match &status {
+        Some(s) => device_context(&s.hostname, s.enrolled),
+        None => hostname.to_string(),
+    };
+    let mut out = fmt::masthead(style, "Device", &context);
+    let hw = &answer.hardware;
+    let unknown = "unknown".to_string();
+    let mut rows = Vec::new();
+    if let Some(s) = &status {
+        rows.push(Row::new(
+            "Device",
+            &s.mode,
+            Slot::Neutral,
+            &format!(
+                "{} · {} · {}",
+                s.hostname,
+                s.device_id,
+                if s.enrolled {
+                    "enrolled"
+                } else {
+                    "not enrolled"
+                }
+            ),
+        ));
+        if let Some(device) = &s.device {
+            rows.push(Row::new(
+                "Class",
+                &device.class,
+                Slot::Neutral,
+                &format!("{} · punarctl status shows the facts", device.source),
+            ));
+        }
+    }
+    let maker = hw.manufacturer.clone().unwrap_or_else(|| unknown.clone());
+    let mut model = vec![
+        hw.model_name
+            .clone()
+            .unwrap_or_else(|| "model unknown".into()),
+    ];
+    if let Some(bios) = &hw.bios_version {
+        model.push(format!("firmware {bios}"));
+    }
+    rows.push(Row::new(
+        "Maker",
+        &printable(&maker),
+        Slot::Neutral,
+        &printable(&model.join(" · ")),
+    ));
+    let threads = hw
+        .cpu_threads
+        .map_or_else(|| "unknown".to_string(), |n| format!("{n} threads"));
+    let mut cpu = vec![
+        hw.cpu_model
+            .clone()
+            .unwrap_or_else(|| "model unknown".into()),
+    ];
+    if let Some(vendor) = &hw.cpu_vendor {
+        cpu.push(vendor.clone());
+    }
+    if let Some(cores) = hw.cpu_cores {
+        cpu.push(format!("{cores} cores"));
+    }
+    rows.push(Row::new(
+        "CPU",
+        &threads,
+        Slot::Neutral,
+        &printable(&cpu.join(" · ")),
+    ));
+    rows.push(Row::new(
+        "Memory",
+        &hw.memory_total_bytes
+            .map_or_else(|| unknown.clone(), gibibytes),
+        Slot::Neutral,
+        "",
+    ));
+    rows.push(Row::new(
+        "Storage",
+        &hw.device_capacity_bytes.map_or_else(
+            || unknown.clone(),
+            |bytes| format!("{} GB", bytes / 1_000_000_000),
+        ),
+        Slot::Neutral,
+        &hw.root_filesystem_type
+            .as_deref()
+            .map(|fs| format!("root filesystem {}", printable(fs)))
+            .unwrap_or_default(),
+    ));
+    out.push_str(&fmt::rows(style, &rows));
+
+    out.push('\n');
+    out.push_str(&fmt::section(style, "Power", "read now"));
+    if answer.power.batteries.is_empty() {
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                "Battery",
+                "None",
+                Slot::Neutral,
+                "no battery reported · a desktop or a virtual machine says so truthfully",
+            )],
+        ));
+    } else {
+        let rows: Vec<Row> = answer
+            .power
+            .batteries
+            .iter()
+            .map(|battery| {
+                Row::new(
+                    &battery.name,
+                    &battery
+                        .capacity_percent
+                        .map_or_else(|| "unknown".to_string(), |p| format!("{p} %")),
+                    Slot::Neutral,
+                    battery.status.as_deref().unwrap_or("status not reported"),
+                )
+            })
+            .collect();
+        out.push_str(&fmt::rows(style, &rows));
+    }
+    out.push_str(&fmt::note(
+        style,
+        "Security posture · punarctl device posture",
+    ));
+    Ok(out)
+}
+
+/// `punarctl device posture`: what the device can prove about itself. The
+/// same states a managing organization receives, from the same collector.
+pub fn device_posture(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let answer: punar_common::ipc::DevicePostureResult = parse(result)?;
+    let p = &answer.posture;
+    let mut out = fmt::masthead(style, "Device posture", hostname);
+    let tri = |value: Option<bool>, yes: &'static str, no: &'static str| match value {
+        Some(true) => (yes, Slot::Ok),
+        Some(false) => (no, Slot::Bad),
+        None => ("unknown", Slot::Warn),
+    };
+    let mut rows = Vec::new();
+
+    let (word, slot) = tri(p.disk_encryption_enabled, "LUKS2", "not encrypted");
+    rows.push(Row::new(
+        "Encryption",
+        word,
+        slot,
+        match p.disk_encryption_enabled {
+            Some(true) => "every data path (/var, /home) is proven on LUKS2",
+            Some(false) => "a data path is on storage that is not LUKS2",
+            None => "the storage evidence could not be read",
+        },
+    ));
+
+    let (word, slot) = match (p.uefi, p.secure_boot) {
+        (Some(false), _) => ("not uefi", Slot::Neutral),
+        (_, value) => tri(value, "enabled", "disabled"),
+    };
+    rows.push(Row::new(
+        "Secure Boot",
+        word,
+        slot,
+        match (p.uefi, p.secure_boot) {
+            (Some(false), _) => "this device did not boot under UEFI",
+            (_, Some(true)) => "the firmware enforced signed boot",
+            (_, Some(false)) => "UEFI boot, without Secure Boot",
+            (_, None) => "the firmware variable could not be read",
+        },
+    ));
+
+    let tpm = match (p.tpm_present, &p.tpm_version) {
+        (Some(true), Some(version)) => (version.as_str(), Slot::Ok),
+        (Some(true), None) => ("present", Slot::Ok),
+        (Some(false), _) => ("absent", Slot::Neutral),
+        (None, _) => ("unknown", Slot::Warn),
+    };
+    rows.push(Row::new("TPM", tpm.0, tpm.1, ""));
+
+    // SPEC section 1.22: a simulated Secure Boot or TPM is labelled.
+    let (word, detail) = match p.is_virtual {
+        Some(true) => (
+            "yes",
+            format!(
+                "{} · Secure Boot and TPM here are the hypervisor's",
+                p.virtualization.as_deref().unwrap_or("hypervisor")
+            ),
+        ),
+        Some(false) => ("no", String::new()),
+        None => ("unknown", String::new()),
+    };
+    rows.push(Row::new(
+        "Virtual",
+        word,
+        Slot::Neutral,
+        &printable(&detail),
+    ));
+
+    let (word, slot) = match (p.firewall.as_deref(), p.firewall_enabled) {
+        (None, _) => ("unknown", Slot::Warn),
+        (Some(_), value) => tri(value, "enabled", "disabled"),
+    };
+    rows.push(Row::new(
+        "Firewall",
+        word,
+        slot,
+        p.firewall.as_deref().unwrap_or("no firewall capability"),
+    ));
+
+    let (word, slot, detail) = match p.os_patch_status {
+        punar_common::device::PatchStatus::UpToDate => ("up to date", Slot::Ok, ""),
+        punar_common::device::PatchStatus::UpdatesAvailable => (
+            "available",
+            Slot::Warn,
+            if p.reboot_required == Some(true) {
+                "a staged release waits for a restart"
+            } else {
+                "punarctl update status"
+            },
+        ),
+        punar_common::device::PatchStatus::Unknown => (
+            "unknown",
+            Slot::Neutral,
+            "no release is staged, and nothing checks on its own · punarctl update check",
+        ),
+    };
+    rows.push(Row::new("Updates", word, slot, detail));
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        &format!(
+            "The posture a managing organization receives · read {}",
+            fmt::timestamp(&answer.checked_at)
+        ),
+    ));
+    Ok(out)
+}
+
 /// `punarctl status`. `org_policy_ids` is the policy-id list fetched from
 /// `enroll.status` when the device is enrolled (the status result itself
 /// carries only the org identity) — empty when unenrolled or when the
@@ -538,7 +792,213 @@ pub fn compliance(style: &Style, result: &Value) -> Result<String, String> {
     Ok(out)
 }
 
-pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Result<String, String> {
+/// What `punarctl status` reads beyond punard's `status`, one call per row
+/// (the D-014 status plate's firewall, AI, approval, grant and update rows).
+/// Each keeps its own error, so a daemon that is down degrades only the row
+/// it answers for.
+pub struct StatusLive {
+    pub firewall: Result<Value, crate::ipc::CallError>,
+    pub agents: Result<Value, crate::ipc::CallError>,
+    pub alerts: Result<Value, crate::ipc::CallError>,
+    pub approvals: Result<Value, crate::ipc::CallError>,
+    pub privilege: Result<Value, crate::ipc::CallError>,
+    pub update: Result<Value, crate::ipc::CallError>,
+}
+
+impl StatusLive {
+    /// The reads by the key `status --all --json` prints them under.
+    pub fn named(&self) -> [(&'static str, &Result<Value, crate::ipc::CallError>); 6] {
+        [
+            ("firewall", &self.firewall),
+            ("agents", &self.agents),
+            ("alerts", &self.alerts),
+            ("approvals", &self.approvals),
+            ("privilege", &self.privilege),
+            ("update", &self.update),
+        ]
+    }
+}
+
+/// Up to three names, then how many more.
+fn first_few(names: &[String]) -> String {
+    let mut shown = names.iter().take(3).cloned().collect::<Vec<_>>();
+    if names.len() > 3 {
+        shown.push(format!("+{} more", names.len() - 3));
+    }
+    shown.join(" · ")
+}
+
+/// One live row, or the row saying its daemon did not answer. A read that
+/// fails never takes the rest of the view with it.
+fn live_row<T: DeserializeOwned>(
+    label: &str,
+    read: &Result<Value, crate::ipc::CallError>,
+    render: impl FnOnce(T) -> Row,
+) -> Row {
+    let why = match read {
+        Ok(value) => match parse::<T>(value) {
+            Ok(parsed) => return render(parsed),
+            Err(why) => why,
+        },
+        Err(error) => error
+            .message()
+            .lines()
+            .next()
+            .unwrap_or("no answer")
+            .to_string(),
+    };
+    Row::new(label, "Unknown", Slot::Bad, &printable(&why))
+}
+
+fn status_live_rows(live: &StatusLive) -> Vec<Row> {
+    vec![
+        live_row("Firewall", &live.firewall, |get: model::CapabilityGet| {
+            let d = get.descriptor;
+            Row::new(
+                "Firewall",
+                &state_str(&d.current_state),
+                state_slot(&d),
+                &format!(
+                    "desired {} · verify {}",
+                    state_str(&d.desired_state),
+                    d.verification
+                ),
+            )
+        }),
+        live_row("AI sessions", &live.agents, |list: model::AgentsList| {
+            let active: Vec<String> = list
+                .sessions
+                .iter()
+                .filter(|session| session.status == "active")
+                .map(|session| session.session_id.clone())
+                .collect();
+            let mut detail = if active.is_empty() {
+                "no agent session".to_string()
+            } else {
+                first_few(&active)
+            };
+            if !list.detections.is_empty() {
+                detail.push_str(&format!(
+                    " · {} unknown — punarctl agents list",
+                    list.detections.len()
+                ));
+            }
+            Row::new(
+                "AI sessions",
+                &format!("{} active", active.len()),
+                Slot::Neutral,
+                &detail,
+            )
+        }),
+        live_row("Unknown AI", &live.alerts, |list: model::AlertsList| {
+            let live: Vec<String> = list
+                .alerts
+                .iter()
+                .filter(|alert| alert.state == "live")
+                .map(|alert| printable(&alert.agent))
+                .collect();
+            if live.is_empty() {
+                Row::new("Unknown AI", "None", Slot::Ok, "no live alert")
+            } else {
+                Row::new(
+                    "Unknown AI",
+                    &format!(
+                        "{} alert{}",
+                        live.len(),
+                        if live.len() == 1 { "" } else { "s" }
+                    ),
+                    Slot::Bad,
+                    &format!("{} · punarctl agents alerts", first_few(&live)),
+                )
+            }
+        }),
+        live_row(
+            "Approvals",
+            &live.approvals,
+            |list: model::ApprovalsList| {
+                let pending: Vec<String> = list
+                    .approvals
+                    .iter()
+                    .filter(|envelope| envelope.approval.status == "pending")
+                    .map(|envelope| envelope.approval.approval_id.clone())
+                    .collect();
+                if pending.is_empty() {
+                    Row::new("Approvals", "None", Slot::Ok, "nothing is waiting on you")
+                } else {
+                    Row::new(
+                        "Approvals",
+                        &format!("{} pending", pending.len()),
+                        Slot::Warn,
+                        &format!("{} · punarctl approvals list", first_few(&pending)),
+                    )
+                }
+            },
+        ),
+        live_row(
+            "Privilege",
+            &live.privilege,
+            |status: model::PrivilegeStatus| match status.grants.as_slice() {
+                [] => Row::new("Privilege", "None", Slot::Ok, "no grant held"),
+                [grant, rest @ ..] => {
+                    let more = if rest.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · +{} more", rest.len())
+                    };
+                    Row::new(
+                        "Privilege",
+                        &format!("{} live", status.grants.len()),
+                        Slot::Warn,
+                        &format!(
+                            "{} · {} · until {}{more} · punarctl privilege revoke",
+                            grant.grant_id,
+                            grant.capability,
+                            fmt::timestamp(&grant.expires_at)
+                        ),
+                    )
+                }
+            },
+        ),
+        live_row("Updates", &live.update, |status: UpdateStatusResult| {
+            let running = status.current.version.as_deref().unwrap_or("unknown");
+            let next = status.desired.version.as_deref().unwrap_or("unknown");
+            match status.desired.state {
+                DesiredReleaseState::Staged => Row::new(
+                    "Updates",
+                    "Staged",
+                    Slot::Warn,
+                    &format!("{next} · running {running} · a restart boots it"),
+                ),
+                DesiredReleaseState::Available => Row::new(
+                    "Updates",
+                    "Available",
+                    Slot::Warn,
+                    &format!("{next} · running {running} · punarctl update apply"),
+                ),
+                DesiredReleaseState::Unknown => Row::new(
+                    "Updates",
+                    "Unknown",
+                    Slot::Neutral,
+                    &format!(
+                        "running {running} · {}",
+                        status
+                            .desired
+                            .reason
+                            .as_deref()
+                            .unwrap_or("no verified update decision")
+                    ),
+                ),
+            }
+        }),
+    ]
+}
+
+pub fn status(
+    style: &Style,
+    result: &Value,
+    org_policy_ids: &[String],
+    live: &StatusLive,
+) -> Result<String, String> {
     let s: model::Status = parse(result)?;
     let mut out = fmt::masthead(style, "Status", &device_context(&s.hostname, s.enrolled));
 
@@ -594,7 +1054,7 @@ pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Resul
             "Organization",
             "",
             Slot::Neutral,
-            &format!("{} · {detail}", org.display_name),
+            &format!("{} · {}", printable(&org.display_name), printable(&detail)),
         ));
     }
     rows.extend([
@@ -629,6 +1089,13 @@ pub fn status(style: &Style, result: &Value, org_policy_ids: &[String]) -> Resul
         out.push('\n');
         out.push_str(&fmt::rows(style, &compliance_rows(compliance, s.enrolled)));
     }
+    out.push('\n');
+    out.push_str(&fmt::section(
+        style,
+        "Right now",
+        "each row asks its own daemon",
+    ));
+    out.push_str(&fmt::rows(style, &status_live_rows(live)));
     if !s.enrolled {
         out.push_str(&fmt::note(
             style,
@@ -717,11 +1184,16 @@ fn descriptor_rows(d: &model::Descriptor) -> Vec<Row> {
         ),
     ];
     if let Some(privilege) = &d.privilege_required {
+        // No person on a Punar device is root, so the way a person meets this
+        // requirement is a grant for exactly this capability.
         rows.push(Row::new(
             "Privilege",
             privilege,
             Slot::Neutral,
-            "run mutations as root · just-in-time elevation arrives in Milestone 9",
+            &format!(
+                "a person asks first · punarctl privilege request --capability {}",
+                d.capability
+            ),
         ));
     }
     if let Some(approval) = &d.approval_requirement {
@@ -847,8 +1319,18 @@ pub fn set(
 pub fn audit(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let tail: model::AuditTail = parse(result)?;
     let mut out = fmt::masthead(style, "Audit", &personal_context(hostname));
+    // Other people's events are theirs (F0-S3): the daemon leaves them out
+    // and says how many, so "is this everything?" has an honest answer.
+    let withheld = match tail.withheld {
+        Some(0) | None => String::new(),
+        Some(1) => " · 1 event of another person on this device withheld".to_string(),
+        Some(n) => format!(" · {n} events of other people on this device withheld"),
+    };
     if tail.events.is_empty() {
-        out.push_str(&fmt::note(style, "No audit events recorded yet"));
+        out.push_str(&fmt::note(
+            style,
+            &format!("No audit events recorded yet{withheld}"),
+        ));
         return Ok(out);
     }
 
@@ -892,7 +1374,7 @@ pub fn audit(style: &Style, result: &Value, hostname: &str) -> Result<String, St
     out.push_str(&fmt::note(
         style,
         &format!(
-            "{} events · newest last · local only · nothing leaves this machine",
+            "{} events · newest last · local only · nothing leaves this machine{withheld}",
             tail.events.len()
         ),
     ));
@@ -904,6 +1386,76 @@ pub fn audit(style: &Style, result: &Value, hostname: &str) -> Result<String, St
 /// the marker. An M3-shaped result (report-only daemon) still renders
 /// with the M3 wording — the view never claims a remediation that did
 /// not happen.
+/// `punarctl reconcile --quiet`: one line when the pass changed something
+/// or failed to, nothing when it only confirmed what was already so. The
+/// timer runs this every two minutes, and the journal is durable: the full
+/// report of an unchanged pass there said nothing new, while every pass is
+/// audited in punard's own log (a `reconcile` event, one per remediation
+/// attempt and one per compliance change; docs/api/ipc.md section 6).
+/// Capability ids are the daemon's closed identifiers; no value is printed.
+pub fn reconcile_change_line(result: &Value) -> Result<Option<String>, String> {
+    let report: model::Reconcile = parse(result)?;
+    let named = |outcomes: &[&str]| -> Vec<&str> {
+        report
+            .capabilities
+            .iter()
+            .filter(|entry| {
+                entry
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|remediation| outcomes.contains(&remediation))
+            })
+            .map(|entry| entry.capability.as_str())
+            .collect()
+    };
+    let applied = named(&["applied"]);
+    let failed = named(&["apply_failed", "verify_failed"]);
+    if applied.is_empty() && failed.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = Vec::new();
+    if !applied.is_empty() {
+        parts.push(format!("remediated {}", applied.join(", ")));
+    }
+    if !failed.is_empty() {
+        parts.push(format!("remediation failed for {}", failed.join(", ")));
+    }
+    Ok(Some(format!(
+        "punarctl reconcile: {} (drift in {} of {} capabilities before the pass)",
+        parts.join("; "),
+        report.drift_count,
+        report.capabilities.len()
+    )))
+}
+
+/// `punarctl agents scan --quiet`: one line when the pass changed the
+/// detection set, nothing when it did not. Changes are audited by
+/// punar-agentd itself (`agents.scan` detected/cleared); a pass that changes
+/// nothing writes nothing anywhere. `agents.scan` always says whether it
+/// changed anything, so an answer that does not is one this cannot read: a
+/// failure, never silence.
+pub fn agents_scan_change_line(result: &Value) -> Result<Option<String>, String> {
+    let changed = result
+        .get("changed")
+        .and_then(Value::as_bool)
+        .ok_or("agents.scan did not say whether the detection set changed")?;
+    if !changed {
+        return Ok(None);
+    }
+    let count = |key: &str| {
+        result
+            .get(key)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    Ok(Some(format!(
+        "punarctl agents scan: the detection set changed ({} detections, {} sessions this \
+         boot)",
+        count("detections"),
+        count("sessions")
+    )))
+}
+
 pub fn reconcile(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let report: model::Reconcile = parse(result)?;
     let mut out = fmt::masthead(style, "Reconcile", &personal_context(hostname));
@@ -1071,11 +1623,12 @@ pub fn policy_explain(style: &Style, result: &Value, path: &str) -> Result<Strin
 
 /// `policy.set`: what was pinned, and — separately — what is actually in force.
 ///
-/// THE TWO LINES ARE NEVER COLLAPSED, even when they agree. An administrator
-/// who pins a value an organization outranks has done something real (the entry
-/// is recorded and becomes effective if the org layer goes away) and something
-/// that changed nothing today, and a single "done" line would let them believe
-/// the second thing did not happen.
+/// THE TWO LINES ARE NEVER COLLAPSED, because on a WITHDRAWAL they genuinely
+/// differ: the entry is gone and something underneath now decides, and a single
+/// "done" line would say nothing about what the machine will actually do. On a
+/// pin they always agree — the daemon refuses a pin that a higher layer already
+/// outranks (docs/api/ipc.md section 5.8a step 5), so there is no such thing as
+/// a recorded-but-overridden administrator entry to report.
 pub fn policy_set(style: &Style, result: &Value) -> Result<String, String> {
     let set: model::PolicySet = parse(result)?;
     let pinned = match &set.pinned_value {
@@ -1103,14 +1656,143 @@ pub fn policy_set(style: &Style, result: &Value) -> Result<String, String> {
             ),
         ],
     ));
-    if set.pinned_value.is_some() && effective != pinned {
+    if set.pinned_value.is_none() {
         out.push_str(&fmt::note(
             style,
-            "A higher-precedence source still decides this value. Your entry is \
-             recorded and takes effect if that source is withdrawn.",
+            "Your entry is gone. The source named above is what decides this \
+             value now.",
         ));
     }
     out.push_str(&fmt::note(style, POLICY_NOTE));
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// F0-S1 device administrators (contract section 23)
+// ---------------------------------------------------------------------------
+
+/// `punarctl admins list`: who administers this device, who decides that,
+/// and whether the reader does. Names are shown through `term_safe_name`:
+/// an organization's name is text somebody else chose.
+pub fn admins_list(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let mode = result["mode"].as_str().unwrap_or("local");
+    let administrators: Vec<String> = result["administrators"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(punar_common::ipc::term_safe_name)
+                .collect()
+        })
+        .unwrap_or_default();
+    let organization = result["source"]["name"]
+        .as_str()
+        .map(punar_common::ipc::term_safe_name);
+    let policy_id = result["source"]["policy_id"].as_str().unwrap_or_default();
+    let mut out = fmt::masthead(style, "Administrators", &personal_context(hostname));
+    let decided_by = match (mode, &organization) {
+        ("pinned", Some(org)) => format!("{org} lists them ({policy_id})"),
+        ("none", Some(org)) => format!("{org} turned local administration off ({policy_id})"),
+        _ => "this device's own list (group punar-admin)".to_string(),
+    };
+    let mut rows = vec![Row::new("Decided by", "", Slot::Neutral, &decided_by)];
+    let listed = if administrators.is_empty() {
+        "none".to_string()
+    } else {
+        administrators.join(", ")
+    };
+    rows.push(Row::new(
+        "Administrators",
+        &listed,
+        if administrators.is_empty() {
+            Slot::Warn
+        } else {
+            Slot::Neutral
+        },
+        "",
+    ));
+    let caller = &result["caller"];
+    let you = if caller["root"].as_bool() == Some(true) {
+        ("root", "needs no role")
+    } else if caller["administrator"].as_bool() == Some(true) {
+        ("administrator", "")
+    } else {
+        (
+            "not an administrator",
+            "ask an administrator to act, or to add you",
+        )
+    };
+    rows.push(Row::new("You", you.0, Slot::Neutral, you.1));
+    for account in result["accounts"].as_array().into_iter().flatten() {
+        let name = punar_common::ipc::term_safe_name(account["user"].as_str().unwrap_or("?"));
+        let role = if account["administrator"].as_bool() == Some(true) {
+            "administrator"
+        } else {
+            "person"
+        };
+        let origin = if account["origin"] == "image" {
+            "part of this image"
+        } else {
+            ""
+        };
+        rows.push(Row::new(
+            &format!("Account {name}"),
+            role,
+            Slot::Neutral,
+            origin,
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        "An administrator may change what reaches everyone on this device: policy, \
+         updates, enrollment, other people's sessions. The last one can never be removed.",
+    ));
+    Ok(out)
+}
+
+/// `punarctl admins add|remove`: what changed, and who administers now.
+pub fn admins_set(style: &Style, result: &Value) -> Result<String, String> {
+    let user = punar_common::ipc::term_safe_name(result["user"].as_str().unwrap_or("?"));
+    let administrator = result["administrator"].as_bool() == Some(true);
+    let changed = result["changed"].as_bool() == Some(true);
+    let now: Vec<String> = result["administrators"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(punar_common::ipc::term_safe_name)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = fmt::masthead(style, "Administrators", &user);
+    out.push_str(&fmt::rows(
+        style,
+        &[
+            Row::new(
+                &user,
+                if administrator {
+                    "administrator"
+                } else {
+                    "person"
+                },
+                Slot::Neutral,
+                if changed {
+                    ""
+                } else {
+                    "already so; nothing changed"
+                },
+            ),
+            Row::new("Administrators", &now.join(", "), Slot::Neutral, ""),
+        ],
+    ));
+    if changed {
+        out.push_str(&fmt::note(
+            style,
+            "Takes effect for the next action they take; a session already open keeps \
+             running. Recorded in the audit trail.",
+        ));
+    }
     Ok(out)
 }
 
@@ -1119,8 +1801,7 @@ pub fn policy_set(style: &Style, result: &Value) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 /// Rows shared by `enroll start` and `enroll status`: org identity, policy
-/// ids, and the loudly-labeled SIMULATED attestation (the honesty label —
-/// the mock control plane measures nothing, and the output says so).
+/// ids, and what the attestation label honestly means.
 fn enrollment_rows(
     org: &model::Org,
     policy_ids: &[String],
@@ -1132,20 +1813,171 @@ fn enrollment_rows(
             "Organization",
             "",
             Slot::Neutral,
-            &format!("{} · {}", org.display_name, org.domain),
+            &format!(
+                "{} · {}",
+                printable(&org.display_name),
+                printable(&org.domain)
+            ),
         ),
-        Row::new("Policy", "", Slot::Neutral, &policy_ids.join(" · ")),
-        Row::new(
-            "Attestation",
-            attestation,
-            Slot::Warn,
-            "no real measurement — the mock control plane accepts every device",
-        ),
+        Row::new("Policy", "", Slot::Neutral, &policy_summary(policy_ids)),
+        attestation_row(attestation),
     ];
     if let Some(ts) = enrolled_at {
         rows.push(Row::new("Enrolled", "", Slot::Neutral, &fmt::timestamp(ts)));
     }
     rows
+}
+
+/// The policy ids, or what their absence means: a Smplify tenant can enroll
+/// a device before assigning it anything, and an empty row reads as broken.
+/// The device asks for the organization's policy on every sync, so one
+/// assigned later applies at the next.
+fn policy_summary(policy_ids: &[String]) -> String {
+    if policy_ids.is_empty() {
+        "none in force · checked on every sync, and applied as soon as one is assigned".to_string()
+    } else {
+        policy_ids.join(" · ")
+    }
+}
+
+/// How the last check for the organization's policy went, and since when the
+/// device has enforced the one it holds. Every answer but the three that
+/// mean "enforcing what the organization serves" says what went wrong and
+/// that the last good policy is still in force. Fixed text around the
+/// daemon's closed reason codes: nothing the organization chose is quoted.
+fn policy_refresh_row(policy: &model::EnrollPolicy) -> Option<Row> {
+    let received = policy
+        .fetched_at
+        .as_deref()
+        .map(|at| fmt::timestamp(&printable(at)))?;
+    let Some(refresh) = &policy.last_refresh else {
+        return Some(Row::new(
+            "Policy check",
+            "Current",
+            Slot::Ok,
+            &format!("policy received {received}"),
+        ));
+    };
+    let reason = refresh
+        .reason
+        .as_deref()
+        .map(|reason| printable(reason).replace('_', " "))
+        .unwrap_or_else(|| "no reason given".to_string());
+    let (value, what) = match refresh.result.as_str() {
+        "unchanged" | "applied" | "withdrawn" => {
+            return Some(Row::new(
+                "Policy check",
+                "Current",
+                Slot::Ok,
+                &format!("policy received {received}"),
+            ));
+        }
+        "rejected" => (
+            "Not applied",
+            format!("the organization's latest policy was refused ({reason})"),
+        ),
+        "held" => (
+            "Not applied",
+            match refresh.reason.as_deref() {
+                Some("unusable_assignment") => {
+                    "the organization assigned something this device cannot use".to_string()
+                }
+                _ => {
+                    "the control plane sent no policy and did not say none is assigned".to_string()
+                }
+            },
+        ),
+        "failed" => (
+            "Not applied",
+            format!("this device could not install the organization's latest policy ({reason})"),
+        ),
+        "unreachable" => (
+            "Not received",
+            "could not reach the control plane".to_string(),
+        ),
+        "refused" => (
+            "Not received",
+            format!("the control plane refused to send the policy ({reason})"),
+        ),
+        other => (
+            "Unknown",
+            format!("the last check ended {:?}", printable(other)),
+        ),
+    };
+    Some(Row::new(
+        "Policy check",
+        value,
+        Slot::Warn,
+        &format!("{what} · still enforcing the policy received {received}"),
+    ))
+}
+
+/// What the attestation label means, said plainly for each value the
+/// control planes send. Two of them mean nothing was measured, and each says
+/// why the device was admitted anyway: the development mock admits every
+/// device (SIMULATED, the milestone-5 honesty label), while Smplify admitted
+/// this one on the organization's enrollment code (NONE: no hardware
+/// attestation yet). Neither is dressed up as proof of the hardware.
+fn attestation_row(attestation: &str) -> Row {
+    match attestation {
+        "simulated" => Row::new(
+            "Attestation",
+            attestation,
+            Slot::Warn,
+            "no real measurement — the development control plane accepts every device",
+        ),
+        "none" => Row::new(
+            "Attestation",
+            attestation,
+            Slot::Warn,
+            "hardware not measured · admitted on the organization's enrollment code",
+        ),
+        other => Row::new("Attestation", other, Slot::Neutral, ""),
+    }
+}
+
+/// Who can end the enrollment (docs/development/smplify-enrollment.md section
+/// 3.1). `None` for a daemon that predates the field, rather than a guess.
+/// Fixed text: the Organization row names the organization, and no name it
+/// chooses is part of the term stated here.
+fn removability_row(removable: Option<bool>) -> Option<Row> {
+    Some(match removable? {
+        true => Row::new(
+            "Unenroll",
+            "Allowed",
+            Slot::Neutral,
+            "punarctl enroll stop · asks for your password",
+        ),
+        false => Row::new(
+            "Unenroll",
+            "Not allowed",
+            Slot::Warn,
+            "the organization enrolled this device as not removable · only erasing it ends \
+             the enrollment",
+        ),
+    })
+}
+
+/// Who owns the device, and so what the organization's inventory of it
+/// carries (docs/development/smplify-enrollment.md section 3.2). `None` for a
+/// daemon that predates the field, rather than a guess. Fixed text, like the
+/// term the person accepted: a name inside it could hide what it says.
+fn ownership_row(organization_owned: Option<bool>) -> Option<Row> {
+    Some(match organization_owned? {
+        false => Row::new(
+            "Ownership",
+            "Personal",
+            Slot::Neutral,
+            "never the serial number or the apps installed here · only those built into Punar",
+        ),
+        true => Row::new(
+            "Ownership",
+            "Organization",
+            Slot::Warn,
+            "the organization also receives the serial number and every app installed for \
+             all users",
+        ),
+    })
 }
 
 /// `punarctl enroll start <domain>`.
@@ -1158,6 +1990,12 @@ pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<Str
         &outcome.attestation,
         outcome.enrolled_at.as_deref(),
     );
+    if let Some(row) = removability_row(outcome.removable) {
+        rows.push(row);
+    }
+    if let Some(row) = ownership_row(outcome.organization_owned) {
+        rows.push(row);
+    }
     if let Some(sync) = &outcome.first_sync {
         rows.push(Row::new(
             "First sync",
@@ -1170,15 +2008,12 @@ pub fn enroll_start(style: &Style, result: &Value, hostname: &str) -> Result<Str
         ));
     }
     out.push_str(&fmt::rows(style, &rows));
-    out.push_str(&fmt::verdict(
-        style,
-        Slot::Ok,
-        &format!(
-            "✓ Enrolled · {} · {}",
-            outcome.org.display_name,
-            outcome.policy_ids.join(" · ")
-        ),
-    ));
+    let mut verdict = format!("✓ Enrolled · {}", printable(&outcome.org.display_name));
+    if !outcome.policy_ids.is_empty() {
+        verdict.push_str(" · ");
+        verdict.push_str(&outcome.policy_ids.join(" · "));
+    }
+    out.push_str(&fmt::verdict(style, Slot::Ok, &verdict));
     out.push_str(&fmt::note(
         style,
         "Org policy applies from now on · compliance sync sends category states only",
@@ -1191,15 +2026,19 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let status: model::EnrollStatus = parse(result)?;
     let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, status.enrolled));
     if !status.enrolled {
-        out.push_str(&fmt::rows(
-            style,
-            &[Row::new(
-                "Enrollment",
-                "None",
-                Slot::Neutral,
-                "personal device",
-            )],
-        ));
+        let mut rows = vec![Row::new(
+            "Enrollment",
+            "None",
+            Slot::Neutral,
+            "personal device",
+        )];
+        if let Some(release) = &status.identity_release {
+            rows.push(match release.state.as_str() {
+                "kept" => identity_kept_row(release.reason.as_deref()),
+                _ => identity_release_row(release.reason.as_deref()),
+            });
+        }
+        out.push_str(&fmt::rows(style, &rows));
         out.push_str(&fmt::note(
             style,
             "Personal mode is local-only · nothing leaves this machine",
@@ -1212,12 +2051,12 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
         // instead of interrupting. It appears on no other view, and there is
         // deliberately no banner, no badge and no prompt anywhere else.
         //
-        // SIMULATED, and labelled (spec 1.22): the endpoint this talks to is
-        // punar-mock-smplify. The real control plane does not exist yet —
-        // docs/development/user-blocked.md item 4.
+        // No sudo: nobody at the keyboard is ever root on a Punar device, so
+        // the command a person can actually run is the one named, and it asks
+        // them for what it needs (docs/api/ipc.md section 5.9).
         out.push_str(&fmt::note(
             style,
-            "To enroll: sudo punarctl enroll start <domain> · SIMULATED — the endpoint is a local mock, not a Smplify instance",
+            "To enroll: punarctl enroll start <domain> · it asks for your organization's enrollment code, then your password",
         ));
         return Ok(out);
     }
@@ -1228,6 +2067,15 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
     let policy_ids = status.policy_ids.clone().unwrap_or_default();
     let attestation = status.attestation.as_deref().unwrap_or("unknown");
     let mut rows = enrollment_rows(org, &policy_ids, attestation, status.enrolled_at.as_deref());
+    if let Some(management) = &status.management {
+        rows.push(management_row(management));
+    }
+    if let Some(row) = removability_row(status.removable) {
+        rows.push(row);
+    }
+    if let Some(row) = ownership_row(status.organization_owned) {
+        rows.push(row);
+    }
     if let Some(sync) = &status.last_sync {
         let (value, slot) = match sync.result.as_deref() {
             Some("success") => ("Success", Slot::Ok),
@@ -1244,27 +2092,197 @@ pub fn enroll_status(style: &Style, result: &Value, hostname: &str) -> Result<St
         }
         rows.push(Row::new("Last sync", value, slot, &desc));
     }
+    if let Some(row) = status.policy.as_ref().and_then(policy_refresh_row) {
+        rows.push(row);
+    }
     out.push_str(&fmt::rows(style, &rows));
+    if let Some(view) = &status.organization_view {
+        out.push_str(&organization_view(style, view));
+    }
     out.push_str(&fmt::note(
         style,
-        "Category-level sync only · states, never values or activity",
+        "Compliance sends states, never values · the inventory sends only the fields above",
     ));
     Ok(out)
+}
+
+/// What the organization can see (SPEC section 24.2): the categories and
+/// field names of the inventory it last received, read by punard from the
+/// body that left. Field names are spelled as words; a list says how many
+/// rows it carried. No section at all from a daemon that predates the field,
+/// rather than an empty one that would read as "nothing".
+fn organization_view(style: &Style, view: &model::OrganizationView) -> String {
+    let when = match view.sent_at.as_deref() {
+        Some(at) => format!("last sent {}", fmt::timestamp(&printable(at))),
+        None => "nothing sent yet".to_string(),
+    };
+    let mut out = fmt::section(style, "Your organization can see", &when);
+    // Descriptions wrap under their category so a long one stays inside the
+    // masthead's width.
+    let label_width = view
+        .categories
+        .iter()
+        .map(|category| category.category.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(12)
+        + 2;
+    let width = fmt::WIDTH.saturating_sub(label_width).max(24);
+    let mut rows = Vec::new();
+    for category in &view.categories {
+        let label = printable(&category.category);
+        let mut first = true;
+        let mut line = String::new();
+        let words = category.fields.iter().map(|field| {
+            let words = field_words(field);
+            match category.counts.get(field) {
+                Some(rows) => format!("{words} ({rows})"),
+                None => words,
+            }
+        });
+        for word in words {
+            let longer = line.chars().count() + 3 + word.chars().count();
+            if !line.is_empty() && longer > width {
+                rows.push(Row::new(
+                    if first { label.as_str() } else { "" },
+                    "",
+                    Slot::Neutral,
+                    &line,
+                ));
+                first = false;
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push_str(" · ");
+            }
+            line.push_str(&word);
+        }
+        if !line.is_empty() {
+            rows.push(Row::new(
+                if first { label.as_str() } else { "" },
+                "",
+                Slot::Neutral,
+                &line,
+            ));
+        }
+    }
+    if !rows.is_empty() {
+        out.push_str(&fmt::rows(style, &rows));
+    }
+    out
+}
+
+/// `kernelRelease` and `memory_total_bytes` as a person reads them:
+/// `kernel release`, `memory total bytes`.
+fn field_words(field: &str) -> String {
+    let mut words = String::new();
+    let mut after_lower = false;
+    for c in printable(field).chars() {
+        if c == '_' || c == '-' {
+            words.push(' ');
+            after_lower = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && after_lower {
+            words.push(' ');
+        }
+        words.push(c.to_ascii_lowercase());
+        after_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+    }
+    words
+}
+
+/// The daemon's words, with anything that could steer a terminal (an escape
+/// sequence, a direction override) made a visible U+FFFD.
+fn printable(text: &str) -> String {
+    punar_common::ipc::term_safe_name(text)
+}
+
+/// Whether the organization can manage the device now. The same words the
+/// shell's Enrollment pane draws ("Management interrupted"), so the terminal
+/// and the panel cannot tell two stories. Fixed text around the daemon's
+/// closed reason code.
+fn management_row(management: &model::Management) -> Row {
+    match management.state.as_str() {
+        "interrupted" => {
+            let reason = management
+                .reason
+                .as_deref()
+                .map(|reason| printable(reason).replace('_', " "))
+                .unwrap_or_else(|| "no reason given".to_string());
+            let since = management
+                .since
+                .as_deref()
+                .map(|at| format!(" since {}", fmt::timestamp(&printable(at))))
+                .unwrap_or_default();
+            Row::new(
+                "Management",
+                "Interrupted",
+                Slot::Bad,
+                &format!(
+                    "the Smplify agent cannot be used ({reason}){since} · reports wait until it \
+                     answers · audited as enroll.agent"
+                ),
+            )
+        }
+        _ => Row::new(
+            "Management",
+            "Active",
+            Slot::Ok,
+            "the Smplify agent answers · checked on every sync",
+        ),
+    }
+}
+
+/// An unenrollment the agent has not confirmed: its identity (key and
+/// certificate) is still to be wiped, and punard asks again on every pass.
+fn identity_release_row(reason: Option<&str>) -> Row {
+    let why = reason
+        .map(|reason| format!(" ({})", printable(reason).replace('_', " ")))
+        .unwrap_or_default();
+    Row::new(
+        "Smplify identity",
+        "Release pending",
+        Slot::Warn,
+        &format!(
+            "the agent has not yet confirmed it wiped this device's key{why} · asked again on \
+             every reconcile pass"
+        ),
+    )
+}
+
+/// A Smplify identity punard holds a token for and no record of ending the
+/// enrollment it belonged to (the enrollment record was deleted): kept, never
+/// wiped by punard itself, and audited. The same words the shell draws.
+fn identity_kept_row(reason: Option<&str>) -> Row {
+    let why = reason
+        .map(|reason| format!(" ({})", printable(reason).replace('_', " ")))
+        .unwrap_or_default();
+    Row::new(
+        "Smplify identity",
+        "Kept",
+        Slot::Bad,
+        &format!(
+            "nothing records the end of the enrollment it belongs to{why} · punard keeps it and \
+             asks the agent nothing · audited as enroll.release · a new enrollment replaces it"
+        ),
+    )
 }
 
 /// `punarctl enroll stop`.
 pub fn enroll_stop(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let outcome: model::EnrollStop = parse(result)?;
     let mut out = fmt::masthead(style, "Enroll", &device_context(hostname, false));
-    out.push_str(&fmt::rows(
-        style,
-        &[Row::new(
-            "Removed",
-            "",
-            Slot::Neutral,
-            &outcome.removed_policy_ids.join(" · "),
-        )],
-    ));
+    let mut rows = vec![Row::new(
+        "Removed",
+        "",
+        Slot::Neutral,
+        &outcome.removed_policy_ids.join(" · "),
+    )];
+    if outcome.identity_release.as_deref() == Some("pending") {
+        rows.push(identity_release_row(None));
+    }
+    out.push_str(&fmt::rows(style, &rows));
     out.push_str(&fmt::verdict(
         style,
         Slot::Ok,
@@ -2551,7 +3569,7 @@ pub fn network_policy(style: &Style, result: &Value, hostname: &str) -> Result<S
     ));
     out.push_str(&fmt::note(
         style,
-        "Strictest source wins · an absent rule denies · sudo punarctl network apply",
+        "Strictest source wins · an absent rule denies · punar-netd applies it as sessions start and end",
     ));
     Ok(out)
 }
@@ -2758,6 +3776,10 @@ struct ConnectionsView {
     limitations: Vec<String>,
     #[serde(default)]
     processes: Vec<NetworkProcessView>,
+    /// Other people's rows, counted and never shown (docs/api/ipc.md section
+    /// 21.3). Absent from a netd older than the scoping.
+    #[serde(default)]
+    withheld: u64,
 }
 
 #[derive(Deserialize)]
@@ -2867,6 +3889,20 @@ pub fn privacy_connections(
     ));
     if connections.processes.is_empty() {
         out.push_str(&fmt::note(style, "No current TCP connections observed"));
+    }
+    // Another person's programs, and where they connect, are that person's
+    // (F0): netd leaves them out and says how many, so "is this everything?"
+    // has an honest answer.
+    match connections.withheld {
+        0 => {}
+        1 => out.push_str(&fmt::note(
+            style,
+            "1 program of another person on this device withheld",
+        )),
+        n => out.push_str(&fmt::note(
+            style,
+            &format!("{n} programs of other people on this device withheld"),
+        )),
     }
     for process in &connections.processes {
         let context = process.session.as_ref().map_or_else(
@@ -3829,6 +4865,90 @@ pub fn approvals_list(style: &Style, result: &Value, hostname: &str) -> Result<S
     Ok(out)
 }
 
+/// `app list --all`: the desktop entries the launcher offers beyond the
+/// catalog, each with the id `app open` takes.
+///
+/// An entry the launcher hides is listed too, marked `hidden` with the reason
+/// from the shipped list both surfaces read. When that list cannot be read,
+/// nothing is marked and a note says why.
+pub fn desktop_entries(
+    style: &Style,
+    entries: &[crate::desktop::DesktopEntry],
+    hidden: &Result<std::collections::BTreeMap<String, String>, String>,
+) -> String {
+    let mut out = String::from("\n");
+    out.push_str(&fmt::section(
+        style,
+        "Desktop entries",
+        "punarctl app open <id>",
+    ));
+    if entries.is_empty() {
+        out.push_str(&fmt::note(style, "No desktop entry beyond the catalog"));
+        return out;
+    }
+    let rows: Vec<Row> = entries
+        .iter()
+        .map(|entry| {
+            let kind = if entry.terminal { "terminal" } else { "window" };
+            let why = hidden
+                .as_ref()
+                .ok()
+                .and_then(|hidden| hidden.get(&entry.id.to_lowercase()));
+            match why {
+                Some(why) => Row::new(
+                    &printable(&entry.id),
+                    "hidden",
+                    Slot::Neutral,
+                    &format!(
+                        "{} · {kind} · not in the launcher: {}",
+                        printable(&entry.name),
+                        printable(why)
+                    ),
+                ),
+                None => Row::new(
+                    &printable(&entry.id),
+                    kind,
+                    Slot::Neutral,
+                    &printable(&entry.name),
+                ),
+            }
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    if let Err(why) = hidden {
+        out.push_str(&fmt::note(
+            style,
+            &format!(
+                "The launcher's hidden list could not be read, so nothing is marked · {}",
+                printable(why)
+            ),
+        ));
+    }
+    out
+}
+
+/// One `approvals watch` line: the approval, its status, what it asks for
+/// and who asked. The row `approvals list` prints, one at a time.
+pub fn approval_event(style: &Style, result: &Value) -> Result<String, String> {
+    let env: model::ApprovalEnvelope = parse(result)?;
+    let doc = &env.approval;
+    let tail = match seconds_until(&doc.expires_at) {
+        Some(s) if doc.status == "pending" => {
+            format!("{} · {} left", contract_line(&env), remaining_words(s))
+        }
+        _ => contract_line(&env),
+    };
+    Ok(fmt::rows(
+        style,
+        &[Row::new(
+            &doc.approval_id,
+            &doc.status,
+            approval_slot(&doc.status),
+            &format!("{tail} · {}", identity_chain(doc)),
+        )],
+    ))
+}
+
 /// `punarctl approvals get <apr_id>` — the full contract card.
 pub fn approval_get(
     style: &Style,
@@ -4400,6 +5520,100 @@ pub fn apps(style: &Style, result: &Value, hostname: &str) -> Result<String, Str
     Ok(out)
 }
 
+/// `punarctl app list`: the installed state from `apps.list`, with each
+/// app's category and trust tier and the catalog version joined from
+/// `apps.catalog`. Without the catalog the rows say only what apps.list says,
+/// and a note says why.
+pub fn app_list(
+    style: &Style,
+    result: &Value,
+    catalog: Option<&Result<Value, crate::ipc::CallError>>,
+    hostname: &str,
+) -> Result<String, String> {
+    let apps = result
+        .get("apps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "apps result has no apps array".to_string())?;
+    let mut out = fmt::masthead(style, "Applications", hostname);
+    if apps.is_empty() {
+        out.push_str(&fmt::note(style, "The catalog offers no applications"));
+        return Ok(out);
+    }
+    let known = match catalog {
+        Some(Ok(value)) => value.get("apps").and_then(Value::as_array),
+        _ => None,
+    };
+    let facts = |id: &str| {
+        known.and_then(|rows| {
+            rows.iter()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+        })
+    };
+    let rows: Vec<Row> = apps
+        .iter()
+        .map(|app| {
+            let text = |key: &str| app.get(key).and_then(Value::as_str).unwrap_or("");
+            let id = app.get("id").and_then(Value::as_str).unwrap_or("unknown");
+            let (state, slot) = match (
+                text("source"),
+                app.get("installed").and_then(Value::as_bool),
+                app.get("update_available").and_then(Value::as_bool),
+            ) {
+                (_, Some(true), Some(true)) => ("update available", Slot::Warn),
+                (_, Some(true), _) => ("installed", Slot::Ok),
+                ("web", _, _) => ("web app", Slot::Neutral),
+                (_, Some(false), _) => ("available", Slot::Neutral),
+                (source, _, _) => (source, Slot::Neutral),
+            };
+            let name = if text("name").is_empty() {
+                id
+            } else {
+                text("name")
+            };
+            let mut description = vec![name.to_string()];
+            if let Some(row) = facts(id) {
+                for key in ["category", "trust_tier"] {
+                    if let Some(value) = row.get(key).and_then(Value::as_str) {
+                        description.push(value.to_string());
+                    }
+                }
+            }
+            Row::new(id, state, slot, &description.join(" · "))
+        })
+        .collect();
+    out.push_str(&fmt::rows(style, &rows));
+    let updates = result
+        .get("updates_available")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let catalog_line = match catalog {
+        Some(Ok(value)) => format!(
+            "Catalog {}",
+            value
+                .get("catalog_version")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        Some(Err(error)) => format!(
+            "Category and trust tier unavailable: {}",
+            error
+                .message()
+                .lines()
+                .next()
+                .unwrap_or("the catalog did not answer")
+        ),
+        None => "Catalog not read".to_string(),
+    };
+    out.push_str(&fmt::note(
+        style,
+        &format!(
+            "{catalog_line} · {updates} update{} available · punarctl app show <id>",
+            if updates == 1 { "" } else { "s" }
+        ),
+    ));
+    Ok(out)
+}
+
 pub fn app_detail(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
     let app = result
         .get("app")
@@ -4613,6 +5827,129 @@ pub fn app_updates(style: &Style, result: &Value, hostname: &str) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A person's audit and connection views say how much of other people's
+    /// was withheld (F0), and say nothing when nothing was. Notes print in
+    /// capitals.
+    #[test]
+    fn withheld_counts_are_said_and_only_when_there_are_some() {
+        let audit = |withheld: Value| {
+            super::audit(
+                &Style::plain(),
+                &json!({ "events": [], "withheld": withheld }),
+                "host",
+            )
+            .unwrap()
+        };
+        assert!(audit(json!(3)).contains("3 EVENTS OF OTHER PEOPLE ON THIS DEVICE WITHHELD"));
+        assert!(audit(json!(1)).contains("1 EVENT OF ANOTHER PERSON ON THIS DEVICE WITHHELD"));
+        assert!(!audit(json!(0)).contains("WITHHELD"));
+        let older = super::audit(&Style::plain(), &json!({ "events": [] }), "host").unwrap();
+        assert!(!older.contains("WITHHELD"), "an older daemon sends none");
+
+        let connections = |withheld: u64| {
+            privacy_connections(
+                &Style::plain(),
+                &json!({
+                    "scanned_at": "2026-09-25T00:00:00Z",
+                    "enforcement": "available",
+                    "relay": {"mode": "direct", "simulated": false},
+                    "dns_protection": {"state": "not_configured", "milestone": "phase_2"},
+                    "transport": "tcp",
+                    "processes": [],
+                    "withheld": withheld,
+                }),
+                "host",
+            )
+            .unwrap()
+        };
+        assert!(connections(2).contains("2 PROGRAMS OF OTHER PEOPLE ON THIS DEVICE WITHHELD"));
+        assert!(connections(1).contains("1 PROGRAM OF ANOTHER PERSON ON THIS DEVICE WITHHELD"));
+        assert!(!connections(0).contains("WITHHELD"));
+    }
+
+    /// An alert names a process, and a process names itself: a hostile
+    /// executable name must not steer the terminal from the status view.
+    #[test]
+    fn status_live_rows_print_alert_names_plainly() {
+        let mut live = no_live();
+        live.alerts = Ok(json!({
+            "alerts": [{"alert_id": "alr_1", "agent": "evil\u{1b}[2J\u{202e}agent",
+                        "state": "live"}],
+            "quiet_window_secs": 86400
+        }));
+        let text = fmt::rows(&Style::plain(), &status_live_rows(&live));
+        let row = text
+            .lines()
+            .find(|line| line.starts_with("UNKNOWN AI"))
+            .unwrap();
+        assert!(row.contains("1 ALERT"), "{row}");
+        for steer in ['\u{1b}', '\u{202e}'] {
+            assert!(
+                !text.contains(steer),
+                "{steer:?} reached the terminal: {text:?}"
+            );
+        }
+        // Every other row carries its own failure, and the view still renders.
+        assert_eq!(
+            text.matches("UNKNOWN    The Punar daemon answered").count(),
+            5,
+            "{text}"
+        );
+    }
+
+    /// A hidden entry is listed, marked, with its reason; the rest are plain.
+    #[test]
+    fn desktop_entries_mark_what_the_launcher_hides() {
+        let entry = |id: &str, terminal: bool| crate::desktop::DesktopEntry {
+            id: id.into(),
+            name: id.into(),
+            exec: vec![id.into()],
+            terminal,
+            path: None,
+        };
+        let hidden = Ok([(
+            "footclient".to_string(),
+            "Another way to reach Foot.".to_string(),
+        )]
+        .into_iter()
+        .collect());
+        let text = desktop_entries(
+            &Style::plain(),
+            &[entry("footclient", true), entry("htop", true)],
+            &hidden,
+        );
+        let foot = text.lines().find(|l| l.starts_with("FOOTCLIENT")).unwrap();
+        assert!(foot.contains("HIDDEN"), "{foot}");
+        assert!(
+            foot.contains("terminal · not in the launcher: Another way to reach Foot."),
+            "{foot}"
+        );
+        let htop = text.lines().find(|l| l.starts_with("HTOP")).unwrap();
+        assert!(
+            htop.contains("TERMINAL") && !htop.contains("HIDDEN"),
+            "{htop}"
+        );
+        assert!(!text.contains("COULD NOT BE READ"), "{text}");
+    }
+
+    /// No live read was made: every row of the status view's live stanza
+    /// says so, and nothing else in the view depends on it.
+    fn no_live() -> StatusLive {
+        let unasked = || {
+            Err(crate::ipc::CallError::Protocol {
+                why: "not asked in this test".to_string(),
+            })
+        };
+        StatusLive {
+            firewall: unasked(),
+            agents: unasked(),
+            alerts: unasked(),
+            approvals: unasked(),
+            privilege: unasked(),
+            update: unasked(),
+        }
+    }
     use serde_json::json;
 
     #[test]
@@ -4744,7 +6081,7 @@ mod tests {
     #[test]
     fn views_reject_shapeless_results_with_a_reason() {
         let style = Style::plain();
-        let err = status(&style, &json!({"not": "a status"}), &[]).unwrap_err();
+        let err = status(&style, &json!({"not": "a status"}), &[], &no_live()).unwrap_err();
         assert!(err.contains("unexpected result shape"));
     }
 
@@ -4781,7 +6118,7 @@ mod tests {
                 "last_remediation_at": null
             }
         });
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(text.contains("OVERALL"), "{text}");
         // DESIGN_LANGUAGE section 8.1: this fixture is NOT enrolled, so the
         // words may not presuppose an authority. The wire value is unchanged
@@ -4829,7 +6166,7 @@ mod tests {
                 }
             }
         });
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(text.contains("DEVICE CLASS"), "{text}");
         assert!(text.contains("APPLIANCE"), "{text}");
         assert!(
@@ -4850,7 +6187,7 @@ mod tests {
             "hostname": "punar-m3",
             "capabilities_total": 3
         });
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(!text.contains("OVERALL"), "{text}");
         assert!(text.contains("PERSONAL DEVICE"), "{text}");
         assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
@@ -4996,7 +6333,7 @@ mod tests {
             "org": acme_org()
         });
         let ids = vec!["eng-baseline-v12".to_string()];
-        let text = status(&style, &result, &ids).unwrap();
+        let text = status(&style, &result, &ids, &no_live()).unwrap();
         assert!(text.contains("ORGANIZATION"), "{text}");
         assert!(
             text.contains("Acme Engineering · eng-baseline-v12"),
@@ -5007,14 +6344,14 @@ mod tests {
 
         // Without the enroll.status follow-up, the row degrades to the
         // domain instead of inventing a policy id.
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(text.contains("Acme Engineering · acme.com"), "{text}");
 
         // Personal device: byte-for-byte no org row (design section 8).
         result["enrolled"] = json!(false);
         result["mode"] = json!("personal");
         result.as_object_mut().unwrap().remove("org");
-        let text = status(&style, &result, &[]).unwrap();
+        let text = status(&style, &result, &[], &no_live()).unwrap();
         assert!(!text.contains("ORGANIZATION  "), "{text}");
         assert!(text.contains("PERSONAL DEVICE"), "{text}");
         assert!(!text.contains("NO ORGANIZATION IS ENROLLED"), "{text}");
@@ -5094,6 +6431,49 @@ mod tests {
         assert!(!text.contains("RECORDED, NOT APPLIED"), "{text}");
     }
 
+    /// The timer's quiet pass prints one line when it changed something or
+    /// failed to, and nothing at all when it only confirmed what was so.
+    #[test]
+    fn a_quiet_reconcile_prints_only_a_change_or_a_failure() {
+        let entry = |capability: &str, drift: bool, remediation: &str| {
+            json!({"capability": capability, "desired_state": "enabled",
+                   "current_state": if drift { "disabled" } else { "enabled" },
+                   "drift": drift, "verified": true, "remediation": remediation})
+        };
+        let quiet = json!({"drift_count": 1, "remediated_count": 0, "capabilities": [
+            entry("security.firewall", false, "none"),
+            entry("system.hostname", true, "alert_only"),
+        ]});
+        assert_eq!(reconcile_change_line(&quiet).unwrap(), None);
+        let changed = json!({"drift_count": 2, "remediated_count": 1, "capabilities": [
+            entry("security.firewall", true, "applied"),
+            entry("time.timezone", true, "apply_failed"),
+        ]});
+        let line = reconcile_change_line(&changed).unwrap().unwrap();
+        assert!(line.contains("remediated security.firewall"), "{line}");
+        assert!(
+            line.contains("remediation failed for time.timezone"),
+            "{line}"
+        );
+        assert!(!line.contains("disabled"), "no value: {line}");
+        assert!(!line.contains('\n'), "one line: {line}");
+
+        assert_eq!(
+            agents_scan_change_line(&json!({"changed": false, "detections": []})).unwrap(),
+            None
+        );
+        assert!(
+            agents_scan_change_line(&json!({"sessions": []})).is_err(),
+            "an answer that does not say is a failure, not silence"
+        );
+        let line = agents_scan_change_line(
+            &json!({"changed": true, "detections": [{}, {}], "sessions": [{}]}),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(line.contains("2 detections, 1 sessions"), "{line}");
+    }
+
     #[test]
     fn enroll_start_renders_the_loud_simulated_label() {
         let style = Style::plain();
@@ -5118,6 +6498,33 @@ mod tests {
         assert!(text.contains("✓ ENROLLED · ACME ENGINEERING"), "{text}");
     }
 
+    /// A real Smplify enrollment: no policy assigned yet and no hardware
+    /// attestation. Nothing blames a mock, the policy row says what an empty
+    /// list means, and the verdict carries no dangling separator.
+    #[test]
+    fn enroll_start_against_smplify_says_what_admitted_the_device() {
+        let style = Style::plain();
+        let result = json!({
+            "enrolled": true,
+            "org": acme_org(),
+            "policy_ids": [],
+            "attestation": "none",
+            "enrolled_at": "2026-09-24T19:30:47Z",
+            "first_sync": {"compliance": "success", "inventory": "success"}
+        });
+        let text = enroll_start(&style, &result, "mac-punar").unwrap();
+        assert!(!text.to_lowercase().contains("mock"), "{text}");
+        assert!(text.contains("hardware not measured"), "{text}");
+        assert!(text.contains("enrollment code"), "{text}");
+        assert!(text.contains("none in force"), "{text}");
+        assert!(text.contains("checked on every sync"), "{text}");
+        let verdict = text
+            .lines()
+            .find(|line| line.contains("✓ ENROLLED"))
+            .expect("a verdict line");
+        assert!(!verdict.trim_end().ends_with('·'), "{verdict}");
+    }
+
     #[test]
     fn enroll_status_renders_both_states_without_a_token() {
         let style = Style::plain();
@@ -5140,6 +6547,364 @@ mod tests {
         assert!(text.contains("UNREACHABLE"), "{text}");
         assert!(text.contains("report queued"), "{text}");
         assert!(!text.to_lowercase().contains("tok_"), "{text}");
+    }
+
+    /// Management interrupted reads the same words the shell's Enrollment
+    /// pane draws, with the daemon's reason and since when; an active agent
+    /// says so; an unenrollment the agent has not confirmed says the key is
+    /// still to be wiped, on the personal view and in enroll stop's verdict.
+    #[test]
+    fn enroll_views_say_when_management_is_interrupted_or_a_release_pending() {
+        let style = Style::plain();
+        let enrolled = |management: Value| {
+            json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": ["eng-baseline-v12"],
+                "enrolled_at": "2026-08-26T09:00:00Z",
+                "attestation": "none",
+                "management": management,
+            })
+        };
+        let text = enroll_status(
+            &style,
+            &enrolled(json!({"state": "interrupted", "reason": "socket_missing",
+                             "since": "2026-09-24T10:00:00Z"})),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("MANAGEMENT"), "{text}");
+        assert!(text.contains("INTERRUPTED"), "{text}");
+        assert!(text.contains("socket missing"), "{text}");
+        assert!(text.contains("enroll.agent"), "{text}");
+        let text =
+            enroll_status(&style, &enrolled(json!({"state": "active"})), "punar-m5").unwrap();
+        assert!(text.contains("ACTIVE"), "{text}");
+        assert!(!text.contains("INTERRUPTED"), "{text}");
+
+        let text = enroll_status(
+            &style,
+            &json!({"enrolled": false,
+                    "identity_release": {"state": "pending", "reason": "not_answering"}}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("RELEASE PENDING"), "{text}");
+        assert!(text.contains("not answering"), "{text}");
+        let text = enroll_status(
+            &style,
+            &json!({"enrolled": false,
+                    "identity_release": {"state": "kept",
+                                         "reason": "enrollment_record_missing"}}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("KEPT"), "{text}");
+        assert!(text.contains("enrollment record missing"), "{text}");
+        assert!(!text.contains("RELEASE PENDING"), "{text}");
+        let text = enroll_stop(
+            &style,
+            &json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],
+                    "identity_release": "pending"}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(text.contains("RELEASE PENDING"), "{text}");
+        let text = enroll_stop(
+            &style,
+            &json!({"enrolled": false, "removed_policy_ids": ["eng-baseline-v12"],
+                    "identity_release": "released"}),
+            "punar-m5",
+        )
+        .unwrap();
+        assert!(!text.contains("RELEASE PENDING"), "{text}");
+    }
+
+    /// The organization chooses its display name, and a terminal obeys what
+    /// is in it. No view of the enrollment passes an escape sequence, a
+    /// direction override or a line separator from it to the terminal, and
+    /// the rows stating the terms — what the organization receives, who can
+    /// unenroll — are fixed text, so the name cannot conceal them.
+    #[test]
+    fn no_enrollment_view_lets_the_organizations_name_steer_the_terminal() {
+        let style = Style::plain();
+        let hostile = json!({
+            "id": "acme", "name": "Acme",
+            "display_name": "Acme\u{1b}[8m\u{202e}\u{2028}\u{200b}",
+            "domain": "acme.com\u{1b}[2K"
+        });
+        let enrolled = json!({
+            "enrolled": true,
+            "org": hostile,
+            "policy_ids": [],
+            "attestation": "none",
+            "enrolled_at": "2026-09-24T19:30:47Z",
+            "removable": false,
+            "organization_owned": true
+        });
+        let status_result = json!({
+            "protocol_version": 1,
+            "daemon_version": "0.2.0",
+            "device_id": "dev_9f3k2v8q1x",
+            "mode": "managed",
+            "enrolled": true,
+            "hostname": "punar-m5",
+            "capabilities_total": 3,
+            "org": hostile
+        });
+        for text in [
+            enroll_start(&style, &enrolled, "mac-punar").unwrap(),
+            enroll_status(&style, &enrolled, "mac-punar").unwrap(),
+            status(&style, &status_result, &[], &no_live()).unwrap(),
+        ] {
+            for steer in ['\u{1b}', '\u{202e}', '\u{2028}', '\u{200b}'] {
+                assert!(
+                    !text.contains(steer),
+                    "{steer:?} reached the terminal: {text:?}"
+                );
+            }
+            assert!(text.contains("Acme"), "{text}");
+        }
+        let receipt = enroll_start(&style, &enrolled, "mac-punar").unwrap();
+        assert!(
+            receipt.contains(
+                "the organization also receives the serial number and every app installed for \
+                 all users"
+            ),
+            "{receipt}"
+        );
+        assert!(
+            receipt.contains("the organization enrolled this device as not removable"),
+            "{receipt}"
+        );
+    }
+
+    /// Both views say who owns the device, and what that sends: a personal
+    /// enrollment never the serial or the apps installed here, an
+    /// organization-owned one both. A daemon that predates the field gets no
+    /// row rather than a guess.
+    #[test]
+    fn enroll_views_show_who_owns_the_device() {
+        let style = Style::plain();
+        let receipt = |owned: Option<bool>| {
+            let mut result = json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": [],
+                "attestation": "none",
+                "enrolled_at": "2026-09-24T19:30:47Z",
+                "removable": true
+            });
+            if let Some(owned) = owned {
+                result["organization_owned"] = json!(owned);
+            }
+            enroll_start(&style, &result, "mac-punar").unwrap()
+        };
+        let status = |owned: bool| {
+            enroll_status(
+                &style,
+                &json!({
+                    "enrolled": true,
+                    "org": acme_org(),
+                    "policy_ids": [],
+                    "enrolled_at": "2026-09-24T19:30:47Z",
+                    "attestation": "none",
+                    "removable": true,
+                    "organization_owned": owned
+                }),
+                "mac-punar",
+            )
+            .unwrap()
+        };
+        let ownership = |text: &str| {
+            text.lines()
+                .find(|line| line.trim_start().starts_with("OWNERSHIP"))
+                .map(str::to_string)
+        };
+        for text in [receipt(Some(false)), status(false)] {
+            let row = ownership(&text).expect("an ownership row");
+            assert!(row.contains("PERSONAL"), "{row}");
+            assert!(
+                row.contains("never the serial number or the apps installed here"),
+                "{row}"
+            );
+        }
+        for text in [receipt(Some(true)), status(true)] {
+            let row = ownership(&text).expect("an ownership row");
+            assert!(row.contains("ORGANIZATION"), "{row}");
+            assert!(
+                row.contains(
+                    "the organization also receives the serial number and every app installed \
+                     for all users"
+                ),
+                "{row}"
+            );
+        }
+        assert_eq!(ownership(&receipt(None)), None);
+    }
+
+    /// The person sees what their organization can see: each category, its
+    /// fields as words, how many rows a list carried, and when it was sent.
+    /// Before the first send it says so; a daemon without the field gets no
+    /// section at all.
+    #[test]
+    fn enroll_status_says_what_the_organization_can_see() {
+        let style = Style::plain();
+        let status = |view: Option<Value>| {
+            let mut result = json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": [],
+                "enrolled_at": "2026-09-24T19:30:47Z",
+                "attestation": "none",
+                "removable": true,
+                "organization_owned": false
+            });
+            if let Some(view) = view {
+                result["organization_view"] = view;
+            }
+            enroll_status(&style, &result, "mac-punar").unwrap()
+        };
+        let text = status(Some(json!({
+            "sent_at": "2026-09-24T19:31:02Z",
+            "categories": [
+                {"category": "hardware", "fields": [
+                    "batteryPresent", "biosVersion", "cpuCores", "cpuModel", "cpuThreads",
+                    "cpuVendor", "deviceCapacityBytes", "isVirtual", "manufacturer",
+                    "memoryTotalBytes", "modelName", "rootFilesystemType", "secureBoot",
+                    "tpmPresent", "tpmVersion", "uefi"]},
+                {"category": "os", "fields": ["arch", "kernelRelease", "name", "version"]},
+                {"category": "software", "fields": ["installedPackages", "smplifydVersion"],
+                 "counts": {"installedPackages": 2}}
+            ]
+        })));
+        let section = text
+            .lines()
+            .find(|line| line.starts_with("YOUR ORGANIZATION CAN SEE"))
+            .expect("the section");
+        assert!(
+            section.ends_with("LAST SENT 2026-09-24 19:31:02"),
+            "{section}"
+        );
+        assert!(
+            text.lines().any(|line| line.starts_with("OS")
+                && line.ends_with("arch · kernel release · name · version")),
+            "{text}"
+        );
+        assert!(
+            text.contains("installed packages (2) · smplifyd version"),
+            "{text}"
+        );
+        assert!(text.contains("memory total bytes"), "{text}");
+        let section: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !line.starts_with("YOUR ORGANIZATION CAN SEE"))
+            .take_while(|line| !line.starts_with("COMPLIANCE SENDS"))
+            .collect();
+        assert!(section.len() > 3, "{text}");
+        for line in section {
+            assert!(line.chars().count() <= fmt::WIDTH, "too wide: {line}");
+        }
+        // The hardware fields wrap under one label.
+        let hardware: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !line.starts_with("HARDWARE"))
+            .take_while(|line| !line.starts_with("OS"))
+            .collect();
+        assert!(hardware.len() > 1, "{text}");
+        assert!(hardware[1].starts_with(' '), "{text}");
+
+        let text = status(Some(json!({"sent_at": null, "categories": []})));
+        assert!(text.contains("NOTHING SENT YET"), "{text}");
+        let text = status(None);
+        assert!(!text.contains("YOUR ORGANIZATION CAN SEE"), "{text}");
+
+        // A field name cannot steer the terminal.
+        let text = status(Some(json!({
+            "sent_at": "2026-09-24T19:31:02Z",
+            "categories": [{"category": "os\u{1b}[2J", "fields": ["name\u{1b}[31m"]}]
+        })));
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+    }
+
+    /// The person sees whether the device enforces the organization's
+    /// current policy, and when it was received; after a check that went
+    /// wrong, what went wrong and that the last good policy is still in force.
+    /// A daemon that predates the field gets no row.
+    #[test]
+    fn enroll_status_says_whether_the_policy_is_current() {
+        let style = Style::plain();
+        let status = |policy: Option<Value>| {
+            let mut result = json!({
+                "enrolled": true,
+                "org": acme_org(),
+                "policy_ids": ["eng-baseline-v12"],
+                "enrolled_at": "2026-09-24T09:00:00Z",
+                "attestation": "none"
+            });
+            if let Some(policy) = policy {
+                result["policy"] = policy;
+            }
+            enroll_status(&style, &result, "mac-punar").unwrap()
+        };
+        let row = |text: &str| {
+            text.lines()
+                .find(|line| line.starts_with("POLICY CHECK"))
+                .map(str::to_string)
+        };
+        let policy = |refresh: Value| {
+            json!({
+                "revision": "sha256:ab",
+                "fetched_at": "2026-09-24T10:00:00Z",
+                "changed_at": "2026-09-24T09:00:00Z",
+                "last_refresh": refresh
+            })
+        };
+
+        for refresh in [
+            Value::Null,
+            json!({"at": "2026-09-24T10:00:00Z", "result": "unchanged"}),
+            json!({"at": "2026-09-24T10:00:00Z", "result": "applied"}),
+        ] {
+            let line = row(&status(Some(policy(refresh)))).expect("a policy row");
+            assert!(line.contains("CURRENT"), "{line}");
+            assert!(
+                line.ends_with("policy received 2026-09-24 10:00:00"),
+                "{line}"
+            );
+        }
+        for (refresh, what) in [
+            (
+                json!({"at": "t", "result": "rejected", "reason": "duplicate_policy_id"}),
+                "the organization's latest policy was refused (duplicate policy id)",
+            ),
+            (
+                json!({"at": "t", "result": "held", "reason": "unusable_assignment"}),
+                "the organization assigned something this device cannot use",
+            ),
+            (
+                json!({"at": "t", "result": "unreachable"}),
+                "could not reach the control plane",
+            ),
+            (
+                json!({"at": "t", "result": "failed", "reason": "swap_unsupported"}),
+                "could not install the organization's latest policy (swap unsupported)",
+            ),
+        ] {
+            let line = row(&status(Some(policy(refresh)))).expect("a policy row");
+            assert!(line.contains(what), "{line}");
+            assert!(
+                line.ends_with("still enforcing the policy received 2026-09-24 10:00:00"),
+                "{line}"
+            );
+        }
+        let line = row(&status(Some(policy(json!({
+            "at": "t", "result": "refused", "reason": "other\u{1b}[2J"
+        })))))
+        .unwrap();
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        assert!(line.contains("NOT RECEIVED"), "{line}");
+        assert_eq!(row(&status(None)), None);
     }
 
     #[test]

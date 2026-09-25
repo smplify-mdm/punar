@@ -1,0 +1,50 @@
+[Unit]
+Description=Punar one-use Mail account setup for profile UID %i
+Documentation=file:/usr/share/doc/punar/pim-ipc.md
+Requires=punar-mail-account@%i.socket
+After=punar-mail-account@%i.socket
+
+[Service]
+Type=simple
+User=punar-mail-account
+Group=punar-mail-account
+Environment=PUNAR_PROFILE_UID=%i
+ExecStart=/usr/bin/punar-mail-account-bridge
+Sockets=punar-mail-account@%i.socket
+RuntimeDirectory=punar-mail-account/%i
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=no
+TimeoutStopSec=5s
+
+# The entry surface receives only a one-use credential channel and a verified
+# Wayland stream. Provider networking and encrypted storage remain exclusively
+# inside punar-pimd.
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+CapabilityBoundingSet=
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CPUAccounting=yes
+IOAccounting=yes
+IPAccounting=yes
+StandardOutput=journal
+StandardError=journal
+
+# Deliberately no [Install]. Account setup has zero idle residency.

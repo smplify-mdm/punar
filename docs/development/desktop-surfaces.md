@@ -89,8 +89,8 @@ exactly as before.
 |---|---|---|
 | **AI** | `/run/punar/agents.json` (`counts.managed + counts.observed`) | renders |
 | **UNKNOWN AI** | `max(agents.json counts.unknown, /run/punar-agentd/alerts.json activeCount)` | renders, never collapsed |
-| **APPROVAL** + countdown | `/run/punard/approvals.json` | renders |
-| **ELEVATED** chip | `grants[]` in `/run/punard/approvals.json` | renders |
+| **APPROVAL** + countdown | `/run/punard/approvals/<uid>.json` | renders |
+| **ELEVATED** chip | `grants[]` in `/run/punard/approvals/<uid>.json` | renders |
 | **ORG** name · dot · compliance word | `/run/punar/status.json` | renders **only when enrolled** (§8) |
 | **ENV** | *nothing to read* — `punar-env` writes no state file | **absent** |
 | **CRED** | *nothing to read* — `punar-secrets` has no state directory at all | **absent** |
@@ -184,10 +184,10 @@ prints fire that view's actions.
 | System · Network | `/proc/net/route` → `/sys/class/net/<if>/{operstate,address}` |
 | System · Displays | `Hyprland.monitors` (live via socket2) |
 | System · Audio | PipeWire default sink/source, live |
-| System · Power | `/sys/class/power_supply/BAT0/{capacity,status}` |
+| System · Power | `punarctl device posture --json`: `power.batteries`, found by the classifier's rule |
 | Security · Device | `punarctl status --json` + §40 explain cards |
-| Security · Encryption | `/sys/block/dm-0/dm/uuid` (LUKS detection) |
-| Security · Secure Boot | the EFI `SecureBoot` efivar + the daemon's attestation word — carries the **dashed SIMULATED · VM** tag |
+| Security · Encryption | `punarctl device posture --json`: `disk_encryption_enabled`, the one LUKS2 answer (every data path) |
+| Security · Secure Boot | `punarctl device posture --json` (Secure Boot, TPM, virtual) + the daemon's attestation word — carries the **dashed SIMULATED · VM** tag |
 | **Security · Firewall** | `punarctl capabilities --json` + `punarctl policy effective --json`; live toggle, drift promise, keyed action row |
 | AI · Agents / Permissions | `/run/punar/agents.json` |
 | Developer · Projects | live Hyprland workspaces |
@@ -267,16 +267,19 @@ therefore unfalsifiable rather than enforced by a check that could rot.
 **OSD:** volume is real — it follows the PipeWire sink's own change event
 and draws the level the sink *settled on*, whoever moved it, so it cannot
 show a level the machine does not hold. With no audio server it reports
-`unavailable` and never draws. **Brightness is dashed** with the plate's
-`SIM · VM` tag and reachable only by IPC, because no backlight capability
-ships — which is also why **no brightness key is bound** (spec §1.22).
+`unavailable` and never draws. **Brightness is real or absent** (SMP-1405
+WP-02): the brightness keys run `punarctl display brightness`, which writes
+through logind's `SetBrightness` on the session's own object and raises the
+row with the value it read back from sysfs. A machine with no backlight
+(every VM) exits 6 before the OSD is called, so nothing is drawn; the
+dashed `SIM · VM` row is gone.
 
 **Try it:**
 ```sh
 notify-send "Deploy finished" "atlas · 4m 12s"      # a toast, then PUNAR+SHIFT+N
 qs -p /usr/share/punar/shell ipc call notifications dnd toggle
 qs -p /usr/share/punar/shell ipc call notifications owner   # punar | foreign | unverified
-qs -p /usr/share/punar/shell ipc call osd brightness 60      # the dashed row
+qs -p /usr/share/punar/shell ipc call osd brightness 60 display   # what the keys raise
 ```
 
 ---
@@ -288,7 +291,7 @@ qs -p /usr/share/punar/shell ipc call osd brightness 60      # the dashed row
 | **Plates** | D-003 Sect II (gate) · D-009 Sect I (alert) |
 | **Chord** | **none** |
 | **IPC** | `approval` · `alerts` |
-| **Data source** | `/run/punard/approvals.json` · `/run/punar-agentd/alerts.json` |
+| **Data source** | `/run/punard/approvals/<uid>.json` · `/run/punar-agentd/alerts.json` |
 | **Status** | **REAL** |
 
 Neither has a keybinding, and that is the design: **a gate the human has
@@ -429,7 +432,7 @@ renderer.
 | Thing | Where | Note |
 |---|---|---|
 | Chord | `PUNAR + B` → `punarctl web-apps browse` | Active context |
-| Launch argv | `punarctl` closed builder | Real binary; seven allowed flags |
+| Launch argv | `punarctl` closed builder | Real binary; eight allowed flags |
 | Default handler | `/etc/xdg/mimeapps.list` → `punar-browser.desktop` | `http`, `https`, `text/html` |
 | `xdg-open` | `xdg-utils` package | Newly present |
 
@@ -447,6 +450,15 @@ notification action, a terminal URL activation, the command center's
 handler either. A **human** could reach a browser through the chord; the
 **system** could not reach one at all, and every such path failed with
 command-not-found.
+
+**Why the browser keeps its own key.** `--password-store=basic` is in the
+closed argv because Chromium otherwise asks `org.freedesktop.secrets` for the
+key that decrypts its saved passwords and cookies, and the Secret Service the
+image ships for third-party apps has no per-application access control — any
+app granted that bus name can read the item back. See milestone-11.md §3.4 for
+the observed bus traffic and the trade this accepts. The surfaces exercise
+asserts both halves: the flag is on the live `/proc/<pid>/cmdline`, and no
+`gcr-prompter` window exists at any point while the browser is up.
 
 **Override semantics.** A user's chosen MIME default still outranks
 `/etc/xdg/mimeapps.list`; choosing Firefox remains ordinary desktop policy.

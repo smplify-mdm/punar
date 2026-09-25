@@ -47,16 +47,17 @@ pragma ComponentBehavior: Bound
 // PERSONAL DEFAULTS as the authority source and shows no org chrome.
 //
 // DATA (milestone-7.md §8.2, milestone-8.md §8.2, docs/api/ipc.md §11
-// and §13.2): the Agents singleton follows `/run/punar/agents.json` and
-// the Ledger singleton follows `/run/punar-agentd/ledger.json`, both
-// with an inotify FileView — no socket client in the shell, no polling,
-// no timers. Opening the panel fires ONE detached
-// `punarctl agents list --json`, and one `punarctl agents access <id>
-// --json` for a session whose ledger is not on hand yet (fixed argv,
-// never a shell string) — the daemon drains and samples on that read
-// and rewrites both files; the FileViews deliver the rewrite. A missing
-// or unparsable file renders the calm empty panel — fail closed, never
-// an error surface.
+// and §13.2): the Agents singleton follows `/run/punar/agents.json` with an
+// inotify FileView — no socket client in the shell, no polling, no timers.
+// Opening the panel fires ONE `punarctl agents list --json`, and the Ledger
+// singleton runs `punarctl agents access <id> --json` for a session whose
+// ledger is not on hand yet (fixed argv, never a shell string): agentd
+// drains and samples on that read, and its answer — this person's own
+// sessions only, since the method is owner-or-root — is the record. The
+// device-wide side file `/run/punar-agentd/ledger.json` holds every
+// person's rows and is `root:punar-audit`, so the panel no longer reads it.
+// A missing or unparsable answer renders the calm empty panel — fail closed,
+// never an error surface.
 //
 // PUNAR+A shows the data; SHIFT+DEL deletes it (spec §24.2 + §1.17:
 // deleting your own data cannot be terminal-only). The keystroke runs
@@ -69,6 +70,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import "../Theme"
 import "../Services"
@@ -90,8 +92,8 @@ DeferredSurfaceBase {
     // action never stays armed behind the reader's back.
     property string purgeArmedId: ""
     // The session whose purge has been handed to punarctl but whose
-    // ledger.json rewrite has not arrived yet. Cleared when the record
-    // comes back purged (or disappears).
+    // purged record has not come back from agents.access yet. Cleared when
+    // the record comes back purged (or the purge is refused).
     property string purgeRequestedId: ""
 
     // ---- shared type grammar (DESIGN_LANGUAGE.md §1) ----
@@ -99,12 +101,92 @@ DeferredSurfaceBase {
     // Meta rows / labels: Geist Mono, tracked, uppercase. Mockup
     // fractional sizes round to whole px (8.5 → 9, 9.5 → 10).
     component Meta: Text {
+        // Plain, always: rows quote agent names and ids a process chose for
+        // itself, and none of it may be read as markup.
+        textFormat: Text.PlainText
         font.family: Theme.fontMono
         font.pixelSize: 9
         font.weight: 600
         font.letterSpacing: Theme.tracking(9, 0.15)
         font.capitalization: Font.AllUppercase
         color: Theme.shellInk3
+    }
+
+    // The list refresh below is asked for its effect, not its output:
+    // `agents list` makes agentd rescan when its view is stale, and the
+    // result reaches this panel through agents.json. What the panel still
+    // needs from it is whether agentd ANSWERED — run detached, a dead or
+    // refusing agentd looked like a quiet machine. "" when the last refresh
+    // was answered. (The ledger's own answer, and its failures, are the
+    // Ledger singleton's.)
+    property string agentdError: ""
+    // A purge agentd refused, and the session it was for.
+    property string purgeError: ""
+    property string purgeErrorId: ""
+
+    component Kick: Process {
+        id: kick
+
+        stdout: StdioCollector {
+            waitForEnd: true
+        }
+        stderr: StdioCollector {
+            id: kickErr
+            waitForEnd: true
+        }
+
+        // Connected, not declared: see Probe in SystemControl/ControlData.qml.
+        Component.onCompleted: kick.exited.connect(function (exitCode) {
+            if (exitCode === 0) {
+                root.agentdError = "";
+                return;
+            }
+            var said = String(kickErr.text).trim().split("\n")[0];
+            root.agentdError = said !== "" ? said : "punarctl exited with " + exitCode;
+        })
+
+        function ask(argv: list<string>): void {
+            if (kick.running)
+                return;
+            kick.command = argv;
+            try {
+                kick.running = true;
+            } catch (e) {
+                root.agentdError = "punarctl could not be started";
+            }
+        }
+    }
+
+    Kick {
+        id: listKick
+    }
+
+    Process {
+        id: purgeProc
+
+        stderr: StdioCollector {
+            id: purgeErr
+            waitForEnd: true
+        }
+
+        Component.onCompleted: purgeProc.exited.connect(function (exitCode) {
+            if (exitCode === 0) {
+                root.purgeError = "";
+                // Deleted: ask agentd for the record again, which now
+                // carries its purged time, so the card stops saying "purge
+                // requested" over rows that are gone. (The panel reads this
+                // person's ledger through agents.access; no side file will
+                // announce the change.)
+                if (root.purgeRequestedId !== "")
+                    Ledger.fetch(root.purgeRequestedId);
+                return;
+            }
+            // Refused: nothing was deleted, so nothing is "requested" any
+            // more, and the privacy card says why.
+            var said = String(purgeErr.text).trim();
+            root.purgeRequestedId = "";
+            root.purgeError = said !== "" ? said : "punarctl exited with " + exitCode;
+        })
     }
 
     // Section header + right-hand tagline (mockup .sect): the question
@@ -994,13 +1076,7 @@ DeferredSurfaceBase {
         // scan. Fixed argv — the shell never composes a shell string.
         Agents.refresh();
         Ledger.refresh();
-        try {
-            Quickshell.execDetached(["punarctl", "agents", "list", "--json"]);
-        } catch (e) {
-            // No punarctl on a dev machine: the panel still renders
-            // whatever agents.json holds (or the calm empty state).
-            console.warn("punar-shell: agents refresh unavailable:", e);
-        }
+        listKick.ask(["/usr/bin/punarctl", "agents", "list", "--json"]);
         root.refreshLedger(root.selectedId);
     }
 
@@ -1033,17 +1109,29 @@ DeferredSurfaceBase {
 
     // Ask agentd for one session's ledger, once, on user action — the
     // read itself is what makes agentd drain the audit tail and sample the
-    // scope cgroup (milestone-8.md §5.1), and the rewrite reaches the
-    // shell through the Ledger FileView. Skipped when the record is
-    // already on hand, so walking the rail with the arrow keys does not
-    // spawn a process per row. Fixed argv, never a shell string.
+    // scope cgroup (milestone-8.md §5.1), and its answer IS the record: the
+    // Ledger singleton keeps what `agents.access` (owner or root) returned,
+    // so this person only ever sees their own sessions. Skipped when the
+    // record is already on hand, so walking the rail with the arrow keys
+    // does not spawn a process per row.
     function refreshLedger(sessionId: string): void {
         if (sessionId === "" || Ledger.has(sessionId))
             return;
-        try {
-            Quickshell.execDetached(["punarctl", "agents", "access", sessionId, "--json"]);
-        } catch (e) {
-            console.warn("punar-shell: ledger refresh unavailable:", e);
+        Ledger.fetch(sessionId);
+    }
+
+    // The ledger follows agentd while the panel is open (F0 review): agentd
+    // rewrites agents.json at every point it republishes a ledger — a
+    // session's rows growing as its audit events drain included — so each
+    // rewrite re-asks for the focused session, once, through the queue.
+    // Not a clock: nothing is asked while nothing changes, or while the
+    // panel is closed.
+    Connections {
+        target: Agents
+
+        function onRevisionChanged(): void {
+            if (root.open && root.selectedId !== "" && Ledger.refusal(root.selectedId) === "")
+                Ledger.fetch(root.selectedId);
         }
     }
 
@@ -1051,8 +1139,10 @@ DeferredSurfaceBase {
     // own data cannot be terminal-only). Two-step by design — the first
     // press arms and the privacy card asks, the second press acts — and
     // the ghost-red destructive voice keeps it from being an accident.
-    // The purge itself is punarctl's job, run detached with fixed argv;
-    // the daemon is the authorization point, exactly as everywhere else.
+    // The purge itself is punarctl's job, with fixed argv; the daemon is the
+    // authorization point, exactly as everywhere else. A purge that worked
+    // shows up as the ledger's purged time; one that was refused is read
+    // from punarctl's answer and said on the privacy card.
     function purgeKey(sessionId: string): void {
         if (sessionId === "")
             return;
@@ -1061,12 +1151,17 @@ DeferredSurfaceBase {
             return;
         }
         root.purgeArmedId = "";
+        if (purgeProc.running)
+            return;
         root.purgeRequestedId = sessionId;
+        root.purgeError = "";
+        root.purgeErrorId = sessionId;
+        purgeProc.command = ["/usr/bin/punarctl", "privacy", "purge", "--session", sessionId, "--yes"];
         try {
-            Quickshell.execDetached(["punarctl", "privacy", "purge", "--session", sessionId, "--yes"]);
+            purgeProc.running = true;
         } catch (e) {
-            console.warn("punar-shell: purge unavailable:", e);
             root.purgeRequestedId = "";
+            root.purgeError = "punarctl could not be started, so nothing was deleted.";
         }
     }
 
@@ -1792,7 +1887,12 @@ DeferredSurfaceBase {
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             font.weight: 500
-                            text: "No ledger recorded for this session yet"
+                            // A refusal is agentd's answer for a session
+                            // that is someone else's (owner-or-root), said
+                            // as such rather than as an empty ledger.
+                            text: Ledger.refusal(win.currentId) !== ""
+                                ? Ledger.refusal(win.currentId)
+                                : "No ledger recorded for this session yet"
                             elide: Text.ElideRight
                         }
                     }
@@ -1918,6 +2018,17 @@ DeferredSurfaceBase {
                                     color: Theme.shellStatusBad
                                     text: "Press Shift+Del again to confirm · this deletes the local ledger for "
                                           + win.currentId + " · the audit trail is not deleted"
+                                    wrapMode: Text.WordWrap
+                                }
+                                Meta {
+                                    width: parent.width
+                                    visible: root.purgeError !== ""
+                                             && root.purgeErrorId === win.currentId
+                                    font.pixelSize: 9
+                                    font.weight: 600
+                                    font.letterSpacing: Theme.tracking(9, 0.1)
+                                    color: Theme.shellStatusBad
+                                    text: "Not purged — " + root.purgeError
                                     wrapMode: Text.WordWrap
                                 }
                                 Meta {
@@ -2162,8 +2273,14 @@ DeferredSurfaceBase {
                     font.pixelSize: 8
                     font.weight: 500
                     font.letterSpacing: Theme.tracking(8, 0.14)
-                    text: "Last scan · " + (Agents.scannedAt === ""
-                        ? "never" : root.shortTime(Agents.scannedAt))
+                    color: root.agentdError === "" && Ledger.error === ""
+                        ? Theme.shellInk3 : Theme.shellStatusBad
+                    text: root.agentdError !== ""
+                        ? "Agentd did not answer · " + root.agentdError
+                        : Ledger.error !== ""
+                        ? "Agentd did not answer · " + Ledger.error
+                        : "Last scan · " + (Agents.scannedAt === ""
+                            ? "never" : root.shortTime(Agents.scannedAt))
                 }
             }
         }

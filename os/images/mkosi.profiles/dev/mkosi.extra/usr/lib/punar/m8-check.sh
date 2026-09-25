@@ -926,8 +926,16 @@ jq_check "detections get NO ledger field (an unmanaged process has no session to
     '.detections | all(has("ledger") | not)'
 
 # --- 11. the AI panel: the D-005 ledger register -----------------------------
-check_eq "the panel's ledger view is 0640 root:punar in the ROOT-owned runtime dir" \
-    "640 root punar" "$(stat -c '%a %U %G' "${LEDGER_RUNTIME}" 2>/dev/null)"
+check_eq "the ledger side file is 0640 root:punar-audit in the ROOT-owned runtime dir" \
+    "640 root punar-audit" "$(stat -c '%a %U %G' "${LEDGER_RUNTIME}" 2>/dev/null)"
+# It holds every person's rows, so no person reads it (F0 platform finding):
+# the session user gets their own ledger through agents.access instead.
+if as_punar cat "${LEDGER_RUNTIME}" >/dev/null 2>&1; then
+    note "FAIL the session user can read ${LEDGER_RUNTIME}, which holds every person's ledger"
+    FAILED=1
+else
+    note "ok   the session user cannot read the device-wide ledger side file"
+fi
 # Compare the stable row, not a milestone-dependent count. Producer rows leave
 # `not_yet_observed` as their mediation points ship (M12 leaves only MCP for a
 # managed session), and observation timestamps can advance between the side
@@ -952,7 +960,7 @@ sleep 2
 panel_state="$(as_punar qs -p /usr/share/punar/shell ipc call aipanel state 2>/dev/null \
     | tr -d '[:space:]"')"
 check_eq "aipanel state after open" "open" "${panel_state}"
-# The bounded settle is the panel's event-driven FileView pickup, not a poll.
+# The bounded settle is the panel's own agents.access read, not a poll.
 sleep 10
 if [ -n "${WL_DISPLAY}" ] && as_punar grim "${RUN_DIR}/punar-m8.png" 2>/dev/null \
         && [ -s "${RUN_DIR}/punar-m8.png" ]; then

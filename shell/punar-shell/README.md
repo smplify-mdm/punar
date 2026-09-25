@@ -49,8 +49,10 @@ the machine.
 | `Services/WorkspaceState.qml` | Singleton: workspace-name persistence + restore (M2, milestone-2.md §6) |
 | `Services/WallpaperState.qml` | Singleton: four-entry wallpaper catalog + atomic user preference + `wallpaper` IPC handler |
 | `Services/Agents.qml` | Singleton: AI-panel display state — watches `/run/punar/agents.json` (M7, ipc.md §11) |
-| `Services/Ledger.qml` | Singleton: AI access-ledger display state — watches `/run/punar-agentd/ledger.json` (M8, ipc.md §13.2) |
-| `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals.json` (M9, ipc.md §15) |
+| `Services/Ledger.qml` | Singleton: AI access-ledger display state for this person — asks `punarctl agents access <id> --json` (owner-or-root `agents.access`, M8, ipc.md §12.2); the device-wide side file is `root:punar-audit` and not read by the shell |
+| `Services/PasswordRun.qml` | Component: runs one `/usr/bin/punarctl` verb that needs the person's password with `--ticket-from-parent`: the password goes to punar-authd over its socket, and punarctl gets only a ticket bound to it and to the one method — never a pipe, never the password (F0-S4, ipc.md §23.5) |
+| `Services/DeviceAdmin.qml` | Singleton: whether this person administers the device (`punarctl --json admins list`), so a surface offers a password field to an administrator and names who can act to anyone else (F0-S1, ipc.md §23.3) |
+| `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals/<uid>.json` (M9, ipc.md §15) |
 | `Services/Alerts.qml` | Singleton: shadow-AI alert display state — watches `/run/punar-agentd/alerts.json` (M10, ipc.md §20) |
 | `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |
 | `WindowActions/WindowActions.qml` | Lazy focused-app menu: graceful close plus two-step, exact-window force quit |
@@ -132,10 +134,12 @@ mapped from Command by an Apple VM client. Raw compositor terminology is not
 shown in the shell.
 
 Every chord below is bound in
-[`os/modules/desktop/hypr/punar-binds.conf`](../../os/modules/desktop/hypr/punar-binds.conf)
-in the **described** form, so `hyprctl binds -j` carries a human label and
-the PUNAR+/ help surface renders the live table rather than a written copy
-of it. **If this list and the machine disagree, the machine is right.**
+[`os/modules/desktop/hypr/punar-binds.lua`](../../os/modules/desktop/hypr/punar-binds.lua)
+with a description, so the compositor's bind table carries a human label and
+the PUNAR+/ help surface renders the live table (through `punarctl keys
+list`) rather than a written copy of it. **If this list and the machine
+disagree, the machine is right.** The whole grammar is in
+[`docs/development/keyboard-grammar.md`](../../docs/development/keyboard-grammar.md).
 
 | Chord | Surface |
 | --- | --- |
@@ -143,13 +147,15 @@ of it. **If this list and the machine disagree, the machine is right.**
 | `PUNAR + Tab` | Project overview |
 | `PUNAR + A` | AI panel |
 | `PUNAR + S` | System control |
-| `PUNAR + /` | Shortcut help |
+| `PUNAR + /` or `PUNAR + F1` | Shortcut help (`/` sits behind Shift on German, French, Spanish and Italian keyboards; F1 is F1 on every layout) |
 | `PUNAR + SHIFT + N` | Notification centre (the plate asks for `PUNAR+N`; the notes scratchpad has held it since M2) |
 | `PUNAR + SHIFT + B` | Focus the bar's status cluster (the plate asks for `PUNAR+B`; the browser has held it since M1) |
 | `PUNAR + Q` | Ask the focused window to close normally |
 | `PUNAR + SHIFT + Q` | Window actions: close normally or enter the two-step Force quit confirmation |
 | `PUNAR + Escape` | Lock the session (`PUNAR+L` and its SHIFT/CTRL variants are all load-bearing in the §13.3 directional grammar) |
-| media keys | Volume up / down / mute — the OSD reads the **sink**, not the keypress |
+| `ALT + TAB` | Window switcher: every window, most recent first, drawn with the overview's wireframes; release Alt to choose (`SHIFT` goes back) |
+| volume keys | Volume up / down / mute — the OSD reads the **sink**, not the keypress |
+| media, microphone and brightness keys | `punarctl media`, `punarctl audio mute --input` and `punarctl display brightness`; the OSD shows the brightness the device settled on, and nothing on a machine without a backlight |
 
 Two surfaces deliberately have **no chord at all** — see below.
 
@@ -428,7 +434,7 @@ so an unelevated device pays nothing for it and an unelevated bar is
 byte-identical to the pre-M9 bar. Privilege is never invisible on this
 device, and there is no generic unrestricted root-shell API behind it.
 
-### Data — `/run/punard/approvals.json` (M9, ipc.md §15)
+### Data — `/run/punard/approvals/<uid>.json` (M9, ipc.md §15)
 
 Deliberately **not** in `/run/punar` alongside `status.json` and
 `agents.json`. That directory is `0755 punar:punar`, so a local process

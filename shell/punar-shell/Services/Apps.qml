@@ -37,6 +37,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 
 Singleton {
@@ -50,21 +51,47 @@ Singleton {
     // not a working standalone application in Punar. A person should see the
     // products, not their process topology. This is intentionally an exact-id
     // list, never a fuzzy name filter.
+    //
+    // The list is not written here. It is catalog/launcher-hidden-entries.json,
+    // shipped next to the catalog, and `punarctl app list --all` reads the
+    // same file and lists these entries marked with their reason. The
+    // launcher and the terminal then differ only on purpose, and visibly.
+    // A file that cannot be read hides nothing: every entry shows, which is
+    // visible, rather than a stale copy of the list quietly applying.
     readonly property var rawEntries: DesktopEntries.applications.values
     readonly property var entries: root.productEntries(root.rawEntries)
-    readonly property var hiddenProductEntryIds: [
-        "footclient",
-        "foot-server",
-        "chromium",
-        "chromium-browser",
-        "org.chromium.chromium",
-        "thunar-settings",
-        "thunar-bulk-rename",
-        "xfce4-about",
-        "bssh",
-        "bvnc",
-        "avahi-discover"
-    ]
+    readonly property string hiddenEntriesInstalledPath: "/usr/share/punar/catalog/launcher-hidden-entries.json"
+    readonly property string hiddenEntriesDevPath: Quickshell.shellDir + "/../../catalog/launcher-hidden-entries.json"
+    property var hiddenProductEntryIds: []
+
+    FileView {
+        id: hiddenEntriesFile
+        path: root.hiddenEntriesInstalledPath
+        blockLoading: true
+        watchChanges: false
+        onLoaded: {
+            try {
+                var parsed = JSON.parse(hiddenEntriesFile.text());
+                var ids = [];
+                if (parsed && parsed.v === 1 && parsed.entries !== null
+                        && typeof parsed.entries === "object") {
+                    for (var id in parsed.entries)
+                        ids.push(String(id).toLowerCase());
+                }
+                root.hiddenProductEntryIds = ids;
+            } catch (e) {
+                console.warn("punar-shell: launcher hidden entries are invalid at",
+                    hiddenEntriesFile.path, e);
+                root.hiddenProductEntryIds = [];
+            }
+        }
+        onLoadFailed: {
+            if (hiddenEntriesFile.path === root.hiddenEntriesInstalledPath)
+                hiddenEntriesFile.path = root.hiddenEntriesDevPath;
+            else
+                root.hiddenProductEntryIds = [];
+        }
+    }
 
     // DesktopEntries updates asynchronously after an installer writes or
     // removes a desktop file. Keep the result of the just-completed typed
@@ -125,6 +152,11 @@ Singleton {
             return "System Monitor";
         if (value === "lstopo")
             return "Hardware Information";
+        // No case for org.punar.mail. One existed while Mail was only a
+        // fixture-backed probe; once the product shipped with its own entry
+        // (Name=Mail, joined by file id) it relabelled the REAL Mail window
+        // as the prototype in every image, because this table is consulted
+        // before the desktop entry. The entry is the truth now.
         return "";
     }
 
@@ -146,7 +178,44 @@ Singleton {
         var entry = root.entryById(value);
         if (entry !== null)
             return root.displayName(entry);
+        // THE SIGNED CATALOG KNOWS THE PRODUCT NAME EVEN WHEN THE FREEDESKTOP
+        // INDEX DOES NOT, and that gap is real rather than theoretical: a
+        // datadir absent when the shell started is never watched (quickshell
+        // 0.3.0 desktopentrymonitor.cpp:46 skips it and never re-arms), so the
+        // first app installed on a fresh device was missing from the index for
+        // the rest of the session and the bar printed `org.gnome.Evolution`.
+        // The tmpfiles rule that pre-creates the flatpak export directory is
+        // the fix for THAT; this is the second line, and it also covers the
+        // ordinary case of an app whose Wayland id matches no desktop-file id
+        // at all.
+        //
+        // No new data and no heuristic: catalogWindowCandidates already builds
+        // the full identity set for an app — id, app_id, desktop_id, package
+        // name, executable basename and every sources[] variant — from a
+        // signed document with a human-authored name. Measured over the shipped
+        // catalogue: 130 apps, 260 distinct candidate ids, ONE collision
+        // (`chatgpt`, which names the web app and its native preview and so
+        // resolves to either safely). First match in catalogue order wins,
+        // which makes that tie deterministic.
+        var catalogName = root.catalogNameForAppId(value);
+        if (catalogName !== "")
+            return catalogName;
         return value === "" ? "Application" : value;
+    }
+
+    /// The signed catalogue's product name for a runtime application id, or ""
+    /// when the catalogue does not know it.
+    function catalogNameForAppId(appId: string): string {
+        var want = String(appId).trim().toLowerCase();
+        if (want === "")
+            return "";
+        var apps = Catalog.entries;
+        for (var i = 0; i < apps.length; i++) {
+            var candidates = root.catalogWindowCandidates(apps[i]);
+            if (candidates[want] === true)
+                return String(apps[i].name || "");
+        }
+        return "";
     }
 
     function windowTitleForAppId(appId: string, title: string): string {
@@ -442,10 +511,11 @@ Singleton {
             if (appId !== "" && candidates[appId] === true) {
                 // Keep the protocol-level activation request for compositor
                 // portability, then use Hyprland's typed focus dispatcher to
-                // guarantee macOS-like task switching across workspaces.
+                // guarantee macOS-like task switching across workspaces:
+                // `punarctl window focus --class`, which escapes the class
+                // into an exact-match selector.
                 list[i].activate();
-                var exactClass = observedAppId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                HyprlandActions.focusWindow("class:^" + exactClass + "$");
+                HyprlandActions.focusWindowClass(observedAppId);
                 return true;
             }
         }

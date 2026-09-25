@@ -16,7 +16,20 @@
 //! /var/lib/punar/approvals/index.json  0600 root:root
 //! /var/lib/punar/grants/               0700 root:root
 //! /var/lib/punar/grants/<gnt>.json     0600 root:root
+//! /run/punard/approvals/               0755 root:root   (the shell's views)
+//! /run/punard/approvals/<uid>.json     0640 root:root + ACL user:<uid>:r
 //! ```
+//!
+//! The shell's view is ONE FILE PER PERSON (F0 review). It used to be one
+//! `/run/punard/approvals.json`, `0640 root:punar`, and every account on the
+//! device is in `punar`, so on a shared device each person could read every
+//! person's agent requests, the justifications written for them and the
+//! device's live grants. Now each person's file holds only the approvals
+//! routed to them and their own grants, and a POSIX ACL lets that one uid
+//! read it: not a group (a person's primary group is not guaranteed to be
+//! theirs alone — the development image's account's is `punar`), and not the
+//! person as owner (an owner can chmod and rewrite a file, and this one is
+//! the card a person reads before they consent).
 //!
 //! An approval a peer can rewrite is an authorization forgery, and a grant a
 //! peer can write is a root shell with extra steps. Every write is atomic
@@ -33,7 +46,18 @@
 //! while the record's `expires_at` is when it *occurred*. Both are in the
 //! trail, so the instant is always recoverable, and no consumer may treat
 //! the sweep as the authority on whether something has expired —
-//! [`ApprovalEnvelope::has_lapsed`] against the clock is.
+//! [`ApprovalEnvelope::has_lapsed`] against the boot clock is.
+//!
+//! # Expiry reads the boot clock, never the wall clock (SMP-1405)
+//!
+//! Every record carries a `lifetime`, a [`BootWindow`] opened when it was
+//! created, and every decision here takes a `now` from
+//! [`punar_common::trusted_time`]: `None` when the clock cannot be read, and
+//! `None` authorizes nothing. So a grant or a pending approval lapses at
+//! reboot and at suspend, a wall clock rolled back (or read as 1970) revives nothing, and a
+//! record an older punard wrote — which has no window — is expired at the
+//! first sweep after an upgrade: the person asks again. The wall-clock
+//! `expires_at` stays on every record for people to read.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -42,20 +66,31 @@ use std::path::{Path, PathBuf};
 use punar_common::approval::{
     APPROVAL_RECORD_MAX_BYTES, APPROVALS_DIR_NAME, ApprovalEnvelope, ApprovalStatus,
     ApprovalsSummary, GRANTS_DIR_NAME, Grant, MAX_APPROVAL_RECORDS, SummaryApproval, SummaryGrant,
-    SummaryRequester, validate_approval_schema,
+    SummaryRequester, approvals_summary_path, validate_approval_schema,
 };
-use punar_common::time::{unix_seconds_from_rfc3339, utc_now_rfc3339};
+use punar_common::time::utc_now_rfc3339;
+use punar_common::trusted_time::BootStamp;
+#[cfg(doc)]
+use punar_common::trusted_time::BootWindow;
 use serde::{Deserialize, Serialize};
 
-use crate::util::{remove_synced, write_atomic_synced};
+use crate::util::{remove_synced, write_atomic_synced, write_atomic_synced_for_reader};
 
 /// Mode for every record and for the two directories.
 const RECORD_MODE: u32 = 0o600;
 const DIR_MODE: u32 = 0o700;
-/// The summary file is group-readable so the shell (user `punar`) can watch
-/// it; the *directory* above it is root-owned, which is the part that makes
-/// it unspoofable (docs/api/ipc.md section 15).
-const SUMMARY_MODE: u32 = 0o640;
+/// The per-person summary directory: root-owned, so nobody can replace a
+/// file in it, and traversable so each person can reach their own file (the
+/// runtime directory above it is `0750 root:punar`).
+const SUMMARY_DIR_MODE: u32 = 0o755;
+
+/// One person the shell's view is published for: their uid, and every name
+/// an approval may be routed to them by (`alice`, `uid:1000`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryReader {
+    pub uid: u32,
+    pub names: Vec<String>,
+}
 
 /// The crash-recovery / quick-read index (design plan section 4.1). The
 /// per-record files stay authoritative: this is a derived view, rebuilt from
@@ -87,8 +122,7 @@ struct IndexEntry {
 pub struct ApprovalStore {
     dir: PathBuf,
     grants_dir: PathBuf,
-    summary_path: PathBuf,
-    summary_gid: Option<u32>,
+    summary_dir: PathBuf,
     records: BTreeMap<String, ApprovalEnvelope>,
     grants: BTreeMap<String, Grant>,
 }
@@ -101,11 +135,7 @@ impl ApprovalStore {
     /// to boot over one damaged approval would take the whole device's
     /// policy engine down; forgetting a pending approval is fail-closed
     /// (nothing executes without a fresh, well-formed record).
-    pub fn load(
-        state_dir: &Path,
-        summary_path: PathBuf,
-        summary_gid: Option<u32>,
-    ) -> io::Result<Self> {
+    pub fn load(state_dir: &Path, summary_dir: PathBuf) -> io::Result<Self> {
         let dir = state_dir.join(APPROVALS_DIR_NAME);
         let grants_dir = state_dir.join(GRANTS_DIR_NAME);
         create_private_dir(&dir)?;
@@ -114,8 +144,7 @@ impl ApprovalStore {
         let mut store = ApprovalStore {
             dir,
             grants_dir,
-            summary_path,
-            summary_gid,
+            summary_dir,
             records: BTreeMap::new(),
             grants: BTreeMap::new(),
         };
@@ -180,7 +209,7 @@ impl ApprovalStore {
     }
 
     /// Pending, unlapsed approvals device-wide.
-    pub fn pending_count(&self, now: u64) -> usize {
+    pub fn pending_count(&self, now: Option<&BootStamp>) -> usize {
         self.records
             .values()
             .filter(|env| env.is_answerable(now))
@@ -188,7 +217,7 @@ impl ApprovalStore {
     }
 
     /// Pending, unlapsed approvals raised by one requester id.
-    pub fn pending_for_requester(&self, requester_id: &str, now: u64) -> usize {
+    pub fn pending_for_requester(&self, requester_id: &str, now: Option<&BootStamp>) -> usize {
         self.records
             .values()
             .filter(|env| env.is_answerable(now) && env.approval.requester.id == requester_id)
@@ -249,14 +278,22 @@ impl ApprovalStore {
         Ok(())
     }
 
-    /// Expire every pending record whose `expires_at` has passed, persist
+    /// Expire every pending record whose window has closed at `now`, persist
     /// them, and return the newly expired ones so the caller can audit each
     /// (one `approval.expire` event apiece, never a batch).
-    pub fn sweep(&mut self, now: u64) -> Vec<ApprovalEnvelope> {
+    ///
+    /// Takes a clock reading, not an `Option`: a sweep writes terminal state,
+    /// so a caller that could not read the clock skips the sweep instead of
+    /// expiring everything over a transient failure. The *decisions* still
+    /// fail closed without one — see [`ApprovalStore::pending_count`] and
+    /// [`ApprovalStore::live_grant`].
+    pub fn sweep(&mut self, now: &BootStamp) -> Vec<ApprovalEnvelope> {
         let lapsed: Vec<String> = self
             .records
             .values()
-            .filter(|env| env.approval.status == ApprovalStatus::Pending && env.has_lapsed(now))
+            .filter(|env| {
+                env.approval.status == ApprovalStatus::Pending && env.has_lapsed(Some(now))
+            })
             .map(|env| env.approval.approval_id.clone())
             .collect();
         let mut expired = Vec::new();
@@ -290,7 +327,12 @@ impl ApprovalStore {
     /// Exact capability match only. There is no wildcard grant, no prefix
     /// match, and no "grants imply related capabilities" rule — SPEC section
     /// 48's whole point is that elevation is narrow.
-    pub fn live_grant(&self, uid: u32, capability: &str, now: u64) -> Option<&Grant> {
+    pub fn live_grant(
+        &self,
+        uid: u32,
+        capability: &str,
+        now: Option<&BootStamp>,
+    ) -> Option<&Grant> {
         self.grants
             .values()
             .filter(|g| g.uid == uid && g.capability == capability && g.is_live(now))
@@ -299,7 +341,7 @@ impl ApprovalStore {
 
     /// Live grants for one uid, or every live grant when `uid` is `None`
     /// (root's view).
-    pub fn live_grants(&self, uid: Option<u32>, now: u64) -> Vec<Grant> {
+    pub fn live_grants(&self, uid: Option<u32>, now: Option<&BootStamp>) -> Vec<Grant> {
         let mut grants: Vec<Grant> = self
             .grants
             .values()
@@ -313,6 +355,20 @@ impl ApprovalStore {
     /// Any grant by id, live or not.
     pub fn grant(&self, grant_id: &str) -> Option<&Grant> {
         self.grants.get(grant_id)
+    }
+
+    /// Every grant id held by `uid` (every grant for `None`), live or not,
+    /// soonest display expiry first — what `privilege.revoke --all` drops.
+    /// Deliberately clock-free: handing privilege back must never depend on
+    /// being able to tell whether it was still live.
+    pub fn grant_ids(&self, uid: Option<u32>) -> Vec<String> {
+        let mut grants: Vec<&Grant> = self
+            .grants
+            .values()
+            .filter(|g| uid.is_none_or(|uid| g.uid == uid))
+            .collect();
+        grants.sort_by(|a, b| a.expires_at.cmp(&b.expires_at));
+        grants.into_iter().map(|g| g.grant_id.clone()).collect()
     }
 
     /// Drop a grant: unlink the record and forget it.
@@ -330,12 +386,13 @@ impl ApprovalStore {
     }
 
     /// Remove every lapsed grant and return them, so the caller can audit
-    /// one `privilege.expire` event apiece.
-    pub fn sweep_grants(&mut self, now: u64) -> Vec<Grant> {
+    /// one `privilege.expire` event apiece. A clock reading is required for
+    /// the same reason [`ApprovalStore::sweep`] requires one.
+    pub fn sweep_grants(&mut self, now: &BootStamp) -> Vec<Grant> {
         let lapsed: Vec<String> = self
             .grants
             .values()
-            .filter(|g| !g.is_live(now))
+            .filter(|g| !g.is_live(Some(now)))
             .map(|g| g.grant_id.clone())
             .collect();
         let mut expired = Vec::new();
@@ -376,44 +433,74 @@ impl ApprovalStore {
         write_atomic_synced(&self.dir.join("index.json"), &bytes, RECORD_MODE)
     }
 
-    /// The shell's view (docs/api/ipc.md section 15): every pending approval
-    /// plus recently resolved ones, and every live grant.
+    /// The shell's views (docs/api/ipc.md section 15): for each person in
+    /// `readers`, the approvals routed to them — pending first, then recent
+    /// verdicts — and their own live grants, in `<uid>.json`, readable by
+    /// root and by that uid alone. A file for anyone no longer in `readers`
+    /// is removed.
     ///
     /// Non-authoritative by contract. The overlay's Approve sends only an
     /// `approval_id` and punard re-derives everything from its own record —
     /// so the worst a stale summary can do is show a card that is already
     /// answered, which the daemon then refuses with `conflict`.
-    pub fn publish_summary(&self, now: u64) -> io::Result<()> {
-        if let Some(parent) = self.summary_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    pub fn publish_summary(
+        &self,
+        now: Option<&BootStamp>,
+        readers: &[SummaryReader],
+    ) -> io::Result<()> {
+        std::fs::create_dir_all(&self.summary_dir)?;
+        std::fs::set_permissions(
+            &self.summary_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(SUMMARY_DIR_MODE),
+        )?;
+        let everything = self.list();
+        let live = self.live_grants(None, now);
+        let mut first_error = None;
+        for reader in readers.iter().filter(|reader| reader.uid != 0) {
+            let summary = ApprovalsSummary {
+                v: 1,
+                updated_at: utc_now_rfc3339(),
+                approvals: everything
+                    .iter()
+                    .filter(|env| reader.names.contains(&env.approval.user))
+                    .take(MAX_SUMMARY_APPROVALS)
+                    .cloned()
+                    .map(summary_row)
+                    .collect(),
+                grants: live
+                    .iter()
+                    .filter(|g| g.uid == reader.uid)
+                    .map(|g| SummaryGrant {
+                        grant_id: g.grant_id.clone(),
+                        capability: g.capability.clone(),
+                        expires_at: g.expires_at.clone(),
+                    })
+                    .collect(),
+            };
+            let bytes = serde_json::to_vec(&summary)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let path = approvals_summary_path(&self.summary_dir, reader.uid);
+            if let Err(e) = write_atomic_synced_for_reader(&path, &bytes, reader.uid) {
+                first_error.get_or_insert(e);
+            }
         }
-        let summary = ApprovalsSummary {
-            v: 1,
-            updated_at: utc_now_rfc3339(),
-            approvals: self
-                .list()
-                .into_iter()
-                .take(MAX_SUMMARY_APPROVALS)
-                .map(summary_row)
-                .collect(),
-            grants: self
-                .live_grants(None, now)
-                .into_iter()
-                .map(|g| SummaryGrant {
-                    grant_id: g.grant_id,
-                    capability: g.capability,
-                    expires_at: g.expires_at,
-                })
-                .collect(),
-        };
-        let bytes = serde_json::to_vec(&summary)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        write_atomic_synced(&self.summary_path, &bytes, SUMMARY_MODE)?;
-        if let Some(gid) = self.summary_gid {
-            // Meaningful only as root; harmless EPERM otherwise (tests).
-            let _ = std::os::unix::fs::chown(&self.summary_path, Some(0), Some(gid));
+        // Anyone no longer a reader keeps no view.
+        if let Ok(entries) = std::fs::read_dir(&self.summary_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(uid) = name
+                    .to_str()
+                    .and_then(|n| n.strip_suffix(".json"))
+                    .and_then(|n| n.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if !readers.iter().any(|reader| reader.uid == uid && uid != 0) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -475,16 +562,22 @@ fn read_json_files(dir: &Path) -> io::Result<Vec<(PathBuf, String)>> {
     Ok(out)
 }
 
-/// Seconds since the epoch, for the expiry comparisons. A clock before the
-/// epoch reads as 0, which expires everything — fail closed, like every
-/// other unreadable-time path in this module.
-pub fn now_secs() -> u64 {
-    unix_seconds_from_rfc3339(&utc_now_rfc3339()).unwrap_or(0)
-}
-
-/// `now + secs` as an RFC 3339 string.
-pub fn rfc3339_in(secs: u64) -> String {
-    punar_common::time::rfc3339_utc_from_unix_seconds(now_secs().saturating_add(secs))
+/// The instant `secs` from now on the **wall** clock, as RFC 3339 — the
+/// `expires_at` people read on a card, a grant and in `punarctl`.
+///
+/// Display only: nothing compares it with anything (the record's
+/// `lifetime` decides, on the boot clock). That is why it may read a wrong
+/// clock without harm, and why an unreadable one simply reads as the epoch.
+/// It is capped at the last second of year 9999, the most the shipped
+/// timestamp pattern can spell, so a clock set absurdly far ahead cannot make
+/// a record fail its schema check and refuse to be written.
+pub fn display_expiry_in(secs: u64) -> String {
+    /// `9999-12-31T23:59:59Z`.
+    const LAST_SPELLABLE_SECOND: u64 = 253_402_300_799;
+    let wall = u64::try_from(punar_common::time::unix_now_millis() / 1000).unwrap_or(u64::MAX);
+    punar_common::time::rfc3339_utc_from_unix_seconds(
+        wall.saturating_add(secs).min(LAST_SPELLABLE_SECOND),
+    )
 }
 
 #[cfg(test)]
@@ -495,13 +588,28 @@ mod tests {
     use punar_common::approval::{
         Approval, ApprovalKind, ApprovalRequest, PolicyCitation, Requester,
     };
+    use punar_common::trusted_time::{BootWindow, live_budget_ms};
     use serde_json::json;
+
+    const BOOT: &str = "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b";
+    const NEXT_BOOT: &str = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b";
+    /// Where every record in these tests opens its window, in raw ms.
+    const T0: i64 = 10_000_000;
+
+    fn at(raw_bt_ms: i64) -> BootStamp {
+        BootStamp {
+            boot_id: BOOT.to_string(),
+            raw_bt_ms,
+            sleep_ms: 0,
+            suspends: 0,
+        }
+    }
 
     fn dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "punard-approvals-{tag}-{}-{}",
             std::process::id(),
-            now_secs()
+            punar_common::time::unix_now_millis()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -510,12 +618,20 @@ mod tests {
 
     fn store(tag: &str) -> (PathBuf, ApprovalStore) {
         let dir = dir(tag);
-        let store = ApprovalStore::load(&dir, dir.join("approvals.json"), None).unwrap();
+        let store = ApprovalStore::load(&dir, dir.join("summaries")).unwrap();
         (dir, store)
     }
 
-    fn envelope(id: &str, requester: &str, expires_in: i64) -> ApprovalEnvelope {
-        let expires = (now_secs() as i64 + expires_in).max(0) as u64;
+    /// The one person these tests route approvals to: `punar`, uid 1000.
+    fn punar() -> Vec<SummaryReader> {
+        vec![SummaryReader {
+            uid: 1000,
+            names: vec!["punar".to_string(), "uid:1000".to_string()],
+        }]
+    }
+
+    /// A pending approval with a `ttl_secs` window opened at raw `opened`.
+    fn envelope(id: &str, requester: &str, ttl_secs: u64, opened: i64) -> ApprovalEnvelope {
         ApprovalEnvelope {
             v: 1,
             approval: Approval {
@@ -530,7 +646,7 @@ mod tests {
                 reason: "Atlas integration test".to_string(),
                 risk: Risk::High,
                 status: ApprovalStatus::Pending,
-                expires_at: punar_common::time::rfc3339_utc_from_unix_seconds(expires),
+                expires_at: display_expiry_in(ttl_secs),
             },
             kind: ApprovalKind::CapabilitySet,
             created_at: utc_now_rfc3339(),
@@ -548,11 +664,12 @@ mod tests {
             resolved_by: None,
             consumed_at: None,
             execution: None,
+            lifetime: Some(BootWindow::of_secs(at(opened), ttl_secs)),
         }
     }
 
-    fn grant(id: &str, uid: u32, capability: &str, expires_in: i64) -> Grant {
-        let expires = (now_secs() as i64 + expires_in).max(0) as u64;
+    /// A grant of `secs` opened at raw `opened`.
+    fn grant(id: &str, uid: u32, capability: &str, secs: u64, opened: i64) -> Grant {
         Grant {
             v: 1,
             grant_id: id.to_string(),
@@ -562,16 +679,19 @@ mod tests {
             capability: capability.to_string(),
             reason: "Reproducing the Atlas net bug".to_string(),
             granted_at: utc_now_rfc3339(),
-            expires_at: punar_common::time::rfc3339_utc_from_unix_seconds(expires),
+            expires_at: display_expiry_in(secs),
             revoked_at: None,
+            lifetime: Some(BootWindow::of_secs(at(opened), secs)),
         }
     }
 
     #[test]
     fn records_round_trip_through_disk_and_the_directory_is_private() {
         let (dir, mut store) = store("roundtrip");
-        store.put(envelope("apr_0000aa01", "agt_one", 300)).unwrap();
-        store.publish_summary(now_secs()).unwrap();
+        store
+            .put(envelope("apr_0000aa01", "agt_one", 300, T0))
+            .unwrap();
+        store.publish_summary(Some(&at(T0)), &punar()).unwrap();
 
         let mode = |p: &Path| {
             use std::os::unix::fs::PermissionsExt;
@@ -579,13 +699,14 @@ mod tests {
         };
         assert_eq!(mode(&dir.join("approvals")), 0o700);
         assert_eq!(mode(&dir.join("approvals/apr_0000aa01.json")), 0o600);
-        assert_eq!(mode(&dir.join("approvals.json")), 0o640);
+        assert_eq!(mode(&dir.join("summaries")), 0o755);
 
-        // A fresh store sees exactly what the old one wrote.
-        let reopened = ApprovalStore::load(&dir, dir.join("approvals.json"), None).unwrap();
+        // A fresh store sees exactly what the old one wrote, window included.
+        let reopened = ApprovalStore::load(&dir, dir.join("summaries")).unwrap();
         let env = reopened.get("apr_0000aa01").unwrap();
         assert_eq!(env.approval.status, ApprovalStatus::Pending);
         assert_eq!(env.contract, "SetFirewall(disabled)");
+        assert_eq!(env.lifetime, Some(BootWindow::of_secs(at(T0), 300)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -594,12 +715,21 @@ mod tests {
     #[test]
     fn the_persisted_record_keeps_the_document_and_the_siblings_apart() {
         let (dir, mut store) = store("shape");
-        store.put(envelope("apr_0000aa02", "agt_one", 300)).unwrap();
+        store
+            .put(envelope("apr_0000aa02", "agt_one", 300, T0))
+            .unwrap();
         let text = std::fs::read_to_string(dir.join("approvals/apr_0000aa02.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let document = value["approval"].as_object().unwrap();
         assert_eq!(document.len(), 9);
-        for sibling in ["kind", "created_at", "request", "policy", "contract"] {
+        for sibling in [
+            "kind",
+            "created_at",
+            "request",
+            "policy",
+            "contract",
+            "lifetime",
+        ] {
             assert!(!document.contains_key(sibling));
             assert!(value.get(sibling).is_some());
         }
@@ -611,12 +741,12 @@ mod tests {
     #[test]
     fn a_nonconformant_record_is_refused_before_it_is_written() {
         let (dir, mut store) = store("bad");
-        let mut env = envelope("apr_0000aa03", "agt_one", 300);
+        let mut env = envelope("apr_0000aa03", "agt_one", 300, T0);
         env.approval.reason = "line one\nline two".to_string();
         assert!(store.put(env).is_err());
         assert!(!dir.join("approvals/apr_0000aa03.json").exists());
 
-        let mut env = envelope("not-an-id", "agt_one", 300);
+        let mut env = envelope("not-an-id", "agt_one", 300, T0);
         env.approval.approval_id = "not-an-id".to_string();
         assert!(store.put(env).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
@@ -625,42 +755,63 @@ mod tests {
     #[test]
     fn the_sweep_expires_lapsed_pending_records_only_once() {
         let (dir, mut store) = store("sweep");
-        store.put(envelope("apr_0000bb01", "agt_one", -1)).unwrap();
-        store.put(envelope("apr_0000bb02", "agt_one", 300)).unwrap();
+        // One opened 301 s before now, one opened now.
+        let now = at(T0 + 301_000);
+        store
+            .put(envelope("apr_0000bb01", "agt_one", 300, T0))
+            .unwrap();
+        store
+            .put(envelope("apr_0000bb02", "agt_one", 300, T0 + 301_000))
+            .unwrap();
 
-        let expired = store.sweep(now_secs());
+        let expired = store.sweep(&now);
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].approval.approval_id, "apr_0000bb01");
         assert_eq!(expired[0].approval.status, ApprovalStatus::Expired);
         // Idempotent: a second sweep has nothing left to expire, so the
         // trail gets exactly one `approval.expire` event per approval.
-        assert!(store.sweep(now_secs()).is_empty());
-        assert_eq!(store.pending_count(now_secs()), 1);
+        assert!(store.sweep(&now).is_empty());
+        assert_eq!(store.pending_count(Some(&now)), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn pending_counts_drive_the_flood_bounds() {
         let (dir, mut store) = store("counts");
-        store.put(envelope("apr_0000cc01", "agt_one", 300)).unwrap();
-        store.put(envelope("apr_0000cc02", "agt_one", 300)).unwrap();
-        store.put(envelope("apr_0000cc03", "agt_two", 300)).unwrap();
+        let now = at(T0 + 10_000);
+        store
+            .put(envelope("apr_0000cc01", "agt_one", 300, T0))
+            .unwrap();
+        store
+            .put(envelope("apr_0000cc02", "agt_one", 300, T0))
+            .unwrap();
+        store
+            .put(envelope("apr_0000cc03", "agt_two", 300, T0))
+            .unwrap();
         // A lapsed approval is not pending, even before anyone sweeps.
-        store.put(envelope("apr_0000cc04", "agt_two", -5)).unwrap();
+        store
+            .put(envelope("apr_0000cc04", "agt_two", 15, T0 - 5_000))
+            .unwrap();
 
-        let now = now_secs();
-        assert_eq!(store.pending_count(now), 3);
-        assert_eq!(store.pending_for_requester("agt_one", now), 2);
-        assert_eq!(store.pending_for_requester("agt_two", now), 1);
+        assert_eq!(store.pending_count(Some(&now)), 3);
+        assert_eq!(store.pending_for_requester("agt_one", Some(&now)), 2);
+        assert_eq!(store.pending_for_requester("agt_two", Some(&now)), 1);
+        // A clock that cannot be read counts nothing as pending — and
+        // punard refuses to raise an approval at all in that state.
+        assert_eq!(store.pending_count(None), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn listing_puts_pending_first_by_soonest_expiry() {
         let (dir, mut store) = store("order");
-        store.put(envelope("apr_0000dd01", "agt_one", 300)).unwrap();
-        store.put(envelope("apr_0000dd02", "agt_one", 60)).unwrap();
-        let mut resolved = envelope("apr_0000dd03", "agt_one", 300);
+        store
+            .put(envelope("apr_0000dd01", "agt_one", 300, T0))
+            .unwrap();
+        store
+            .put(envelope("apr_0000dd02", "agt_one", 60, T0))
+            .unwrap();
+        let mut resolved = envelope("apr_0000dd03", "agt_one", 300, T0);
         resolved.approval.status = ApprovalStatus::Denied;
         store.put(resolved).unwrap();
 
@@ -677,21 +828,48 @@ mod tests {
     fn grants_are_exact_matches_and_expire_for_real() {
         let (dir, mut store) = store("grants");
         store
-            .put_grant(grant("gnt_0000aa01", 1000, "time.timezone", 60))
+            .put_grant(grant("gnt_0000aa01", 1000, "time.timezone", 60, T0))
             .unwrap();
-        let now = now_secs();
-        assert!(store.live_grant(1000, "time.timezone", now).is_some());
+        let now = at(T0);
+        assert!(
+            store
+                .live_grant(1000, "time.timezone", Some(&now))
+                .is_some()
+        );
         // Wrong uid, wrong capability, no prefix magic: all refused.
-        assert!(store.live_grant(1001, "time.timezone", now).is_none());
-        assert!(store.live_grant(1000, "security.firewall", now).is_none());
-        assert!(store.live_grant(1000, "time", now).is_none());
-        // Past its window it authorizes nothing, sweep or no sweep.
-        assert!(store.live_grant(1000, "time.timezone", now + 61).is_none());
+        assert!(
+            store
+                .live_grant(1001, "time.timezone", Some(&now))
+                .is_none()
+        );
+        assert!(
+            store
+                .live_grant(1000, "security.firewall", Some(&now))
+                .is_none()
+        );
+        assert!(store.live_grant(1000, "time", Some(&now)).is_none());
+        // Past its window it authorizes nothing, sweep or no sweep. The
+        // window is 60 000 ms less the 12 ms drift allowance.
+        let edge = at(T0 + live_budget_ms(60_000));
+        assert!(
+            store
+                .live_grant(
+                    1000,
+                    "time.timezone",
+                    Some(&at(T0 + live_budget_ms(60_000) - 1))
+                )
+                .is_some()
+        );
+        assert!(
+            store
+                .live_grant(1000, "time.timezone", Some(&edge))
+                .is_none()
+        );
 
-        let expired = store.sweep_grants(now + 61);
+        let expired = store.sweep_grants(&edge);
         assert_eq!(expired.len(), 1);
         assert!(!dir.join("grants/gnt_0000aa01.json").exists());
-        assert!(store.sweep_grants(now + 61).is_empty());
+        assert!(store.sweep_grants(&edge).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -699,24 +877,26 @@ mod tests {
     fn revoking_a_grant_unlinks_it_and_is_idempotent() {
         let (dir, mut store) = store("revoke");
         store
-            .put_grant(grant("gnt_0000bb01", 1000, "time.timezone", 600))
+            .put_grant(grant("gnt_0000bb01", 1000, "time.timezone", 600, T0))
             .unwrap();
         assert!(store.drop_grant("gnt_0000bb01").unwrap().is_some());
         assert!(store.drop_grant("gnt_0000bb01").unwrap().is_none());
-        assert!(store.live_grants(None, now_secs()).is_empty());
+        assert!(store.live_grants(None, Some(&at(T0))).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn the_summary_carries_the_overlay_fields_and_no_agent_name() {
         let (dir, mut store) = store("summary");
-        store.put(envelope("apr_0000ee01", "agt_one", 300)).unwrap();
         store
-            .put_grant(grant("gnt_0000cc01", 1000, "time.timezone", 600))
+            .put(envelope("apr_0000ee01", "agt_one", 300, T0))
             .unwrap();
-        store.publish_summary(now_secs()).unwrap();
+        store
+            .put_grant(grant("gnt_0000cc01", 1000, "time.timezone", 600, T0))
+            .unwrap();
+        store.publish_summary(Some(&at(T0)), &punar()).unwrap();
 
-        let text = std::fs::read_to_string(dir.join("approvals.json")).unwrap();
+        let text = std::fs::read_to_string(dir.join("summaries/1000.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["v"], 1);
         let row = &value["approvals"][0];
@@ -727,19 +907,188 @@ mod tests {
         assert_eq!(row["requester"]["type"], "ai_agent");
         assert!(row["requester"].get("agent_name").is_none());
         assert_eq!(value["grants"][0]["grant_id"], "gnt_0000cc01");
+        // The shell's file is unchanged in shape: no window in it.
+        assert!(row.get("lifetime").is_none());
+        assert!(value["grants"][0].get("lifetime").is_none());
+
+        // A clock that cannot be read publishes no live grant.
+        store.publish_summary(None, &punar()).unwrap();
+        let text = std::fs::read_to_string(dir.join("summaries/1000.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value["grants"].as_array().unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// **Grants and pending approvals lapse at reboot.** The raw clock starts
+    /// again near zero on the next boot, which a comparison that ignored the
+    /// boot id would read as "no time has passed".
+    #[test]
+    fn a_grant_or_approval_from_another_boot_is_dead() {
+        let (dir, mut store) = store("reboot");
+        store
+            .put_grant(grant("gnt_0000dd01", 1000, "time.timezone", 3600, T0))
+            .unwrap();
+        store
+            .put(envelope("apr_0000dd11", "agt_one", 300, T0))
+            .unwrap();
+        let rebooted = BootStamp {
+            boot_id: NEXT_BOOT.to_string(),
+            raw_bt_ms: T0 + 1,
+            sleep_ms: 0,
+            suspends: 0,
+        };
+        assert!(
+            store
+                .live_grant(1000, "time.timezone", Some(&rebooted))
+                .is_none()
+        );
+        assert!(store.live_grants(None, Some(&rebooted)).is_empty());
+        assert_eq!(store.pending_count(Some(&rebooted)), 0);
+        assert_eq!(store.sweep_grants(&rebooted).len(), 1);
+        assert_eq!(store.sweep(&rebooted).len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The hole this migration closes. A clock rolled back — or read as
+    /// 1970, which used to make everything live — is not an input: the
+    /// record's wall-clock `expires_at` may say next century, and the boot
+    /// clock still ends it on time.
+    #[test]
+    fn rolling_the_wall_clock_back_revives_nothing() {
+        let (dir, mut store) = store("rollback");
+        let mut pending = envelope("apr_0000ab01", "agt_one", 300, T0);
+        pending.approval.expires_at = "2126-01-01T00:00:00Z".to_string();
+        let mut elevated = grant("gnt_0000ab01", 1000, "time.timezone", 60, T0);
+        elevated.expires_at = "2126-01-01T00:00:00Z".to_string();
+        store.put(pending).unwrap();
+        store.put_grant(elevated).unwrap();
+
+        let later = at(T0 + 300_000);
+        assert_eq!(store.pending_count(Some(&later)), 0);
+        assert!(
+            store
+                .live_grant(1000, "time.timezone", Some(&later))
+                .is_none()
+        );
+        assert_eq!(store.sweep(&later).len(), 1);
+        assert_eq!(store.sweep_grants(&later).len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Records an older punard wrote carry no window. On upgrade they are
+    /// expired at the first sweep: a grant lapses and the person asks again.
+    #[test]
+    fn a_record_an_older_punard_wrote_is_dead_and_swept() {
+        let (dir, mut store) = store("legacy");
+        let mut old_grant = grant("gnt_0000ef01", 1000, "time.timezone", 3600, T0);
+        old_grant.lifetime = None;
+        let mut old_pending = envelope("apr_0000ef01", "agt_one", 300, T0);
+        old_pending.lifetime = None;
+        store.put_grant(old_grant).unwrap();
+        store.put(old_pending).unwrap();
+        // Reload from disk, exactly as the upgraded punard would.
+        let mut store = ApprovalStore::load(&dir, dir.join("summaries")).unwrap();
+        let now = at(T0);
+        assert!(
+            store
+                .live_grant(1000, "time.timezone", Some(&now))
+                .is_none()
+        );
+        assert_eq!(store.pending_count(Some(&now)), 0);
+        assert_eq!(store.sweep_grants(&now).len(), 1);
+        let expired = store.sweep(&now);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].approval.status, ApprovalStatus::Expired);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The display expiry is display: it reads the wall clock, never fails,
+    /// and never spells a year the schema pattern cannot hold.
+    #[test]
+    fn the_display_expiry_is_always_a_schema_timestamp() {
+        for secs in [0, 300, 3_600, u64::MAX] {
+            let text = display_expiry_in(secs);
+            assert!(
+                punar_common::time::is_rfc3339_timestamp(&text),
+                "{secs}: {text}"
+            );
+        }
+        assert_eq!(display_expiry_in(u64::MAX), "9999-12-31T23:59:59Z");
     }
 
     /// A damaged record must not take the daemon down with it.
     #[test]
     fn an_unreadable_record_is_quarantined_not_fatal() {
         let (dir, mut store) = store("quarantine");
-        store.put(envelope("apr_0000ff01", "agt_one", 300)).unwrap();
+        store
+            .put(envelope("apr_0000ff01", "agt_one", 300, T0))
+            .unwrap();
         std::fs::write(dir.join("approvals/apr_0000ff02.json"), "{not json").unwrap();
 
-        let reopened = ApprovalStore::load(&dir, dir.join("approvals.json"), None).unwrap();
+        let reopened = ApprovalStore::load(&dir, dir.join("summaries")).unwrap();
         assert!(reopened.get("apr_0000ff01").is_some());
         assert!(reopened.get("apr_0000ff02").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// F0 review: each person's view holds the approvals routed to them and
+    /// their own grants, and nothing of anyone else's; a person who is no
+    /// longer a reader keeps no file; root gets none (root reads the socket).
+    #[test]
+    fn each_person_sees_only_their_own_approvals_and_grants() {
+        let (dir, mut store) = store("per-person");
+        let mut alices = envelope("apr_0000a101", "agt_alice", 300, T0);
+        alices.approval.user = "alice".to_string();
+        let mut bobs = envelope("apr_0000b101", "agt_bob", 300, T0);
+        bobs.approval.user = "uid:1001".to_string();
+        store.put(alices).unwrap();
+        store.put(bobs).unwrap();
+        store
+            .put_grant(grant("gnt_0000a101", 1000, "time.timezone", 600, T0))
+            .unwrap();
+        store
+            .put_grant(grant("gnt_0000b101", 1001, "security.firewall", 600, T0))
+            .unwrap();
+        let readers = vec![
+            SummaryReader {
+                uid: 1000,
+                names: vec!["alice".into(), "uid:1000".into()],
+            },
+            SummaryReader {
+                uid: 1001,
+                names: vec!["bob".into(), "uid:1001".into()],
+            },
+            SummaryReader {
+                uid: 0,
+                names: vec!["root".into()],
+            },
+        ];
+        store.publish_summary(Some(&at(T0)), &readers).unwrap();
+        let view = |uid: u32| -> serde_json::Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(dir.join(format!("summaries/{uid}.json"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let alice = view(1000);
+        assert_eq!(alice["approvals"].as_array().unwrap().len(), 1);
+        assert_eq!(alice["approvals"][0]["approval_id"], "apr_0000a101");
+        assert_eq!(alice["grants"].as_array().unwrap().len(), 1);
+        assert_eq!(alice["grants"][0]["grant_id"], "gnt_0000a101");
+        let bob = view(1001);
+        assert_eq!(bob["approvals"][0]["approval_id"], "apr_0000b101");
+        assert_eq!(bob["grants"][0]["grant_id"], "gnt_0000b101");
+        assert!(!alice.to_string().contains("agt_bob"));
+        assert!(!bob.to_string().contains("agt_alice"));
+        assert!(
+            !dir.join("summaries/0.json").exists(),
+            "root reads the socket"
+        );
+
+        // Bob leaves the device: his view goes with him.
+        store.publish_summary(Some(&at(T0)), &readers[..1]).unwrap();
+        assert!(!dir.join("summaries/1001.json").exists());
+        assert!(dir.join("summaries/1000.json").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Add Mail Account
+GenericName=Email Account Setup
+Comment=Securely connect an email account to Mail
+Exec=punarctl mail account-add
+TryExec=punarctl
+Icon=mail-mark-unread-symbolic
+Terminal=false
+Categories=Settings;Network;Email;
+Keywords=mail;email;account;imap;smtp;gmail;icloud;
+StartupNotify=true
+StartupWMClass=org.punar.MailAccount
+X-Punar-FirstParty=true

@@ -1,0 +1,635 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/pim/records.json",
+  "title": "Punar PIM record",
+  "description": "Provider-neutral records emitted by punar-pimd for Mail, Calendar, Reminders and contact completion. Runtime JSON uses snake_case. Credential values, server passwords, OAuth codes/tokens, provider client secrets and caller-selected profile identities are deliberately absent (ADR-008).",
+  "oneOf": [
+    { "$ref": "#/$defs/account" },
+    { "$ref": "#/$defs/mail_summary" },
+    { "$ref": "#/$defs/mail_thread" },
+    { "$ref": "#/$defs/mail_draft" },
+    { "$ref": "#/$defs/calendar" },
+    { "$ref": "#/$defs/calendar_event" },
+    { "$ref": "#/$defs/reminder_list" },
+    { "$ref": "#/$defs/reminder" },
+    { "$ref": "#/$defs/contact" },
+    { "$ref": "#/$defs/change_event" },
+    { "$ref": "#/$defs/operation" }
+  ],
+  "$defs": {
+    "account_id": {
+      "type": "string",
+      "pattern": "^acct_[A-Za-z0-9]+$",
+      "maxLength": 80
+    },
+    "setup_id": {
+      "type": "string",
+      "pattern": "^setup_[A-Za-z0-9]+$",
+      "maxLength": 80
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^op_[A-Za-z0-9]+$",
+      "maxLength": 80
+    },
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,31}_[A-Za-z0-9]+$",
+      "maxLength": 128
+    },
+    "nullable_timestamp": {
+      "oneOf": [
+        { "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "event_when": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "date" },
+            "start_date": { "$ref": "#/$defs/date" },
+            "end_date": { "$ref": "#/$defs/date" },
+            "timezone": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "required": ["kind", "start_date", "end_date", "timezone"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "date_time" },
+            "starts_at": {
+              "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+            },
+            "ends_at": {
+              "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+            },
+            "timezone": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "required": ["kind", "starts_at", "ends_at", "timezone"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "reminder_due": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "date" },
+            "date": { "$ref": "#/$defs/date" },
+            "timezone": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "required": ["kind", "date", "timezone"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "date_time" },
+            "at": {
+              "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+            },
+            "timezone": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "required": ["kind", "at", "timezone"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "email_address": {
+      "type": "object",
+      "properties": {
+        "name": { "type": ["string", "null"], "maxLength": 256 },
+        "address": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 320,
+          "pattern": "^[^\\s@]+@[^\\s@]+$"
+        }
+      },
+      "required": ["name", "address"],
+      "additionalProperties": false
+    },
+    "sync_error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "offline",
+            "upstream_auth_required",
+            "upstream_unreachable",
+            "rate_limited",
+            "malformed_remote_data",
+            "unsupported_remote_state",
+            "internal"
+          ]
+        },
+        "retryable": { "type": "boolean" },
+        "occurred_at": {
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+        }
+      },
+      "required": ["code", "retryable", "occurred_at"],
+      "additionalProperties": false
+    },
+    "conflict": {
+      "type": "object",
+      "properties": {
+        "conflict_id": { "$ref": "#/$defs/opaque_id" },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "maxLength": 64
+          },
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "detected_at": {
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+        },
+        "resolution_options": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["keep_local", "use_remote", "merge"]
+          },
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true
+        }
+      },
+      "required": ["conflict_id", "fields", "detected_at", "resolution_options"],
+      "additionalProperties": false
+    },
+    "sync_metadata": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["local_only", "synced", "pending", "offline", "conflict", "error"]
+        },
+        "local_revision": { "type": "integer", "minimum": 0 },
+        "remote_revision": { "type": ["string", "null"], "maxLength": 512 },
+        "updated_at": {
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+        },
+        "last_error": {
+          "oneOf": [
+            { "$ref": "#/$defs/sync_error" },
+            { "type": "null" }
+          ]
+        },
+        "conflict": {
+          "oneOf": [
+            { "$ref": "#/$defs/conflict" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "local_revision",
+        "remote_revision",
+        "updated_at",
+        "last_error",
+        "conflict"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "state": { "const": "conflict" } },
+            "required": ["state"]
+          },
+          "then": { "properties": { "conflict": { "$ref": "#/$defs/conflict" } } },
+          "else": { "properties": { "conflict": { "type": "null" } } }
+        }
+      ]
+    },
+    "account": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "account" },
+        "account_id": { "$ref": "#/$defs/account_id" },
+        "provider_type": {
+          "type": "string",
+          "enum": ["open_protocols", "google", "microsoft"]
+        },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "primary_address": {
+          "oneOf": [
+            { "$ref": "#/$defs/email_address" },
+            { "type": "null" }
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["mail", "calendar", "reminders", "contacts"]
+          },
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "auth_state": {
+          "type": "string",
+          "enum": ["ready", "action_required", "revoked", "removing", "error"]
+        },
+        "connectivity": {
+          "type": "string",
+          "enum": ["online", "offline", "limited", "unknown"]
+        },
+        "last_sync_at": { "$ref": "#/$defs/nullable_timestamp" },
+        "next_retry_at": { "$ref": "#/$defs/nullable_timestamp" }
+      },
+      "required": [
+        "kind",
+        "account_id",
+        "provider_type",
+        "display_name",
+        "primary_address",
+        "capabilities",
+        "auth_state",
+        "connectivity",
+        "last_sync_at",
+        "next_retry_at"
+      ],
+      "additionalProperties": false
+    },
+    "mail_summary": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "mail_summary" },
+        "thread_id": { "$ref": "#/$defs/opaque_id" },
+        "account_id": { "$ref": "#/$defs/account_id" },
+        "subject": { "type": "string", "maxLength": 998 },
+        "correspondents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/email_address" },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "preview": { "type": "string", "maxLength": 512 },
+        "received_at": {
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+        },
+        "unread": { "type": "boolean" },
+        "starred": { "type": "boolean" },
+        "attachments_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "labels": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "sync": { "$ref": "#/$defs/sync_metadata" }
+      },
+      "required": [
+        "kind",
+        "thread_id",
+        "account_id",
+        "subject",
+        "correspondents",
+        "preview",
+        "received_at",
+        "unread",
+        "starred",
+        "attachments_count",
+        "labels",
+        "sync"
+      ],
+      "additionalProperties": false
+    },
+    "attachment": {
+      "type": "object",
+      "properties": {
+        "attachment_id": { "$ref": "#/$defs/opaque_id" },
+        "filename": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "media_type": { "type": "string", "minLength": 3, "maxLength": 255 },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 1073741824 },
+        "quarantine_state": {
+          "type": "string",
+          "enum": ["not_downloaded", "quarantined", "released", "blocked"]
+        }
+      },
+      "required": ["attachment_id", "filename", "media_type", "size_bytes", "quarantine_state"],
+      "additionalProperties": false
+    },
+    "mail_message": {
+      "type": "object",
+      "properties": {
+        "message_id": { "$ref": "#/$defs/opaque_id" },
+        "sender": { "$ref": "#/$defs/email_address" },
+        "to": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/email_address" },
+          "maxItems": 500
+        },
+        "cc": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/email_address" },
+          "maxItems": 500
+        },
+        "sent_at": {
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+        },
+        "plain_text": { "type": "string", "maxLength": 262144 },
+        "body_complete": { "type": "boolean" },
+        "remote_content_blocked": { "type": "boolean" },
+        "attachments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/attachment" },
+          "maxItems": 128
+        },
+        "attachments_complete": { "type": "boolean" },
+        "sync": { "$ref": "#/$defs/sync_metadata" }
+      },
+      "required": [
+        "message_id",
+        "sender",
+        "to",
+        "cc",
+        "sent_at",
+        "plain_text",
+        "body_complete",
+        "remote_content_blocked",
+        "attachments",
+        "attachments_complete",
+        "sync"
+      ],
+      "additionalProperties": false
+    },
+    "mail_thread": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "mail_thread" },
+        "thread_id": { "$ref": "#/$defs/opaque_id" },
+        "account_id": { "$ref": "#/$defs/account_id" },
+        "subject": { "type": "string", "maxLength": 998 },
+        "messages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/mail_message" },
+          "minItems": 1,
+          "maxItems": 20
+        },
+        "next_cursor": { "type": ["string", "null"], "maxLength": 512 },
+        "snapshot_cursor": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "sync": { "$ref": "#/$defs/sync_metadata" }
+      },
+      "required": [
+        "kind",
+        "thread_id",
+        "account_id",
+        "subject",
+        "messages",
+        "next_cursor",
+        "snapshot_cursor",
+        "sync"
+      ],
+      "additionalProperties": false
+    },
+    "mail_draft": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "mail_draft" },
+        "draft_id": { "$ref": "#/$defs/opaque_id" },
+        "account_id": { "$ref": "#/$defs/account_id" },
+        "in_reply_to_thread_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/opaque_id" },
+            { "type": "null" }
+          ]
+        },
+        "to": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/email_address" },
+          "maxItems": 500
+        },
+        "cc": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/email_address" },
+          "maxItems": 500
+        },
+        "bcc": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/email_address" },
+          "maxItems": 500
+        },
+        "subject": { "type": "string", "maxLength": 998 },
+        "plain_text": { "type": "string", "maxLength": 4194304 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "updated_at": {
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "kind",
+        "draft_id",
+        "account_id",
+        "in_reply_to_thread_id",
+        "to",
+        "cc",
+        "bcc",
+        "subject",
+        "plain_text",
+        "revision",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "calendar": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "calendar" },
+        "calendar_id": { "$ref": "#/$defs/opaque_id" },
+        "account_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/account_id" },
+            { "type": "null" }
+          ]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "color": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "read_only": { "type": "boolean" },
+        "sync": { "$ref": "#/$defs/sync_metadata" }
+      },
+      "required": ["kind", "calendar_id", "account_id", "title", "color", "read_only", "sync"],
+      "additionalProperties": false
+    },
+    "attendee": {
+      "type": "object",
+      "properties": {
+        "address": { "$ref": "#/$defs/email_address" },
+        "role": { "type": "string", "enum": ["organizer", "required", "optional"] },
+        "response": {
+          "type": "string",
+          "enum": ["needs_action", "accepted", "declined", "tentative"]
+        }
+      },
+      "required": ["address", "role", "response"],
+      "additionalProperties": false
+    },
+    "calendar_event": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "calendar_event" },
+        "event_id": { "$ref": "#/$defs/opaque_id" },
+        "calendar_id": { "$ref": "#/$defs/opaque_id" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "when": { "$ref": "#/$defs/event_when" },
+        "location": { "type": ["string", "null"], "maxLength": 4096 },
+        "description": { "type": ["string", "null"], "maxLength": 65536 },
+        "recurrence_rule": { "type": ["string", "null"], "maxLength": 4096 },
+        "attendees": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/attendee" },
+          "maxItems": 1000
+        },
+        "sync": { "$ref": "#/$defs/sync_metadata" }
+      },
+      "required": [
+        "kind",
+        "event_id",
+        "calendar_id",
+        "title",
+        "when",
+        "location",
+        "description",
+        "recurrence_rule",
+        "attendees",
+        "sync"
+      ],
+      "additionalProperties": false
+    },
+    "reminder_list": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "reminder_list" },
+        "list_id": { "$ref": "#/$defs/opaque_id" },
+        "account_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/account_id" },
+            { "type": "null" }
+          ]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "color": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "sync": { "$ref": "#/$defs/sync_metadata" }
+      },
+      "required": ["kind", "list_id", "account_id", "title", "color", "sync"],
+      "additionalProperties": false
+    },
+    "reminder": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "reminder" },
+        "reminder_id": { "$ref": "#/$defs/opaque_id" },
+        "list_id": { "$ref": "#/$defs/opaque_id" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "notes": { "type": ["string", "null"], "maxLength": 65536 },
+        "due": { "$ref": "#/$defs/reminder_due" },
+        "recurrence_rule": { "type": ["string", "null"], "maxLength": 4096 },
+        "completed_at": { "$ref": "#/$defs/nullable_timestamp" },
+        "sync": { "$ref": "#/$defs/sync_metadata" }
+      },
+      "required": [
+        "kind",
+        "reminder_id",
+        "list_id",
+        "title",
+        "notes",
+        "due",
+        "recurrence_rule",
+        "completed_at",
+        "sync"
+      ],
+      "additionalProperties": false
+    },
+    "contact": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "contact" },
+        "contact_id": { "$ref": "#/$defs/opaque_id" },
+        "account_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/account_id" },
+            { "type": "null" }
+          ]
+        },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "addresses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/email_address" },
+          "minItems": 1,
+          "maxItems": 128
+        },
+        "sync": { "$ref": "#/$defs/sync_metadata" }
+      },
+      "required": ["kind", "contact_id", "account_id", "display_name", "addresses", "sync"],
+      "additionalProperties": false
+    },
+    "change_event": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "change_event" },
+        "change_id": { "$ref": "#/$defs/opaque_id" },
+        "entity_kind": {
+          "type": "string",
+          "enum": [
+            "account",
+            "mail_summary",
+            "mail_thread",
+            "mail_draft",
+            "calendar",
+            "calendar_event",
+            "reminder_list",
+            "reminder",
+            "contact"
+          ]
+        },
+        "operation": { "type": "string", "enum": ["upsert", "delete"] },
+        "entity_id": { "$ref": "#/$defs/opaque_id" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "changed_at": {
+          "$ref": "https://schemas.punar.dev/v1alpha1/common/defs.json#/$defs/timestamp"
+        }
+      },
+      "required": ["kind", "change_id", "entity_kind", "operation", "entity_id", "revision", "changed_at"],
+      "additionalProperties": false
+    },
+    "operation": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "operation" },
+        "operation_id": { "$ref": "#/$defs/operation_id" },
+        "state": {
+          "type": "string",
+          "enum": ["accepted", "completed", "queued_offline", "conflict", "failed"]
+        },
+        "resource_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/opaque_id" },
+            { "type": "null" }
+          ]
+        },
+        "change_cursor": { "type": ["string", "null"], "maxLength": 512 }
+      },
+      "required": ["kind", "operation_id", "state", "resource_id", "change_cursor"],
+      "additionalProperties": false
+    }
+  }
+}

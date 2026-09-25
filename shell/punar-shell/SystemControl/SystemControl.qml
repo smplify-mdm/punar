@@ -91,6 +91,10 @@ DeferredSurfaceBase {
     // ---------------------------------------------------------------
 
     component Meta: Text {
+        // Plain, always. Views here quote organization-supplied names,
+        // policy sources and punard's own messages, and none of them may be
+        // read as markup (Text's AutoText default would).
+        textFormat: Text.PlainText
         font.family: Theme.fontMono
         font.pixelSize: 9
         font.weight: 600
@@ -222,6 +226,7 @@ DeferredSurfaceBase {
                 wrapMode: Text.WordWrap
             }
             Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 visible: dashed.why !== ""
                 text: dashed.why
@@ -276,6 +281,7 @@ DeferredSurfaceBase {
         }
         Text {
             id: kvValue
+            textFormat: Text.PlainText
             anchors.left: kvKey.right
             anchors.leftMargin: 16
             anchors.right: parent.right
@@ -332,6 +338,7 @@ DeferredSurfaceBase {
         }
         Text {
             id: rowName
+            textFormat: Text.PlainText
             anchors.left: rowLine.tone === "" ? parent.left : rowDot.right
             anchors.leftMargin: rowLine.tone === "" ? 0 : 10
             anchors.verticalCenter: parent.verticalCenter
@@ -625,6 +632,13 @@ DeferredSurfaceBase {
         ctl.webAppComposerVisible = false;
         ctl.webAppRemoveArmed = "";
         ctl.query = "";
+        // An administrator edit is abandoned with the panel, and the typed
+        // password goes with it. Leaving the stage set would put a password
+        // field back on screen the next time this opened, mid-question and
+        // with the reason it belonged to already forgotten.
+        ctl.cancelAdminEdit();
+        adminReasonInput.text = "";
+        adminPasswordInput.text = "";
         hideTimer.restart(); // keep the window alive for the exit animation
     }
 
@@ -963,6 +977,7 @@ DeferredSurfaceBase {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         anchors.fill: searchInput
                         visible: searchInput.text === ""
                         text: "Search"
@@ -1118,6 +1133,7 @@ DeferredSurfaceBase {
                         height: 28
 
                         Text {
+                            textFormat: Text.PlainText
                             anchors.left: parent.left
                             anchors.leftMargin: 10
                             anchors.right: railDot.left
@@ -1195,6 +1211,7 @@ DeferredSurfaceBase {
 
                         Text {
                             id: paneTitle
+                            textFormat: Text.PlainText
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
                             text: ctl.view.title
@@ -1311,6 +1328,7 @@ DeferredSurfaceBase {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 anchors.fill: timezoneSearch
                                 visible: timezoneSearch.text === ""
                                 verticalAlignment: Text.AlignVCenter
@@ -1367,6 +1385,7 @@ DeferredSurfaceBase {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 width: parent.width
                                 text: "A dedicated window and launcher, using the selected browser context. Punar downloads no manifest or icon."
                                 font.family: Theme.fontSans
@@ -1409,6 +1428,7 @@ DeferredSurfaceBase {
                                 }
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     anchors.fill: webAppNameInput
                                     visible: webAppNameInput.text === ""
                                     verticalAlignment: Text.AlignVCenter
@@ -1464,6 +1484,7 @@ DeferredSurfaceBase {
                                 }
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     anchors.fill: webAppUrlInput
                                     visible: webAppUrlInput.text === ""
                                     verticalAlignment: Text.AlignVCenter
@@ -1669,6 +1690,7 @@ DeferredSurfaceBase {
 
                     // The plain-sentence paragraph (§73 voice).
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         visible: ctl.view.note !== undefined
                         topPadding: 16
@@ -1776,8 +1798,9 @@ DeferredSurfaceBase {
                     // ACCIDENT: echoMode is set to Password so the shell never
                     // paints the secret, and the text is handed straight to
                     // ControlData and cleared here, so it lives in exactly one
-                    // place for exactly as long as it takes to write it to a
-                    // pipe.
+                    // place for exactly as long as it takes to hand it to
+                    // punarctl over the private socket it opens (F0-S4) —
+                    // never a pipe.
                     Item {
                         id: adminBox
 
@@ -1922,6 +1945,7 @@ DeferredSurfaceBase {
                                 text: ctl.lastActionPending ? "Sent · waiting for the daemon" : (ctl.lastActionExit === 0 ? "Accepted · exit 0" : "Exit " + ctl.lastActionExit)
                             }
                             Text {
+                                textFormat: Text.PlainText
                                 width: parent.width
                                 visible: ctl.lastActionError !== ""
                                 text: ctl.lastActionError
@@ -1977,7 +2001,10 @@ DeferredSurfaceBase {
                     font.pixelSize: 9
                     font.weight: 500
                     font.letterSpacing: Theme.tracking(9, 0.14)
-                    text: ctl.daemonAnswered ? "Same capabilities as punarctl" : "Awaiting punard · nothing measured is shown"
+                    // Honest, not aspirational: every change here prints the
+                    // command it ran, but some views still have no punarctl
+                    // verb of their own (docs: the terminal-parity plan).
+                    text: ctl.daemonAnswered ? "Every change shows the command it ran · not every view has a punarctl verb yet" : "Awaiting punard · nothing measured is shown"
                 }
             }
         }

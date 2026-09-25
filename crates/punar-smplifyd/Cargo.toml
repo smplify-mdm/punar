@@ -1,0 +1,27 @@
+[package]
+name = "punar-smplifyd"
+description = "Punar's built-in Smplify device agent: identity and transport only, serving punard's control-plane contract on a root-only socket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "punar-smplifyd"
+path = "src/main.rs"
+
+[dependencies]
+punar-common = { workspace = true }
+base64 = { workspace = true }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+ring = "0.17"
+rustix = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-platform-verifier = { workspace = true }
+sd-listen-fds = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }

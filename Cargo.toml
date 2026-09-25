@@ -13,9 +13,13 @@ members = [
     "crates/punar-mock-smplify",
     "crates/punar-netd",
     "crates/punar-onboard",
+    "crates/punar-pimd",
     "crates/punar-policy",
+    "crates/punar-reauth",
     "crates/punar-recovery",
     "crates/punar-secrets",
+    "crates/punar-signin-probe",
+    "crates/punar-smplifyd",
     "crates/punar-workspace",
     "crates/punarctl",
     "crates/punard",
@@ -24,18 +28,26 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# The workspace uses let-chains, stabilized in Rust 1.88. Keep this aligned
+# with CI's exact toolchain so a green run is also an honest MSRV claim.
+rust-version = "1.88"
 publish = false
 
 [workspace.dependencies]
 # Internal crates
 punar-common = { path = "crates/punar-common" }
+punar-workspace = { path = "crates/punar-workspace" }
 # dev-only counterparty: M10's punard suite drives the *real* dev/CI mock
 # control plane over a tempdir socket, so the courier path is exercised
 # against the binary the image ships rather than a second in-test
 # reimplementation of the same protocol (milestone-10.md section 7).
 punar-mock-smplify = { path = "crates/punar-mock-smplify" }
+# dev-only in punard: its enrollment suite puts punard's real inventory
+# through the agent's real translation (punar_smplifyd::status), so the
+# key sets an organization receives are asserted end to end.
+punar-smplifyd = { path = "crates/punar-smplifyd" }
 punar-policy = { path = "crates/punar-policy" }
+punar-reauth = { path = "crates/punar-reauth" }
 punar-recovery = { path = "crates/punar-recovery" }
 
 # External
@@ -46,11 +58,16 @@ clap = { version = "4", features = ["derive"] }
 # rustix (M3, docs/development/milestone-3.md section 3): SO_PEERCRED and
 # bind-before-listen for punard's UDS. std's peer_cred is unstable; libc would
 # need `unsafe` (workspace crates are #![forbid(unsafe_code)]); nix is larger.
-# Feature-gated to `net` + (M7) `fs`; transitives (bitflags, linux-raw-sys)
-# pinned by Cargo.lock. M7 adds `fs` for `flock` behind punar-common's audit
-# rotation lock (docs/api/ipc.md section 10.4), now that punard and
-# punar-agentd append to one trail — same crate, no new transitives.
-rustix = { version = "1", features = ["net", "fs"] }
+# Feature-gated to `net` + (M7) `fs` + `process`; transitives (bitflags,
+# linux-raw-sys) are pinned by Cargo.lock. M7 adds `fs` for `flock` behind
+# punar-common's shared audit rotation lock; PIM private-state validation uses
+# the safe `process::getuid` wrapper rather than libc/unsafe ownership checks —
+# same crate, no new transitive package.
+rustix = { version = "1", features = ["net", "fs", "process", "thread", "event"] }
+# Socket activation hands punar-pimd only the two systemd-owned, named
+# descriptors it expects. This pure-Rust parser owns the received descriptors
+# immediately and adds no resident runtime or libsystemd dependency.
+sd-listen-fds = "=0.2.0"
 # signal-hook (M3): safe SIGTERM/SIGINT handling for punard graceful shutdown
 # (M7: punar-agentd shuts down the same way).
 # sigaction is not reachable from safe std or safe rustix; signal-hook is the
@@ -82,6 +99,27 @@ unicode-segmentation = "1"
 # suites: this protocol fixes one reviewed suite and does not negotiate.
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "chacha", "x25519"] }
 base64 = "0.22"
+hmac = "0.12"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+# PIM credential records use RustCrypto's externally reviewed AEAD lineage
+# rather than first-party cryptography. 0.11 is already locked transitively by
+# the exact HPKE dependency; the direct feature adds key/cipher zeroization.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+# PIM MIME input is parsed by Stalwart's safe-Rust, fuzzed parser. Pin the
+# reviewed patch and keep its optional legacy encodings/serialization disabled;
+# Punar copies only bounded plain text and metadata into its own records.
+mail-parser = { version = "=0.11.9", default-features = false }
+# Open-protocol Mail uses one reviewed Tokio/rustls stack on both architectures.
+# Exact versions keep the Rust 1.88 floor and dependency review reproducible.
+# SMTP deliberately omits obsolete MD5 authentication features, MIME building
+# and DKIM here: this first slice only verifies authenticated submission.
+async-imap = { version = "=0.11.3", default-features = false, features = ["runtime-tokio"] }
+mail-send = { version = "=0.6.0", default-features = false, features = ["ring", "tls12"] }
+redb = { version = "=2.6.3", default-features = false }
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-platform-verifier = "=0.7.0"
+tokio = { version = "=1.51.0", default-features = false, features = ["io-util", "net", "rt", "time"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }

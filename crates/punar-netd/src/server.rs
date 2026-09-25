@@ -97,7 +97,14 @@ impl Daemon {
         if let Some(parent) = cfg.audit_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let audit = AuditWriter::open(&cfg.audit_path)?;
+        // The shared trail is root:punar-audit (F0-S3), a group no person is
+        // in. This writer used to leave the group to the others; a trail it
+        // created or rotated first was then root:root until one of them
+        // restarted.
+        let audit = AuditWriter::open_in_group(
+            &cfg.audit_path,
+            lookup_gid(&cfg.group_file, punar_common::audit::AUDIT_GROUP),
+        )?;
         let device_id = read_device_id(&cfg.device_id_path);
         let daemon = Self {
             inner: Arc::new(Inner {
@@ -405,7 +412,8 @@ impl Inner {
                     .connections()
                     .map_err(runtime_error)?;
                 self.audit_network_denials(pass.denial_events.iter());
-                serde_json::to_value(pass.result).map_err(|error| internal(error.to_string()))
+                serde_json::to_value(pass.result.scoped_to(peer.uid))
+                    .map_err(|error| internal(error.to_string()))
             }
             NetworkMethod::Zones => Ok(self.runtime.lock().unwrap().zones_json()),
             NetworkMethod::Policy(params) => self
@@ -428,7 +436,7 @@ impl Inner {
                         params.project.as_deref().unwrap_or("all"),
                     );
                     return Err(denied(
-                        "Applying network policy requires root because it changes the kernel nftables table. Next step: run `sudo punarctl network apply`.",
+                        "Applying network policy requires root because it changes the kernel nftables table, and no account on a Punar device is root. Next step: none needed — punar-netd applies it on its own when it starts and whenever an agent session starts or ends; `punarctl network status` shows what it enforces now.",
                     ));
                 }
                 let resource = params.project.as_deref().unwrap_or("all");

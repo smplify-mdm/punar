@@ -276,7 +276,9 @@ fn fixture_enroll_start() -> Value {
         "policy_ids": ["eng-baseline-v12"],
         "attestation": "simulated",
         "enrolled_at": "2026-08-26T09:00:00Z",
-        "first_sync": {"compliance": "success", "inventory": "success"}
+        "first_sync": {"compliance": "success", "inventory": "success"},
+        "removable": true,
+        "organization_owned": false
     })
 }
 
@@ -288,7 +290,9 @@ fn fixture_enroll_status() -> Value {
         "enrolled_at": "2026-08-26T09:00:00Z",
         "attestation": "simulated",
         "last_sync": {"at": "2026-08-26T09:02:00Z", "result": "success",
-                       "pending": false}
+                       "pending": false},
+        "removable": true,
+        "organization_owned": false
     })
 }
 
@@ -334,7 +338,7 @@ fn managed_respond(request: &Value) -> Result<Value, Value> {
 
 /// The ipc.md section 3.2 denial example — the section 73 voice the real
 /// daemon sends a non-root `capabilities.set`.
-const DENIED_MESSAGE: &str = "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — just-in-time elevation arrives in Milestone 9.\nNext step: re-run as root: sudo punarctl capabilities set system.hostname <name>";
+const DENIED_MESSAGE: &str = "Changing system.hostname needs administrator privileges.\nPolicy: personal defaults — an ordinary user may hold privilege for a bounded window, never permanently (SPEC section 48).\nNext step: ask for time-boxed privilege: punarctl privilege request --capability system.hostname --reason \"<why>\"; once you approve it, run punarctl capabilities set system.hostname <name> again.";
 
 // ---------------------------------------------------------------------------
 // Mock daemon
@@ -352,7 +356,8 @@ fn respond(request: &Value) -> Result<Value, Value> {
     let params = request.get("params");
 
     match method {
-        "status" | "capabilities.list" | "reconcile" | "policy.effective" | "update.status" => {
+        "status" | "capabilities.list" | "reconcile" | "policy.effective" | "update.status"
+        | "approvals.list" | "privilege.status" => {
             assert!(params.is_none(), "{method} takes no params");
         }
         _ => {}
@@ -361,6 +366,9 @@ fn respond(request: &Value) -> Result<Value, Value> {
     match method {
         "status" => Ok(fixture_status()),
         "update.status" => Ok(fixture_update_status()),
+        // A calm device: nothing waits on the person and no grant is held.
+        "approvals.list" => Ok(json!({"approvals": [], "checked_at": "2026-08-25T09:30:00Z"})),
+        "privilege.status" => Ok(json!({"grants": [], "checked_at": "2026-08-25T09:30:00Z"})),
         "update.check" => {
             assert_eq!(params.unwrap(), &json!({ "force": false }));
             Ok(fixture_update_check())
@@ -475,6 +483,15 @@ fn handle_connection(stream: UnixStream, responder: fn(&Value) -> Result<Value, 
 
 /// Start a mock daemon with a custom responder on a fresh tempdir socket;
 /// returns the socket path.
+/// The default fixtures, on a device that is not enrolled yet: what
+/// `enroll start` checks before it asks anyone for a code or a password.
+fn unenrolled_respond(request: &Value) -> Result<Value, Value> {
+    if request["method"] == "enroll.status" {
+        return Ok(json!({ "enrolled": false }));
+    }
+    respond(request)
+}
+
 fn start_mock_with(responder: fn(&Value) -> Result<Value, Value>) -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -503,10 +520,17 @@ fn start_mock() -> PathBuf {
     start_mock_with(respond)
 }
 
+/// Where no agent registry listens: `run` points punarctl here so a test never
+/// reaches the host's own punar-agentd.
+fn no_agentd() -> PathBuf {
+    std::env::temp_dir().join("punarctl-no-agentd-here.sock")
+}
+
 fn run(socket: &PathBuf, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_punarctl"))
         .args(args)
         .env("PUNARD_SOCKET", socket)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
         .env("NO_COLOR", "1")
         .output()
         .expect("run punarctl")
@@ -555,8 +579,8 @@ const RULE: &str = "────────────────────
 
 #[test]
 fn status_human_output_matches_the_d014_snapshot() {
-    let socket = start_mock();
-    let output = run(&socket, &["status"]);
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["status"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
 
     let expected = format!(
@@ -571,6 +595,14 @@ fn status_human_output_matches_the_d014_snapshot() {
          FIREWALL      MATCHES\n\
          HOSTNAME      MATCHES\n\
          TIMEZONE      MATCHES\n\
+         \n\
+         RIGHT NOW                                   EACH ROW ASKS ITS OWN DAEMON\n\
+         FIREWALL      ENABLED    desired enabled · verify nftables\n\
+         AI SESSIONS   1 ACTIVE   agt_4f21c09ab3e1 · 1 unknown — punarctl agents list\n\
+         UNKNOWN AI    1 ALERT    foo-agent · punarctl agents alerts\n\
+         APPROVALS     NONE       nothing is waiting on you\n\
+         PRIVILEGE     NONE       no grant held\n\
+         UPDATES       STAGED     2026.09.01.1 · running 2026.08.30.1 · a restart boots it\n\
          PERSONAL DEVICE · ENROLLMENT LATER NEVER APPLIES RETROACTIVELY\n"
     );
     assert_eq!(stdout(&output), expected);
@@ -933,13 +965,56 @@ fn update_check_sends_only_force_and_renders_the_signed_decision() {
     );
 }
 
+/// punard's answer to a person's update request that carried no password
+/// confirmation (there is no terminal to ask on under `run()`).
+fn update_needs_a_password_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some(method @ ("update.apply" | "update.rollback")) => {
+            assert!(
+                request["params"].get("ticket").is_none(),
+                "{method}: no terminal, so no password was asked for or sent"
+            );
+            Err(json!({
+                "code": "denied",
+                "message": "Installing an update needs your password, and this request \
+                            did not carry a confirmation.\nPolicy: personal defaults — \
+                            what the operating system runs is an administrative change, \
+                            confirmed at the moment it is made.\nNext step: run \
+                            `punarctl update apply 2026.09.01.1` in a terminal; it asks \
+                            for your password.",
+                "details": {"decision": "deny", "reason": "reauthentication_required"}
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
+/// Without a terminal punarctl cannot ask for the password, so it sends the
+/// request as it is and prints punard's refusal: exit 3, and the next step is
+/// a command a person can run — never `sudo`.
+#[test]
+fn an_update_without_a_terminal_prints_the_password_refusal() {
+    let socket = start_mock_with(update_needs_a_password_respond);
+    for args in [
+        ["update", "apply", "2026.09.01.1"].as_slice(),
+        ["update", "rollback"].as_slice(),
+    ] {
+        let output = run(&socket, args);
+        assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+        let text = stderr(&output);
+        assert!(text.contains("needs your password"), "{text}");
+        assert!(!text.contains("sudo"), "{text}");
+        assert!(stdout(&output).is_empty());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // M5 enrollment verbs (contract sections 5.9–5.11, 7)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn enroll_start_renders_the_loud_simulated_label_and_json_round_trips() {
-    let socket = start_mock();
+    let socket = start_mock_with(unenrolled_respond);
 
     let output = run(&socket, &["enroll", "start", "acme.com"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -960,6 +1035,289 @@ fn enroll_start_renders_the_loud_simulated_label_and_json_round_trips() {
     assert!(!stdout(&output).contains("tok_"));
 }
 
+/// On a device that is already enrolled, `enroll start` says so and stops:
+/// nobody is asked for an enrollment code or a password only to be told the
+/// device already belongs to an organization.
+#[test]
+fn enroll_start_on_an_enrolled_device_asks_for_nothing() {
+    let socket = start_mock();
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("already enrolled with Acme Engineering"),
+        "{text}"
+    );
+    assert!(text.contains("punarctl enroll stop"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
+    assert!(stdout(&output).is_empty());
+}
+
+/// Unenrolling a device that is not enrolled asks for nothing: no yes, no
+/// password, just what is true.
+#[test]
+fn enroll_stop_on_a_personal_device_asks_for_nothing() {
+    let socket = start_mock_with(unenrolled_respond);
+    let output = run(&socket, &["enroll", "stop"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not enrolled"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(stdout(&output).is_empty());
+}
+
+/// An organization that enrolls devices as not removable (punard refuses
+/// until the person accepts), on a device not enrolled yet. `enroll.start`
+/// calls are counted so a test can prove nothing was retried behind the
+/// person's back.
+static NON_REMOVABLE_STARTS: AtomicUsize = AtomicUsize::new(0);
+
+fn non_removable_org_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("enroll.status") => Ok(json!({ "enrolled": false })),
+        Some("enroll.start") => {
+            NON_REMOVABLE_STARTS.fetch_add(1, Ordering::SeqCst);
+            if request["params"]["accept_non_removable"] == json!(true) {
+                let mut result = fixture_enroll_start();
+                result["removable"] = json!(false);
+                return Ok(result);
+            }
+            Err(json!({
+                "code": "denied",
+                "message": "Acme Engineering enrolls devices so that nobody on them can \
+                            unenroll them, and this request did not accept that. Nothing \
+                            was changed: this device was not registered with Acme \
+                            Engineering.\nPolicy: Acme Engineering's enrollment terms — \
+                            once enrolled, only erasing and reinstalling this device ends \
+                            the enrollment; nobody on it, you included, can unenroll it.\n\
+                            Next step: if that is what you want, run `punarctl enroll start \
+                            acme.com --accept-non-removable`.",
+                "details": {"decision": "deny", "reason": "non_removable_not_accepted",
+                            "organization": "acme",
+                            "organization_name": "Acme Engineering"}
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
+/// A device already enrolled as not removable.
+fn non_removable_enrolled_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("enroll.status") => {
+            let mut status = fixture_enroll_status();
+            status["removable"] = json!(false);
+            Ok(status)
+        }
+        Some("enroll.stop") => {
+            assert!(
+                request.get("params").is_none(),
+                "nobody may unenroll this device, so no password is asked for or sent"
+            );
+            Err(json!({
+                "code": "denied",
+                "message": "This device's enrollment with Acme Engineering cannot be undone \
+                            from the device.\nPolicy: Acme Engineering's enrollment terms — \
+                            it enrolls devices as not removable, and that was accepted when \
+                            this device enrolled.\nNext step: only erasing and reinstalling \
+                            the device ends the enrollment.",
+                "details": {"decision": "deny", "reason": "enrollment_not_removable",
+                            "organization": "acme"}
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
+/// Without a terminal there is nobody to ask, so a non-removable
+/// organization's refusal is the answer: it names the flag, exits 3, and is
+/// never retried. With the flag the enrollment goes through and says who can
+/// end it.
+#[test]
+fn a_non_removable_enrollment_is_refused_without_consent_and_shown_with_it() {
+    let socket = start_mock_with(non_removable_org_respond);
+    let before = NON_REMOVABLE_STARTS.load(Ordering::SeqCst);
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("--accept-non-removable"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
+    assert_eq!(
+        NON_REMOVABLE_STARTS.load(Ordering::SeqCst),
+        before + 1,
+        "no second request without the person's yes"
+    );
+
+    let output = run(
+        &socket,
+        &["enroll", "start", "acme.com", "--accept-non-removable"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("NOT ALLOWED"), "{text}");
+    assert!(
+        text.contains("only erasing it ends the enrollment"),
+        "{text}"
+    );
+}
+
+/// An organization that enrolls devices as not removable AND as its own. The
+/// params of every `enroll.start` are kept, so a test can prove what each
+/// request accepted and that nothing was retried behind the person's back.
+static TERMS_STARTS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+fn two_terms_org_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("enroll.status") => Ok(json!({ "enrolled": false })),
+        Some("enroll.start") => {
+            let params = request["params"].clone();
+            TERMS_STARTS.lock().unwrap().push(params.clone());
+            let unaccepted: Vec<&str> = [
+                ("non_removable", "accept_non_removable"),
+                ("organization_owned", "accept_organization_owned"),
+            ]
+            .into_iter()
+            .filter(|(_, param)| params[param] != json!(true))
+            .map(|(term, _)| term)
+            .collect();
+            if unaccepted.is_empty() {
+                let mut result = fixture_enroll_start();
+                result["removable"] = json!(false);
+                result["organization_owned"] = json!(true);
+                return Ok(result);
+            }
+            let flags: Vec<String> = unaccepted
+                .iter()
+                .map(|term| format!("--accept-{}", term.replace('_', "-")))
+                .collect();
+            Err(json!({
+                "code": "denied",
+                "message": format!(
+                    "Acme Engineering enrolls devices on terms this request did not \
+                     accept.\nNext step: if that is what you want, run `punarctl enroll \
+                     start acme.com {}`.",
+                    flags.join(" ")
+                ),
+                "details": {
+                    "decision": "deny",
+                    "reason": if unaccepted.len() == 1 {
+                        format!("{}_not_accepted", unaccepted[0])
+                    } else {
+                        "enrollment_terms_not_accepted".to_string()
+                    },
+                    "terms": unaccepted,
+                    "organization": "acme",
+                    "organization_name": "Acme Engineering"
+                }
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
+/// Every term the organization sets is refused in one answer that names all
+/// of them, and without a terminal that answer stands: one request, exit 3.
+/// Each flag accepts its own term and nothing else, and with both the
+/// receipt says who can unenroll and who owns the device.
+#[test]
+fn every_enrollment_term_is_named_at_once_and_accepted_by_its_own_flag() {
+    let socket = start_mock_with(two_terms_org_respond);
+    let starts = |from: usize| TERMS_STARTS.lock().unwrap()[from..].to_vec();
+    let before = TERMS_STARTS.lock().unwrap().len();
+
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("--accept-non-removable --accept-organization-owned"),
+        "{text}"
+    );
+    assert_eq!(
+        starts(before),
+        [json!({"org_domain": "acme.com"})],
+        "no second request without the person's yes"
+    );
+
+    let before = TERMS_STARTS.lock().unwrap().len();
+    let output = run(
+        &socket,
+        &["enroll", "start", "acme.com", "--accept-organization-owned"],
+    );
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("acme.com --accept-non-removable`"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        starts(before),
+        [json!({"org_domain": "acme.com", "accept_organization_owned": true})]
+    );
+
+    let before = TERMS_STARTS.lock().unwrap().len();
+    let output = run(
+        &socket,
+        &[
+            "enroll",
+            "start",
+            "acme.com",
+            "--accept-non-removable",
+            "--accept-organization-owned",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        starts(before),
+        [json!({
+            "org_domain": "acme.com",
+            "accept_non_removable": true,
+            "accept_organization_owned": true
+        })]
+    );
+    let text = stdout(&output);
+    assert!(text.contains("NOT ALLOWED"), "{text}");
+    let ownership = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("OWNERSHIP"))
+        .expect("an ownership row");
+    assert!(ownership.contains("ORGANIZATION"), "{ownership}");
+    assert!(
+        ownership.contains("serial number and every app installed for all users"),
+        "{ownership}"
+    );
+}
+
+/// A device enrolled as not removable: `enroll stop` asks for neither a yes
+/// nor a password, and prints punard's refusal; `enroll start` says nothing
+/// on the device can end the enrollment; `enroll status` shows the term.
+#[test]
+fn a_non_removable_enrollment_asks_for_nothing_it_cannot_use() {
+    let socket = start_mock_with(non_removable_enrolled_respond);
+    let output = run(&socket, &["enroll", "stop"]);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("erasing and reinstalling"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = run(&socket, &["enroll", "start", "acme.com"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("not removable"), "{text}");
+    assert!(!text.contains("enroll stop"), "{text}");
+
+    let output = run(&socket, &["enroll", "status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("NOT ALLOWED"),
+        "{}",
+        stdout(&output)
+    );
+}
+
 #[test]
 fn enroll_status_and_stop_render_and_round_trip() {
     let socket = start_mock();
@@ -970,6 +1328,17 @@ fn enroll_status_and_stop_render_and_round_trip() {
     assert!(text.contains("SIMULATED"), "{text}");
     assert!(text.contains("LAST SYNC"), "{text}");
     assert!(text.contains("SUCCESS"), "{text}");
+    // Who can end the enrollment is part of the state, and the way to do it
+    // is one a person can actually follow.
+    assert!(text.contains("UNENROLL"), "{text}");
+    assert!(text.contains("punarctl enroll stop"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
+    // So is what the organization receives because of who owns the device.
+    assert!(text.contains("OWNERSHIP"), "{text}");
+    assert!(
+        text.contains("never the serial number or the apps installed here"),
+        "{text}"
+    );
 
     let output = run(&socket, &["--json", "enroll", "status"]);
     let value: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
@@ -1370,8 +1739,8 @@ fn agents_respond(request: &Value) -> Result<Value, Value> {
                     "code": "denied",
                     "message": "The access ledger for agt_someoneelse belongs to another \
                                 user.\nWhy: a ledger is personal data — only the session's \
-                                owner or root may read it.\nNext step: ask that user, or \
-                                re-run as root: sudo punarctl agents access agt_someoneelse",
+                                owner or root may read it.\nNext step: ask that user to do \
+                                it.",
                     "details": {"session_id": id}
                 })),
                 _ => Err(json!({
@@ -2705,6 +3074,335 @@ fn run_m9(punard: &PathBuf, secrets: &PathBuf, args: &[&str], stdin_text: Option
     child.wait_with_output().expect("run punarctl")
 }
 
+/// punard's side of `policy.set` for the tests below: it accepts exactly the
+/// bare 64-hex ticket punar-authd mints, and refuses a request that carries no
+/// confirmation the way punard does.
+const POLICY_TICKET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn policy_set_respond(request: &Value) -> Result<Value, Value> {
+    if request["method"] != "policy.set" {
+        return respond(request);
+    }
+    let params = &request["params"];
+    match params.get("ticket").and_then(Value::as_str) {
+        Some(POLICY_TICKET) => Ok(json!({
+            "capability": params["capability"],
+            "pinned_value": params["value"],
+            "effective_value": params["value"],
+            "source": {"kind": "device_specific_override", "rank": 4,
+                       "policy_id": "device-admin/owner",
+                       "name": "Device administrator"},
+            "changed": true
+        })),
+        Some(other) => Err(json!({
+            "code": "invalid_params",
+            "message": format!("WRONG TICKET REACHED PUNARD: {other:?}"),
+            "details": {}
+        })),
+        None => Err(json!({
+            "code": "denied",
+            "message": "Changing device policy needs your password again, and this request \
+                        did not carry a confirmation.\nPolicy: personal defaults — an \
+                        administrative change is confirmed at the moment it is made.\n\
+                        Next step: run `punarctl policy set security.firewall <value> \
+                        --reason \"<why>\"` in a terminal; it asks for your password.",
+            "details": {"decision": "deny", "reason": "reauthentication_required"}
+        })),
+    }
+}
+
+/// Run punarctl with `payload` waiting on descriptor 3, which is a socket
+/// when `socket` and a pipe otherwise — the two shapes a caller can hand it.
+/// `sh` moves the descriptor into place (`3<&0`) so no test code needs to
+/// touch raw descriptors.
+fn run_with_fd3(punard: &PathBuf, args: &[&str], payload: &str, socket: bool) -> Output {
+    use std::os::fd::OwnedFd;
+    use std::process::Stdio;
+    let stdin = if socket {
+        let (mut ours, theirs) = UnixStream::pair().expect("socketpair");
+        ours.write_all(payload.as_bytes()).expect("write payload");
+        drop(ours);
+        Stdio::from(OwnedFd::from(theirs))
+    } else {
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        writer.write_all(payload.as_bytes()).expect("write payload");
+        drop(writer);
+        Stdio::from(OwnedFd::from(reader))
+    };
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg("exec \"$0\" \"$@\" 3<&0 0</dev/null")
+        .arg(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", punard)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
+        .env("NO_COLOR", "1")
+        .stdin(stdin)
+        .output()
+        .expect("run punarctl")
+}
+
+/// A confirmation reaches punarctl on a socket and punard receives the bare
+/// ticket, whichever form it arrived in; the same bytes on a pipe are refused
+/// before anything is sent, because a pipe can be read by any program running
+/// as the person (F0-S4). The stdin flags are gone and say what replaced
+/// them. With no terminal and no source, nothing is invented: the request
+/// goes without a confirmation and punard's refusal is what prints.
+#[test]
+fn policy_set_takes_a_confirmation_from_a_socket_and_never_a_pipe() {
+    let socket = start_mock_with(policy_set_respond);
+    let set = [
+        "policy",
+        "set",
+        "security.firewall",
+        "disabled",
+        "--reason",
+        "lab bench",
+        "--ticket-fd",
+        "3",
+    ];
+    // A seccomp filter (Docker's default profile) refuses the pidfd_getfd a
+    // descriptor number needs; punarctl then says so in words, and the
+    // descriptor legs below cannot run. In CI and on a device they do.
+    let filtered = fs::read_to_string("/proc/self/status")
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line.starts_with("Seccomp:") && line.trim_end().ends_with('2'));
+    if filtered {
+        let output = run_with_fd3(&socket, &set, &format!("ok {POLICY_TICKET}\n"), true);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(stderr(&output).contains("seccomp"), "{}", stderr(&output));
+        eprintln!("note: seccomp refuses pidfd_getfd here; the descriptor legs are skipped");
+    } else {
+        for payload in [
+            format!("ok {POLICY_TICKET}\n"),
+            format!("{POLICY_TICKET}\n"),
+        ] {
+            let output = run_with_fd3(&socket, &set, &payload, true);
+            assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        }
+        let clear = [
+            "policy",
+            "clear",
+            "security.firewall",
+            "--reason",
+            "back to the org",
+            "--ticket-fd",
+            "3",
+        ];
+        let output = run_with_fd3(&socket, &clear, &format!("ok {POLICY_TICKET}\n"), true);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+        // The same ticket on a pipe never leaves punarctl.
+        let output = run_with_fd3(&socket, &set, &format!("ok {POLICY_TICKET}\n"), false);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let text = stderr(&output);
+        assert!(text.contains("not a socket"), "{text}");
+        assert!(text.contains("Nothing was changed"), "{text}");
+
+        // punar-auth's refusal is not a ticket, and says so without a round
+        // trip.
+        let output = run_with_fd3(&socket, &set, "denied\n", true);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(stderr(&output).contains("not a confirmation ticket"));
+    }
+
+    // The removed flags refuse, naming what replaced them.
+    for flag in ["--ticket-stdin", "--password-stdin"] {
+        let output = run_m9(
+            &socket,
+            &std::env::temp_dir().join("punarctl-no-secrets.sock"),
+            &[
+                "policy",
+                "set",
+                "security.firewall",
+                "disabled",
+                "--reason",
+                "x",
+                flag,
+            ],
+            Some(&format!("ok {POLICY_TICKET}\n")),
+        );
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let text = stderr(&output);
+        assert!(text.contains("--password-fd"), "{text}");
+        assert!(text.contains("/proc/<pid>/fd"), "{text}");
+    }
+
+    // No terminal, no source: the refusal names a command that asks.
+    let output = run_m9(
+        &socket,
+        &std::env::temp_dir().join("punarctl-no-secrets.sock"),
+        &[
+            "policy",
+            "set",
+            "security.firewall",
+            "disabled",
+            "--reason",
+            "x",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("it asks for your password"), "{text}");
+    assert!(!text.contains("sudo"), "{text}");
+}
+
+/// `--ticket-from-parent`: the path of the private socket is the first line
+/// punarctl prints, and the program that started it relays punar-authd's
+/// answer over that socket — never the password, which that program sent to
+/// punar-authd itself (F0 review). A ticket reaches punard exactly; a refused
+/// password is said as a refusal, a device that could not check as that, and
+/// the rendezvous leaves no name behind. The old `--password-from-parent`
+/// refuses, naming what replaced it.
+#[test]
+fn the_parent_relays_a_ticket_over_a_private_socket_and_never_the_password() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let socket = start_mock_with(policy_set_respond);
+    let runtime = std::env::temp_dir().join(format!("punarctl-xdg-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&runtime);
+    fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let run = |flag: &str, relay: Option<&str>| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+            .args([
+                "policy",
+                "set",
+                "security.firewall",
+                "disabled",
+                "--reason",
+                "lab bench",
+                flag,
+            ])
+            .env("PUNARD_SOCKET", &socket)
+            .env("PUNAR_AGENTD_SOCKET", no_agentd())
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn punarctl");
+        let mut path = None;
+        // Held until punarctl exits: it prints its result on this pipe.
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        if let Some(relay) = relay {
+            let mut first = String::new();
+            out.read_line(&mut first).unwrap();
+            let named = first
+                .trim_end()
+                .strip_prefix("ticket-socket ")
+                .unwrap_or_else(|| panic!("first line names the socket: {first:?}"))
+                .to_string();
+            assert!(named.starts_with(runtime.join("punar-reauth").to_str().unwrap()));
+            let mut stream = UnixStream::connect(&named).expect("connect to the rendezvous");
+            stream.write_all(relay.as_bytes()).unwrap();
+            drop(stream);
+            path = Some(named);
+        }
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
+        let status = child.wait().unwrap();
+        let mut err = String::new();
+        std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+        if let Some(path) = &path {
+            assert!(
+                !std::path::Path::new(path).exists(),
+                "no name is left behind"
+            );
+        }
+        (status.code(), err)
+    };
+
+    let (code, err) = run(
+        "--ticket-from-parent",
+        Some(&format!("ok {POLICY_TICKET}\n")),
+    );
+    assert_eq!(code, Some(0), "the relayed ticket reached punard: {err}");
+
+    let (code, err) = run("--ticket-from-parent", Some("denied\n"));
+    assert_eq!(code, Some(3), "{err}");
+    assert!(err.contains("was not accepted"), "{err}");
+
+    let (code, err) = run("--ticket-from-parent", Some("unavailable\n"));
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("could not check your password"), "{err}");
+    assert!(!err.contains("not accepted"), "{err}");
+
+    let (code, err) = run("--password-from-parent", None);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("--ticket-from-parent"), "{err}");
+    let _ = fs::remove_dir_all(&runtime);
+}
+
+/// F0 review (the role before the password): a caller punard says is not a
+/// device administrator is never asked for a password, and no source it named
+/// is read — punard's own refusal, naming who can act, is what prints.
+#[test]
+fn a_person_without_the_role_is_never_asked_for_a_password() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let socket = start_mock_with(not_an_administrator_respond);
+    let runtime = std::env::temp_dir().join(format!("punarctl-xdg-na-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&runtime);
+    fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args([
+            "policy",
+            "set",
+            "security.firewall",
+            "disabled",
+            "--reason",
+            "lab bench",
+            "--ticket-from-parent",
+        ])
+        .env("PUNARD_SOCKET", &socket)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run punarctl");
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = stderr(&output);
+    assert!(
+        !out.contains("ticket-socket"),
+        "no rendezvous is offered to a person who cannot act: {out}"
+    );
+    assert_eq!(output.status.code(), Some(3), "{err}");
+    assert!(
+        err.contains("alice"),
+        "punard's refusal names who can act: {err}"
+    );
+    let _ = fs::remove_dir_all(&runtime);
+}
+
+/// A punard for whom the caller, bob, is not an administrator.
+fn not_an_administrator_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("admins.list") => Ok(json!({
+            "mode": "local", "administrators": ["alice"], "accounts": [], "group": "punar-admin",
+            "source": null,
+            "caller": {"user": "bob", "root": false, "administrator": false}
+        })),
+        Some("policy.set") => {
+            assert!(
+                request["params"].get("ticket").is_none(),
+                "no ticket is gathered for a person without the role"
+            );
+            Err(json!({
+                "code": "denied",
+                "message": "Changing device policy reaches everyone who uses this device, so \
+                            it needs a device administrator, and bob is not one.\n\
+                            Administrators: alice.",
+                "details": {"decision": "deny", "reason": "device_admin_required"}
+            }))
+        }
+        _ => respond(request),
+    }
+}
+
 /// **Exit 4 is real.** An agent-originated mutation the AI policy gates
 /// returns `approval_required`, executes nothing, and says so in the
 /// section 73 voice — and stdout stays empty, because there is no result
@@ -3128,4 +3826,913 @@ fn privilege_status_and_revoke_render_the_live_grant() {
         "{}",
         stdout(&output)
     );
+}
+
+// ---------------------------------------------------------------------------
+// App list and browser-context status (terminal parity, step 3)
+// ---------------------------------------------------------------------------
+
+fn fixture_apps_list() -> Value {
+    json!({
+        "architecture": "aarch64",
+        "updates_available": 1,
+        "apps": [
+            {"id": "org.gnome.Calculator", "name": "Calculator", "source": "flathub",
+             "installed": true, "installed_commit": "aaa", "target_commit": "bbb",
+             "update_available": true},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "source": "flathub",
+             "installed": false, "installed_commit": null, "target_commit": "ccc",
+             "update_available": false}
+        ]
+    })
+}
+
+fn fixture_apps_catalog() -> Value {
+    json!({
+        "catalog_version": "2026.09.1",
+        "generated_at": "2026-09-01T00:00:00Z",
+        "architecture": "aarch64",
+        "apps": [
+            {"id": "org.gnome.Calculator", "name": "Calculator", "category": "utilities",
+             "trust_tier": "verified", "summary": "Sums"},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "category": "internet",
+             "trust_tier": "community", "summary": "Browser"}
+        ]
+    })
+}
+
+fn apps_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("apps.list") => Ok(fixture_apps_list()),
+        Some("apps.catalog") => {
+            // The whole catalog, unfiltered: an empty params object.
+            assert_eq!(request["params"], json!({}), "{request}");
+            Ok(fixture_apps_catalog())
+        }
+        _ => respond(request),
+    }
+}
+
+fn apps_without_catalog_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str() {
+        Some("apps.list") => Ok(fixture_apps_list()),
+        Some("apps.catalog") => Err(json!({
+            "code": "unavailable",
+            "message": "The app catalog is not readable.\nPolicy: none\nNext step: none",
+            "details": {}
+        })),
+        _ => respond(request),
+    }
+}
+
+/// `app list` answers what is installed and what the catalog says about it:
+/// category, trust tier and the catalog version it came from. `--json` is
+/// still apps.list verbatim.
+#[test]
+fn app_list_joins_category_trust_tier_and_catalog_version() {
+    let socket = start_mock_with(apps_respond);
+    let output = run(&socket, &["app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Calculator · utilities · verified"), "{text}");
+    assert!(text.contains("Firefox · internet · community"), "{text}");
+    assert!(text.contains("UPDATE AVAILABLE"), "{text}");
+    assert!(text.contains("CATALOG 2026.09.1"), "{text}");
+    assert!(text.contains("1 UPDATE AVAILABLE"), "{text}");
+
+    let output = run(&socket, &["--json", "app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let parsed: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(parsed, fixture_apps_list());
+}
+
+/// A catalog that cannot be read drops only its own columns, and says so.
+#[test]
+fn app_list_without_the_catalog_says_what_is_missing() {
+    let socket = start_mock_with(apps_without_catalog_respond);
+    let output = run(&socket, &["app", "list"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Calculator"), "{text}");
+    assert!(!text.contains("verified"), "{text}");
+    assert!(
+        text.contains("CATEGORY AND TRUST TIER UNAVAILABLE: THE APP CATALOG IS NOT READABLE."),
+        "{text}"
+    );
+}
+
+/// `web-apps context status` names the workspace bindings System Control
+/// keeps, not only the active context.
+#[test]
+fn context_status_prints_the_workspace_bindings() {
+    let state = std::env::temp_dir().join(format!("punarctl-context-{}", std::process::id()));
+    fs::create_dir_all(state.join("punar")).expect("state dir");
+    fs::write(
+        state.join("punar/browser-context.json"),
+        json!({
+            "version": 1,
+            "updated": "2026-09-24T00:00:00Z",
+            "active": "atlas",
+            "active_cause": "workspace:Atlas",
+            "bindings": [
+                {"workspace": "Atlas", "context": "atlas"},
+                {"workspace": "Home", "context": "personal"}
+            ]
+        })
+        .to_string(),
+    )
+    .expect("state file");
+    let socket = start_mock();
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["web-apps", "context", "status"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("XDG_STATE_HOME", &state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("WORKSPACE BINDINGS"), "{text}");
+    let atlas = text
+        .lines()
+        .find(|line| line.ends_with("workspace Atlas"))
+        .expect(&text);
+    assert!(atlas.starts_with("ATLAS"), "{text}");
+    let home = text
+        .lines()
+        .find(|line| line.ends_with("workspace Home"))
+        .expect(&text);
+    assert!(home.starts_with("PERSONAL"), "{text}");
+
+    fs::write(
+        state.join("punar/browser-context.json"),
+        json!({"version": 1, "updated": "x", "active": "personal",
+               "active_cause": "default", "bindings": []})
+        .to_string(),
+    )
+    .expect("state file");
+    let output = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["web-apps", "context", "status"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("XDG_STATE_HOME", &state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl");
+    assert!(
+        stdout(&output).contains("NO WORKSPACE IS BOUND"),
+        "{}",
+        stdout(&output)
+    );
+    let _ = fs::remove_dir_all(&state);
+}
+
+// ---------------------------------------------------------------------------
+// `status`: the live rows (terminal parity, step 3)
+// ---------------------------------------------------------------------------
+
+/// A daemon that is down costs only its own rows: with punar-agentd gone the
+/// two AI rows say so, and every punard row still answers.
+#[test]
+fn status_degrades_only_the_rows_whose_daemon_is_down() {
+    let socket = start_mock();
+    let output = run(&socket, &["status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let line = |label: &str| {
+        text.lines()
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label} row in:\n{text}"))
+            .to_string()
+    };
+    for label in ["AI SESSIONS", "UNKNOWN AI"] {
+        let row = line(label);
+        assert!(row.contains("UNKNOWN"), "{row}");
+        assert!(row.contains("not reachable"), "{row}");
+    }
+    assert!(
+        line("FIREWALL      ENABLED").contains("verify nftables"),
+        "{text}"
+    );
+    assert!(line("APPROVALS").contains("NONE"), "{text}");
+    assert!(line("PRIVILEGE").contains("NONE"), "{text}");
+    assert!(line("UPDATES").contains("STAGED"), "{text}");
+}
+
+/// What waits on the person and what they hold: a pending approval and a
+/// live grant each name themselves and the verb that acts on them.
+#[test]
+fn status_names_pending_approvals_and_the_live_grant() {
+    let punard = start_m9_punard_mock();
+    let secrets = start_secrets_mock();
+    let output = run_m9(&punard, &secrets, &["status"], None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let approvals = text
+        .lines()
+        .find(|line| line.starts_with("APPROVALS"))
+        .expect(&text);
+    assert!(approvals.contains("1 PENDING"), "{approvals}");
+    assert!(
+        approvals.contains("apr_7c1d9a4e · punarctl approvals list"),
+        "{approvals}"
+    );
+    let privilege = text
+        .lines()
+        .find(|line| line.starts_with("PRIVILEGE"))
+        .expect(&text);
+    assert!(privilege.contains("1 LIVE"), "{privilege}");
+    assert!(
+        privilege.contains("gnt_2b8e11c4 · time.timezone · until"),
+        "{privilege}"
+    );
+    assert!(
+        privilege.contains("punarctl privilege revoke"),
+        "{privilege}"
+    );
+}
+
+/// `status --all --json` is every daemon's answer verbatim, keyed; a daemon
+/// that did not answer is null with its reason under `errors`. Plain
+/// `status --json` is still the status result alone.
+#[test]
+fn status_all_json_keys_every_answer_and_names_what_failed() {
+    let socket = start_mock();
+    let output = run(&socket, &["--json", "status", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("stdout is JSON");
+    assert_eq!(document["status"], fixture_status());
+    assert_eq!(
+        document["firewall"],
+        json!({"descriptor": firewall_descriptor()})
+    );
+    assert_eq!(document["update"], fixture_update_status());
+    assert_eq!(document["approvals"]["approvals"], json!([]));
+    assert_eq!(document["privilege"]["grants"], json!([]));
+    for key in ["agents", "alerts"] {
+        assert_eq!(document[key], Value::Null, "{document}");
+        assert_eq!(document["errors"][key]["code"], "unreachable", "{document}");
+        assert!(
+            document["errors"][key]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("not reachable")),
+            "{document}"
+        );
+    }
+    assert_eq!(
+        document["errors"].as_object().map(|errors| errors.len()),
+        Some(2),
+        "{document}"
+    );
+
+    let agentd = start_agentd_mock();
+    let output = run_agents(&agentd, &["--json", "status", "--all"]);
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("stdout is JSON");
+    assert_eq!(document["agents"], fixture_agents_list());
+    assert_eq!(document["alerts"], fixture_alerts_list(false));
+    assert_eq!(document["errors"], json!({}));
+}
+
+// ---------------------------------------------------------------------------
+// `approvals watch` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+/// How many times the watch mock has answered `approvals.list`: the first
+/// read sees the approval pending, every later read sees it answered.
+static WATCH_LISTS: AtomicUsize = AtomicUsize::new(0);
+/// `approvals.resolve` must never be reached from a watch without a person.
+static WATCH_RESOLVES: AtomicUsize = AtomicUsize::new(0);
+
+fn approved_approval() -> Value {
+    let mut approval = pending_approval();
+    approval["approval"]["status"] = json!("approved");
+    approval["resolved_at"] = json!("2126-08-25T10:01:00Z");
+    approval["resolved_by"] = json!({"uid": 1000, "user": "punar", "pid": 812});
+    approval
+}
+
+/// History the watch must not reprint: answered before it started.
+fn old_approval() -> Value {
+    let mut approval = approved_approval();
+    approval["approval"]["approval_id"] = json!("apr_00000001");
+    approval
+}
+
+fn watch_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "approvals.list" => {
+            let calls = WATCH_LISTS.fetch_add(1, Ordering::SeqCst);
+            let current = if calls == 0 {
+                pending_approval()
+            } else {
+                approved_approval()
+            };
+            Ok(json!({"approvals": [current, old_approval()],
+                      "checked_at": "2126-08-25T10:00:30Z"}))
+        }
+        "approvals.get" => {
+            assert_eq!(request["params"]["approval_id"], json!("apr_7c1d9a4e"));
+            if WATCH_LISTS.load(Ordering::SeqCst) <= 1 {
+                Ok(pending_approval())
+            } else {
+                Ok(approved_approval())
+            }
+        }
+        "approvals.resolve" => {
+            WATCH_RESOLVES.fetch_add(1, Ordering::SeqCst);
+            Ok(approved_approval())
+        }
+        _ => respond(request),
+    }
+}
+
+/// Read stdout lines from a running child until `want` lines arrived or
+/// `limit` passed, then kill it.
+fn read_lines_then_kill(
+    mut child: std::process::Child,
+    want: usize,
+    limit: std::time::Duration,
+) -> Vec<String> {
+    let stdout = child.stdout.take().expect("stdout");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let mut lines = Vec::new();
+    while lines.len() < want {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match receiver.recv_timeout(left) {
+            Ok(line) => lines.push(line),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    lines
+}
+
+/// Each approval prints when it arrives and again when it settles, as the
+/// `approvals.get` result verbatim, one per line. What was answered before
+/// the watch started is history and does not print.
+#[test]
+fn approvals_watch_streams_each_approval_as_it_arrives_and_settles() {
+    let socket = start_mock_with(watch_respond);
+    let child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["--json", "approvals", "watch"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn punarctl");
+    // No summary directory to watch here, so the second read comes from
+    // the five-second fallback. Reprinted history would be one of the first
+    // two lines, so two are enough.
+    let lines = read_lines_then_kill(child, 2, std::time::Duration::from_secs(12));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let first: Value = serde_json::from_str(&lines[0]).expect("NDJSON");
+    let second: Value = serde_json::from_str(&lines[1]).expect("NDJSON");
+    assert_eq!(first, pending_approval());
+    assert_eq!(second, approved_approval());
+    assert!(
+        !lines.iter().any(|line| line.contains("apr_00000001")),
+        "{lines:?}"
+    );
+    assert_eq!(WATCH_RESOLVES.load(Ordering::SeqCst), 0);
+}
+
+/// `--answer` asks a person at a terminal and nobody else: without one it
+/// refuses before reading anything, and a piped "a" approves nothing.
+#[test]
+fn approvals_watch_answer_needs_a_terminal_and_ignores_stdin() {
+    if fs::File::open("/dev/tty").is_ok() {
+        eprintln!("skipped: this test process has a terminal the child would prompt on");
+        return;
+    }
+    let socket = start_mock_with(watch_respond);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(["approvals", "watch", "--answer"])
+        .env("PUNARD_SOCKET", &socket)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn punarctl");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"a\n")
+        .expect("write stdin");
+    // A watch that did not refuse would run until killed: bound it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().expect("poll child").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("collect punarctl");
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("--answer needs a terminal"), "{text}");
+    assert!(text.contains("Next step:"), "{text}");
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+    assert_eq!(WATCH_RESOLVES.load(Ordering::SeqCst), 0);
+}
+
+// ---------------------------------------------------------------------------
+// `web-apps context bind|unbind` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+fn browser_context(id: &str) -> Value {
+    json!({
+        "id": id, "name": id, "derived": false, "deletable": id != "personal",
+        "isolates": ["storage"], "profile_path_rel": format!("punar/browser/contexts/{id}")
+    })
+}
+
+/// punard's `webapps.list` with two contexts and no apps.
+fn contexts_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "webapps.list" => Ok(json!({
+            "apps": [],
+            "contexts": [browser_context("personal"), browser_context("atlas")],
+            "required_web_apps": [],
+            "policy": {"managed": false, "policy_ids": ["personal-defaults"],
+                       "allow_user_install": true}
+        })),
+        _ => respond(request),
+    }
+}
+
+fn run_with_state(socket: &PathBuf, state: &PathBuf, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", socket)
+        .env("PUNAR_AGENTD_SOCKET", no_agentd())
+        .env("XDG_STATE_HOME", state)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl")
+}
+
+fn context_state(state: &std::path::Path) -> Value {
+    serde_json::from_str(
+        &fs::read_to_string(state.join("punar/browser-context.json")).expect("state file"),
+    )
+    .expect("state is JSON")
+}
+
+/// A terminal binds a workspace the way System Control does: one binding
+/// per workspace, optionally active now, and unbinding the binding that
+/// chose the active context returns new windows to personal.
+#[test]
+fn context_bind_and_unbind_keep_one_binding_per_workspace() {
+    let state = std::env::temp_dir().join(format!("punarctl-bind-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    let socket = start_mock_with(contexts_respond);
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "atlas",
+            "--workspace",
+            "Atlas",
+            "--activate",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("BOUND · WORKSPACE ATLAS · ATLAS"), "{text}");
+    assert!(
+        text.lines().any(|line| line.ends_with("workspace Atlas")),
+        "{text}"
+    );
+    let doc = context_state(&state);
+    assert_eq!(doc["active"], "atlas");
+    assert_eq!(doc["active_cause"], "workspace:Atlas");
+    assert_eq!(
+        doc["bindings"],
+        json!([{"workspace": "Atlas", "context": "atlas"}])
+    );
+
+    // Rebinding replaces; without --activate the active context stays.
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "--json",
+            "web-apps",
+            "context",
+            "bind",
+            "personal",
+            "--workspace",
+            "Atlas",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let printed: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(printed, context_state(&state));
+    assert_eq!(
+        printed["bindings"],
+        json!([{"workspace": "Atlas", "context": "personal"}])
+    );
+    assert_eq!(printed["active"], "atlas");
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &["web-apps", "context", "unbind", "--workspace", "Atlas"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let doc = context_state(&state);
+    assert_eq!(doc["bindings"], json!([]));
+    assert_eq!(doc["active"], "personal");
+    assert_eq!(doc["active_cause"], "default");
+    let _ = fs::remove_dir_all(&state);
+}
+
+/// Each refusal says what did not happen and changes nothing: an unknown
+/// context, a workspace name outside the binding grammar (refused before
+/// punard is asked), and a workspace that is not bound.
+#[test]
+fn context_bind_refusals_change_nothing() {
+    let state = std::env::temp_dir().join(format!("punarctl-bind-refuse-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    let socket = start_mock_with(contexts_respond);
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "nosuch",
+            "--workspace",
+            "Atlas",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("does not exist, so nothing was bound"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!state.join("punar/browser-context.json").exists());
+
+    // The default mock does not know webapps.list: the name is refused first.
+    let plain = start_mock();
+    let output = run_with_state(
+        &plain,
+        &state,
+        &[
+            "web-apps",
+            "context",
+            "bind",
+            "atlas",
+            "--workspace",
+            "../evil",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("cannot be bound"), "{text}");
+    assert!(text.contains("Next step:"), "{text}");
+    assert!(!state.join("punar/browser-context.json").exists());
+
+    let output = run_with_state(
+        &socket,
+        &state,
+        &["web-apps", "context", "unbind", "--workspace", "Nowhere"],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("is not bound, so nothing was removed"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = fs::remove_dir_all(&state);
+}
+
+// ---------------------------------------------------------------------------
+// `app list --all` and `app open <desktop-id>` (terminal parity, step 7)
+// ---------------------------------------------------------------------------
+
+/// The catalog knows only `apps.list`'s two apps; any other id is not found.
+fn desktop_open_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "apps.list" => Ok(fixture_apps_list()),
+        "apps.catalog" if request["params"].get("id").is_some() => Err(json!({
+            "code": "not_found",
+            "message": format!(
+                "No app named {} is in the catalog.\nNext step: punarctl app search",
+                request["params"]["id"]
+            ),
+            "details": {}
+        })),
+        "apps.catalog" => Ok(fixture_apps_catalog()),
+        _ => respond(request),
+    }
+}
+
+/// A data home with the kinds of entry the launcher meets.
+fn desktop_home(tag: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("punarctl-desktop-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    let apps = home.join("applications");
+    fs::create_dir_all(apps.join("kde")).expect("applications dir");
+    let marker = home.join("opened");
+    let write = |name: &str, body: &str| {
+        fs::write(
+            apps.join(name),
+            format!("[Desktop Entry]\nType=Application\n{body}\n"),
+        )
+        .expect("desktop file");
+    };
+    write("htop.desktop", "Name=htop\nExec=htop\nTerminal=true");
+    write("secret.desktop", "Name=Secret\nExec=secret\nNoDisplay=true");
+    write(
+        "punar-org.gnome.Calculator.desktop",
+        "Name=Calculator\nExec=/usr/bin/punarctl app open org.gnome.Calculator %U",
+    );
+    write(
+        "marker.desktop",
+        &format!("Name=Marker\nExec=/usr/bin/touch \"{}\"", marker.display()),
+    );
+    write("loop.desktop", "Name=Loop\nExec=punarctl app open loop");
+    fs::write(
+        apps.join("kde/konsole.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Konsole\nExec=konsole\n",
+    )
+    .expect("desktop file");
+    home
+}
+
+fn run_desktop(socket: &PathBuf, home: &PathBuf, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_punarctl"))
+        .args(args)
+        .env("PUNARD_SOCKET", socket)
+        .env("XDG_DATA_HOME", home)
+        .env("XDG_DATA_DIRS", "/nonexistent-punar-data")
+        .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run punarctl")
+}
+
+/// `--all` adds what the launcher offers beyond the catalog: hidden entries
+/// stay out, a catalog app's own launcher is its catalog row, and a
+/// subdirectory entry gets its desktop-file id.
+#[test]
+fn app_list_all_adds_the_desktop_entries_the_launcher_offers() {
+    let home = desktop_home("list");
+    let socket = start_mock_with(desktop_open_respond);
+    let output = run_desktop(&socket, &home, &["--json", "app", "list", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let document: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+    assert_eq!(
+        document["apps"],
+        json!([
+            {"id": "org.gnome.Calculator", "name": "Calculator", "source": "catalog",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "org.mozilla.firefox", "name": "Firefox", "source": "catalog",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "htop", "name": "htop", "source": "desktop-entry",
+             "terminal": true, "hidden_in_launcher": false},
+            {"id": "kde-konsole", "name": "Konsole", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "loop", "name": "Loop", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false},
+            {"id": "marker", "name": "Marker", "source": "desktop-entry",
+             "terminal": false, "hidden_in_launcher": false}
+        ])
+    );
+    // The marks come from the image's shipped list. Where it is absent (this
+    // container), the document says so rather than implying nothing is hidden.
+    let installed = std::path::Path::new("/usr/share/punar/catalog/launcher-hidden-entries.json");
+    if installed.exists() {
+        assert_eq!(
+            document["launcher_hidden_list"],
+            json!(installed),
+            "{document}"
+        );
+    } else {
+        assert_eq!(document["launcher_hidden_list"], Value::Null, "{document}");
+        assert!(
+            document["launcher_hidden_error"]
+                .as_str()
+                .is_some_and(|why| why.contains("could not be read")),
+            "{document}"
+        );
+    }
+
+    let output = run_desktop(&socket, &home, &["app", "list", "--all"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("DESKTOP ENTRIES"), "{text}");
+    let htop = text
+        .lines()
+        .find(|line| line.starts_with("HTOP"))
+        .expect(&text);
+    assert!(htop.contains("TERMINAL"), "{htop}");
+    assert!(!text.contains("Secret"), "{text}");
+    if !installed.exists() {
+        assert!(
+            text.contains("THE LAUNCHER'S HIDDEN LIST COULD NOT BE READ, SO NOTHING IS MARKED"),
+            "{text}"
+        );
+    }
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// A desktop id opens its parsed Exec, never a shell string; an id that is
+/// neither kind says so; and an entry that hands over to a catalog id that
+/// does not exist stops instead of looping.
+#[test]
+fn app_open_runs_a_desktop_entry_and_names_what_is_missing() {
+    let home = desktop_home("open");
+    let socket = start_mock_with(desktop_open_respond);
+
+    let output = run_desktop(&socket, &home, &["app", "open", "marker"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let marker = home.join("opened");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(marker.exists(), "the entry's Exec did not run");
+
+    let output = run_desktop(&socket, &home, &["app", "open", "nosuch"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("Nothing is named nosuch"), "{text}");
+    assert!(text.contains("punarctl app list --all"), "{text}");
+
+    let output = run_desktop(&socket, &home, &["app", "open", "loop"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("No app named"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+// ---------------------------------------------------------------------------
+// `device` and `device posture` (terminal parity, step 6)
+// ---------------------------------------------------------------------------
+
+fn fixture_device_posture(encrypted: Option<bool>) -> Value {
+    json!({
+        "posture": {
+            "secure_boot": true, "uefi": true, "tpm_present": true, "tpm_version": "2.0",
+            "is_virtual": true, "virtualization": "kvm",
+            "disk_encryption_enabled": encrypted,
+            "firewall_enabled": true, "firewall": "nftables",
+            "os_patch_status": "unknown", "reboot_required": null
+        },
+        "hardware": {
+            "manufacturer": "QEMU", "model_name": "Standard PC (Q35 + ICH9, 2009)",
+            "bios_version": "1.16.3", "cpu_model": "QEMU Virtual CPU",
+            "cpu_vendor": "AuthenticAMD", "cpu_cores": 2, "cpu_threads": 4,
+            "memory_total_bytes": 8589934592u64, "device_capacity_bytes": 128000000000u64,
+            "root_filesystem_type": "erofs", "battery_present": true
+        },
+        "power": {"batteries": [{"name": "BAT0", "capacity_percent": 64, "status": "Charging"}]},
+        "checked_at": "2026-09-24T10:00:00Z"
+    })
+}
+
+fn device_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "device.posture" => {
+            assert!(request.get("params").is_none(), "{request}");
+            Ok(fixture_device_posture(Some(true)))
+        }
+        _ => respond(request),
+    }
+}
+
+/// punard is up, but `status` fails: the identity rows drop out and the
+/// rest of `device` still answers.
+fn device_without_status_respond(request: &Value) -> Result<Value, Value> {
+    match request["method"].as_str().unwrap_or_default() {
+        "device.posture" => Ok(fixture_device_posture(None)),
+        "status" => Err(json!({"code": "internal", "message": "status failed", "details": {}})),
+        _ => respond(request),
+    }
+}
+
+/// What the device can prove about itself, in the posture's own words, and
+/// the same result verbatim with --json.
+#[test]
+fn device_posture_renders_every_state_and_round_trips() {
+    let socket = start_mock_with(device_respond);
+    let output = run(&socket, &["device", "posture"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let row = |label: &str| {
+        text.lines()
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label} row:\n{text}"))
+            .to_string()
+    };
+    assert!(row("ENCRYPTION").contains("LUKS2"), "{text}");
+    assert!(
+        row("ENCRYPTION").contains("every data path (/var, /home)"),
+        "{text}"
+    );
+    assert!(row("SECURE BOOT").contains("ENABLED"), "{text}");
+    assert!(row("TPM").contains("2.0"), "{text}");
+    assert!(
+        row("VIRTUAL").contains("kvm · Secure Boot and TPM here are the hypervisor's"),
+        "{text}"
+    );
+    assert!(row("FIREWALL").contains("ENABLED"), "{text}");
+    assert!(row("UPDATES").contains("UNKNOWN"), "{text}");
+    assert!(
+        text.contains("THE POSTURE A MANAGING ORGANIZATION RECEIVES"),
+        "{text}"
+    );
+
+    for args in [
+        &["--json", "device", "posture"][..],
+        &["--json", "device"][..],
+    ] {
+        let output = run(&socket, args);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let parsed: Value = serde_json::from_str(&stdout(&output)).expect("--json is JSON");
+        assert_eq!(parsed, fixture_device_posture(Some(true)), "{args:?}");
+    }
+}
+
+/// `device`: identity and class from status, then hardware and power.
+#[test]
+fn device_renders_identity_hardware_and_power() {
+    let socket = start_mock_with(device_respond);
+    let output = run(&socket, &["device"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("DEVICE        PERSONAL")),
+        "{text}"
+    );
+    assert!(text.contains("dev_9f3k2v8q1x · not enrolled"), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("MAKER") && l.contains("QEMU")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("CPU") && l.contains("4 THREADS")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("MEMORY") && l.contains("8.0 GIB")),
+        "{text}"
+    );
+    assert!(text.contains("POWER"), "{text}");
+    let battery = text.lines().find(|l| l.starts_with("BAT0")).expect(&text);
+    assert!(
+        battery.contains("64 %") && battery.contains("Charging"),
+        "{battery}"
+    );
+}
+
+/// A failed `status` read costs only the identity rows; an unknown
+/// encryption answer says unknown, never "not encrypted".
+#[test]
+fn device_degrades_without_status_and_keeps_unknown_unknown() {
+    let socket = start_mock_with(device_without_status_respond);
+    let output = run(&socket, &["device"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(!text.lines().any(|l| l.starts_with("DEVICE ")), "{text}");
+    assert!(text.lines().any(|l| l.starts_with("MAKER")), "{text}");
+
+    let output = run(&socket, &["device", "posture"]);
+    let text = stdout(&output);
+    let encryption = text
+        .lines()
+        .find(|l| l.starts_with("ENCRYPTION"))
+        .expect(&text);
+    assert!(encryption.contains("UNKNOWN"), "{encryption}");
+    assert!(!encryption.contains("NOT ENCRYPTED"), "{encryption}");
 }

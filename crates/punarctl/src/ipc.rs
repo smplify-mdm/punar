@@ -2,7 +2,8 @@
 //!
 //! The client sends exactly one request per connection and closes (contract
 //! section 2). It never elevates itself: the daemon is the authorization
-//! point, and `sudo punarctl …` is the M3 way to run mutating verbs.
+//! point. No person on a Punar device is root (onboarding.md section 1.6), so
+//! a person's mutating verbs carry a grant or a password confirmation instead.
 //!
 //! Failure surfaces in the SPEC section 73 voice — what happened, why, what
 //! the next step is; never a bare errno. Server-produced errors already
@@ -62,7 +63,7 @@ pub const PROTOCOL_VERSION: u64 = 1;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// M5 (contract sections 2, 7): `enroll start` runs a full enrollment
-/// pipeline server-side (60 s processing bound), so its client budget is
+/// pipeline server-side (70 s processing bound), so its client budget is
 /// raised to 90 s — for that one verb only.
 pub const ENROLL_START_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -90,6 +91,10 @@ pub const EXIT_DENIED: u8 = 3;
 /// and executed nothing (contract section 14.1).
 pub const EXIT_APPROVAL_REQUIRED: u8 = 4;
 pub const EXIT_UNREACHABLE: u8 = 5;
+/// SMP-1405 WP-02: what the verb drives is not present — no backlight in a
+/// virtual machine, no media player running. Not a failure and not a
+/// refusal: a script can tell "nothing to do here" from "it broke".
+pub const EXIT_ABSENT: u8 = 6;
 
 /// The wire code that carries exit 4 (contract section 14.1).
 pub const CODE_APPROVAL_REQUIRED: &str = "approval_required";
@@ -287,7 +292,9 @@ impl Client {
                 "permission denied — the control socket admits root and members of \
                  group punar only (personal defaults)"
                     .to_string(),
-                "re-run as root (sudo punarctl …) or from the punar session user".to_string(),
+                "run it from the account of this device's administrator, a member of \
+                 group punar"
+                    .to_string(),
             ),
             io::ErrorKind::ConnectionRefused => (
                 "nothing is listening on the control socket — the daemon is not running"

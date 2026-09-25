@@ -8,7 +8,7 @@ Deterministic mock data for tests and the MVP hero demo (spec section 75). The M
 
 Two kinds of directories:
 
-1. **Schema-domain fixtures** — `<domain>/valid/` and `<domain>/invalid/` cases exercising the schemas in `schemas/<domain>/` (`ai-agent`, `audit`, `capability`, `desired-state`, `network`, `policy`, `update`). Valid files must validate; invalid files must fail for the one reason their filename states.
+1. **Schema-domain fixtures** — `<domain>/valid/` and `<domain>/invalid/` cases exercising the schemas in `schemas/<domain>/` (`ai-agent`, `audit`, `capability`, `desired-state`, `network`, `pim`, `policy`, `update`). Valid files must validate; invalid files must fail for the one reason their filename states. PIM uses the explicit `ipc-message.*` and `records.*` prefixes because the domain contains two schemas.
 2. **Mock control-plane seed data** — `organizations/` and `policies/`, consumed by enrollment (spec section 49), policy tests, and the hero demo. All seed files are valid documents.
 
 Empty directories are placeholders for future domains.
@@ -22,6 +22,9 @@ For schema-domain directories, the fixture directory names the schema domain and
 | `organizations/acme/org.json` | none (see below) |
 | `organizations/acme/desired-state-eng-baseline-v12.json` | `schemas/desired-state/desired-state.json` |
 | `organizations/acme/policy-source-eng-baseline-v12.json` | `schemas/policy/policy-source.json` |
+| `organizations/acme/policy-sets/*/set.json` | none (the mock's own manifest) |
+| `organizations/acme/policy-sets/*/desired-state-*.json` | `schemas/desired-state/desired-state.json` |
+| `organizations/acme/policy-sets/*/policy-source-*.json` | `schemas/policy/policy-source.json` |
 | `policies/ai-policy-engineering-standard.yaml` | `schemas/policy/ai-policy.json` |
 | `policies/policy-source-eng-ai-v3.json` | `schemas/policy/policy-source.json` |
 
@@ -31,6 +34,7 @@ For schema-domain directories, the fixture directory names the schema domain and
 
 - `organizations/acme/desired-state-eng-baseline-v12.json` — the Acme engineering baseline `DeviceDesiredState`: the spec section 38 example plus the section 44.4 firewall defaults (inbound deny / outbound allow). `metadata.device` is pinned to `dev_123` (the device id used by spec sections 38 and 53) because the desired-state schema requires a device id; the mock control plane substitutes the enrolling device's id at enrollment time, and tests expect `dev_123`.
 - `organizations/acme/policy-source-eng-baseline-v12.json` — provenance envelope binding policy id `eng-baseline-v12` and source name `Acme Engineering Baseline` (both verbatim from the spec section 40 explain output) to the baseline. It carries no embedded `policy` payload: the body is the sibling desired-state file, referenced by policy id, so there is a single source of truth.
+- `organizations/acme/policy-sets/` — the other policy sets the dev/CI mock can serve once `admin.policy_publish` names one, so a device's live policy refresh has something to refresh to (docs/development/milestone-5.md section 4.4). Each `set.json` lists envelope + desired-state file pairs, looked up in the set's own directory first and then in `organizations/acme/`, and the `assignment` marker `policy.fetch` answers with. `default` is not a directory: it is the baseline `org.json` composes. `firewall-off` is the baseline with its firewall rule off; `plus-role` adds the rank-3 `eng-role-sre` envelope; `none` assigns nothing (the one answer that withdraws a device's policy); `duplicate-id` names the baseline twice and is invalid **as a set** by design, while every file in it is schema-valid.
 - `policies/ai-policy-engineering-standard.yaml` — the `engineering-standard` AI authority policy the baseline references via `spec.ai.policy`. The body is the spec section 20 example verbatim.
 - `policies/policy-source-eng-ai-v3.json` — provenance envelope giving that policy its id `eng-ai-v3`, the id cited by the spec section 53 audit example (`"policy_ids": ["eng-ai-v3"]`). As above, the body lives in the sibling YAML file. Both Acme envelopes use `source_kind: organization_baseline` / `precedence_rank: 2` (spec section 39's "Organization Mandatory Policy" rung, matching `policy/valid/policy-source-org-baseline.json`).
 

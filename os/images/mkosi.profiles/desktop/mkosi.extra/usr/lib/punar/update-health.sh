@@ -11,6 +11,9 @@ AGENTS_JSON="${RUN_DIR}/update-health-agents.json"
 PI_BOOT_PARTITION=/proc/device-tree/chosen/bootloader/partition
 PI_TRYBOOT=/proc/device-tree/chosen/bootloader/tryboot
 PI_PENDING=/var/lib/punar/update/pending-pi.json
+# Written by punard when it stages a Pi candidate; on tmpfs, so only a boot
+# clears it (crates/punard/src/pi_update.rs PI_STAGED_MARKER).
+PI_STAGED=/run/punard/pi-update-staged
 PI_RESULT="${RUN_DIR}/update-pi-reconcile.json"
 MAX_WAIT=170
 
@@ -102,6 +105,15 @@ pi_firmware_fallback_observed() {
         end' "${PI_PENDING}" 2>/dev/null) || return 1
     [ "${current_partition}" = "${previous_partition}" ]
 }
+
+# Staged in this very boot and not yet restarted into: this run is not a boot
+# of anything new (the unit was restarted, say, because a daemon it requires
+# was), and the pending record only looks like a fallback. The restart that
+# tries the candidate is still armed; there is nothing to settle.
+if [ -e "${PI_STAGED}" ]; then
+    echo "PUNAR_UPDATE_HEALTH_OK pi_outcome=staged_awaiting_restart"
+    exit 0
+fi
 
 # A normal boot of the recorded previous slot is firmware's explicit fallback
 # result. It needs no candidate desktop-health wait. This shell observation

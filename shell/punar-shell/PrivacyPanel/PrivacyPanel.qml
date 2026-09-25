@@ -26,6 +26,13 @@ DeferredSurfaceBase {
         return view !== null && view !== undefined && Array.isArray(view.processes)
             ? view.processes : [];
     }
+    // Other people's programs netd left out of this person's view (F0;
+    // docs/api/ipc.md section 21.3): counted, never shown.
+    readonly property int withheldCount: {
+        var view = root.networkView;
+        return view !== null && view !== undefined && typeof view.withheld === "number"
+            ? view.withheld : 0;
+    }
     readonly property int connectionCount: {
         var total = 0;
         for (var i = 0; i < root.processes.length; i++) {
@@ -679,7 +686,11 @@ DeferredSurfaceBase {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     horizontalAlignment: Text.AlignRight
-                    text: "TCP only · No content inspection"
+                    text: root.withheldCount > 0
+                        ? "TCP only · No content inspection · "
+                          + (root.withheldCount === 1 ? "1 program of another person withheld"
+                             : root.withheldCount + " programs of other people withheld")
+                        : "TCP only · No content inspection"
                 }
             }
         }

@@ -24,9 +24,19 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Authenticate a normal login; reads username/password JSON from stdin.
-    Login,
+    Login {
+        /// The keyboard layout chosen on the login screen, carried into the
+        /// session as PUNAR_KEYMAP only if the sign-in succeeds.
+        #[arg(long)]
+        keymap: Option<String>,
+    },
     /// Consume the root-owned first-session PAM token, then start the desktop.
-    First { username: String },
+    First {
+        username: String,
+        /// As for `login`.
+        #[arg(long)]
+        keymap: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -50,9 +60,12 @@ fn main() -> ExitCode {
     };
 
     let result = match cli.command {
-        Command::First { username } => start_session(&socket, &username, None),
-        Command::Login => read_login()
-            .and_then(|(username, password)| start_session(&socket, &username, Some(password))),
+        Command::First { username, keymap } => {
+            start_session(&socket, &username, None, keymap.as_deref())
+        }
+        Command::Login { keymap } => read_login().and_then(|(username, password)| {
+            start_session(&socket, &username, Some(password), keymap.as_deref())
+        }),
     };
     match result {
         Ok(()) => {

@@ -1,0 +1,16 @@
+{
+  "kind": "account",
+  "account_id": "acct_A1",
+  "provider_type": "google",
+  "display_name": "Personal",
+  "primary_address": {
+    "name": "Alice",
+    "address": "alice@example.com"
+  },
+  "capabilities": ["mail", "calendar", "contacts"],
+  "auth_state": "ready",
+  "connectivity": "online",
+  "last_sync_at": "2026-09-22T19:02:00Z",
+  "next_retry_at": null,
+  "refresh_token": "must-never-be-a-record-field"
+}

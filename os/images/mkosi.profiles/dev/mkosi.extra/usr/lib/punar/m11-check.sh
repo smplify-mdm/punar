@@ -33,6 +33,8 @@ FAILED=0
 NOTES_JOB=""
 FIXTURE_JOB=""
 BROWSER_JOB=""
+# Made before either context's browser first starts (storage_compacted).
+STORAGE_MARK=""
 
 : > "${REPORT}"
 
@@ -136,26 +138,89 @@ profile_pss_kib() {
     printf '%s\n' "${total}"
 }
 
+# The browser process of each running Chromium: the one without --type=.
+chromium_browser_pids() {
+    for pid in $(chromium_pids); do
+        case "$(tr '\000' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)" in
+            *--type=*) ;;
+            *) printf '%s\n' "${pid}" ;;
+        esac
+    done
+}
+
+# Close every Chromium the way closing its windows would, then make sure.
+#
+# SIGTERM goes to each BROWSER process only, which commits what its storage
+# service holds and then ends its own children. Signalling every Chromium
+# process at once, as this did, also reaches the storage service, a utility
+# process of its own (--utility-sub-type=storage.mojom.StorageService) that
+# exits at once and drops every DOM-storage write not yet committed. Chromium
+# commits a page's localStorage about five seconds after the page writes it:
+# measured on Chromium 153, a value written two seconds before such a stop
+# never reached either profile, while a SIGTERM to the browser process alone
+# committed it every time, one second after the write included. Anything
+# still running a minute later is killed, and BROWSERS_KILLED counts it.
+BROWSERS_KILLED=0
 stop_browsers() {
-    pids="$(chromium_pids)"
+    pids="$(chromium_browser_pids)"
     # Intentional word splitting: chromium_pids prints one validated decimal
     # process id per line and kill accepts the resulting argument vector.
     # shellcheck disable=SC2086
     [ -z "${pids}" ] || kill ${pids} >/dev/null 2>&1 || true
     waited=0
-    while [ "${waited}" -lt 30 ] && [ -n "$(chromium_pids)" ]; do
+    while [ "${waited}" -lt 60 ] && [ -n "$(chromium_pids)" ]; do
         sleep 1
         waited=$((waited + 1))
     done
     pids="$(chromium_pids)"
-    # shellcheck disable=SC2086
-    [ -z "${pids}" ] || kill -9 ${pids} >/dev/null 2>&1 || true
+    if [ -n "${pids}" ]; then
+        BROWSERS_KILLED=$((BROWSERS_KILLED + $(printf '%s\n' "${pids}" | wc -l)))
+        # shellcheck disable=SC2086
+        kill -9 ${pids} >/dev/null 2>&1 || true
+    fi
+}
+
+# Chromium keeps a page's localStorage in Default/Local Storage (LevelDB). A
+# probe counts as persisted only there: the atlas page carries its probe value
+# in its URL fragment, so that value also reaches Default/Sessions within a
+# second of the navigation, and Default/History later, whether or not the
+# page's storage write has landed. Searched for across the whole profile, the
+# atlas probe was "persisted" about five seconds before its storage was, and
+# the presence half of the separation check was proven by the URL.
+probe_stored() {
+    grep -raqF "$2" "$1/Default/Local Storage" 2>/dev/null
+}
+
+# The files under profile $1 that hold $2, relative to it: a FAIL line's own
+# evidence, since the exported proof carries no browser profile.
+probe_files() {
+    grep -ralF "$2" "$1" 2>/dev/null | sed "s#^$1/##" | head -n 6 | tr '\n' ';'
+}
+
+# Both searches read the raw bytes, which is sound only while Local Storage
+# holds what this check wrote in LevelDB's log, byte for byte. Once LevelDB
+# compacts the log into a table, the table's blocks are Snappy-compressed,
+# and a probe value that repeats its own key (punar-ctx-probe-atlas after
+# punar-ctx-probe) is stored as a back-reference: the value is there and
+# grep cannot see it. Measured on Chromium 153 with a page that wrote 190 KB
+# of localStorage, then one reopen: the log became 000003.ldb, and the probe
+# was nowhere a raw search looks. A small log survives reopening untouched
+# (the same probe, reopened twice, even in low-end mode, stayed in
+# 000003.log), so this check never compacts one itself; but a leaked value
+# hidden that way would pass the absence half, so a table is looked for
+# rather than assumed away. The tables under profile $1's Local Storage
+# written after file $2, relative to the profile: a table from before it
+# holds nothing this check wrote.
+storage_compacted() {
+    find "$1/Default/Local Storage" -type f \( -name '*.ldb' -o -name '*.sst' \) \
+        -newer "$2" 2>/dev/null | sed "s#^$1/##" | tr '\n' ';'
 }
 
 # Invoked through EXIT.
 # shellcheck disable=SC2317,SC2329
 cleanup() {
     stop_browsers
+    [ -z "${STORAGE_MARK}" ] || rm -f "${STORAGE_MARK}"
     [ -z "${NOTES_JOB}" ] || wait "${NOTES_JOB}" >/dev/null 2>&1 || true
     [ -z "${FIXTURE_JOB}" ] || wait "${FIXTURE_JOB}" >/dev/null 2>&1 || true
     [ -z "${BROWSER_JOB}" ] || wait "${BROWSER_JOB}" >/dev/null 2>&1 || true
@@ -188,7 +253,7 @@ fi
 as_punar "${CTL}" --json capabilities > "${RUN_DIR}/m11-capabilities.json" 2>&1
 jq_check "browser.policy is the fifth typed capability with a closed desired-state set" \
     "${RUN_DIR}/m11-capabilities.json" \
-    '(.capabilities | length) == 5 and ([.capabilities[].capability] | index("browser.policy")) != null and (.capabilities[] | select(.capability == "browser.policy") | .allowed_desired_states) == ["managed", "unmanaged"]'
+    '(.capabilities | length) == 7 and ([.capabilities[].capability] | index("browser.policy")) != null and (.capabilities[] | select(.capability == "browser.policy") | .allowed_desired_states) == ["managed", "unmanaged"]'
 
 if [ -x /usr/lib/chromium/chromium ]; then
     note "ok   upstream Chromium real binary exists"
@@ -310,7 +375,7 @@ as_punar "${CTL}" --json web-apps launch linear --dry-run \
     > "${RUN_DIR}/m11-argv-dryrun.txt" 2>&1
 jq_check "dry-run is an exact closed Chromium argv with origin and context" \
     "${RUN_DIR}/m11-argv-dryrun.txt" \
-    '.program == "/usr/lib/chromium/chromium" and (.argv | length) == 7 and (.argv | index("--app=https://linear.app")) != null and (.argv | index("--class=punar-webapp-linear")) != null and (.argv | map(select(startswith("--user-data-dir="))) | length) == 1'
+    '.program == "/usr/lib/chromium/chromium" and (.argv | length) == 8 and (.argv | index("--app=https://linear.app")) != null and (.argv | index("--class=punar-webapp-linear")) != null and (.argv | index("--password-store=basic")) != null and (.argv | map(select(startswith("--user-data-dir="))) | length) == 1'
 if grep -F -f "${DENYLIST}" "${RUN_DIR}/m11-argv-dryrun.txt" >/dev/null 2>&1; then
     note "FAIL dry-run argv contains a forbidden Chromium token"
     FAILED=1
@@ -319,6 +384,9 @@ else
 fi
 
 # 3. Native app window and live Chromium sandbox evidence.
+# The storage-separation step reads raw bytes, which is sound only for what
+# LevelDB has not compacted since this point (storage_compacted).
+STORAGE_MARK="$(mktemp)"
 # Start elsewhere so landing on Atlas proves the rule acted; merely observing
 # an Atlas window while Atlas was already focused would be a false positive.
 as_punar hyprctl dispatch "hl.dsp.focus({ workspace = '2' })" >/dev/null 2>&1 || true
@@ -432,19 +500,26 @@ grep_row "context status says workspace changes do not launch apps" \
 # commits DOM storage on a timer. On a slower accelerator (native ARM64 under
 # HVF reported transient GPU command-buffer failures) the fixture window can
 # exist before its script has run, and stopping the browsers then proves
-# nothing. Wait, bounded, for each context to persist its OWN probe first;
-# the two-way check below still requires the other context's value to be
-# absent, so this cannot pass vacuously.
+# nothing. Wait, bounded, until each context has COMMITTED its own probe to
+# its own Local Storage (probe_stored): the page's script has run and
+# Chromium has written what it stored. The two-way check below still requires
+# the other context's value to be absent from the whole of each profile, so
+# this cannot pass vacuously.
 waited=0
-while [ "${waited}" -lt 90 ]; do
-    if grep -raF 'punar-ctx-probe-personal' "${PERSONAL_PROFILE}" >/dev/null 2>&1 \
-            && grep -raF 'punar-ctx-probe-atlas' "${ATLAS_PROFILE}" >/dev/null 2>&1; then
+while [ "${waited}" -lt 120 ]; do
+    if probe_stored "${PERSONAL_PROFILE}" punar-ctx-probe-personal \
+            && probe_stored "${ATLAS_PROFILE}" punar-ctx-probe-atlas; then
         break
     fi
     sleep 1
     waited=$((waited + 1))
 done
-note "info both contexts persisted their own storage probe after ${waited}s"
+PROBE_WAITED="${waited}"
+if [ "${PROBE_WAITED}" -lt 120 ]; then
+    note "info both contexts committed their own storage probe after ${PROBE_WAITED}s"
+else
+    note "info a storage probe was still uncommitted after 120s; closing the browsers commits any write Chromium holds"
+fi
 
 # 5. The PUNAR+B command target opens a normal browser in the chosen context.
 stop_browsers
@@ -453,15 +528,35 @@ stop_browsers
 NOTES_JOB=""
 FIXTURE_JOB=""
 # Chromium may buffer LevelDB writes while the page is live. Inspect the
-# profiles only after both processes have exited so this remains deterministic
-# on slower TCG and storage-constrained CI hosts.
-if grep -raF 'punar-ctx-probe-personal' "${PERSONAL_PROFILE}" >/dev/null 2>&1 \
-        && ! grep -raF 'punar-ctx-probe-atlas' "${PERSONAL_PROFILE}" >/dev/null 2>&1 \
-        && grep -raF 'punar-ctx-probe-atlas' "${ATLAS_PROFILE}" >/dev/null 2>&1 \
-        && ! grep -raF 'punar-ctx-probe-personal' "${ATLAS_PROFILE}" >/dev/null 2>&1; then
+# profiles only after every Chromium process has exited, closed through its
+# browser process (stop_browsers), so this remains deterministic on slower TCG
+# and storage-constrained CI hosts. Each context's own probe must be in its
+# Local Storage; the other context's must be nowhere in its profile at all,
+# and neither Local Storage may have been compacted where that search is
+# blind.
+separation=""
+probe_stored "${PERSONAL_PROFILE}" punar-ctx-probe-personal \
+    || separation="${separation} the personal Local Storage lacks its own probe;"
+probe_stored "${ATLAS_PROFILE}" punar-ctx-probe-atlas \
+    || separation="${separation} the atlas Local Storage lacks its own probe;"
+leaked="$(probe_files "${PERSONAL_PROFILE}" punar-ctx-probe-atlas)"
+[ -z "${leaked}" ] \
+    || separation="${separation} the personal profile holds the atlas probe in ${leaked}"
+leaked="$(probe_files "${ATLAS_PROFILE}" punar-ctx-probe-personal)"
+[ -z "${leaked}" ] \
+    || separation="${separation} the atlas profile holds the personal probe in ${leaked}"
+# The absence half proves nothing about a table LevelDB wrote since the
+# contexts started: a leaked value inside it is compressed out of sight.
+compacted="$(storage_compacted "${PERSONAL_PROFILE}" "${STORAGE_MARK}")"
+[ -z "${compacted}" ] \
+    || separation="${separation} the personal Local Storage was compacted during the check (${compacted}), where a raw search cannot show the atlas probe absent;"
+compacted="$(storage_compacted "${ATLAS_PROFILE}" "${STORAGE_MARK}")"
+[ -z "${compacted}" ] \
+    || separation="${separation} the atlas Local Storage was compacted during the check (${compacted}), where a raw search cannot show the personal probe absent;"
+if [ -z "${separation}" ]; then
     note "ok   browser storage probe values remain separated by context"
 else
-    note "FAIL profile storage did not prove two-way context separation"
+    note "FAIL profile storage did not prove two-way context separation:${separation} (commit wait ${PROBE_WAITED}s; Chromium processes killed rather than closed: ${BROWSERS_KILLED}; personal probe in personal: $(probe_files "${PERSONAL_PROFILE}" punar-ctx-probe-personal) atlas probe in atlas: $(probe_files "${ATLAS_PROFILE}" punar-ctx-probe-atlas))"
     FAILED=1
 fi
 

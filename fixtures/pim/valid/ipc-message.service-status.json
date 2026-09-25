@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "id": "status-1",
+  "method": "service.status",
+  "result": {
+    "kind": "service_status",
+    "protocol_version": 1,
+    "service_version": "0.1.0",
+    "profile_id": "profile_A1",
+    "profile_uid": 1000,
+    "storage_encryption": "verified_device_luks",
+    "connectivity": "offline",
+    "accounts": 0,
+    "last_change_cursor": "cursor_initial"
+  }
+}

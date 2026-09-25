@@ -247,6 +247,11 @@ fn render_session_chain(
     let tag = session.tag();
     writeln!(output, "  chain s_{tag} {{").unwrap();
 
+    let residual = session
+        .policy
+        .rule("internet")
+        .ok_or_else(|| NftError::MissingInternetRule(session.session_id.clone()))?;
+
     // Blocks first: overlapping CIDRs can never let a broader allow eclipse
     // a narrower production/privileged deny.
     for rule in session
@@ -266,15 +271,19 @@ fn render_session_chain(
         render_zone_rules(output, memberships, tag, &rule.zone, rule.decision);
     }
 
-    writeln!(output, "    ip daddr 127.0.0.0/8 accept").unwrap();
-    writeln!(output, "    ip6 daddr ::1/128 accept").unwrap();
-    writeln!(output, "    ip daddr 169.254.0.0/16 accept").unwrap();
-    writeln!(output, "    ip6 daddr fe80::/10 accept").unwrap();
+    // `internet = allow` needs the systemd-resolved stub, but it does not
+    // imply authority over every service listening on the host loopback. A
+    // project that genuinely needs another local/link-local destination must
+    // name it in an explicit root-owned zone, which was evaluated above.
+    if residual.decision == Decision::Allow {
+        writeln!(output, "    ip daddr 127.0.0.53 udp dport 53 accept").unwrap();
+        writeln!(output, "    ip daddr 127.0.0.53 tcp dport 53 accept").unwrap();
+    }
+    render_infrastructure_block(output, "ip", "127.0.0.0/8", "loopback", tag);
+    render_infrastructure_block(output, "ip6", "::1/128", "loopback", tag);
+    render_infrastructure_block(output, "ip", "169.254.0.0/16", "linklocal", tag);
+    render_infrastructure_block(output, "ip6", "fe80::/10", "linklocal", tag);
 
-    let residual = session
-        .policy
-        .rule("internet")
-        .ok_or_else(|| NftError::MissingInternetRule(session.session_id.clone()))?;
     let counter = counter_name(tag, "internet", residual.decision);
     if residual.decision == Decision::Allow {
         writeln!(output, "    counter name {counter} accept").unwrap();
@@ -288,6 +297,28 @@ fn render_session_chain(
     }
     writeln!(output, "  }}").unwrap();
     Ok(())
+}
+
+fn render_infrastructure_block(
+    output: &mut String,
+    family: &str,
+    destination: &str,
+    class: &str,
+    tag: &str,
+) {
+    writeln!(
+        output,
+        "    {family} daddr {destination} limit rate 5/minute log prefix \"punar-net deny {class} {tag} \" level info"
+    )
+    .unwrap();
+    // This is a structural guard, not a policy-zone verdict, so it uses an
+    // anonymous counter. Named policy counters remain a closed semantic set
+    // and cannot be mistaken for an internet or site-zone decision.
+    writeln!(
+        output,
+        "    {family} daddr {destination} counter reject with icmpx type admin-prohibited"
+    )
+    .unwrap();
 }
 
 fn render_zone_rules(
@@ -438,13 +469,19 @@ mod tests {
         let deny_log = rendered.find("corp_prod_v4 limit rate").unwrap();
         let deny_reject = rendered.find("corp_prod_v4 counter name").unwrap();
         let allow = rendered.find("corp_dev_v4 counter name").unwrap();
-        let loopback = rendered.find("ip daddr 127.0.0.0/8 accept").unwrap();
+        let resolver = rendered
+            .find("ip daddr 127.0.0.53 udp dport 53 accept")
+            .unwrap();
+        let loopback = rendered
+            .find("ip daddr 127.0.0.0/8 counter reject")
+            .unwrap();
         let residual = rendered
             .find("counter name c_4f21c09ab3e1_residual_allow accept")
             .unwrap();
         assert!(deny_log < deny_reject);
         assert!(deny_reject < allow);
-        assert!(allow < loopback);
+        assert!(allow < resolver);
+        assert!(resolver < loopback);
         assert!(loopback < residual);
         assert!(rendered.starts_with("destroy table inet punar-net\ntable inet punar-net"));
         assert!(!rendered.contains("punar-base"));
@@ -457,8 +494,33 @@ mod tests {
         let rendered = render_table(false, &zones, &memberships, &[session]).unwrap();
         for line in rendered.lines().filter(|line| line.contains("reject")) {
             assert!(!line.contains("limit rate"), "{line}");
-            assert!(line.contains("counter name"), "{line}");
+            assert!(line.contains("counter"), "{line}");
         }
+    }
+
+    #[test]
+    fn local_and_link_local_are_never_implicit_policy_bypasses() {
+        let (zones, memberships, mut session) = fixture();
+        session
+            .policy
+            .rules
+            .iter_mut()
+            .find(|rule| rule.zone == "internet")
+            .unwrap()
+            .decision = Decision::Deny;
+        let denied = render_table(false, &zones, &memberships, &[session]).unwrap();
+        assert!(!denied.contains("127.0.0.0/8 accept"));
+        assert!(!denied.contains("169.254.0.0/16 accept"));
+        assert!(!denied.contains("127.0.0.53 udp dport 53 accept"));
+        assert!(denied.contains("127.0.0.0/8 counter reject"));
+        assert!(denied.contains("169.254.0.0/16 counter reject"));
+
+        let (zones, memberships, allowed) = fixture();
+        let allowed = render_table(false, &zones, &memberships, &[allowed]).unwrap();
+        assert!(allowed.contains("127.0.0.53 udp dport 53 accept"));
+        assert!(allowed.contains("127.0.0.53 tcp dport 53 accept"));
+        assert!(allowed.contains("127.0.0.0/8 counter reject"));
+        assert!(allowed.contains("169.254.0.0/16 counter reject"));
     }
 
     #[test]

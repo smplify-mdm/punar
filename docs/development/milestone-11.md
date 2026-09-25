@@ -169,7 +169,7 @@ Punar chrome over Chromium's own window content.
 |---|---|
 | 1 | **No fork, no patch, no build flag, no preload — and this is checkable.** Chromium stays exactly the architecture substrate's snapshot-pinned vendor package. The integration layer is argv + files + records. `m11-check` asserts the real browser binary is owned by that package manager and that no Punar-owned entry point names a weakening option. §3.1, §12 group 1. |
 | 2 | **No new binary and no new daemon.** The launcher shim *is* `punarctl web-apps launch <id>`, which builds argv as a `Vec<String>` and `execve`s `chromium` (the M3 fixed-argv law, M6 podman precedent). Consequence: `PUNAR_SERVICE_UNITS` in `idle-ram.sh` is **unchanged**, the services-RSS gate is structurally untouched, and the `.desktop` files Punar writes never contain the token `chromium` — so a Chromium flag has no syntactic place to hide in them. §3.2, §4.5, §9.1. |
-| 3 | **The argv builder is a closed allowlist, compiled in.** `punarctl` may emit exactly seven Chromium flags (`--app=`, `--user-data-dir=`, `--class=`, `--ozone-platform=wayland`, `--no-first-run`, `--no-default-browser-check`, `--disable-features=` **only** with the fixed value `PunarNone` — see §8.2) and nothing else, ever. A unit test asserts the const array; a record field can never become a flag because every record field is validated against a regex before it reaches argv. The explicit Wayland selection is required because Chromium chose X11 from a system exercise even with a valid Wayland socket when the earlier `auto` hint was used. §3.3, §8.2. |
+| 3 | **The argv builder is a closed allowlist, compiled in.** `punarctl` may emit exactly eight Chromium flags (`--app=`, `--user-data-dir=`, `--class=`, `--ozone-platform=wayland`, `--no-first-run`, `--no-default-browser-check`, `--disable-features=` **only** with the fixed value `PunarNone` — see §8.2 — and `--password-store=` **only** with the fixed value `basic`, see §3.4) and nothing else, ever. A unit test asserts the const array; a record field can never become a flag because every record field is validated against a regex before it reaches argv. The explicit Wayland selection is required because Chromium chose X11 from a system exercise even with a valid Wayland socket when the earlier `auto` hint was used. §3.3, §8.2. |
 | 4 | **Web-app install is a typed capability with two front doors, one implementation** (spec 10, 12.2). `punarctl web-apps install …` and the command center's D-013 install card both call the **same** `webapps.install` method on `punard` over the existing socket; the card is a renderer of the CLI's typed action, invoked with fixed argv via `Quickshell.execDetached` — the M9 approval-overlay pattern verbatim. No second code path, no shell string. §4.2, §10.2. |
 | 5 | **punard decides and remembers; punarctl materializes.** The record of truth is root-owned (`/var/lib/punar/web-apps/<uid>/apps/<id>.json`, `0600 root:root`), because inventory an administrator may be told about must not be forgeable by the thing being inventoried. The `.desktop` entry, the icon and the profile directory live in the user's home and are **derived artifacts**, rebuildable at any time by `punarctl web-apps sync`. punard never reads or writes a user's home. §4.3. |
 | 6 | **`webapps.*` mutations are uid-scoped self-service, not root-only** — the `privilege.request` precedent (any connected peer, mutating, always audited). A peer may install, uninstall and define contexts **only within its own uid's scope**; there is no cross-uid verb and no wildcard. Root is not required because installing a web app on your own machine is not a privileged act (law 5). §4.4, §11.2. |
@@ -252,7 +252,7 @@ is no new thing to audit for flags. `Exec=` in every Punar-written
 
 ```rust
 // crates/punarctl/src/webapps/launch.rs — the complete flag vocabulary.
-const ALLOWED_CHROMIUM_FLAGS: [&str; 7] = [
+const ALLOWED_CHROMIUM_FLAGS: [&str; 8] = [
     "--app=",                    // value: the record's start_url, re-validated
     "--user-data-dir=",          // value: the context profile dir, absolute
     "--class=",                  // value: "punar-webapp-<id>"
@@ -260,8 +260,53 @@ const ALLOWED_CHROMIUM_FLAGS: [&str; 7] = [
     "--no-first-run",            // exact
     "--no-default-browser-check",// exact
     "--disable-features=PunarNone", // see §8.2 — present ONLY as this literal
+    "--password-store=basic",    // see §3.4 — present ONLY as this literal
 ];
 ```
+
+### 3.4 The browser is not a client of the device-wide secret store
+
+The image ships `gnome-keyring` so that third-party applications have a
+freedesktop Secret Service at all; `docs/design/third-party-apps.md` states
+plainly what that protocol is not. It has **no per-application access
+control**: every caller that holds `org.freedesktop.secrets` can read every
+unlocked item. Punar's enforcement point is the sandbox, and the sandbox
+withholds the user's home — it deliberately does not withhold that bus name,
+because an app that asks for `org.freedesktop.secrets=talk` is named on the
+install card and granted it.
+
+Left to itself, Chromium is one of those callers. It asks the Secret Service
+for its `Chromium Safe Storage` key at startup, on this image too: the
+selection is not conditional on a recognized desktop, and `Hyprland` is not one
+Chromium recognizes. Observed on the pinned snapshot's own Chromium 151, with
+the daemon the image ships:
+
+```
+method call ... destination=org.freedesktop.secrets
+    interface=org.freedesktop.Secret.Service; member=ReadAlias
+```
+
+and, on a machine where the login keyring is already unlocked, an item any
+other bus client can read back in full:
+
+```
+$ secret-tool search --all application chromium
+label  = Chromium Safe Storage
+secret = <the key that decrypts this browser's saved passwords and cookies>
+```
+
+`--password-store=basic` makes Chromium keep that key in its own profile
+directory instead. This is a **product decision, not a CI workaround**: the
+browser Punar ships stops handing its credential-encryption key to every
+application that was granted the secrets bus. It is stated as a trade rather
+than a win — `basic` obfuscates the key rather than protecting it, so it is
+weaker against something already reading this user's home as this user. That
+attacker can read the whole profile anyway, and the disk is encrypted at rest.
+
+The device capability `credential_isolation` continues to report
+`org.freedesktop.secrets` as `shared`, and that stays correct: the shared store
+is still there, and still shared, for the third-party apps it was added for.
+What changed is that Punar's own browser is no longer one of its clients.
 
 Rules, each unit-tested:
 
@@ -643,7 +688,15 @@ on the Hyprland workspace event it already subscribes to, via `FileView` with
 `atomicWrites: true`; the CLI and shell see one another's changes through
 inotify. **Event-driven, no timer, no polling loop**
 (spec 6.3). `punarctl web-apps context use <id>` is the manual writer and sets
-`active_cause: "manual"`.
+`active_cause: "manual"`. `punarctl web-apps context bind <id> --workspace
+<name> [--activate]` and `context unbind --workspace <name>` write the
+bindings: one per workspace, at most 64, with the workspace-name grammar,
+against the contexts punard lists. Unbinding the binding that chose the active
+context returns it to `personal`, as leaving that workspace would. System
+Control runs these same verbs, so the shell writes the file itself only for
+the automatic switch on a workspace event. Both sides use
+`$XDG_STATE_HOME/punar/browser-context.json` when `XDG_STATE_HOME` is
+absolute, and `~/.local/state` otherwise.
 
 **What "brings forward" means, precisely:**
 
@@ -1063,7 +1116,9 @@ punarctl web-apps context list [--json]
 punarctl web-apps context create <id> [--name <display>]
 punarctl web-apps context delete <id> [--purge-data]
 punarctl web-apps context use <id>
-punarctl web-apps context status
+punarctl web-apps context bind <id> --workspace <name> [--activate]
+punarctl web-apps context unbind --workspace <name>
+punarctl web-apps context status                      # active context and every binding
 ```
 
 D-014 house rules apply unchanged: mono masthead, middle-dot separators,
@@ -1105,8 +1160,10 @@ in System Control's Applications pane:
   `Quickshell.execDetached(["punarctl","web-apps","install", …])` — fixed
   argv, no shell string (spec 12.2).
 - **The context picker** — the Applications list begins with contexts and
-  their isolation meta and the active row's cause. It writes
-  `browser-context.json` directly (it is the file's owner, §5.5) and, when
+  their isolation meta and the active row's cause. Choosing one runs
+  `punarctl web-apps context bind <id> --workspace <focused> --activate`, or
+  `context use <id>` on an unnamed workspace, so its checks and its refusal
+  are the terminal's (§5.5), and, when
   enrolled, renders the derived `org-acme` row with the `MANAGED` pill and
   the dashed `SIMULATED` cert-roots tag. Unenrolled: those rows do not
   exist — **not greyed out, not present-and-empty; absent** (DESIGN_LANGUAGE
@@ -1389,9 +1446,10 @@ for the missing live assertions.
 14. `punarctl web-apps install https://linear.app --name Linear --context atlas`
     succeeds; the record's `origin` is `https://linear.app`.
 15. `punarctl web-apps launch linear --dry-run --json` prints the exact argv
-    it *would* exec; assert it is exactly the seven-flag vocabulary, that
-    `--app=https://linear.app` is present, and that **no** token from
-    `forbidden-tokens.txt` appears. Nothing is launched (no network).
+    it *would* exec; assert it is exactly the eight-flag vocabulary, that
+    `--app=https://linear.app` and `--password-store=basic` are present, and
+    that **no** token from `forbidden-tokens.txt` appears. Nothing is launched
+    (no network).
 
 **4 · The window is native (the money shot).**
 

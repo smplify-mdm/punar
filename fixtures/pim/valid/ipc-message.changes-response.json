@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "id": "changes-1",
+  "method": "changes.since",
+  "result": {
+    "kind": "change_page",
+    "items": [
+      {
+        "kind": "change_event",
+        "change_id": "change_A1",
+        "entity_kind": "reminder",
+        "operation": "upsert",
+        "entity_id": "reminder_A1",
+        "revision": 4,
+        "changed_at": "2026-09-22T19:00:00Z"
+      }
+    ],
+    "next_cursor": "cursor_4",
+    "has_more": false
+  }
+}

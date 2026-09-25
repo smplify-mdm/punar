@@ -113,9 +113,11 @@ stage_desktop_extra() {
            "${extra}/usr/share/punar/network" \
            "${extra}/usr/share/punar/repart.d" \
            "${extra}/usr/share/punar/fixtures" \
+           "${dev_extra}/usr/share/punar/shell/Mail" \
            "${dev_extra}/usr/share/punar/fixtures"
     mkdir -p "${extra}/etc/xdg/hypr" "${extra}/etc/xdg/foot" \
              "${extra}/etc/fonts/conf.d" "${extra}/usr/share/fonts/punar" \
+             "${extra}/usr/share/doc/punar" \
              "${extra}/usr/share/punar/shell" "${extra}/usr/share/punar/theme" \
              "${extra}/usr/share/punar/theme/themes" \
              "${extra}/usr/share/punar/browser" \
@@ -124,9 +126,15 @@ stage_desktop_extra() {
              "${extra}/usr/share/punar/repart.d/install-raspberry-pi" \
              "${extra}/usr/share/punar/repart.d/install-encrypted" \
              "${extra}/usr/share/punar/repart.d/install-streaming" \
+             "${dev_extra}/usr/share/punar/shell" \
              "${dev_extra}/usr/share/punar/fixtures/acme" \
              "${dev_extra}/usr/share/punar/fixtures/projects/atlas" \
              "${dev_extra}/usr/share/punar/fixtures/webapps/notes"
+
+    install -m 0644 "${REPO_ROOT}/docs/api/pim-ipc.md" \
+        "${extra}/usr/share/doc/punar/pim-ipc.md"
+    install -m 0644 "${REPO_ROOT}/docs/development/smplify-enrollment.md" \
+        "${extra}/usr/share/doc/punar/smplify-enrollment.md"
 
     # Hyprland config. Lua is the supported provider from 0.55 onward; 0.56
     # warns on every legacy .conf session and 0.57 removes that parser.
@@ -147,7 +155,9 @@ stage_desktop_extra() {
     rm -f "${extra}/usr/lib/punar/punar-layout.sh" \
           "${extra}/usr/lib/punar/punar-scratchpad.sh" \
           "${extra}/usr/lib/punar/punar-terminal-app.sh" \
-          "${extra}/usr/lib/punar/punar-graphics-env.sh"
+          "${extra}/usr/lib/punar/punar-graphics-env.sh" \
+          "${extra}/usr/lib/punar/punar-shell-run" \
+          "${extra}/usr/lib/punar/punar-end-session"
     install -m 0755 "${mod}/hypr/punar-layout.sh" \
         "${extra}/usr/lib/punar/punar-layout.sh"
     install -m 0755 "${mod}/hypr/punar-scratchpad.sh" \
@@ -156,6 +166,13 @@ stage_desktop_extra() {
         "${extra}/usr/lib/punar/punar-terminal-app.sh"
     install -m 0755 "${mod}/hypr/punar-graphics-env.sh" \
         "${extra}/usr/lib/punar/punar-graphics-env.sh"
+    # The shell's supervisor (no core dumps; restarted after a crash) and
+    # PUNAR+SHIFT+E's helper, which asks through the compositor when the
+    # shell cannot (F0 review).
+    install -m 0755 "${mod}/hypr/punar-shell-run.sh" \
+        "${extra}/usr/lib/punar/punar-shell-run"
+    install -m 0755 "${mod}/hypr/punar-end-session.sh" \
+        "${extra}/usr/lib/punar/punar-end-session"
     # foot system-wide config (first-found-wins; overwrites the packaged
     # commented example at the same path — intended, see module README).
     cp "${mod}/foot/foot.ini" "${extra}/etc/xdg/foot/foot.ini"
@@ -172,6 +189,12 @@ stage_desktop_extra() {
         "${extra}/usr/local/share/applications/punar-browser.desktop"
     install -m 0644 "${REPO_ROOT}/browser/integration/chromium.desktop" \
         "${extra}/usr/local/share/applications/chromium.desktop"
+    install -m 0644 "${mod}/applications/org.punar.Mail.desktop" \
+        "${extra}/usr/local/share/applications/org.punar.Mail.desktop"
+    install -m 0644 "${mod}/applications/org.punar.MailAccount.desktop" \
+        "${extra}/usr/local/share/applications/org.punar.MailAccount.desktop"
+    install -m 0644 "${mod}/applications/org.punar.MailAccounts.desktop" \
+        "${extra}/usr/local/share/applications/org.punar.MailAccounts.desktop"
     # fontconfig defaults (sorts before 60-latin so preferences win).
     cp "${mod}/fonts/50-punar-fonts.conf" "${extra}/etc/fonts/conf.d/"
     # Vendored fonts, OFL.txt alongside each family (license requirement).
@@ -181,6 +204,12 @@ stage_desktop_extra() {
     # Hyprland exec-once: qs -p /usr/share/punar/shell).
     cp -R "${shell_src}/." "${extra}/usr/share/punar/shell/"
     rm -f "${extra}/usr/share/punar/shell/README.md"
+    # Mail's live model reaches punar-pimd only through the root-brokered,
+    # profile-scoped capability bridge. Production receives the application
+    # but never its screenshot fixtures; developer images overlay the complete
+    # source and opt in explicitly with PUNAR_MAIL_FIXTURES=1.
+    rm -f "${extra}/usr/share/punar/shell/Mail/Fixtures.qml"
+    cp -R "${shell_src}/Mail" "${dev_extra}/usr/share/punar/shell/Mail"
     cp "${tokens}" "${extra}/usr/share/punar/theme/punar-tokens.json"
     # Theme documents + the shipped pointer (docs/design/theme-system.md
     # §3.2/§3.4). Theme.qml's resolution order is
@@ -219,6 +248,11 @@ stage_desktop_extra() {
     # served until AI capabilities land (M7+).
     cp "${REPO_ROOT}/fixtures/organizations/acme/"*.json \
        "${dev_extra}/usr/share/punar/fixtures/acme/"
+    # The policy sets admin.policy_publish chooses between (milestone-5.md
+    # §4.4): m5-check publishes them in turn to exercise the device's live
+    # policy refresh against the mock the image ships.
+    cp -r "${REPO_ROOT}/fixtures/organizations/acme/policy-sets" \
+       "${dev_extra}/usr/share/punar/fixtures/acme/"
     # M6: Atlas project fixture for the in-VM developer-environment
     # exercise (milestone-6.md §8) — m6-check copies it from
     # /usr/share/punar/fixtures/projects/atlas to ~punar/atlas and asserts
@@ -254,6 +288,10 @@ stage_desktop_extra() {
         "${extra}/usr/share/punar/catalog/icons"
     install -m 0644 "${REPO_ROOT}/catalog/catalog.json" \
         "${extra}/usr/share/punar/catalog/catalog.json"
+    # The launcher's hidden desktop entries: one file Apps.qml and
+    # `punarctl app list --all` both read, so they differ only on purpose.
+    install -m 0644 "${REPO_ROOT}/catalog/launcher-hidden-entries.json" \
+        "${extra}/usr/share/punar/catalog/launcher-hidden-entries.json"
     install -m 0644 "${REPO_ROOT}/catalog/remotes/flathub.flatpakrepo" \
         "${extra}/usr/share/punar/catalog/remotes/flathub.flatpakrepo"
     install -m 0644 "${REPO_ROOT}"/catalog/icons/*.svg \
@@ -358,6 +396,11 @@ stage_punar_binaries() {
     # punar-netd is M12's fourth least-privilege daemon. It owns only the
     # punar-net nftables table and the bounded on-demand network view.
     # idle-ram.sh counts all four service cgroups in the one services budget.
+    # punar-signin-probe is a second dev/CI harness, staged beside the mock
+    # and never into the product tree: surfaces-check.sh signs the dev user
+    # in through the real greetd PAM stack with it (group 8k), because the
+    # image autologins and no password reaches PAM otherwise. Release-image
+    # policy A5 refuses it anywhere else.
     echo "==> Building Punar product services, onboarding and CLIs + dev mock (release, --locked; $(rustc --version))"
     (
         cd "${REPO_ROOT}" &&
@@ -366,10 +409,11 @@ stage_punar_binaries() {
                 cargo build --release --locked \
                     -p punard -p punarctl -p punar-env -p punar-agentd \
                     -p punar-secrets -p punar-netd -p punar-onboard -p punar-auth \
-                    -p punar-mock-smplify
+                    -p punar-pimd -p punar-smplifyd \
+                    -p punar-mock-smplify -p punar-signin-probe
     )
 
-    echo "==> Staging product binaries into ${extra}/usr/bin and the mock into ${dev_extra}/usr/bin"
+    echo "==> Staging product binaries into ${extra}/usr/bin and the dev harnesses into ${dev_extra}/usr/bin"
     install -d "${extra}/usr/bin"
     install -m 0755 \
         "${cargo_target}/release/punard" \
@@ -383,9 +427,21 @@ stage_punar_binaries() {
         "${cargo_target}/release/punar-greet" \
         "${cargo_target}/release/punar-auth" \
         "${cargo_target}/release/punar-authd" \
+        "${cargo_target}/release/punar-pimd" \
+        "${cargo_target}/release/punar-mail-bridge" \
+        "${cargo_target}/release/punar-mail-account-bridge" \
+        "${cargo_target}/release/punar-smplifyd" \
         "${extra}/usr/bin/"
+    install -d "${extra}/usr/lib/punar"
+    install -m 0750 "${cargo_target}/release/punar-pim-launch" \
+        "${extra}/usr/lib/punar/punar-pim-launch"
+    # punard's unprivileged download helper. World-executable because it runs
+    # as punar-fetch@.service's dynamic user, never as root.
+    install -m 0755 "${cargo_target}/release/punar-fetch" \
+        "${extra}/usr/lib/punar/punar-fetch"
     install -d "${dev_extra}/usr/bin"
     install -m 0755 "${cargo_target}/release/punar-mock-smplify" \
+        "${cargo_target}/release/punar-signin-probe" \
         "${dev_extra}/usr/bin/"
 
     "${REPO_ROOT}/tests/images/check-staged-service-executables.sh" \
@@ -411,6 +467,7 @@ reset_staged_binaries() {
     # desktop build can never leak product/mock binaries into punar-dev.
     rm -rf "${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/bin" \
            "${IMAGES_DIR}/mkosi.profiles/dev/mkosi.extra/usr/bin"
+    rm -f "${IMAGES_DIR}/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-pim-launch"
 }
 
 # M6 offline container base image (milestone-6.md §6): `punar-env up` needs

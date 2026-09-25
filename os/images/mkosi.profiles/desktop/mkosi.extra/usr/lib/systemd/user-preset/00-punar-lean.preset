@@ -16,3 +16,24 @@ disable foot-server.service
 disable foot-server.socket
 disable hypridle.service
 disable filter-chain.service
+
+# gnome-keyring provides org.freedesktop.secrets and MUST be reachable, but it
+# must not be resident. Its packaged units carry [Install] sections
+# (WantedBy=graphical-session-pre.target and sockets.target), so leaving the
+# preset silent would enable both, add two unreviewed .wants links and trip
+# release-image policy A9 — the hypridle case above, exactly. D-Bus activation
+# through /usr/share/dbus-1/services/org.freedesktop.secrets.service starts the
+# daemon the first time an application asks for a secret, and not before.
+disable gnome-keyring-daemon.service
+disable gnome-keyring-daemon.socket
+
+# gcr rides in as a gnome-keyring dependency and enables an SSH AGENT — a
+# resident service this image never asked for, and a SECOND one: the manifest
+# already carries gpg-agent-ssh.socket, so two agents would compete for
+# SSH_AUTH_SOCK and the winner would depend on unit ordering.
+#
+# Release-image policy A9 caught this rather than a person noticing, which is
+# the argument for a byte-exact enabled-unit manifest in one line: adding one
+# package quietly enabled a credential-adjacent daemon, and the build refused.
+disable gcr-ssh-agent.service
+disable gcr-ssh-agent.socket

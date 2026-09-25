@@ -29,7 +29,7 @@ pragma ComponentBehavior: Bound
 // IPC TARGETS REGISTERED BY THIS TREE (all reachable as
 // `qs -p /usr/share/punar/shell ipc call <target> <method>`; every target
 // name is unique, verified by `qs ipc show` and by grep over the tree):
-//   bar · commandcenter · overview · windowactions · aipanel · approval · alerts
+//   bar · commandcenter · overview · windowactions · windowswitcher · aipanel · approval · alerts
 //   privacypanel · systemcontrol · notifications · toasts · osd · shortcuts · lock · theme
 //   wallpaper
 //
@@ -56,6 +56,7 @@ import "SystemControl"
 import "Wallpaper"
 import "SessionMenu"
 import "WindowActions"
+import "WindowSwitcher"
 
 ShellRoot {
     id: shellRoot
@@ -69,6 +70,7 @@ ShellRoot {
         BrowserContext.init();
         WallpaperState.init();
         SurfaceTiming.init();
+        ShortcutUsage.init();
     }
 
     // The user-invoked surfaces below retain 104–120 MiB apiece in an
@@ -101,6 +103,7 @@ ShellRoot {
         }
 
         function openSurface(): void {
+            ShortcutUsage.surfaceOpened(deferred.surfaceName);
             deferred.ensureLoaded(true);
         }
 
@@ -109,6 +112,8 @@ ShellRoot {
                 deferred.openSurface();
                 return;
             }
+            if (!deferred.surface.open)
+                ShortcutUsage.surfaceOpened(deferred.surfaceName);
             deferred.surface.toggle();
         }
 
@@ -198,6 +203,13 @@ ShellRoot {
         function open(): void {
             sessionMenuSurface.openSurface();
         }
+        // PUNAR+SHIFT+E: open the menu with "End session" armed, or — when it
+        // is already armed — confirm it. Never ends a session on one press.
+        function endSession(): void {
+            var menu = sessionMenuSurface.ensureLoaded(false);
+            if (menu !== null)
+                menu.requestSessionEnd();
+        }
         function close(): void {
             sessionMenuSurface.closeSurface();
         }
@@ -232,6 +244,73 @@ ShellRoot {
         }
         function residency(): string {
             return windowActionsSurface.residency();
+        }
+    }
+
+    // Alt+Tab (SMP-1405 WP-02). Deferred: nothing resident until the first
+    // switch. The compositor sends the gesture's number and its Tab count
+    // with every call (punar-binds.lua), so `step` constructs the surface on
+    // the first Tab and `commit` finishes it on the release of Alt.
+    DeferredSurface {
+        id: windowSwitcherSurface
+        surfaceName: "windowswitcher"
+        // The highest gesture already finished. Kept here, not in the
+        // surface, because the surface is destroyed after each switch and two
+        // processes of one gesture can land in either order.
+        property double finishedGesture: 0
+        sourceComponent: WindowSwitcher {
+            onFinished: function (gesture) {
+                windowSwitcherSurface.finishedGesture = Math.max(windowSwitcherSurface.finishedGesture, gesture);
+            }
+        }
+
+        function current(gesture: string): bool {
+            var g = Number(gesture);
+            return isFinite(g) && g > windowSwitcherSurface.finishedGesture;
+        }
+    }
+
+    IpcHandler {
+        target: "windowswitcher"
+
+        // `step`, not `show`: `qs ipc call … show` is parsed as `qs ipc show`.
+        function step(gesture: string, steps: string): string {
+            if (!windowSwitcherSurface.current(gesture))
+                return "stale";
+            var surface = windowSwitcherSurface.surface;
+            if (surface === null) {
+                ShortcutUsage.surfaceOpened("windowswitcher");
+                surface = windowSwitcherSurface.ensureLoaded(false);
+            }
+            return surface === null ? "unavailable" : surface.ipcStep(gesture, steps);
+        }
+        function commit(gesture: string, steps: string): string {
+            if (!windowSwitcherSurface.current(gesture))
+                return "stale";
+            var surface = windowSwitcherSurface.ensureLoaded(false);
+            return surface === null ? "unavailable" : surface.ipcCommit(gesture, steps);
+        }
+        function toggle(): void {
+            windowSwitcherSurface.toggleSurface();
+        }
+        function open(): void {
+            windowSwitcherSurface.openSurface();
+        }
+        function close(): void {
+            windowSwitcherSurface.closeSurface();
+        }
+        function state(): string {
+            return windowSwitcherSurface.surfaceState();
+        }
+        function selected(): string {
+            var surface = windowSwitcherSurface.surface;
+            return surface === null ? "" : surface.ipcSelected();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("windowswitcher");
+        }
+        function residency(): string {
+            return windowSwitcherSurface.residency();
         }
     }
 
@@ -448,12 +527,46 @@ ShellRoot {
             shortcutsSurface.releaseIfClosed();
             return result;
         }
+        function unmapped(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcUnmapped();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
+        function sections(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "";
+            var result = surface.ipcSections();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
+        // Type-to-filter and the "Not tried yet" hint, read over IPC so the
+        // gates can hold them (SMP-1405 WP-02).
+        function filter(text: string): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcFilter(text);
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
+        function untried(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "";
+            var result = surface.ipcUntried();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
     }
 
     // The M9 approval gate (Plate D-003). It has no keybinding by
     // design: it opens ITSELF whenever punard records something pending,
     // because a gate the human has to go looking for is not a gate. Fed
-    // by the Approvals singleton's FileView on /run/punard/approvals.json;
+    // by the Approvals singleton's FileView on /run/punard/approvals/<uid>.json;
     // on a machine where punard never wrote that file it never appears.
     // Driven in CI with: qs -p /usr/share/punar/shell ipc call approval open
     ApprovalOverlay {
@@ -677,15 +790,74 @@ ShellRoot {
             notificationCenterSurface.releaseIfClosed();
             return result;
         }
+
+        // Terminal parity (`punarctl notifications`). Read straight from the
+        // daemon through its sanitising accessors, so a terminal sees exactly
+        // the words the centre draws, newest first, and nothing a sender
+        // could use to steer a terminal. No surface is loaded to answer.
+        function list(): string {
+            var out = [];
+            var live = Notifications.tracked;
+            for (var i = live.length - 1; i >= 0; i--) {
+                var n = live[i];
+                if (n === null || n === undefined)
+                    continue;
+                var actions = [];
+                var offered = Notifications.actionsOf(n);
+                for (var j = 0; j < offered.length; j++) {
+                    actions.push({
+                        key: Notifications.sanitize(offered[j].identifier, Notifications.maxActionLabelChars),
+                        label: Notifications.actionLabelOf(offered[j])
+                    });
+                }
+                var at = Notifications.arrivedAt[Notifications.key(n)];
+                out.push({
+                    id: Notifications.key(n),
+                    source: Notifications.sourceOf(n),
+                    summary: Notifications.sentenceOf(n),
+                    detail: Notifications.detailOf(n),
+                    urgency: Notifications.urgencyOf(n),
+                    sticky: Notifications.sticky(n),
+                    arrived_at: typeof at === "number" ? new Date(at).toISOString() : null,
+                    actions: actions
+                });
+            }
+            return JSON.stringify({
+                notifications: out,
+                dnd: Notifications.dnd
+            });
+        }
+        // Dismiss one record by id; the id back, or "" when there is none.
+        function dismissId(id: string): string {
+            var n = Notifications.byKey(id);
+            if (n === null)
+                return "";
+            Notifications.dismiss(n);
+            return id;
+        }
+        // Invoke one of a record's own actions, by the key `list` printed.
+        function invoke(id: string, key: string): string {
+            var n = Notifications.byKey(id);
+            if (n === null)
+                return "no-notification";
+            var offered = Notifications.actionsOf(n);
+            for (var j = 0; j < offered.length; j++) {
+                if (Notifications.sanitize(offered[j].identifier, Notifications.maxActionLabelChars) === key) {
+                    Notifications.invokeAction(offered[j]);
+                    return "ok";
+                }
+            }
+            return "no-action";
+        }
     }
 
     // The volume/brightness OSD (Plate D-009 Sect III) — the one surface
     // the §6 surface-assignment table puts on PANEL regardless of the
     // active mood, because an OSD overlay is a plate. Volume is real: it
     // follows the PipeWire default sink's own change event and draws the
-    // level the sink settled on, whoever moved it. Brightness renders
-    // dashed with its SIM · VM tag — no backlight capability ships, so no
-    // brightness key is bound (spec §1.22).
+    // level the sink settled on, whoever moved it. Brightness is drawn when
+    // `punarctl display brightness` reports the value the backlight settled
+    // on, and never on a machine that has none (SMP-1405 WP-02).
     Osd {
     }
 

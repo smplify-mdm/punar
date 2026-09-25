@@ -1,39 +1,106 @@
 pragma Singleton
-// HyprlandActions — the shell's typed bridge to Hyprland 0.56's Lua
-// dispatcher API.
+// HyprlandActions — the shell's one path to workspace and window dispatchers.
 //
-// Hyprland.dispatch() now accepts a Lua dispatcher expression, not the
-// pre-0.56 `workspace 1` / `renameworkspace 1 Atlas` command grammar. Keep
-// expression construction here so user-authored workspace names are escaped
-// once and every surface speaks the same compositor contract.
+// Every call runs the `punarctl` verb a person would type: `punarctl workspace
+// focus|rename` and `punarctl window focus --class`. punarctl builds the
+// Hyprland 0.56 Lua dispatcher expression, quotes every value as a Lua string
+// literal and checks workspace names against the one grammar, so the overview,
+// the command center, the workspace store and a terminal all do each thing the
+// same way (terminal parity: docs/api/ipc.md section 7).
+//
+// Calls run one at a time, in the order they were made: opening a project is
+// "focus, then rename", and a rename that raced its focus would name the
+// wrong workspace. A refusal is logged and kept in `lastError`, never dropped.
 
 import QtQuick
-import Quickshell.Hyprland
+import Quickshell
+import Quickshell.Io
 
-QtObject {
+Singleton {
     id: root
 
-    function luaString(value: var): string {
-        var text = String(value);
-        return "'" + text
-            .replace(/\\/g, "\\\\")
-            .replace(/'/g, "\\'")
-            .replace(/\r/g, "\\r")
-            .replace(/\n/g, "\\n") + "'";
+    // The last refusal, verbatim from punarctl; empty after a success.
+    property string lastError: ""
+    property var queue: []
+
+    function run(argv: var): void {
+        var next = root.queue.slice();
+        next.push(argv);
+        root.queue = next;
+        root.pump();
+    }
+
+    function pump(): void {
+        if (runner.running || root.queue.length === 0)
+            return;
+        var next = root.queue.slice();
+        var argv = next.shift();
+        root.queue = next;
+        runner.command = argv;
+        try {
+            runner.running = true;
+        } catch (e) {
+            root.lastError = "punarctl could not be started: " + e;
+            console.warn("punar-shell:", root.lastError);
+            Qt.callLater(root.pump);
+        }
+    }
+
+    Process {
+        id: runner
+
+        stderr: StdioCollector {
+            id: runnerErr
+            waitForEnd: true
+        }
+
+        // Connected, not declared: Quickshell does not register the exit
+        // status type, so a declarative onExited cannot be compiled.
+        Component.onCompleted: runner.exited.connect(function (exitCode) {
+            if (exitCode === 0) {
+                root.lastError = "";
+            } else {
+                root.lastError = String(runnerErr.text).trim();
+                console.warn("punar-shell:", runner.command.join(" "), "was refused:", root.lastError);
+            }
+            Qt.callLater(root.pump);
+        })
     }
 
     function focusWorkspace(selector: var): void {
-        Hyprland.dispatch("hl.dsp.focus({ workspace = " + root.luaString(selector) + " })");
+        root.run(["punarctl", "workspace", "focus", String(selector)]);
     }
 
-    function focusWindow(selector: string): void {
-        Hyprland.dispatch("hl.dsp.focus({ window = " + root.luaString(selector) + " })");
+    // Raise an application's window by its class; punarctl escapes the class
+    // into an exact-match selector.
+    function focusWindowClass(appClass: string): void {
+        root.run(["punarctl", "window", "focus", "--class", appClass]);
     }
 
+    // Raise one exact window by its address (the Alt+Tab switcher); punarctl
+    // checks the address is 0x-hex before it builds the selector.
+    function focusWindowAddress(address: string): void {
+        root.run(["punarctl", "window", "focus", "--address", address]);
+    }
+
+    // A layout preset from the command center: `punarctl layout`, which runs
+    // punar-layout.sh, the presets' one implementation, and refuses first
+    // when no compositor is reachable. It sets the SESSION's preset (every
+    // workspace without one of its own follows it), then gives the focused
+    // workspace back to the session, so the choice is seen where it was
+    // made even if PUNAR+comma/period had given that workspace its own. The
+    // keys remain the per-workspace route (SMP-1405 WP-02 review: the
+    // command center had become per-workspace only, with no way back).
+    function applyLayout(preset: string): void {
+        root.run(["punarctl", "layout", preset]);
+        root.run(["punarctl", "layout", "default", "--workspace", "active"]);
+    }
+
+    // An empty name clears the workspace's name.
     function renameWorkspace(selector: var, name: string): void {
-        var expression = "hl.dsp.workspace.rename({ workspace = " + root.luaString(selector);
+        var argv = ["punarctl", "workspace", "rename", String(selector)];
         if (name !== "")
-            expression += ", name = " + root.luaString(name);
-        Hyprland.dispatch(expression + " })");
+            argv.push(name);
+        root.run(argv);
     }
 }

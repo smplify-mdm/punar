@@ -11,7 +11,7 @@ runtime result, never publisher copy. It also contains no application payload:
 the base image ships only Flatpak itself, this catalog, and Flathub's signed
 remote descriptor. Apps and runtimes are fetched on demand into shared `/var`.
 
-The current browseable catalog contains 129 reviewed identities across AI,
+The current browseable catalog contains 130 reviewed identities across AI,
 Developer, Diagnostics, Writing, Security, Browsers, Communication, and Media.
 The developer set includes VSCodium, Dev Toolbox, DBeaver Community, HTTPie,
 Postman, Meld, and Podman Desktop. Logs, Mission Center, and Wireshark cover
@@ -58,6 +58,19 @@ gate.
 `punard` accept basename-only SVG or PNG names; image staging copies those files
 beside the catalog. Installed application icons still come from their
 freedesktop desktop entries, not this directory.
+
+`launcher-hidden-entries.json` lists the desktop entries the launcher leaves
+out as package implementation details (Foot's second and third launchers,
+Chromium's own entries beside Punar's Browser, helper tools that ship with
+Thunar, Xfce and Avahi), each with the reason. It uses exact ids only, never a
+pattern. It is staged beside `catalog.json`, and it is the only copy of that
+list:
+
+- `Services/Apps.qml` hides these entries;
+- `punarctl app list --all` still lists them, marked `hidden` with the reason;
+- the in-VM surface gate checks the launcher against the same file.
+
+A file that cannot be read hides nothing.
 
 Run `tools/verify-app-catalog.sh` during a catalog refresh. It builds a clean
 temporary Flatpak user installation from the committed remote descriptor,

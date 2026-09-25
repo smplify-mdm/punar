@@ -3,10 +3,72 @@
 # created here; release onboarding owns that transaction.
 set -eu
 
+/usr/lib/punar/verify-bubblewrap
+
 # Stable admission group shared by every human account, regardless of the
 # username chosen in onboarding. It must predate tmpfiles and daemon startup.
 if ! getent group punar >/dev/null 2>&1; then
     groupadd --system punar
+fi
+
+# Device administrators (F0-S1; docs/api/ipc.md section 23). Onboarding puts
+# the first account in this group and the account materializer keeps a device
+# from ever booting with no member. The image ships it EMPTY: release gate A25
+# refuses a tree that names a member, because an administrator is a person on
+# this device, never a property of the image.
+if ! getent group punar-admin >/dev/null 2>&1; then
+    groupadd --system punar-admin
+fi
+
+# Readers of the whole audit trail (F0-S3; docs/api/ipc.md section 6). No
+# person is a member: a person reads their own events, and the device's,
+# through `audit.tail`. /var/log/punar and every audit file are root-owned in
+# this group (tmpfiles.d/punard.conf; release gate A24).
+if ! getent group punar-audit >/dev/null 2>&1; then
+    groupadd --system punar-audit
+fi
+
+if ! getent group punar-pim >/dev/null 2>&1; then
+    groupadd --system punar-pim
+fi
+if ! getent passwd punar-pim >/dev/null 2>&1; then
+    useradd --system --gid punar-pim --home-dir /var/lib/punar-pim \
+        --no-create-home --shell /usr/sbin/nologin punar-pim
+fi
+
+# The built-in Smplify device agent holds the device key and certificate
+# under its own locked identity; punard talks to it over a root-only socket
+# and nothing else on the device can read the key.
+if ! getent group punar-smplifyd >/dev/null 2>&1; then
+    groupadd --system punar-smplifyd
+fi
+if ! getent passwd punar-smplifyd >/dev/null 2>&1; then
+    useradd --system --gid punar-smplifyd --home-dir /var/lib/punar-smplifyd \
+        --no-create-home --shell /usr/sbin/nologin punar-smplifyd
+fi
+
+if ! getent group punar-mail >/dev/null 2>&1; then
+    groupadd --system punar-mail
+fi
+if ! getent passwd punar-mail >/dev/null 2>&1; then
+    useradd --system --gid punar-mail --home-dir /run/punar-mail \
+        --no-create-home --shell /usr/sbin/nologin punar-mail
+fi
+
+if ! getent group punar-mail-account >/dev/null 2>&1; then
+    groupadd --system punar-mail-account
+fi
+if ! getent passwd punar-mail-account >/dev/null 2>&1; then
+    useradd --system --gid punar-mail-account --home-dir /run/punar-mail-account \
+        --no-create-home --shell /usr/sbin/nologin punar-mail-account
+fi
+
+if ! getent group punar-mail-accounts >/dev/null 2>&1; then
+    groupadd --system punar-mail-accounts
+fi
+if ! getent passwd punar-mail-accounts >/dev/null 2>&1; then
+    useradd --system --gid punar-mail-accounts --home-dir /run/punar-mail-accounts \
+        --no-create-home --shell /usr/sbin/nologin punar-mail-accounts
 fi
 
 # Match x86 product policy: rootless Podman is available on demand, while its
@@ -34,6 +96,27 @@ if ! getent passwd greeter >/dev/null 2>&1; then
         --no-create-home --shell /usr/sbin/nologin greeter
 fi
 install -d -m 0750 -o greeter -g greeter /var/lib/greetd
+
+# Neither the greeter's account nor any person's is ever in `input` or `video`
+# (docs/design/onboarding.md section 1.7). `input` is every keystroke typed on
+# this machine and `video` is the screen; the greeter's compositor takes its
+# devices from logind on the active seat, exactly as a person's session does.
+# Some packagings grant a greeter `video`, by a maintainer script or by a
+# sysusers.d `m` line that systemd-sysusers would replay on a later boot, so
+# take the membership away here and delete the line that would give it back.
+# check-release-image.sh A16 refuses a tree where either survives.
+for retired_group in input video; do
+    for member in $(getent group "${retired_group}" | cut -d: -f4 | tr ',' ' '); do
+        case "${member}" in
+            greeter|_greetd) gpasswd --delete "${member}" "${retired_group}" >/dev/null ;;
+        esac
+    done
+done
+for sysusers_conf in /usr/lib/sysusers.d/*.conf; do
+    [ -f "${sysusers_conf}" ] || continue
+    sed -i -E '/^[[:space:]]*m[[:space:]]+(greeter|_greetd)[[:space:]]+(input|video)([[:space:]].*)?$/d' \
+        "${sysusers_conf}"
+done
 
 # Same signed, payload-free remote definition as x86. Spotify itself selects
 # the web source on ARM64, while other curated Flatpaks can remain available

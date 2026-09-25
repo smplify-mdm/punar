@@ -1,0 +1,100 @@
+{
+  "v": 1,
+  "note": "CURATION.md admission rule 2 requires every catalogue entry to build for both supported architectures, or to carry a deliberately labelled official web fallback for the missing one. These entries meet neither, and are acknowledged here rather than discovered by a person on the wrong machine. The shell no longer OFFERS an application this device cannot install (Services/Catalog.qml filters on the architecture punard publishes in status.json), so the cost of an entry on this list is that the application is absent on that architecture — not that it is offered and then refused, which is the bug this list was written after.",
+  "supported_architectures": [
+    "x86_64",
+    "aarch64"
+  ],
+  "apps": {
+    "android-studio": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "arduino-ide": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "blender": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "bruno": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "edge": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "ghb": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "insomnia": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "jan": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "obs-studio": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "pgadmin4": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "pycharm-community": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "thunderbird": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "torbrowser-launcher": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "unityhub": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    },
+    "zoom": {
+      "missing": [
+        "aarch64"
+      ],
+      "reason": "Upstream publishes no aarch64 build for this application (flatpak source only), and there is no official web version to offer as a labelled fallback."
+    }
+  }
+}

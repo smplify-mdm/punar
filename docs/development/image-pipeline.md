@@ -121,7 +121,16 @@ CI run is the arbiter.
    `mkosi --force --mirror https://archive.archlinux.org/repos/<date> build`.
    mkosi installs `base` + `linux` with pacman, builds an initrd, assembles a
    UKI, installs systemd-boot into the ESP, and emits a GPT disk image via
-   systemd-repart (offline; no loop devices).
+   systemd-repart (offline; no loop devices). The initrd is mkosi's default
+   one plus Punar's own cpio members, which `os/images/mkosi.finalize`
+   publishes under `ARTIFACTDIR/io.mkosi.initrd` so that ukify links them in:
+   on every lane and profile, `os/images/initrd-common`
+   (`punar-release-initramfs.service`, which frees the unpacked initramfs
+   before switch-root on Linux 7.0 to 7.2, where it otherwise stayed resident
+   for the whole boot on the measured arm64 release image, plus the initrd-only
+   drop-ins that make a failed switch-root reboot; see PERFORMANCE_BUDGETS.md
+   §4.1), and on installer builds the live-root units from
+   `os/images/installer-initrd`.
 4. Before conversion, `tests/images/check-repart-layout.sh` mounts each raw
    partition read-only and fails the build on a geometry, filesystem, mount,
    subvolume, inactive-slot or UKI-selector mismatch.
@@ -346,6 +355,37 @@ as built:
   the mock's `received-*.jsonl` are copied into the export as
   `m5-received-*.jsonl` (never `devices.json`, which holds the
   server-side token record).
+
+## The sign-in probe (desktop gate)
+
+`/usr/bin/punar-signin-probe` (crate `punar-signin-probe`) is the second dev/CI
+harness in the development profile, compiled and staged next to the mock on
+all three lanes (Arch x86_64, Debian amd64, Debian arm64) and never into the
+product tree; release-image policy A5 fails an image that carries it. It runs
+one PAM service's whole stack for the calling account, in greetd's order
+(authenticate, account, credentials and session open, then close), with the
+password on stdin. `surfaces-check.sh` group 8k signs the dev user in through
+`/etc/pam.d/greetd` with it, because the image autologins and greetd's
+`initial_session` never runs the auth stack, and then holds the login keyring
+that sign-in wrote to the encrypted format and mode 600. It replaced
+`pamtester` on the Debian lanes, which Arch does not package, so every lane
+runs the same stack.
+
+It runs that stack as the dev user, from inside the session, where greetd
+runs it as root before the session exists. So `pam_unix` checks the password
+through the `unix_chkpwd` helper, which works for this account only because
+its hash is in `/etc/shadow`, and `pam_gnome_keyring` unlocks the session's
+running daemon at `authenticate`; under greetd it keeps the password there
+and hands it over at session open, after `pam_systemd` has set
+`XDG_RUNTIME_DIR`. Both paths end in the daemon's one login unlock, which is
+what decides the keyring's format and mode. greetd's own hand-over at session
+open is not exercised: proving it needs a root sign-in with logind, which the
+user-session gate cannot start.
+
+Group 8k requires that no login keyring exists before its sign-in: a wrong
+password cannot unlock one that does, so against an existing keyring the
+wrong-password leg would pass whether or not the typo reached the daemon. A
+second run of the check in one boot therefore fails there, by design.
 
 ## The M6 punar-env base image (Milestone 6)
 

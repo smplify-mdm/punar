@@ -434,8 +434,12 @@ if [ "${HARDWARE_ACCEL}" -eq 1 ]; then
     # because group 3 waits for the timer to fire ON ITS OWN, and a timer
     # firing is wall clock under any accelerator). Raised from M9's 3600 to
     # keep the same headroom now that an eleventh bounded in-guest exercise
-    # sits between the RAM result and the export.
-    DEFAULT_EXPORT_TIMEOUT=4200
+    # sits between the RAM result and the export. And the SMP-1405 WP-02
+    # keys exercise (punar-keys-check.service, bounded 10 min in-guest:
+    # real keys over QMP, two configuration reloads, two lock/unlock cycles
+    # and about forty short waits; a minute or two under KVM) runs after the
+    # surface costs and before the milestone checks, so 600 s more.
+    DEFAULT_EXPORT_TIMEOUT=4800
     echo "==> using ${ACCEL} hardware acceleration (${ARCH})"
 else
     ACCEL="tcg"
@@ -462,8 +466,10 @@ else
     # quickshell/grim round trips are the slow parts) and the M10 shadow-AI
     # exercise (bounded 15 min in-guest; its 300 s detection-timer wait is
     # wall clock, so it costs the same under TCG, and the quickshell/grim
-    # round trips and the mock enroll/unenroll cycle are the slow parts).
-    DEFAULT_EXPORT_TIMEOUT=9600
+    # round trips and the mock enroll/unenroll cycle are the slow parts)
+    # and the WP-02 keys exercise (bounded 10 min in-guest; the reloads and
+    # the quickshell round trips are the slow parts under TCG).
+    DEFAULT_EXPORT_TIMEOUT=10200
     warn "native KVM/HVF unavailable for ${ARCH}: degrading to TCG software emulation (slow; boot may take many minutes)"
     if [ "${MODE}" = "desktop" ]; then
         warn "desktop mode under TCG: RAM numbers will be labeled '(VM, emulated)' and are indicative only (PERFORMANCE_BUDGETS.md §5.2)"
@@ -480,12 +486,23 @@ SERIAL_LOG="${WORKDIR}/serial.log"
 EXPORT_RAW="${WORKDIR}/export.b64"
 VARS_COPY="${WORKDIR}/OVMF_VARS.fd"
 QEMU_PID=""
+QMP_KEYS_PID=""
+QMP_SOCKET="${WORKDIR}/qmp.sock"
 FIRMWARE_ARGS=()
 MINIMAL_DISPLAY_ARGS=(-display none)
 DESKTOP_DISPLAY_ARGS=(-display none)
 DISK_ARGS=(-drive "file=${IMAGE},format=qcow2,if=virtio")
 DESKTOP_NETWORK_ARGS=(-nic "user,model=virtio-net-pci")
 DESKTOP_SERIAL_ARGS=(-device virtio-serial-pci)
+# A keyboard and an absolute pointer the host can press through QMP: the keys
+# exercise (keys-check.sh, SMP-1405 WP-02) asks tools/qmp-keys.py for real key
+# chords and pointer drags, so the grammar is proven as a person uses it.
+# THIS CHANGED THE MEASURED MACHINE: from WP-02 on, the desktop gate's VM has
+# these two virtio input devices, so idle-RAM figures before and after it are
+# not strictly like for like (two more kernel input drivers and their event
+# nodes, and libinput devices in the compositor). PERFORMANCE_BUDGETS.md
+# records the change beside the figure.
+DESKTOP_INPUT_ARGS=(-device virtio-keyboard-pci -device virtio-tablet-pci)
 
 if [ "${ARCH}" = "x86_64" ]; then
     cp "${OVMF_VARS}" "${VARS_COPY}"
@@ -513,11 +530,16 @@ else
     )
     DESKTOP_SERIAL_ARGS=(-device "virtio-serial-pci,romfile=")
     DESKTOP_DISPLAY_ARGS+=(-device "virtio-gpu-pci,romfile=")
+    DESKTOP_INPUT_ARGS=(-device "virtio-keyboard-pci,romfile=" -device "virtio-tablet-pci,romfile=")
 fi
 
 # Invoked indirectly via the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup() {
+    if [ -n "${QMP_KEYS_PID}" ] && kill -0 "${QMP_KEYS_PID}" 2>/dev/null; then
+        kill "${QMP_KEYS_PID}" 2>/dev/null || true
+        wait "${QMP_KEYS_PID}" 2>/dev/null || true
+    fi
     if [ -n "${QEMU_PID}" ] && kill -0 "${QEMU_PID}" 2>/dev/null; then
         kill "${QEMU_PID}" 2>/dev/null || true
         wait "${QEMU_PID}" 2>/dev/null || true
@@ -643,6 +665,10 @@ run_desktop() {
           "${PROOF_DIR}/wifi-report.txt" \
           "${PROOF_DIR}"/wifi-*.txt \
           "${PROOF_DIR}/recovery-report.txt" \
+          "${PROOF_DIR}/keys-report.txt" \
+          "${PROOF_DIR}/keys-set.txt" \
+          "${PROOF_DIR}/keys-adopt.txt" \
+          "${PROOF_DIR}/qmp-keys.log" \
           "${PROOF_DIR}"/lock-frost-*.png \
           "${PROOF_DIR}/surfaces-report.txt" \
           "${PROOF_DIR}"/surfaces-*.json \
@@ -717,6 +743,8 @@ run_desktop() {
         "${DESKTOP_SERIAL_ARGS[@]}"
         -chardev "file,id=punarexp,path=${EXPORT_RAW}"
         -device "virtserialport,chardev=punarexp,name=punar.export"
+        "${DESKTOP_INPUT_ARGS[@]}"
+        -qmp "unix:${QMP_SOCKET},server=on,wait=off"
     )
 
     echo "==> Booting ${IMAGE} (mode=desktop)"
@@ -724,6 +752,11 @@ run_desktop() {
     echo "    firmware=${FIRMWARE_LABEL} proof-dir=${PROOF_DIR}"
     "${QEMU}" "${qemu_args[@]}" &
     QEMU_PID=$!
+    # The key driver waits for requests on the serial console and stops when
+    # the export ends; its own log is proof of what it pressed and refused.
+    python3 "${REPO_ROOT}/tools/qmp-keys.py" "${QMP_SOCKET}" "${SERIAL_LOG}" \
+        "${EXPORT_RAW}" "${PROOF_DIR}/qmp-keys.log" &
+    QMP_KEYS_PID=$!
 
     # Phase 1: graphical session up (greetd -> Hyprland -> punar-shell ->
     # desktop-ready.sh -> punar-desktop-marker.service).
@@ -803,9 +836,12 @@ run_desktop() {
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
                      wifi-report.txt wifi-link.txt wifi-devices.txt \
-                     recovery-report.txt \
+                     recovery-report.txt keys-report.txt keys-set.txt keys-adopt.txt \
                      lock-frost-a.png lock-frost-a2.png lock-frost-b.png \
                      surfaces-report.txt surfaces-latency.txt surfaces-costs.txt \
+                     surfaces-mail-launch.txt surfaces-mail.png \
+                     surfaces-mail-account.png surfaces-mail-accounts.png \
+                     surfaces-mail-production.png \
                      surfaces-commandcenter.png surfaces-systemcontrol.png \
                      surfaces-notifications.png surfaces-shortcuts.png \
                      surfaces-aipanel.png surfaces-overview.png \
@@ -909,7 +945,7 @@ run_desktop() {
     # in the guest but silently absent from the host report, so the host gate
     # always treated a current image as an older, ungated one.
     if [ -f "${PROOF_DIR}/runtime-report.txt" ]; then
-        grep -E '^PUNAR_(IDLE_|ZRAM_|NETWORK_)[A-Z0-9_]*=[^[:space:]]+$' \
+        grep -E '^PUNAR_(IDLE_|ZRAM_|NETWORK_|SMPLIFYD_)[A-Z0-9_]*=[^[:space:]]+$' \
             "${PROOF_DIR}/runtime-report.txt" >> "${PROOF_DIR}/ram-report.txt" || true
     fi
     if [ -f "${PROOF_DIR}/m11-report.txt" ]; then
@@ -1444,11 +1480,40 @@ run_desktop() {
         echo "==> Recovery door: no report under TCG (informational only)"
     fi
 
+    # Phase 11c: keys, keyboard layout and window grammar (SMP-1405 WP-02),
+    # pressed as real keys through QMP. Gated like the wireless verdict: a
+    # delivered FAIL, or a missing report under acceleration, fails the build.
+    local keys_report="${PROOF_DIR}/keys-report.txt"
+    if [ -f "${keys_report}" ]; then
+        if grep -q 'PUNAR_KEYS_FAIL' "${keys_report}"; then
+            echo "error: keys exercise reported PUNAR_KEYS_FAIL; failing assertions:" >&2
+            grep '^FAIL' "${keys_report}" >&2 || true
+            echo "    QMP driver log: ${PROOF_DIR}/qmp-keys.log" >&2
+            exit 1
+        elif grep -q 'PUNAR_KEYS_OK' "${keys_report}"; then
+            echo "==> Keys: PUNAR_KEYS_OK ($(grep -c '^ok' "${keys_report}" || true) assertions passed)"
+        else
+            echo "error: keys-report.txt carries no verdict (guest crashed mid-exercise?)" >&2
+            exit 1
+        fi
+    elif grep -aq 'PUNAR_KEYS_FAIL' "${SERIAL_LOG}"; then
+        echo "error: keys exercise reported PUNAR_KEYS_FAIL on the serial console" >&2
+        exit 1
+    elif grep -aq 'PUNAR_KEYS_OK' "${SERIAL_LOG}"; then
+        echo "==> Keys: PUNAR_KEYS_OK (verdict from serial console)"
+    elif [ "${HARDWARE_ACCEL}" -eq 1 ]; then
+        echo "error: no keys-report.txt and no verdict on serial — the keys exercise did not run" >&2
+        exit 1
+    else
+        echo "==> Keys: no report under TCG (informational only)"
+    fi
+
     # Phase 12c.1: isolated surface construction/resident-cost verdict. The
-    # five lazy-load candidates run in fresh probe processes beside the real
-    # shell. Values are evidence, not thresholds; the hard gate is that all 15
-    # samples produced valid timestamps and PSS reads. Missing evidence fails
-    # under KVM, following the M8 silent-skip lesson.
+    # seven lazy-load candidates run in fresh probe processes beside the real
+    # shell. Values are evidence, not thresholds, except the window
+    # switcher's relative budget; the hard gate is that all 21 samples
+    # produced valid timestamps and PSS reads. Missing evidence fails under
+    # KVM, following the M8 silent-skip lesson.
     local surface_costs="${PROOF_DIR}/surfaces-costs.txt"
     if [ -f "${surface_costs}" ]; then
         if grep -q 'PUNAR_SURFACE_COSTS_FAIL' "${surface_costs}"; then
@@ -1456,7 +1521,7 @@ run_desktop() {
             grep '^FAIL' "${surface_costs}" >&2 || true
             exit 1
         elif grep -q 'PUNAR_SURFACE_COSTS_OK' "${surface_costs}"; then
-            echo "==> Surface costs: PUNAR_SURFACE_COSTS_OK (15 isolated samples)"
+            echo "==> Surface costs: PUNAR_SURFACE_COSTS_OK (21 isolated samples)"
             grep '^median ' "${surface_costs}" || true
         else
             echo "error: surfaces-costs.txt carries no PUNAR_SURFACE_COSTS_OK/FAIL verdict" >&2

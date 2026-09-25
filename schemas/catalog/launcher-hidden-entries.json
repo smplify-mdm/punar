@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.punar.dev/v1alpha1/catalog/launcher-hidden-entries.json",
+  "title": "LauncherHiddenEntries",
+  "description": "The desktop entries the launcher leaves out as package implementation details, each with the reason. One file read by both the launcher (Apps.qml) and `punarctl app list --all`, which lists them marked rather than hiding them, so the two surfaces never drift apart silently.",
+  "type": "object",
+  "properties": {
+    "v": {
+      "title": "Version",
+      "description": "Document version. 1.",
+      "const": 1
+    },
+    "note": {
+      "title": "Note",
+      "description": "Why this file exists, in prose, for whoever meets it next.",
+      "type": "string",
+      "minLength": 1
+    },
+    "entries": {
+      "title": "Hidden entries",
+      "description": "Desktop-file id (lower-case, without .desktop) -> the reason the launcher hides it, shown by `punarctl app list --all`. Exact ids only, never a pattern.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._+-]{0,254}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      }
+    }
+  },
+  "required": [
+    "v",
+    "note",
+    "entries"
+  ],
+  "additionalProperties": false
+}

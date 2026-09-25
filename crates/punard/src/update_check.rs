@@ -5,14 +5,23 @@
 //! network source is a root-owned HTTPS base URL. If it is absent, a fixed
 //! directory transport remains available for offline recovery media and CI.
 //! Neither transport lets the caller choose an origin, path or trust key.
+//!
+//! The verified cache answers a non-forced check for 15 minutes, and that
+//! age is measured on the boot clock (SMP-1405) from the moment the fetch
+//! began, never from the file's mtime against the wall clock: a clock stepped
+//! back could otherwise keep serving a stale "nothing newer" long after a
+//! release shipped. The stamp lives in memory, so a punard restart, a
+//! suspend or a reboot simply fetches again.
 
 use std::fs;
-use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use punar_common::trusted_time::{BootStamp, BootWindow, SystemClock, TrustedClock, elapsed_ms};
 use punar_common::update::{
     Architecture, BootPlatform, ReleaseKeySet, ReleaseManifest, ReleaseTarget, ReleaseVersion,
     UpdateChannel, UpdateCheckResult, UpdateSlot, UpdateTrustError, cohort_bucket,
@@ -20,15 +29,17 @@ use punar_common::update::{
 };
 use thiserror::Error;
 
+use crate::fetch::{DEFAULT_FETCH_SOCKET, FetchClient, FetchRequest, read_update_base};
 use crate::update_status::{read_bounded, read_os_release};
-use crate::util::{run_with_timeout, write_atomic_synced};
+use crate::util::write_atomic_synced;
 
 const CHANNEL_DOCUMENT_MAX: u64 = 64 * 1024;
 const SIGNATURE_MAX: u64 = 64;
-const REPOSITORY_URL_MAX: u64 = 2048;
 const DEFAULT_CACHE_MAX_AGE: u64 = 15 * 60;
-const HTTPS_FETCH_TIMEOUT: Duration = Duration::from_secs(35);
-const RELEASE_FETCH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// A channel document or signature: the whole transfer, connection included.
+const HTTPS_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// A release payload or boot artifact.
+const RELEASE_FETCH_TIMEOUT: Duration = Duration::from_secs(3500);
 const RELEASE_DOCUMENT_MAX: u64 = 1024 * 1024;
 static FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -42,7 +53,11 @@ pub struct UpdateCheckSources {
     pub repository_url_owner_uid: u32,
     /// Fixed local transport root used only when `repository_url_file` is absent.
     pub repository_dir: PathBuf,
-    pub curl_bin: PathBuf,
+    /// The unprivileged download helper's socket (`punar-fetch.socket`).
+    /// punard never runs a downloader itself: the helper sends the bytes
+    /// over a pipe, punard copies them into a private staging file the
+    /// helper never holds, and verifies that file (crate::fetch).
+    pub fetch_socket: PathBuf,
     pub trusted_keys_dir: PathBuf,
     pub cached_channel: PathBuf,
     pub cached_signature: PathBuf,
@@ -60,7 +75,7 @@ impl Default for UpdateCheckSources {
             repository_url_file: PathBuf::from("/etc/punar/update-repository.url"),
             repository_url_owner_uid: 0,
             repository_dir: PathBuf::from("/run/punar/update-source"),
-            curl_bin: PathBuf::from("/usr/bin/curl"),
+            fetch_socket: PathBuf::from(DEFAULT_FETCH_SOCKET),
             trusted_keys_dir: PathBuf::from("/usr/share/punar/release-keys"),
             cached_channel: PathBuf::from("/var/lib/punar/update/verified-channel.json"),
             cached_signature: PathBuf::from("/var/lib/punar/update/verified-channel.json.sig"),
@@ -130,11 +145,28 @@ pub struct PreparedRelease {
 
 pub struct UpdateCheckEngine {
     sources: UpdateCheckSources,
+    /// The boot clock the cache's age is measured on.
+    clock: Arc<dyn TrustedClock>,
+    /// When this engine last wrote a verified channel document, on the boot
+    /// clock. `None` — never, since this punard started, or the clock could
+    /// not be read — means the cache is not fresh and the next check
+    /// fetches.
+    verified_at: Mutex<Option<BootStamp>>,
 }
 
 impl UpdateCheckEngine {
+    /// An engine reading the machine's own boot clock.
     pub fn new(sources: UpdateCheckSources) -> Self {
-        Self { sources }
+        Self::with_clock(sources, Arc::new(SystemClock::new()))
+    }
+
+    /// An engine measuring cache age on `clock` (punard passes its own).
+    pub fn with_clock(sources: UpdateCheckSources, clock: Arc<dyn TrustedClock>) -> Self {
+        Self {
+            sources,
+            clock,
+            verified_at: Mutex::new(None),
+        }
     }
 
     pub fn check(
@@ -148,13 +180,18 @@ impl UpdateCheckEngine {
         let keys = ReleaseKeySet::load_dir(&self.sources.trusted_keys_dir)
             .map_err(|error| untrusted("trusted_keys", error))?;
 
-        let cached = !force && self.cache_is_fresh();
-        let (document, signature, metadata_age_seconds) = if cached {
+        let fresh_age = if force { None } else { self.fresh_cache_age() };
+        let cached = fresh_age.is_some();
+        // The cache's age starts BEFORE the fetch, not after it: a slow
+        // network (up to the downloader's timeout) must not add its own
+        // duration to the 15 minutes a "nothing newer" answer is reused for.
+        // Stored only once the verified bytes are safely on disk.
+        let fetch_started = if cached { None } else { self.clock.now() };
+        let (document, signature, metadata_age_seconds) = if let Some(age) = fresh_age {
             let document = read_cache(&self.sources.cached_channel, CHANNEL_DOCUMENT_MAX)
                 .map_err(|error| untrusted("cached_metadata", error))?;
             let signature = read_cache(&self.sources.cached_signature, SIGNATURE_MAX)
                 .map_err(|error| untrusted("cached_signature", error))?;
-            let age = file_age_seconds(&self.sources.cached_channel).unwrap_or(0);
             (document, signature, age)
         } else {
             let (document, signature) = self.fetch_fresh(&target)?;
@@ -179,6 +216,10 @@ impl UpdateCheckEngine {
             // Signature first, then signature file, then document last. A
             // power loss can at worst leave a mismatched pair that re-verifies
             // as untrusted; it cannot make unverified bytes authoritative.
+            // The previous freshness stamp stops vouching for the files the
+            // moment they start to change, so a write that fails halfway
+            // leaves the cache stale rather than fresh and mismatched.
+            *self.verified_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
             ensure_private_parent(&self.sources.cached_channel)
                 .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
             ensure_private_parent(&self.sources.cached_signature)
@@ -187,6 +228,7 @@ impl UpdateCheckEngine {
                 .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
             write_atomic_synced(&self.sources.cached_channel, &document, 0o600)
                 .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
+            *self.verified_at.lock().unwrap_or_else(|e| e.into_inner()) = fetch_started;
         }
 
         Ok(check_result(
@@ -409,11 +451,27 @@ impl UpdateCheckEngine {
         &self.sources.trusted_keys_dir
     }
 
-    fn cache_is_fresh(&self) -> bool {
-        self.sources.cached_channel.is_file()
-            && self.sources.cached_signature.is_file()
-            && file_age_seconds(&self.sources.cached_channel)
-                .is_some_and(|age| age <= self.sources.cache_max_age_seconds)
+    /// The verified cache's age in whole seconds while it may still answer a
+    /// non-forced check, or `None` when it must not: files missing, never
+    /// written by this engine, another boot, a clock that went backwards or
+    /// cannot be read, or older than `cache_max_age_seconds` less the drift
+    /// allowance. All on the boot clock; the wall clock and the files'
+    /// mtimes are not inputs.
+    fn fresh_cache_age(&self) -> Option<u64> {
+        if !self.sources.cached_channel.is_file() || !self.sources.cached_signature.is_file() {
+            return None;
+        }
+        let verified_at = self
+            .verified_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let now = self.clock.now()?;
+        let window = BootWindow::of_secs(verified_at.clone(), self.sources.cache_max_age_seconds);
+        if !window.is_open(Some(&now)) {
+            return None;
+        }
+        u64::try_from(elapsed_ms(&verified_at, &now)? / 1_000).ok()
     }
 
     fn fetch_fresh(&self, target: &ReleaseTarget) -> Result<(Vec<u8>, Vec<u8>), UpdateCheckError> {
@@ -477,7 +535,7 @@ impl UpdateCheckEngine {
             std::process::id(),
             FETCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::OpenOptions::new()
+        let staged = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
@@ -488,41 +546,15 @@ impl UpdateCheckEngine {
                 ))
             })?;
 
-        let maximum = max_bytes.to_string();
-        let output = temporary.to_string_lossy().into_owned();
-        let result = run_with_timeout(
-            &self.sources.curl_bin,
-            &[
-                "--disable",
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--proto",
-                "=https",
-                "--proto-redir",
-                "=https",
-                "--max-redirs",
-                "0",
-                "--tlsv1.2",
-                "--connect-timeout",
-                "10",
-                "--max-time",
-                "30",
-                "--max-filesize",
-                &maximum,
-                "--output",
-                &output,
-                url,
-            ],
-            HTTPS_FETCH_TIMEOUT,
+        let fetched = FetchClient::new(&self.sources.fetch_socket).fetch(
+            &FetchRequest::update(url, max_bytes, HTTPS_FETCH_TIMEOUT),
+            &staged,
         );
-        let bytes = match result {
-            Ok(result) if result.success => read_source(&temporary, max_bytes),
-            Ok(_) => Err(UpdateCheckError::SourceUnavailable(format!(
-                "HTTPS {description} download failed"
-            ))),
+        drop(staged);
+        let bytes = match fetched {
+            Ok(_) => read_source(&temporary, max_bytes),
             Err(error) => Err(UpdateCheckError::SourceUnavailable(format!(
-                "HTTPS {description} download could not run: {error}"
+                "HTTPS {description} download failed: {error}"
             ))),
         };
         let _ = fs::remove_file(&temporary);
@@ -630,53 +662,27 @@ impl UpdateCheckEngine {
         size: u64,
         description: &str,
     ) -> Result<(), UpdateCheckError> {
-        // Curl must never choose the permissions of a cached release
-        // artifact. Pre-create the unpredictable file with the same private
-        // mode as the surrounding cache, and refuse to replace anything that
-        // appeared at the path unexpectedly.
-        fs::OpenOptions::new()
+        // The helper never chooses the permissions of a cached release
+        // artifact, or touches it at all: punard opens it here, with the same
+        // private mode as the surrounding cache, on a path that must not
+        // already exist, and copies the helper's pipe into it.
+        let staged = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(destination)
             .map_err(|error| UpdateCheckError::Cache(error.to_string()))?;
-        let maximum = size.to_string();
-        let output = destination.to_string_lossy().into_owned();
-        let result = run_with_timeout(
-            &self.sources.curl_bin,
-            &[
-                "--disable",
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--proto",
-                "=https",
-                "--proto-redir",
-                "=https",
-                "--max-redirs",
-                "0",
-                "--tlsv1.2",
-                "--connect-timeout",
-                "10",
-                "--max-time",
-                "3500",
-                "--max-filesize",
-                &maximum,
-                "--output",
-                &output,
-                url,
-            ],
-            RELEASE_FETCH_TIMEOUT,
-        );
-        match result {
-            Ok(result) if result.success => Ok(()),
-            Ok(_) => Err(UpdateCheckError::SourceUnavailable(format!(
-                "HTTPS {description} download failed"
-            ))),
-            Err(error) => Err(UpdateCheckError::SourceUnavailable(format!(
-                "HTTPS {description} download could not run: {error}"
-            ))),
-        }
+        FetchClient::new(&self.sources.fetch_socket)
+            .fetch(
+                &FetchRequest::update(url, size, RELEASE_FETCH_TIMEOUT),
+                &staged,
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                UpdateCheckError::SourceUnavailable(format!(
+                    "HTTPS {description} download failed: {error}"
+                ))
+            })
     }
 }
 
@@ -796,38 +802,11 @@ fn read_source(path: &Path, max_bytes: u64) -> Result<Vec<u8>, UpdateCheckError>
     read_bounded(path, max_bytes).map_err(UpdateCheckError::SourceUnavailable)
 }
 
+/// The channel's base URL. punard and the download helper read it through
+/// the same function (crate::fetch), so the helper refuses exactly the
+/// update URLs that are not beneath what punard reads here.
 fn read_repository_base_url(path: &Path, expected_uid: u32) -> Result<String, UpdateCheckError> {
-    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(i32::try_from(flags.bits()).expect("open flags fit libc::c_int"))
-        .open(path)
-        .map_err(|error| source_configuration(path, error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| source_configuration(path, error.to_string()))?;
-    if !metadata.file_type().is_file() {
-        return Err(source_configuration(path, "it is not a regular file"));
-    }
-    if metadata.uid() != expected_uid || metadata.mode() & 0o022 != 0 {
-        return Err(source_configuration(
-            path,
-            format!("it must be owned by uid {expected_uid} and not be group/other writable"),
-        ));
-    }
-    let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut file)
-        .take(REPOSITORY_URL_MAX + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| source_configuration(path, error.to_string()))?;
-    if bytes.len() as u64 > REPOSITORY_URL_MAX {
-        return Err(source_configuration(path, "it exceeds 2048 bytes"));
-    }
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| source_configuration(path, "it is not UTF-8"))?;
-    let line = text.strip_suffix('\n').unwrap_or(text);
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    validate_repository_base_url(line).map_err(|reason| source_configuration(path, reason))
+    read_update_base(path, expected_uid).map_err(|reason| source_configuration(path, reason))
 }
 
 fn source_configuration(path: &Path, reason: impl Into<String>) -> UpdateCheckError {
@@ -836,62 +815,6 @@ fn source_configuration(path: &Path, reason: impl Into<String>) -> UpdateCheckEr
         path.display(),
         reason.into()
     ))
-}
-
-fn validate_repository_base_url(value: &str) -> Result<String, &'static str> {
-    if value.is_empty()
-        || value
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-    {
-        return Err("the URL must be one non-empty line without whitespace");
-    }
-    let normalized = value.strip_suffix('/').unwrap_or(value);
-    let rest = normalized
-        .strip_prefix("https://")
-        .ok_or("only an https:// URL is accepted")?;
-    if rest.contains(['?', '#', '@', '%', '\\']) {
-        return Err("userinfo, query, fragment, escapes and backslashes are not accepted");
-    }
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    if authority.is_empty() || authority.contains(['[', ']']) {
-        return Err("a DNS hostname or IPv4 address is required");
-    }
-    let (host, port) = match authority.split_once(':') {
-        Some((host, port)) if !port.contains(':') => (host, Some(port)),
-        Some(_) => return Err("IPv6 literals are not accepted"),
-        None => (authority, None),
-    };
-    if host.len() > 253
-        || host.split('.').any(|label| {
-            label.is_empty()
-                || label.len() > 63
-                || !label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                || !label.as_bytes()[0].is_ascii_alphanumeric()
-                || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
-        })
-    {
-        return Err("the hostname is invalid");
-    }
-    if let Some(port) = port {
-        if port.is_empty() || port.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
-            return Err("the HTTPS port is invalid");
-        }
-    }
-    if !path.is_empty()
-        && path.split('/').any(|segment| {
-            segment.is_empty()
-                || matches!(segment, "." | "..")
-                || !segment.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
-                })
-        })
-    {
-        return Err("the base path contains an unsafe segment");
-    }
-    Ok(normalized.to_string())
 }
 
 fn read_cache(path: &Path, max_bytes: u64) -> Result<Vec<u8>, UpdateTrustError> {
@@ -936,16 +859,6 @@ fn require_equal<T: Eq>(
     }
 }
 
-fn file_age_seconds(path: &Path) -> Option<u64> {
-    fs::metadata(path)
-        .ok()?
-        .modified()
-        .ok()?
-        .elapsed()
-        .ok()
-        .map(|age| age.as_secs())
-}
-
 fn ensure_private_parent(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
@@ -957,6 +870,7 @@ fn ensure_private_parent(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fetch::validate_https_url;
     use ed25519_dalek::{Signer, SigningKey};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -972,12 +886,21 @@ mod tests {
         path
     }
 
+    /// Every engine here downloads through the real helper protocol: a
+    /// helper thread runs `crate::fetch::serve`, the function the shipped
+    /// `punar-fetch` runs, with `root/curl` as its downloader. Tests write
+    /// that fixture downloader; it prints the body on standard output.
     fn sources(root: &Path) -> UpdateCheckSources {
+        let fetch_socket = root.join("fetch.sock");
+        crate::fetch::testing::spawn_helper(
+            &fetch_socket,
+            crate::fetch::testing::config(&root.join("curl"), &root.join("update-repository.url")),
+        );
         UpdateCheckSources {
             repository_url_file: root.join("update-repository.url"),
             repository_url_owner_uid: rustix::process::geteuid().as_raw(),
             repository_dir: root.join("repository"),
-            curl_bin: root.join("curl"),
+            fetch_socket,
             trusted_keys_dir: root.join("keys"),
             cached_channel: root.join("state/verified-channel.json"),
             cached_signature: root.join("state/verified-channel.json.sig"),
@@ -1034,16 +957,176 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A clock whose raw time is whatever a file says, so a fake downloader
+    /// — another process — can let time pass in the middle of a fetch.
+    #[derive(Debug)]
+    struct FileClock(PathBuf);
+
+    impl TrustedClock for FileClock {
+        fn now(&self) -> Option<BootStamp> {
+            let raw_bt_ms = fs::read_to_string(&self.0).ok()?.trim().parse().ok()?;
+            Some(BootStamp {
+                boot_id: "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b".to_string(),
+                raw_bt_ms,
+                sleep_ms: 0,
+                suspends: 0,
+            })
+        }
+    }
+
+    /// The cache's age starts when the fetch STARTS. A fetch that takes 20 s
+    /// must not buy the cached answer 20 s more than its 15 minutes, nor
+    /// report itself 20 s younger than it is.
+    #[test]
+    fn the_cache_ages_from_the_start_of_the_fetch() {
+        use punar_common::trusted_time::live_budget_ms;
+
+        let root = root("slow-fetch");
+        let (engine, _) = fixture(&root);
+        let now_file = root.join("raw-bt-ms");
+        fs::write(&now_file, "1000").unwrap();
+        fs::write(
+            &engine.sources.repository_url_file,
+            "https://updates.example.test/punar/\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            &engine.sources.repository_url_file,
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        // The document download takes 20 s on the boot clock.
+        let curl = &root.join("curl");
+        fs::write(
+            curl,
+            format!(
+                "#!/bin/sh\nfor url in \"$@\"; do :; done\ncase \"$url\" in\n  *.sig) cat '{}' ;;\n  *.json) echo 21000 > '{}'; cat '{}' ;;\n  *) exit 2 ;;\nesac\n",
+                engine
+                    .sources
+                    .repository_dir
+                    .join("channel.json.sig")
+                    .display(),
+                now_file.display(),
+                engine
+                    .sources
+                    .repository_dir
+                    .join("channel.json")
+                    .display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(curl, fs::Permissions::from_mode(0o755)).unwrap();
+        let engine = UpdateCheckEngine::with_clock(
+            engine.sources.clone(),
+            Arc::new(FileClock(now_file.clone())),
+        );
+
+        assert!(
+            !engine
+                .check(UpdateChannel::Stable, "dev_00123", false)
+                .unwrap()
+                .cached
+        );
+        // Just after the fetch returned: already 20 s old.
+        let cached = engine
+            .check(UpdateChannel::Stable, "dev_00123", false)
+            .unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.metadata_age_seconds, 20);
+        // The window closes at its budget from the START of the fetch.
+        let budget = live_budget_ms(DEFAULT_CACHE_MAX_AGE as i64 * 1_000);
+        fs::write(&now_file, (1_000 + budget - 1).to_string()).unwrap();
+        assert!(
+            engine
+                .check(UpdateChannel::Stable, "dev_00123", false)
+                .unwrap()
+                .cached
+        );
+        fs::write(&now_file, (1_000 + budget).to_string()).unwrap();
+        assert!(
+            !engine
+                .check(UpdateChannel::Stable, "dev_00123", false)
+                .unwrap()
+                .cached,
+            "stale at the budget from the start of the fetch, not its end"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The cache's 15 minutes are measured on the boot clock (SMP-1405): the
+    /// edge is the drift-shortened budget, and a reboot or an unreadable
+    /// clock sends the next check back to the source. The files' mtimes are
+    /// not consulted, so stepping the wall clock back revives nothing.
+    #[test]
+    fn the_cache_ages_on_the_boot_clock_and_not_by_mtime() {
+        use punar_common::trusted_time::{ManualClock, live_budget_ms};
+
+        let root = root("boot-clock");
+        let (engine, _) = fixture(&root);
+        let clock = Arc::new(ManualClock::new(
+            "0f2a6c1e-7d3b-4a59-9c8e-1b2d3e4f5a6b",
+            1_000,
+        ));
+        let engine = UpdateCheckEngine::with_clock(engine.sources.clone(), clock.clone());
+        let check = || {
+            engine
+                .check(UpdateChannel::Stable, "dev_00123", false)
+                .unwrap()
+        };
+
+        assert!(!check().cached, "nothing verified yet in this boot");
+        let budget = live_budget_ms(DEFAULT_CACHE_MAX_AGE as i64 * 1_000);
+        clock.advance_ms(budget - 1);
+        let cached = check();
+        assert!(cached.cached);
+        assert_eq!(cached.metadata_age_seconds, 899);
+
+        // An mtime from 1970 changes nothing either way.
+        let file = fs::File::options()
+            .write(true)
+            .open(&engine.sources.cached_channel)
+            .unwrap();
+        file.set_modified(std::time::UNIX_EPOCH).unwrap();
+        drop(file);
+        assert!(check().cached);
+
+        clock.advance_ms(1);
+        assert!(!check().cached, "the budget itself is stale");
+        // That check re-fetched and re-stamped the cache.
+        assert!(check().cached);
+
+        clock.reboot("9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b", 1_000);
+        assert!(
+            !check().cached,
+            "a cache verified in another boot is not fresh"
+        );
+
+        clock.set(None);
+        assert!(
+            !check().cached,
+            "an unreadable clock never serves the cache"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn https_artifact_destination_is_private_before_the_downloader_runs() {
         let root = root("https-mode");
         let paths = sources(&root);
+        let curl = root.join("curl");
+        fs::write(&curl, "#!/bin/sh\nprintf data\n").unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        // The helper serves only URLs beneath the root-owned channel base.
         fs::write(
-            &paths.curl_bin,
-            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = --output ]; then\n    shift\n    printf data > \"$1\"\n    exit 0\n  fi\n  shift\ndone\nexit 2\n",
+            &paths.repository_url_file,
+            "https://updates.example.test/\n",
         )
         .unwrap();
-        fs::set_permissions(&paths.curl_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(
+            &paths.repository_url_file,
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         let engine = UpdateCheckEngine::new(paths);
         let destination = root.join("artifact.new");
         engine
@@ -1102,15 +1185,15 @@ mod tests {
         .unwrap();
         fs::set_permissions(
             &engine.sources.repository_url_file,
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o644),
         )
         .unwrap();
         let log = root.join("curl-argv");
-        let curl = &engine.sources.curl_bin;
+        let curl = &root.join("curl");
         fs::write(
             curl,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nout=\nurl=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output' ]; then shift; out=$1; else url=$1; fi\n  shift\ndone\ncase \"$url\" in\n  *.sig) cp '{}' \"$out\" ;;\n  *.json) cp '{}' \"$out\" ;;\n  *) exit 2 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nfor url in \"$@\"; do :; done\ncase \"$url\" in\n  *.sig) cat '{}' ;;\n  *.json) cat '{}' ;;\n  *) exit 2 ;;\nesac\n",
                 log.display(),
                 engine
                     .sources
@@ -1136,7 +1219,7 @@ mod tests {
         let argv = fs::read_to_string(log).unwrap();
         assert!(argv.contains("--disable"));
         assert!(argv.contains("--proto\n=https"));
-        assert!(argv.contains("--max-redirs\n0"));
+        assert!(argv.contains("--location\n--max-redirs\n0"));
         assert!(argv.contains("--tlsv1.2"));
         assert!(
             argv.contains("https://updates.example.test/punar/stable/aarch64/uefi/channel.json\n")
@@ -1162,7 +1245,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(
             &engine.sources.repository_url_file,
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o644),
         )
         .unwrap();
 
@@ -1173,6 +1256,41 @@ mod tests {
         assert!(error.to_string().contains("only an https:// URL"));
         assert!(!engine.sources.cached_channel.exists());
         assert!(!engine.sources.cached_signature.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_base_the_download_helper_cannot_read_is_refused_before_any_download() {
+        // The helper runs as a dynamic user and re-reads the base itself, so
+        // a root-only file would fail every download on a permission error.
+        // punard refuses it up front and says why.
+        let root = root("https-unreadable-base");
+        let (engine, _) = fixture(&root);
+        fs::write(
+            &engine.sources.repository_url_file,
+            "https://updates.example.test/punar\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            &engine.sources.repository_url_file,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let ran = root.join("curl-ran");
+        let curl = root.join("curl");
+        fs::write(&curl, format!("#!/bin/sh\n: > '{}'\n", ran.display())).unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = engine
+            .check(UpdateChannel::Stable, "dev_00123", true)
+            .unwrap_err();
+        assert!(error.is_unreachable());
+        assert!(
+            error.to_string().contains("readable by others (mode 0644)"),
+            "{error}"
+        );
+        assert!(!ran.exists(), "no download was attempted");
+        assert!(!engine.sources.cached_channel.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1207,20 +1325,14 @@ mod tests {
         .unwrap();
         fs::set_permissions(
             &engine.sources.repository_url_file,
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o644),
         )
         .unwrap();
         let oversized = root.join("oversized");
         fs::write(&oversized, vec![b'x'; CHANNEL_DOCUMENT_MAX as usize + 1]).unwrap();
-        fs::write(
-            &engine.sources.curl_bin,
-            format!(
-                "#!/bin/sh\nout=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--output' ]; then shift; out=$1; fi\n  shift\ndone\ncp '{}' \"$out\"\n",
-                oversized.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&engine.sources.curl_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let curl = root.join("curl");
+        fs::write(&curl, format!("#!/bin/sh\ncat '{}'\n", oversized.display())).unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
 
         let error = engine
             .check(UpdateChannel::Stable, "dev_00123", true)
@@ -1248,10 +1360,10 @@ mod tests {
     #[test]
     fn repository_url_validation_rejects_ambiguous_and_unsafe_forms() {
         assert_eq!(
-            validate_repository_base_url("https://updates.example.test/releases-v1/").unwrap(),
+            validate_https_url("https://updates.example.test/releases-v1/").unwrap(),
             "https://updates.example.test/releases-v1"
         );
-        assert!(validate_repository_base_url("https://updates.example.test:8443").is_ok());
+        assert!(validate_https_url("https://updates.example.test:8443").is_ok());
         for invalid in [
             "http://updates.example.test",
             "https://user@updates.example.test",
@@ -1266,7 +1378,7 @@ mod tests {
             "https://updates.example.test\nhttps://other.example.test",
         ] {
             assert!(
-                validate_repository_base_url(invalid).is_err(),
+                validate_https_url(invalid).is_err(),
                 "unsafe URL was accepted: {invalid:?}"
             );
         }

@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::greetd::valid_keymap;
 use crate::identity::{IdentityError, IdentityStore};
 use crate::protocol::{
     CreateAccountWire, ErrorResponse, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, OpProbe,
@@ -192,6 +193,16 @@ fn handle(
             return Ok(false);
         }
     }
+    let keymap = request.keymap.filter(|value| !value.is_empty());
+    if keymap.as_deref().is_some_and(|value| !valid_keymap(value)) {
+        write_error(
+            writer,
+            "keymap_invalid",
+            Some("keymap"),
+            "That keyboard layout is not one this device can use. Choose one from the list.",
+        )?;
+        return Ok(false);
+    }
     let password = Zeroizing::new(request.password);
     let result = store.create_first_account(&username, &password, &device_name);
     drop(password);
@@ -206,6 +217,16 @@ fn handle(
                 )
             });
             let timezone_applied = timezone_result.is_ok();
+            let keymap_applied = keymap.as_deref().is_some_and(|value| {
+                apply_keymap(Path::new(PUNARD_SOCKET), value)
+                    .inspect_err(|error| {
+                        eprintln!(
+                            "punar-onboardd: the first-run keyboard layout {value} is not the \
+                             device's: {error}"
+                        );
+                    })
+                    .is_ok()
+            });
             let response = SuccessResponse {
                 v: PROTOCOL_VERSION,
                 ok: true,
@@ -218,6 +239,7 @@ fn handle(
                 timezone_warning: (!timezone_applied).then_some(
                     "Your account is ready, but the timezone could not be changed. You can retry in System Control.",
                 ),
+                keymap_applied,
             };
             let body = Zeroizing::new(
                 serde_json::to_vec(&response)
@@ -231,6 +253,59 @@ fn handle(
             write_error(writer, code, field, message)?;
             Ok(false)
         }
+    }
+}
+
+/// punard's socket (`punar_common::ipc::SOCKET_PATH`; this crate does not
+/// link punar-common).
+const PUNARD_SOCKET: &str = "/run/punard/punard.sock";
+
+/// The first-run form's keyboard layout, made the device's through punard,
+/// as root (SMP-1405 WP-02 merged with F0).
+///
+/// The device's layout is what the login screen types in for everyone, so
+/// after first run only a device administrator with a fresh password changes
+/// it. First run is the one moment that rule is already met: nobody else has
+/// an account, the person creating this one becomes the device's
+/// administrator, and they chose the layout and typed their new password in
+/// it a moment ago. If the device kept the installer's layout instead, the
+/// login screen would type that password in a different layout the next
+/// time. It goes through punard, not straight to /etc/vconsole.conf: punard
+/// owns that file (`system.keymap`), checks the value against the image's
+/// installed layouts, records it and audits it, and would otherwise put its
+/// own value back.
+fn apply_keymap(socket: &Path, layouts: &str) -> io::Result<()> {
+    use std::io::{BufRead, BufReader};
+    if !valid_keymap(layouts) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "keymap"));
+    }
+    let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request = serde_json::json!({
+        "v": 1,
+        "id": "onboard-keymap",
+        "method": "capabilities.set",
+        "params": { "capability": "system.keymap", "desired_state": layouts },
+    });
+    writeln!(stream, "{request}")?;
+    let mut line = String::new();
+    BufReader::new(stream.take(MAX_RESPONSE_BYTES as u64)).read_line(&mut line)?;
+    let answer: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|_| io::Error::other("punard's answer was not JSON"))?;
+    match answer.get("error") {
+        None if answer.get("result").is_some() => Ok(()),
+        None => Err(io::Error::other(
+            "punard answered with neither a result nor an error",
+        )),
+        Some(error) => Err(io::Error::other(
+            error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|message| message.lines().next())
+                .unwrap_or("punard refused it")
+                .to_string(),
+        )),
     }
 }
 
@@ -494,6 +569,45 @@ mod tests {
         );
         assert!(apply_timezone("Mars/Olympus", &localtime, &zoneinfo).is_err());
         assert!(apply_timezone("../shadow", &localtime, &zoneinfo).is_err());
+    }
+
+    /// The first-run keyboard layout goes to punard as one root
+    /// `capabilities.set` on `system.keymap`, and punard's refusal is an
+    /// error, never an applied layout. A value outside the layout grammar
+    /// never leaves this process.
+    #[test]
+    fn first_run_keymap_asks_punard_for_the_devices_layout() {
+        use std::io::{BufRead, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("punard.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let served = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for answer in [
+                r#"{"v":1,"id":"onboard-keymap","result":{"changed":true}}"#,
+                r#"{"v":1,"id":"onboard-keymap","error":{"code":"invalid_params","message":"xx is not installed.\nNext step: choose another."}}"#,
+            ] {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                requests.push(serde_json::from_str::<serde_json::Value>(&line).unwrap());
+                writeln!(&stream, "{answer}").unwrap();
+            }
+            requests
+        });
+        apply_keymap(&socket, "us,ru").unwrap();
+        let refused = apply_keymap(&socket, "xx").unwrap_err();
+        assert_eq!(refused.to_string(), "xx is not installed.");
+        let requests = served.join().unwrap();
+        assert_eq!(requests[0]["method"], "capabilities.set");
+        assert_eq!(
+            requests[0]["params"],
+            serde_json::json!({"capability": "system.keymap", "desired_state": "us,ru"})
+        );
+        assert!(apply_keymap(&socket, "us\nXKBLAYOUT=x").is_err());
+        assert!(apply_keymap(&dir.path().join("absent.sock"), "de").is_err());
     }
 
     /// Frame a request body the way both clients do.

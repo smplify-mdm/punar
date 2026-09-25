@@ -68,6 +68,18 @@ pub struct DeviceRecord {
     pub compliance_state: Option<String>,
 }
 
+/// `published-policy.json`: which policy set `policy.fetch` serves, who
+/// chose it and when. Absent: the default set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishedPolicy {
+    pub v: u32,
+    pub set: String,
+    pub published_at: String,
+    /// The fixture identity that published it — asserted, never verified.
+    pub admin: String,
+}
+
 /// The received-state store: registered devices in memory + on disk, and
 /// the two append-only report logs.
 #[derive(Debug)]
@@ -76,6 +88,7 @@ pub struct StateStore {
     devices: BTreeMap<String, DeviceRecord>,
     queries: Vec<QueryEntry>,
     query_seq: u64,
+    published_policy: Option<PublishedPolicy>,
 }
 
 impl StateStore {
@@ -102,12 +115,75 @@ impl StateStore {
         };
         let queries = load_queries(&dir.join(QUERIES_FILE))?;
         let query_seq = queries.len() as u64;
+        // Which set is published survives a restart, like everything else
+        // here: the m5-check offline stop→start must not quietly change what
+        // the organization serves. Corrupt fails loudly, as the ledger does.
+        let published_path = dir.join(PUBLISHED_POLICY_FILE);
+        let published_policy = if published_path.exists() {
+            let bytes = std::fs::read(&published_path)?;
+            Some(serde_json::from_slice(&bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{}: corrupt published policy: {e}",
+                        published_path.display()
+                    ),
+                )
+            })?)
+        } else {
+            None
+        };
         Ok(StateStore {
             dir: dir.to_path_buf(),
             devices,
             queries,
             query_seq,
+            published_policy,
         })
+    }
+
+    /// The published policy set's name, if one was published.
+    pub fn published_policy(&self) -> Option<&PublishedPolicy> {
+        self.published_policy.as_ref()
+    }
+
+    /// Publish `set` as what every device's `policy.fetch` is served from
+    /// now on. Atomic, 0600.
+    pub fn publish_policy(&mut self, set: &str, admin: &str) -> io::Result<()> {
+        let record = PublishedPolicy {
+            v: 1,
+            set: set.to_string(),
+            published_at: utc_now_rfc3339(),
+            admin: admin.to_string(),
+        };
+        let tmp = self.dir.join("published-policy.json.tmp");
+        let mut body = serde_json::to_string_pretty(&record)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        body.push('\n');
+        write_new_0600(&tmp, body.as_bytes())?;
+        std::fs::rename(&tmp, self.dir.join(PUBLISHED_POLICY_FILE))?;
+        self.published_policy = Some(record);
+        Ok(())
+    }
+
+    /// Append the audit record of one publish attempt, whatever its outcome.
+    /// `set` is a validated bare name; `outcome` is chosen by the server.
+    pub fn append_policy_publication(
+        &self,
+        admin: &str,
+        set: &str,
+        outcome: &str,
+    ) -> io::Result<()> {
+        self.append_line(
+            POLICY_PUBLICATIONS_FILE,
+            json!({
+                "occurred_at": utc_now_rfc3339(),
+                "admin": admin,
+                "set": set,
+                "outcome": outcome,
+                "identity_verified": false,
+            }),
+        )
     }
 
     /// Register (or re-register) a device: mint a fresh token, record it,
@@ -453,6 +529,10 @@ pub const ANSWERS_FILE: &str = "received-answers.jsonl";
 pub const RECOVERY_ENVELOPES_FILE: &str = "received-recovery-envelopes.jsonl";
 /// Dev/CI append-only audit of recovery release attempts; no key material.
 pub const RECOVERY_RELEASES_FILE: &str = "recovery-releases.jsonl";
+/// Which policy set is published ([`PublishedPolicy`]).
+pub const PUBLISHED_POLICY_FILE: &str = "published-policy.json";
+/// Dev/CI append-only audit of policy publish attempts.
+pub const POLICY_PUBLICATIONS_FILE: &str = "policy-publications.jsonl";
 
 /// Where one queued question stands. `pending` until the device that owns
 /// it answers; the terminal value mirrors the device's own

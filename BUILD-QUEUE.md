@@ -134,6 +134,166 @@ fixes. Use the newest run on the current remote head rather than treating that
 historical run as current. **Never push while a CI run is in flight** — the
 concurrency group cancels it.
 
+### 1.2 First-party daily suite — Mail, Calendar and Reminders
+
+These are now core OS applications, not optional catalogue entries. The exact
+product/security contract and staged acceptance gates live in
+[`docs/design/mail-calendar-contacts.md`](docs/design/mail-calendar-contacts.md).
+
+Current truth: production Mail is fixture-free and reads only the protected
+profile store. A human-only fixed broker launches it under a locked identity
+with a Mail-scoped capability and verified Wayland stream; the window has no
+network or device access. Separate locked account-entry and account-manager
+surfaces now connect TLS-only IMAP/SMTP accounts, start an initial bounded
+INBOX sync, list accounts, and remove credentials/configuration/cached mail
+locally. Mail refreshes on open and every five minutes while visible. Fixtures
+remain explicitly labelled, opt-in and dev-only, and production staging removes
+them. The Rust/QML contracts pass locally. An encrypted ARM64 installed image
+now boots through LUKS2 and opens the protected account-entry window through
+the fixed broker without relaxing `ProtectHome=yes`; live-provider,
+hostile-runtime, restart, and removal acceptance remain open, along
+with OAuth and the send/reply/draft/archive/delete/search/attachment lifecycle.
+Calendar and Reminders still have a tested local-data core but no user-facing
+window.
+
+The detailed history below records how this slice was reached; where it calls
+the fixed broker/helper or account UI missing, the current-truth paragraph
+above supersedes it.
+
+Next build slice, in order:
+
+1. **decision complete:** ADR-008 selects open standards first and a
+   service-private per-profile vault owned by socket-activated `punar-pimd`;
+   implementation and hostile-caller proof remain open. Do not repurpose
+   `punar-secrets`, whose no-state promise is a security contract;
+2. **contract complete:** `schemas/pim/` and `docs/api/pim-ipc.md` define the
+   closed v1 envelope, profile-bound ownership, pagination/change cursors,
+   offline/conflict states and credential/profile-override negative fixtures;
+   the service and runtime authorization proof remain open;
+3. **durable core in progress:** `crates/punar-pimd` now owns a profile-bound,
+   crash-durable local Calendar/Reminders store with blank structural
+   containers, zero sample records, optimistic revisions, retained tombstones,
+   offline intent, restart/corruption/mode/profile/migration tests and no
+   credential fields. ADR-009 now selects an unnamed inherited capability
+   channel instead of an application-connectable socket, and the safe
+   `SCM_RIGHTS` transfer primitive rejects cross-profile, extended,
+   absent/extra-descriptor and cross-client method attempts; it also verifies
+   the kernel-attested control peer is root before reading a grant. The
+   protocol layer now adds bounded newline framing, a closed typed method table,
+   authorization-before-parameter parsing, safe correlation/error reflection
+   and exact success/error envelopes. The inherited connection runner enforces
+   an absolute ten-second deadline independently for each request and response,
+   including slow byte-drip peers. A single verified lockdown primitive now
+   sets hard/soft core limits to zero, makes the caller non-dumpable and sets
+   `no_new_privs`; wiring it into the privileged fixed launch/service and the
+   hostile same-uid runtime theft proof remain open. A first composition root
+   now locks down before opening the profile store/cursor key, accepts one
+   root-brokered channel and drives the strict dispatcher without creating an
+   application-owned listener. The staged socket-activated executable accepts
+   exactly two named listening sequenced-packet descriptors, derives only a
+   strict uid-bound profile/state path, and runs as a locked `punar-pim`
+   identity inside a hardened service. Its two root-only socket units have no
+   install target; the fixed launcher remains open. A service-private credential-vault library now encrypts each
+   record with XChaCha20-Poly1305, binds it to the schema/profile/account/kind,
+   zeroizes caller input and held keys, refuses plaintext or unproven storage,
+   and durably removes account secrets. Its proof is bound to the state path's
+   actual device id and cryptsetup's kernel `CRYPT-LUKS2-` mapper identity;
+   a bounded unnamed one-use credential-entry channel now locks the helper down
+   before input exists, distinguishes cancellation, rejects oversized frames,
+   clears caller input and moves the received value directly into that vault.
+   A protected one-use account-entry channel now precedes it: a strict bounded
+   packet carries only identity and IMAP/SMTP configuration, a separate opaque
+   packet carries the password, and malformed/extended/cancelled/oversized
+   sessions publish no account. The helper receives only a closed result code
+   plus a successful account id; provider text cannot cross back. A bounded
+   five-minute setup-session coordinator now backs Settings-only
+   `accounts.begin_connect` and `accounts.cancel_connect`, admits at most four
+   sessions, returns only an opaque setup id, and keeps the helper descriptor
+   outside application IPC. A second strict root-broker control exchange now
+   claims that descriptor exactly once, rejects wrong-profile, extended,
+   descriptor-bearing and non-root requests, and returns only a closed refusal
+   or one unnamed endpoint. It supports open-protocol accounts only and has no
+   fixed broker executable or UI yet.
+   A two-control-plane service loop now polls application grants, helper claims
+   and unnamed worker completion, caps active connections at 32, performs no
+   provider work on the accept path and exits after a bounded zero-work idle
+   interval. Its integration test drives Settings, creates and claims a setup,
+   and observes clean idle exit. The image now stages that production binary
+   and its dormant systemd activation units; fixed-broker activation, in-image
+   zero-residency measurement and descriptor-theft proof remain open.
+   A service-internal account coordinator now validates private IMAP/SMTP
+   configuration before credential entry, atomically creates typed incoming
+   and outgoing vault records, requires provider verification before making an
+   account ready, rolls staged credentials back on every checked failure and
+   removes cached Mail, sync cursors, metadata, configuration and credentials
+   together, with restart proof. Removal now requires a profile-store-bound
+   permit that blocks new sync admission and waits a bounded time for an
+   already-admitted worker; timeout reopens sync and changes no private data.
+   Settings-only `accounts.remove` now invokes that guarded path. The fixed
+   helper executable/launcher, QML account flow and crash-reconciliation proof
+   remain open. ADR-011 now pins a Rust-1.88-compatible, TLS-only open-protocol
+   verifier: implicit TLS or required STARTTLS, platform CA validation, fixed
+   deadlines, closed errors and a 1 MiB aggregate IMAP verification-response
+   cap. Its 89-package resolved dependency increase is not yet an image-size
+   measurement. A bounded adapter now selects INBOX read-only, fetches at most
+   twenty numerical UIDs through the same TLS/deadline boundary, isolates
+   malformed records, and atomically advances the durable cursor with parsed
+   messages. Live-provider/runtime proof, SMTP send and bounded retry remain
+   open. ADR-012 adds a separate descriptor-bound, copy-on-write Mail
+   database with an 8 MiB cache, atomic batch/cursor commits, idempotent
+   delivery, restart persistence, UIDVALIDITY replacement, paging and complete
+   account removal. It stores only ADR-010's bounded Punar records, never raw
+   MIME, HTML or attachment payloads. Search indexing, power-loss injection,
+   scale/resource measurement and live IMAP proof remain open. The
+   HMAC cursor primitive now binds opaque positions to the profile, method and
+   hashed filter/sort set and rejects tampering/cross-context replay. Its
+   random profile-bound key is now created atomically in service-private state,
+   survives restart and rejects corrupt, cross-profile, aliased or
+   over-permissive state without replacement. Key reads do not follow symbolic
+   links and validate the exact opened file. The primary PIM state file now
+   applies the same exact-opened-file rule: it rejects symbolic links,
+   hard-linked aliases, foreign ownership, modes other than 0600 and inputs
+   above a 64 MiB pre-parse cap; its parent must be an owned 0700 directory. A
+   bounded five-minute stable-page cache now prevents mutations from mixing old
+   and new records across a list; restart, expiry or eviction returns an
+   explicit cursor expiry. The full dispatcher is now in progress: status,
+   honest empty accounts, structural Calendar/Reminder lists, local
+   event/reminder mutations, typed conflicts, provider-neutral account
+   metadata/listing, read-only `mail.list`/`mail.thread`, and the durable change
+   stream are store-backed. Mail pages come only from the parsed durable store;
+   their continuation state is capped, time-bound and signed to the selected
+   account/thread plus the durable Mail revision, so sync invalidates rather
+   than mixes pages. `sync.trigger` now acknowledges before provider work,
+   coalesces repeated account triggers, permits at most two concurrent jobs,
+   catches worker failure and exits after one bounded batch; online, offline,
+   authentication-required and closed error state persist without provider
+   text. There is no resident timer or automatic retry loop. Account
+   metadata and service-private open-protocol configuration now have one-way
+   v1/v2-to-v3 migrations; provider endpoints never appear in snapshots or
+   normal application IPC, and credentials remain only in the vault. The
+   library coordinator can create and remove this state after a verifier
+   succeeds. Settings-only account setup now creates/cancels bounded opaque
+   sessions without accepting credentials, while `accounts.remove` reaches the
+   guarded removal lifecycle, requires deletion of local private data, and
+   returns only closed errors. A privileged fixed launcher still must claim
+   the one-use helper endpoint and launch the entry UI. The first Mail
+   ingest boundary now converts bounded untrusted
+   RFC 5322/MIME input to plain-text-only records, blocks remote HTML content,
+   discards attachment payloads and never invents a missing sender. Filtered
+   event/reminder reads, the fixed service/launcher and account-entry UI
+   runtime, automatic backoff scheduling and production-image staging remain
+   open;
+4. complete one real account vertical slice before replacing Mail's fixture
+   bindings or adding provider logos;
+5. only then expose `Mail`, `Calendar` and `Reminders` desktop entries, MIME
+   ownership and onboarding suggestions.
+
+Every slice must retain the existing x86_64/ARM64 image and resource gates.
+Google/Microsoft sign-in, open IMAP/SMTP + CalDAV, managed configuration,
+profile separation, hostile-content rendering and account removal are all
+definition-of-done items; a polished inbox with fixture rows closes none of
+them.
+
 ---
 
 ## 2. Latency and memory — finish what is measured
@@ -970,7 +1130,7 @@ locally like our smplify deployment and other VMs."*
 `docs/development/milestone-11.md`, `milestone-12.md`. M11 is now **partially
 implemented**: the curated catalog, typed daemon/CLI calls, responsive Command
 Center application library, and System Control Applications browse path expose
-129 reviewed app identities, including clearly labelled official web entries and
+130 reviewed app identities, including clearly labelled official web entries and
 separate native preview/beta entries for Claude and ChatGPT. Flatpak sources
 are commit- and metadata-digest-pinned per architecture; unsupported ARM64
 publisher clients use labelled Chromium web fallbacks. Vendor Debian sources
@@ -1132,6 +1292,18 @@ semantics, and there is no raw-dispatcher escape hatch. This needs a live
 compositor to iterate against. NOTE: it was also misdiagnosed as the cause of an
 M2 failure that turned out to be auto-lock; the failures were identical without
 it. Reproduce without the suspect change before backing anything out.
+**Re-landed (SMP-1405 WP-02):** the missing argument semantics is the bind
+option `{ mouse = true }` (Omarchy 4.0.4 tiling.lua K50/K51). The binds now sit
+last in punar-binds.lua inside `pcall`, so no error can take earlier binds with
+it; `tools/hyprland-verify.sh` runs the whole config through the pinned
+Hyprland's `--verify-config` (which ignores bind options it does not know, so
+it proves the dispatchers parse, not that `mouse = true` does what it says),
+and keys-check.sh drags a real window with PUNAR held through QMP.
+**keys-check.sh has not run in CI yet.** On qcow2 overlays of the arm64
+release image carrying this branch (2026-09-25), PUNAR+drag moved a popped-out
+window (256,175 to 416,295), PUNAR+right-drag resized it (768x480 to 843x536),
+and the run ended `PUNAR_KEYS_OK`. The desktop gate's first run is the CI
+proof.
 
 **Still open.** A desktop right-click context menu — genuinely not built, not
 stubbed, and not something Thunar can provide, because no file manager owns the
