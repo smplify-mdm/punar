@@ -64,9 +64,23 @@ pub struct Daemon {
     pin_retry_base: Duration,
     /// Time the tenant-key check-in takes past its own budget, as a slow
     /// name lookup or a slow disk could make it: for the test that holds a
-    /// report to its whole budget even then.
+    /// report to its whole budget even then. It moves [`Daemon::now`] on
+    /// rather than sleeping, so it costs the test nothing and a loaded host
+    /// cannot add to it.
     #[cfg(test)]
-    pin_overrun: Duration,
+    pin_overrun: Mutex<Duration>,
+    /// How far the tests have moved [`Daemon::now`] past the monotonic
+    /// clock: a retry wait or an overrun is stepped over, not slept through,
+    /// so what a test asserts about them cannot depend on how busy the host
+    /// running it is.
+    #[cfg(test)]
+    clock_skew: Mutex<Duration>,
+    /// Every budget a request to Smplify was given, in the order the
+    /// requests were made ([`Daemon::grant`]). The tests hold each call to
+    /// the budgets it hands out, which the HTTP client then enforces
+    /// (`http::tests`), instead of timing whole calls on a shared host.
+    #[cfg(test)]
+    granted: Mutex<Vec<Duration>>,
     /// When the tenant-key check-in may next be tried after failing. Kept in
     /// memory only: a restart costs one early check-in, not a stale schedule
     /// on disk.
@@ -111,7 +125,11 @@ impl Daemon {
             pin_budget: PIN_BUDGET,
             pin_retry_base: PIN_RETRY_BASE,
             #[cfg(test)]
-            pin_overrun: Duration::ZERO,
+            pin_overrun: Mutex::new(Duration::ZERO),
+            #[cfg(test)]
+            clock_skew: Mutex::new(Duration::ZERO),
+            #[cfg(test)]
+            granted: Mutex::new(Vec::new()),
             pin_retry: Mutex::new(None),
             link_down: AtomicBool::new(false),
             released: AtomicBool::new(false),
@@ -143,6 +161,36 @@ impl Daemon {
         self.pin_budget = budget;
         self.pin_retry_base = retry_base;
         self
+    }
+
+    /// The clock a report's budget and the check-in's retry schedule are
+    /// kept by: the monotonic clock, which only the tests move.
+    fn now(&self) -> Instant {
+        Instant::now() + self.clock_skew()
+    }
+
+    #[cfg(not(test))]
+    fn clock_skew(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    #[cfg(test)]
+    fn clock_skew(&self) -> Duration {
+        *self.clock_skew.lock().unwrap()
+    }
+
+    /// Move [`Daemon::now`] on by `by`, as that much time passing would.
+    #[cfg(test)]
+    fn advance(&self, by: Duration) {
+        *self.clock_skew.lock().unwrap() += by;
+    }
+
+    /// `budget`, as given to one request to Smplify: every client this agent
+    /// builds takes its budget through here.
+    fn grant(&self, budget: Duration) -> Duration {
+        #[cfg(test)]
+        self.granted.lock().unwrap().push(budget);
+        budget
     }
 
     /// Without systemd (development, tests): socket → bind → chmod 0600 →
@@ -307,12 +355,13 @@ impl Daemon {
         // Resolving is optional, so it may never cost /enroll most of the
         // deadline: a third at most, and an unresolved image enrolls under
         // the canonical identifier.
-        let os_identifier = Api::anonymous(&organization.server, self.register_budget / 3)
-            .map_err(internal)?
-            .resolve_os(&os_release)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| crate::device::CANONICAL_OS_IDENTIFIER.to_string());
+        let os_identifier =
+            Api::anonymous(&organization.server, self.grant(self.register_budget / 3))
+                .map_err(internal)?
+                .resolve_os(&os_release)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| crate::device::CANONICAL_OS_IDENTIFIER.to_string());
         eprintln!(
             "punar-smplifyd: registering with {} as {}",
             organization.server.origin(),
@@ -322,7 +371,7 @@ impl Daemon {
         let csr = identity::generate_csr().map_err(internal)?;
         let enrolled = Api::anonymous(
             &organization.server,
-            self.register_budget.saturating_sub(started.elapsed()),
+            self.grant(self.register_budget.saturating_sub(started.elapsed())),
         )
         .map_err(internal)?
         .enroll(
@@ -487,7 +536,7 @@ impl Daemon {
         // after a check-in that overran its own could answer after punard
         // stopped waiting, and a report Smplify stored would read as
         // unreachable.
-        let started = Instant::now();
+        let started = self.now();
         let whole = match pin {
             PinTenantKey::First => self.pin_budget + self.call_budget,
             PinTenantKey::Never => self.call_budget,
@@ -500,7 +549,7 @@ impl Daemon {
             self.pin_tenant_key_if_missing(&record);
         }
         let left = whole
-            .saturating_sub(started.elapsed())
+            .saturating_sub(self.now().saturating_duration_since(started))
             .min(self.call_budget);
         if left.is_zero() {
             return Err(CallError::new(
@@ -543,7 +592,7 @@ impl Daemon {
         if record.tenant_public_key.is_some() {
             return;
         }
-        let started = Instant::now();
+        let started = self.now();
         let failures = match &*self.pin_retry.lock().unwrap() {
             Some(retry) if retry.device_id == record.device_id => {
                 if started < retry.not_before {
@@ -559,7 +608,7 @@ impl Daemon {
                 .map_err(internal)
         });
         #[cfg(test)]
-        std::thread::sleep(self.pin_overrun);
+        self.advance(*self.pin_overrun.lock().unwrap());
         let why = match answer {
             Ok(Some(key)) => {
                 let mut pinned = record.clone();
@@ -634,7 +683,7 @@ impl Daemon {
             CallError::new(ErrorCode::Internal, "the stored server origin is invalid")
         })?;
         let identity = self.store.client_identity().map_err(internal)?;
-        Api::with_identity(&server, identity, budget).map_err(internal)
+        Api::with_identity(&server, identity, self.grant(budget)).map_err(internal)
     }
 }
 
@@ -825,6 +874,52 @@ mod tests {
         (port, arrivals)
     }
 
+    /// A Smplify nothing gets through to: every connection is closed as soon
+    /// as it is accepted, as a link that drops mid-handshake closes it, so
+    /// each request fails at once as a transport failure and spends none of
+    /// its budget. A connection is counted before it is closed, and the
+    /// agent cannot see the close until then, so once a call has answered
+    /// the count holds every request it made. Its port, and the count.
+    fn unreachable_smplify() -> (u16, Arc<Mutex<usize>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let arrivals = Arc::new(Mutex::new(0));
+        let counted = Arc::clone(&arrivals);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                *counted.lock().unwrap() += 1;
+                drop(stream);
+            }
+        });
+        (port, arrivals)
+    }
+
+    /// Longer than any call against [`unreachable_smplify`] takes on any
+    /// host, and shorter than every budget those tests hand out: a request
+    /// that waited out its budget against a Smplify that refused it at once
+    /// fails the test instead of passing it slowly.
+    const PATIENCE: Duration = Duration::from_secs(20);
+
+    /// Answer one report on a thread of its own, from an agent holding
+    /// `token`: the answer, the budget each request it made was given, in
+    /// order, and how long the call took.
+    fn report_granting(
+        d: &Arc<Daemon>,
+        token: &str,
+        method: &str,
+        key: &str,
+    ) -> (String, Vec<Duration>, Duration) {
+        d.granted.lock().unwrap().clear();
+        let (took, line) = answer_apart(
+            d,
+            json!({"v": 1, "id": "r", "method": method,
+                   "params": {"device_token": token, key: {}}}),
+            PATIENCE,
+        );
+        let granted = std::mem::take(&mut *d.granted.lock().unwrap());
+        (line, granted, took)
+    }
+
     /// Answer `request` on a thread of its own, so a call that never
     /// returns fails the test instead of hanging it: how long it took, and
     /// the answer.
@@ -891,6 +986,11 @@ mod tests {
     /// within one register budget, which punard waits out: resolving and
     /// enrolling share one deadline, resolving may not spend all of it, and
     /// nothing else is asked of Smplify.
+    ///
+    /// Held to the budgets the two requests were given rather than to a
+    /// stopwatch around the call, which on a loaded host measures the host
+    /// as much as the agent: the HTTP client keeps each request to the budget
+    /// it was given (`http::tests`).
     #[test]
     fn a_registration_answers_within_its_budget_from_a_silent_smplify() {
         const BUDGET: Duration = Duration::from_millis(1200);
@@ -907,7 +1007,7 @@ mod tests {
         );
         assert!(line.contains(r#""result""#), "{line}");
 
-        let (took, line) = answer_apart(
+        let (_, line) = answer_apart(
             &d,
             json!({"v": 1, "id": "r", "method": "enroll.register",
                    "params": {"device_id": "machine-1", "bootstrap": "b", "code": "lex_1"}}),
@@ -917,12 +1017,29 @@ mod tests {
             line.contains(r#""error""#),
             "Smplify never answered: {line}"
         );
-        assert!(took < BUDGET + BUDGET / 2, "{took:?}");
-        let arrivals = arrivals.lock().unwrap().clone();
-        assert_eq!(arrivals.len(), 2, "resolving and enrolling, nothing else");
+        let granted = d.granted.lock().unwrap().clone();
+        assert_eq!(
+            granted.len(),
+            2,
+            "resolving and enrolling, nothing else: {granted:?}"
+        );
+        assert_eq!(
+            granted[0],
+            BUDGET / 3,
+            "resolving may spend a third at most"
+        );
+        // The silent Smplify held the resolve for the whole of its third, so
+        // /enroll was given what was left of the one deadline, never a fresh
+        // one. A socket timeout can fire up to a scheduler tick early, which
+        // is the difference between a third and the quarter asserted.
         assert!(
-            arrivals[1].duration_since(arrivals[0]) < BUDGET / 2,
-            "resolving spent most of the deadline"
+            granted[1] <= BUDGET - BUDGET / 4,
+            "enrolling was given {:?} of a {BUDGET:?} deadline after resolving waited out its third",
+            granted[1]
+        );
+        assert!(
+            arrivals.lock().unwrap().len() <= granted.len(),
+            "nothing else reached Smplify"
         );
         assert!(!d.store.exists(), "no identity without a certificate");
         let _ = std::fs::remove_dir_all(root);
@@ -969,101 +1086,97 @@ mod tests {
 
     /// A report that Smplify kept but whose answer reaches punard late reads
     /// there as "unreachable", and the whole inventory is then uploaded again
-    /// on every pass. So even while the tenant key is unpinned and Smplify
-    /// answers nothing at all, each report answers within the agent's budget
+    /// on every pass. So even while the tenant key is unpinned and nothing
+    /// reaches Smplify at all, each report answers within the agent's budget
     /// for it, which punard waits out: the inventory report makes one
     /// request, and the compliance report's check-in has a budget of its own
     /// beside its status POST's. A check-in that failed is not tried again
     /// until its retry time, which doubles, so a Smplify that never answers it
     /// does not cost every pass a second request.
+    ///
+    /// Held to the budgets the requests were given, and to the agent's clock,
+    /// which the test steps over the retry waits: the HTTP client keeps each
+    /// request to its budget (`http::tests`), while a stopwatch or a sleep on
+    /// a loaded host says as much about the host as about the agent.
     #[test]
     fn a_report_answers_within_its_budget_and_a_failing_pin_backs_off() {
-        const BUDGET: Duration = Duration::from_millis(1000);
-        const PIN: Duration = Duration::from_millis(1000);
-        // Longer than a whole compliance report, so the next one comes
-        // inside it.
-        const RETRY: Duration = Duration::from_millis(4000);
+        // Handed out, never spent: every request fails at once.
+        const BUDGET: Duration = Duration::from_secs(60);
+        const PIN: Duration = Duration::from_secs(40);
+        const RETRY: Duration = Duration::from_secs(600);
         let (d, root) = daemon();
         let d = d.with_call_budget(BUDGET).with_pin_budget(PIN, RETRY);
-        let (port, arrivals) = silent_smplify();
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
-        let (token, token_sha256) = identity::new_device_token().unwrap();
-        d.store
-            .save(
-                &Record {
-                    device_id: "dev-1".into(),
-                    server: format!("https://127.0.0.1:{port}"),
-                    org_id: "acme".into(),
-                    org_name: "Acme".into(),
-                    os_identifier: "punar".into(),
-                    not_after: None,
-                    tenant_public_key: None,
-                    token_sha256,
-                    enrolled_at: "2026-09-24T00:00:00Z".into(),
-                },
-                &Zeroizing::new(key.serialize_pem()),
-                &cert.pem(),
-                &cert.pem(),
-            )
-            .unwrap();
+        let (port, arrivals) = unreachable_smplify();
+        let token = enrolled_at(&d, port);
         let d = Arc::new(d);
         let report = |method: &str, key: &str| {
-            let (took, line) = answer_apart(
-                &d,
-                json!({"v": 1, "id": "r", "method": method,
-                       "params": {"device_token": &*token, key: {}}}),
-                (PIN + BUDGET) * 10,
-            );
+            let (line, granted, _) = report_granting(&d, &token, method, key);
             assert!(
                 line.contains(r#""error""#),
-                "Smplify never answered: {line}"
+                "nothing reached Smplify: {line}"
             );
-            took
+            granted
         };
-        let arrived = || arrivals.lock().unwrap().clone();
-        let slack = BUDGET / 2;
+        let arrived = || *arrivals.lock().unwrap();
 
-        let took = report("inventory.report", "inventory");
-        assert!(took < BUDGET + slack, "{took:?}");
+        // One request, given what is left of the call's budget: all of it,
+        // but for the moments the call spent before asking.
+        let (line, granted, took) = report_granting(&d, &token, "inventory.report", "inventory");
+        assert!(line.contains(r#""error""#), "{line}");
         assert_eq!(
-            arrived().len(),
+            granted.len(),
             1,
-            "the inventory report asks Smplify one thing"
+            "the inventory report asks Smplify one thing: {granted:?}"
         );
+        assert!(
+            granted[0] <= BUDGET && granted[0] + took >= BUDGET,
+            "the inventory report was given {:?} of its {BUDGET:?}",
+            granted[0]
+        );
+        assert_eq!(arrived(), 1);
 
-        // The check-in, then the status POST, each with its own budget.
-        let took = report("compliance.report", "report");
-        assert!(took < PIN + BUDGET + slack, "{took:?}");
-        let first_pin = arrived();
+        // The check-in first, with a budget of its own, then the status POST
+        // with the call's.
         assert_eq!(
-            first_pin.len(),
-            3,
+            report("compliance.report", "report"),
+            [PIN, BUDGET],
             "the compliance report tries the pin first"
         );
-        let pin_waited = first_pin[2].duration_since(first_pin[1]);
-        assert!(
-            pin_waited >= PIN - PIN / 10,
-            "the check-in was given {pin_waited:?}, not its own budget"
-        );
+        assert_eq!(arrived(), 3);
 
         // Until its retry time, a failed check-in is not tried again.
-        let took = report("compliance.report", "report");
-        assert!(took < BUDGET + slack, "{took:?}");
-        assert_eq!(arrived().len(), 4, "only the status POST");
-
-        // Then it is, once, and the next wait is longer.
-        std::thread::sleep(
-            (first_pin[1] + RETRY + Duration::from_millis(50))
-                .saturating_duration_since(Instant::now()),
+        d.advance(RETRY / 2);
+        assert_eq!(
+            report("compliance.report", "report"),
+            [BUDGET],
+            "only the status POST"
         );
-        report("compliance.report", "report");
-        assert_eq!(arrived().len(), 6, "the check-in is retried after its wait");
-        report("compliance.report", "report");
-        assert_eq!(arrived().len(), 7, "and waits longer after failing again");
+        assert_eq!(arrived(), 4);
+
+        // Then it is, once.
+        d.advance(RETRY);
+        assert_eq!(
+            report("compliance.report", "report"),
+            [PIN, BUDGET],
+            "the check-in is retried after its wait"
+        );
+        assert_eq!(arrived(), 6);
+
+        // And after failing again it waits twice as long: not after one
+        // retry time, but after two.
+        d.advance(RETRY);
+        assert_eq!(
+            report("compliance.report", "report"),
+            [BUDGET],
+            "the second wait is longer than the first"
+        );
+        d.advance(RETRY);
+        assert_eq!(
+            report("compliance.report", "report"),
+            [PIN, BUDGET],
+            "and ends after twice the first"
+        );
+        assert_eq!(arrived(), 9);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1075,51 +1188,44 @@ mod tests {
     /// wait and a report Smplify stored is never read as unreachable.
     #[test]
     fn a_report_after_a_slow_check_in_keeps_to_its_whole_budget() {
-        const BUDGET: Duration = Duration::from_millis(600);
-        const PIN: Duration = Duration::from_millis(300);
-        const OVERRUN: Duration = Duration::from_millis(900);
+        const BUDGET: Duration = Duration::from_secs(60);
+        const PIN: Duration = Duration::from_secs(40);
         let (d, root) = daemon();
-        let mut d = d
+        let d = d
             .with_call_budget(BUDGET)
-            .with_pin_budget(PIN, BUDGET * 100);
-        d.pin_overrun = OVERRUN;
-        let (port, arrivals) = silent_smplify();
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
-        let (token, token_sha256) = identity::new_device_token().unwrap();
-        d.store
-            .save(
-                &Record {
-                    device_id: "dev-1".into(),
-                    server: format!("https://127.0.0.1:{port}"),
-                    org_id: "acme".into(),
-                    org_name: "Acme".into(),
-                    os_identifier: "punar".into(),
-                    not_after: None,
-                    tenant_public_key: None,
-                    token_sha256,
-                    enrolled_at: "2026-09-24T00:00:00Z".into(),
-                },
-                &Zeroizing::new(key.serialize_pem()),
-                &cert.pem(),
-                &cert.pem(),
-            )
-            .unwrap();
+            .with_pin_budget(PIN, Duration::from_secs(600));
+        let (port, arrivals) = unreachable_smplify();
+        let token = enrolled_at(&d, port);
         let d = Arc::new(d);
-        let (took, line) = answer_apart(
-            &d,
-            json!({"v": 1, "id": "r", "method": "compliance.report",
-                   "params": {"device_token": &*token, "report": {}}}),
-            (PIN + BUDGET + OVERRUN) * 10,
-        );
-        assert!(line.contains(r#""error""#), "{line}");
+        let report = |overrun: Duration| {
+            *d.pin_overrun.lock().unwrap() = overrun;
+            // Each report tries the check-in, whatever the last one did.
+            *d.pin_retry.lock().unwrap() = None;
+            report_granting(&d, &token, "compliance.report", "report")
+        };
+
         // The check-in and its overrun spent the whole budget: nothing is
         // left for the POST, which is not sent.
-        assert!(took < PIN + OVERRUN + BUDGET / 2, "{took:?}");
-        assert_eq!(arrivals.lock().unwrap().len(), 1, "only the check-in");
+        let (line, granted, _) = report(PIN + BUDGET);
+        assert!(line.contains("no time was left in this call"), "{line}");
+        assert_eq!(granted, [PIN], "only the check-in");
+        assert_eq!(*arrivals.lock().unwrap(), 1);
+
+        // It overran by less: the POST is given what is left of the whole
+        // budget, which is less than its own, and never a fresh one. Only the
+        // time the call really took comes off it besides.
+        let overrun = PIN + BUDGET / 2;
+        let left = PIN + BUDGET - overrun;
+        let (line, granted, took) = report(overrun);
+        assert!(line.contains(r#""error""#), "{line}");
+        assert_eq!(granted.len(), 2, "the check-in, then the POST: {granted:?}");
+        assert_eq!(granted[0], PIN);
+        assert!(
+            granted[1] <= left && granted[1] + took >= left,
+            "the POST was given {:?} when {left:?} was left of the call's budget",
+            granted[1]
+        );
+        assert_eq!(*arrivals.lock().unwrap(), 3);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1129,55 +1235,34 @@ mod tests {
     /// what the outage built up.
     #[test]
     fn a_check_in_an_outage_backed_off_is_tried_once_the_link_is_back() {
-        const BUDGET: Duration = Duration::from_millis(300);
+        const BUDGET: Duration = Duration::from_secs(60);
+        const PIN: Duration = Duration::from_secs(40);
         let (d, root) = daemon();
         let d = d
             .with_call_budget(BUDGET)
-            .with_pin_budget(BUDGET, Duration::from_secs(600));
-        let (port, arrivals) = silent_smplify();
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
-        let (token, token_sha256) = identity::new_device_token().unwrap();
-        d.store
-            .save(
-                &Record {
-                    device_id: "dev-1".into(),
-                    server: format!("https://127.0.0.1:{port}"),
-                    org_id: "acme".into(),
-                    org_name: "Acme".into(),
-                    os_identifier: "punar".into(),
-                    not_after: None,
-                    tenant_public_key: None,
-                    token_sha256,
-                    enrolled_at: "2026-09-24T00:00:00Z".into(),
-                },
-                &Zeroizing::new(key.serialize_pem()),
-                &cert.pem(),
-                &cert.pem(),
-            )
-            .unwrap();
+            .with_pin_budget(PIN, Duration::from_secs(600));
+        let (port, arrivals) = unreachable_smplify();
+        let token = enrolled_at(&d, port);
         let d = Arc::new(d);
-        let report = || {
-            answer_apart(
-                &d,
-                json!({"v": 1, "id": "r", "method": "compliance.report",
-                       "params": {"device_token": &*token, "report": {}}}),
-                BUDGET * 20,
-            )
-        };
-        let arrived = || arrivals.lock().unwrap().len();
-        report();
-        assert_eq!(arrived(), 2, "the check-in, then the POST");
-        report();
-        assert_eq!(arrived(), 3, "the check-in waits");
-        // A POST gets through: the silent Smplify cannot answer one, so the
-        // agent is told as a report that got through would tell it.
+        let report = || report_granting(&d, &token, "compliance.report", "report").1;
+        let arrived = || *arrivals.lock().unwrap();
+        assert_eq!(report(), [PIN, BUDGET], "the check-in, then the POST");
+        assert_eq!(arrived(), 2);
+        assert!(
+            d.link_down.load(Ordering::SeqCst),
+            "a POST that reached nothing is an outage"
+        );
+        assert_eq!(report(), [BUDGET], "the check-in waits");
+        assert_eq!(arrived(), 3);
+        // A POST gets through: nothing here can answer one, so the agent is
+        // told as a report that got through would tell it.
         d.after_compliance_post(true);
-        report();
-        assert_eq!(arrived(), 5, "the check-in is tried again at once");
+        assert_eq!(
+            report(),
+            [PIN, BUDGET],
+            "the check-in is tried again at once"
+        );
+        assert_eq!(arrived(), 5);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1188,51 +1273,22 @@ mod tests {
     /// keeps failing; and a refusal is Smplify answering.
     #[test]
     fn only_a_compliance_report_that_could_not_reach_smplify_says_the_link_is_down() {
-        const BUDGET: Duration = Duration::from_millis(300);
         let (d, root) = daemon();
         let d = d
-            .with_call_budget(BUDGET)
-            .with_pin_budget(BUDGET, Duration::from_secs(600));
-        let (port, arrivals) = silent_smplify();
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
-        let (token, token_sha256) = identity::new_device_token().unwrap();
-        d.store
-            .save(
-                &Record {
-                    device_id: "dev-1".into(),
-                    server: format!("https://127.0.0.1:{port}"),
-                    org_id: "acme".into(),
-                    org_name: "Acme".into(),
-                    os_identifier: "punar".into(),
-                    not_after: None,
-                    tenant_public_key: None,
-                    token_sha256,
-                    enrolled_at: "2026-09-24T00:00:00Z".into(),
-                },
-                &Zeroizing::new(key.serialize_pem()),
-                &cert.pem(),
-                &cert.pem(),
-            )
-            .unwrap();
-        let waiting = Instant::now() + Duration::from_secs(600);
+            .with_call_budget(Duration::from_secs(60))
+            .with_pin_budget(Duration::from_secs(40), Duration::from_secs(600));
+        let (port, arrivals) = unreachable_smplify();
+        let token = enrolled_at(&d, port);
+        let waiting = d.now() + Duration::from_secs(600);
         *d.pin_retry.lock().unwrap() = Some(PinRetry {
             device_id: "dev-1".into(),
             failures: 3,
             not_before: waiting,
         });
         let d = Arc::new(d);
-        let (_, line) = answer_apart(
-            &d,
-            json!({"v": 1, "id": "r", "method": "inventory.report",
-                   "params": {"device_token": &*token, "inventory": {}}}),
-            BUDGET * 20,
-        );
+        let (line, _, _) = report_granting(&d, &token, "inventory.report", "inventory");
         assert!(line.contains(r#""error""#), "{line}");
-        assert_eq!(arrivals.lock().unwrap().len(), 1);
+        assert_eq!(*arrivals.lock().unwrap(), 1);
         // A compliance report gets through.
         d.after_compliance_post(true);
         assert!(
@@ -1287,8 +1343,9 @@ mod tests {
         d
     }
 
-    /// An identity on disk, and the device token punard would hold for it.
-    fn enrolled_store(d: &Daemon) -> Zeroizing<String> {
+    /// An identity on disk whose Smplify is `server`, and the device token
+    /// punard would hold for it.
+    fn enrolled_with(d: &Daemon, server: &str) -> Zeroizing<String> {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let cert = rcgen::CertificateParams::new(vec!["dev-1".to_string()])
             .unwrap()
@@ -1299,7 +1356,7 @@ mod tests {
             .save(
                 &Record {
                     device_id: "dev-1".into(),
-                    server: "https://api.acme.example".into(),
+                    server: server.into(),
                     org_id: "acme".into(),
                     org_name: "Acme".into(),
                     os_identifier: "punar".into(),
@@ -1316,20 +1373,34 @@ mod tests {
         token
     }
 
+    /// An identity on disk, and the device token punard would hold for it.
+    fn enrolled_store(d: &Daemon) -> Zeroizing<String> {
+        enrolled_with(d, "https://api.acme.example")
+    }
+
+    /// The same, for a Smplify on this machine at `port`.
+    fn enrolled_at(d: &Daemon, port: u16) -> Zeroizing<String> {
+        enrolled_with(d, &format!("https://127.0.0.1:{port}"))
+    }
+
     /// An agent that holds no identity answers, and goes dormant once no call
     /// has come for the idle time: a device that never enrolled, or declined
     /// to, runs no agent.
     #[test]
     fn an_agent_with_no_identity_goes_dormant_once_idle() {
-        const IDLE: Duration = Duration::from_millis(300);
+        const IDLE: Duration = Duration::from_millis(1000);
         let (d, root) = daemon();
         let d = Arc::new(admitting(d));
         let (socket, stopped) = serve_apart(&d, &root, IDLE);
+        // Taken before the call, never after its answer: the agent starts
+        // its idle wait only once it has answered, so this is no later than
+        // that wait began, however long the host takes to hand the answer
+        // back to this thread.
+        let asked = Instant::now();
         let answer = call(
             &socket,
             json!({"v": 1, "id": "a", "method": "identity.status"}),
         );
-        let asked = Instant::now();
         assert_eq!(answer["result"], json!({"enrolled": false}));
         assert_eq!(
             stopped.recv_timeout(IDLE * 10).expect("dormant").unwrap(),
