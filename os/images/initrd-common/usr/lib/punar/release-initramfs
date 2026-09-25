@@ -269,10 +269,11 @@ keep_command() {
 }
 
 # Keep what initrd-switch-root.service itself runs, as PID 1 has loaded it
-# (drop-ins included). This unit has its own mount namespace, which systemctl
-# takes for a chroot and then silently ignores "show"; SYSTEMD_IGNORE_CHROOT
-# makes it ask PID 1 anyway. The boot step refuses when PID 1 names no
-# command; a dry run has no PID 1 to ask and says it uses the fixed set.
+# (drop-ins included). In a chroot systemctl answers "show" with nothing and
+# succeeds. It does not take this unit's private mount namespace for one
+# today; SYSTEMD_IGNORE_CHROOT keeps the answer from ever depending on that.
+# The boot step refuses when PID 1 names no command; a dry run has no PID 1
+# to ask and says it uses the fixed set.
 keep_switch_root_commands() {
     local show word found=no
     resolve /usr/bin/systemctl || keep_nothing "cannot resolve /usr/bin/systemctl"

@@ -166,9 +166,9 @@ SHOW_SWITCH_ROOT='
 { path=systemctl ; argv[]=systemctl --no-block switch-root ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
 '
 
-# A fake systemctl whose "show" prints $1. Like the real one, it answers
-# nothing when it believes it runs in a chroot, which from a unit with its own
-# mount namespace it does unless SYSTEMD_IGNORE_CHROOT is set.
+# A fake systemctl whose "show" prints $1. Like the real one in a chroot, it
+# answers nothing and succeeds unless SYSTEMD_IGNORE_CHROOT is set, so the
+# helper's answer never depends on systemctl's chroot detection.
 fake_systemctl() {
     # shellcheck disable=SC2016 # the lines of the fake script, verbatim
     printf '%s\n' '#!/bin/sh' \
