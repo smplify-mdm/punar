@@ -392,6 +392,266 @@ if [ -e "${LOCK_EXERCISE}" ]; then
     fail A15 'the lock exercise seam is present: usr/lib/punar/lock-exercise.allow'
 fi
 
+# A16: nobody who uses this machine is in `input` or `video`, the greeter
+# included. `input` lets any process running as that account read every
+# keystroke from /dev/input, the lock screen's passphrase included; `video` is
+# raw DRM and framebuffer access, which reads the screen. Sessions take their
+# devices from logind on the active seat (docs/design/onboarding.md 1.7).
+# Checked everywhere membership can come from: /etc/group and /etc/gshadow,
+# a sysusers.d `m` line that systemd-sysusers would replay on a later boot,
+# and userdb records (membership drop-ins and a user record's memberOf).
+greeter_user=$(sed -n 's/^[[:space:]]*user[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "${ROOT}/etc/greetd/config.toml" 2>/dev/null | head -n 1)
+is_protected_account() {
+    case "$1" in
+        greeter|_greetd) return 0 ;;
+    esac
+    [ -n "${greeter_user}" ] && [ "$1" = "${greeter_user}" ] && return 0
+    [ -f "${ROOT}/etc/passwd" ] && awk -F: -v name="$1" '
+        $1 == name && $3 >= 1000 && $3 < 60000 { found = 1 }
+        END { exit found ? 0 : 1 }' "${ROOT}/etc/passwd"
+}
+# The loops read here-documents, not pipes, so fail() counts in this shell.
+for retired_group in input video; do
+    for group_file in etc/group etc/gshadow; do
+        [ -f "${ROOT}/${group_file}" ] || continue
+        members=$(awk -F: -v group="${retired_group}" -v file="${group_file}" '
+            $1 == group {
+                list = $4
+                if (file == "etc/gshadow" && $3 != "") list = list "," $3
+                n = split(list, names, ",")
+                for (i = 1; i <= n; i++) if (names[i] != "") print names[i]
+            }' "${ROOT}/${group_file}")
+        while IFS= read -r member; do
+            [ -n "${member}" ] || continue
+            if is_protected_account "${member}"; then
+                fail A16 "${member} is in the ${retired_group} group (${group_file})"
+            fi
+        done <<EOF
+${members}
+EOF
+    done
+    for sysusers_dir in usr/lib/sysusers.d etc/sysusers.d; do
+        [ -d "${ROOT}/${sysusers_dir}" ] || continue
+        for sysusers_conf in "${ROOT}/${sysusers_dir}"/*.conf; do
+            [ -f "${sysusers_conf}" ] || continue
+            members=$(awk -v group="${retired_group}" '
+                $1 == "m" && $3 == group { print $2 }' "${sysusers_conf}")
+            while IFS= read -r member; do
+                [ -n "${member}" ] || continue
+                if is_protected_account "${member}"; then
+                    fail A16 "${sysusers_conf#"${ROOT}"/} would add ${member} to ${retired_group}"
+                fi
+            done <<EOF
+${members}
+EOF
+        done
+    done
+    for userdb_dir in etc/userdb usr/lib/userdb usr/local/lib/userdb run/userdb; do
+        [ -d "${ROOT}/${userdb_dir}" ] || continue
+        for membership in "${ROOT}/${userdb_dir}"/*:"${retired_group}".membership; do
+            [ -e "${membership}" ] || [ -L "${membership}" ] || continue
+            fail A16 "a userdb record puts an account in ${retired_group}: ${membership#"${ROOT}"/}"
+        done
+        for record in "${ROOT}/${userdb_dir}"/*.user; do
+            [ -f "${record}" ] || continue
+            if tr -d '\n' < "${record}" \
+                | grep -Eq "\"memberOf\"[[:space:]]*:[[:space:]]*\\[[^]]*\"${retired_group}\""; then
+                fail A16 "a userdb user record is a member of ${retired_group}: ${record#"${ROOT}"/}"
+            fi
+        done
+    done
+done
+
+# A17: names resolve over unicast DNS only. LLMNR and multicast DNS announce
+# this machine's name to every neighbour on a shared network and let any of
+# them answer a single-label lookup; systemd's default turns LLMNR on. The
+# drop-in must state both off, and nothing that sorts after it or overrides it
+# may state otherwise.
+RESOLVED_DROPIN="${ROOT}/usr/lib/systemd/resolved.conf.d/50-punar.conf"
+if [ ! -f "${RESOLVED_DROPIN}" ]; then
+    fail A17 'the resolver drop-in is missing: usr/lib/systemd/resolved.conf.d/50-punar.conf'
+else
+    for protocol in LLMNR MulticastDNS; do
+        grep -Eq "^[[:space:]]*${protocol}[[:space:]]*=[[:space:]]*no[[:space:]]*$" \
+            "${RESOLVED_DROPIN}" \
+            || fail A17 "50-punar.conf does not set ${protocol}=no"
+    done
+fi
+for resolved_conf in \
+    "${ROOT}/etc/systemd/resolved.conf" \
+    "${ROOT}"/etc/systemd/resolved.conf.d/*.conf \
+    "${ROOT}"/run/systemd/resolved.conf.d/*.conf \
+    "${ROOT}"/usr/local/lib/systemd/resolved.conf.d/*.conf \
+    "${ROOT}"/usr/lib/systemd/resolved.conf.d/*.conf; do
+    [ -f "${resolved_conf}" ] || continue
+    awk '
+        /^[[:space:]]*[#;]/ { next }
+        /^[[:space:]]*(LLMNR|MulticastDNS)[[:space:]]*=/ {
+            value = $0
+            sub(/^[^=]*=[[:space:]]*/, "", value)
+            sub(/[[:space:]]*$/, "", value)
+            if (value != "no") { print; bad = 1 }
+        }
+        END { exit bad ? 0 : 1 }' "${resolved_conf}" > /dev/null \
+        && fail A17 "${resolved_conf#"${ROOT}"/} turns LLMNR or multicast DNS on"
+done
+
+# A18: every package source verifies signatures. A source that installs
+# unsigned packages is a path by which anyone on the network, or the mirror,
+# runs code as root. pacman: no SigLevel may allow an unsigned package
+# (Arch's own DatabaseOptional default concerns the database only). APT: no
+# trusted=yes or insecure/weak allowance, in one-line or deb822 sources or in
+# apt.conf. Flatpak: no remote with GPG verification off, and every catalog
+# remote carries its key.
+for pacman_conf in "${ROOT}/etc/pacman.conf" "${ROOT}"/etc/pacman.d/*.conf; do
+    [ -f "${pacman_conf}" ] || continue
+    awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*SigLevel[[:space:]]*=/ {
+            value = $0
+            sub(/^[^=]*=/, "", value)
+            n = split(value, words, /[[:space:]]+/)
+            for (i = 1; i <= n; i++) {
+                if (words[i] ~ /^(Package)?(Never|Optional|TrustAll)$/) { bad = 1 }
+            }
+        }
+        END { exit bad ? 0 : 1 }' "${pacman_conf}" \
+        && fail A18 "${pacman_conf#"${ROOT}"/} lets pacman install an unsigned package"
+done
+for apt_source in "${ROOT}/etc/apt/sources.list" "${ROOT}"/etc/apt/sources.list.d/*.list; do
+    [ -f "${apt_source}" ] || continue
+    grep -v '^[[:space:]]*#' "${apt_source}" \
+        | grep -Eiq '(trusted|allow-insecure|allow-weak|allow-downgrade-to-insecure)=yes' \
+        && fail A18 "${apt_source#"${ROOT}"/} accepts an unauthenticated APT source"
+done
+for apt_source in "${ROOT}"/etc/apt/sources.list.d/*.sources; do
+    [ -f "${apt_source}" ] || continue
+    grep -v '^[[:space:]]*#' "${apt_source}" \
+        | grep -Eiq '^[[:space:]]*(Trusted|Allow-Insecure|Allow-Weak|Allow-Downgrade-To-Insecure)[[:space:]]*:[[:space:]]*yes' \
+        && fail A18 "${apt_source#"${ROOT}"/} accepts an unauthenticated APT source"
+done
+for apt_conf in "${ROOT}/etc/apt/apt.conf" "${ROOT}"/etc/apt/apt.conf.d/*; do
+    [ -f "${apt_conf}" ] || continue
+    grep -v '^[[:space:]]*//' "${apt_conf}" \
+        | grep -Eiq '(AllowUnauthenticated|AllowInsecureRepositories|AllowWeakRepositories|AllowDowngradeToInsecureRepositories)[[:space:]"]+(true|yes|1)' \
+        && fail A18 "${apt_conf#"${ROOT}"/} lets APT install without verified signatures"
+done
+for flatpak_conf in \
+    "${ROOT}/var/lib/flatpak/repo/config" \
+    "${ROOT}"/etc/flatpak/remotes.d/*.flatpakrepo \
+    "${ROOT}"/usr/share/flatpak/remotes.d/*.flatpakrepo \
+    "${ROOT}"/usr/share/punar/catalog/remotes/*.flatpakrepo; do
+    [ -f "${flatpak_conf}" ] || continue
+    grep -Eiq '^[[:space:]]*gpg-?verify(-summary)?[[:space:]]*=[[:space:]]*(false|0)' "${flatpak_conf}" \
+        && fail A18 "${flatpak_conf#"${ROOT}"/} turns Flatpak signature verification off"
+done
+for catalog_remote in "${ROOT}"/usr/share/punar/catalog/remotes/*.flatpakrepo; do
+    [ -f "${catalog_remote}" ] || continue
+    grep -Eq '^GPGKey=.+' "${catalog_remote}" \
+        || fail A18 "${catalog_remote#"${ROOT}"/} names no GPGKey, so its remote could not verify anything"
+done
+
+# A19: the downloader runs in exactly one place, the unprivileged fetch
+# helper (crates/punard/src/fetch.rs). punard is root and used to run it for
+# every update and vendor download; it must never again, and neither may any
+# other unit or Punar program. The helper's unit must keep what makes it
+# unprivileged, and only root may reach its socket.
+FETCH_HELPER=usr/lib/punar/punar-fetch
+FETCH_UNIT="${ROOT}/usr/lib/systemd/system/punar-fetch@.service"
+FETCH_SOCKET="${ROOT}/usr/lib/systemd/system/punar-fetch.socket"
+DOWNLOADER_UNITS=$(
+    for unit_root in \
+        usr/lib/systemd/system usr/lib/systemd/user \
+        etc/systemd/system etc/systemd/user; do
+        [ -d "${ROOT}/${unit_root}" ] || continue
+        find "${ROOT}/${unit_root}" -type f | while IFS= read -r unit_file; do
+            if grep -Eq '^[[:space:]]*Exec[A-Za-z]*=([-+!:@|]*|.*[^[:alnum:]_.-])curl([[:space:]]|$)' "${unit_file}"; then
+                printf '%s ' "${unit_file#"${ROOT}"/}"
+            fi
+        done
+    done
+)
+if [ -n "${DOWNLOADER_UNITS}" ]; then
+    fail A19 "units run the downloader directly: ${DOWNLOADER_UNITS}"
+fi
+for punar_program in "${ROOT}"/usr/bin/punar* "${ROOT}"/usr/lib/punar/*; do
+    [ -f "${punar_program}" ] || continue
+    [ "${punar_program}" = "${ROOT}/${FETCH_HELPER}" ] && continue
+    if grep -a -q -F '/usr/bin/curl' "${punar_program}"; then
+        fail A19 "${punar_program#"${ROOT}"/} names the downloader; only ${FETCH_HELPER} may"
+    elif [ "$(head -c 2 "${punar_program}")" = '#!' ] \
+        && sed 's/#.*//' "${punar_program}" \
+            | grep -Eq '(^|[;&|`([:space:]])curl([[:space:]]|$)'; then
+        fail A19 "${punar_program#"${ROOT}"/} runs the downloader; only ${FETCH_HELPER} may"
+    fi
+done
+if [ ! -x "${ROOT}/${FETCH_HELPER}" ]; then
+    fail A19 "the fetch helper is missing or not executable: ${FETCH_HELPER}"
+fi
+if [ ! -f "${FETCH_UNIT}" ]; then
+    fail A19 'the fetch helper unit is missing: usr/lib/systemd/system/punar-fetch@.service'
+else
+    for required in \
+        "ExecStart=/${FETCH_HELPER}" \
+        'DynamicUser=yes' \
+        'CapabilityBoundingSet=' \
+        'AmbientCapabilities=' \
+        'NoNewPrivileges=yes' \
+        'ProtectSystem=strict' \
+        'ProtectHome=yes' \
+        'PrivateDevices=yes' \
+        'RestrictAddressFamilies=AF_INET AF_INET6' \
+        'IPAddressDeny=localhost link-local multicast'; do
+        grep -qxF -- "${required}" "${FETCH_UNIT}" \
+            || fail A19 "punar-fetch@.service lost '${required}'"
+    done
+    for forbidden in '^User=' '^Group=' '^SupplementaryGroups=' '^ReadWritePaths=' \
+        '^CapabilityBoundingSet=.+' '^AmbientCapabilities=.+' '^PrivateNetwork=no'; do
+        grep -Eq -- "${forbidden}" "${FETCH_UNIT}" \
+            && fail A19 "punar-fetch@.service sets ${forbidden#^}"
+    done
+fi
+if [ ! -f "${FETCH_SOCKET}" ]; then
+    fail A19 'the fetch helper socket is missing: usr/lib/systemd/system/punar-fetch.socket'
+else
+    for required in 'SocketUser=root' 'SocketGroup=root' 'SocketMode=0600' \
+        'DirectoryMode=0700' 'Accept=yes'; do
+        grep -qxF -- "${required}" "${FETCH_SOCKET}" \
+            || fail A19 "punar-fetch.socket lost '${required}'"
+    done
+fi
+
+# A20: a researcher can find where to report. security.txt (RFC 9116) names
+# at least one contact and the policy, and has not expired: an expired file
+# tells a reader the contacts may be stale, and RFC 9116 asks that it expire
+# within a year. Evaluated against the time of this build.
+SECURITY_TXT="${ROOT}/usr/share/punar/security.txt"
+if [ ! -f "${SECURITY_TXT}" ]; then
+    fail A20 'the security contact is missing: usr/share/punar/security.txt'
+else
+    grep -Eq '^Contact: (https://|mailto:).+' "${SECURITY_TXT}" \
+        || fail A20 'security.txt names no https: or mailto: Contact'
+    grep -Eq '^Policy: https://.+' "${SECURITY_TXT}" \
+        || fail A20 'security.txt names no Policy'
+    grep -Eq '^Preferred-Languages: .+' "${SECURITY_TXT}" \
+        || fail A20 'security.txt states no Preferred-Languages'
+    expires_count=$(grep -c '^Expires: ' "${SECURITY_TXT}" || true)
+    expires_value=$(sed -n 's/^Expires: //p' "${SECURITY_TXT}" | head -n 1)
+    if [ "${expires_count}" != 1 ]; then
+        fail A20 "security.txt must carry exactly one Expires (found ${expires_count})"
+    elif ! expires_epoch=$(date -u -d "${expires_value}" +%s 2>/dev/null); then
+        fail A20 "security.txt Expires is not a time: ${expires_value}"
+    else
+        build_epoch=$(date -u +%s)
+        if [ "${expires_epoch}" -le "${build_epoch}" ]; then
+            fail A20 "security.txt expired at ${expires_value}; rotate it and SECURITY.md together"
+        elif [ "${expires_epoch}" -gt $((build_epoch + 366 * 86400)) ]; then
+            fail A20 "security.txt Expires is more than a year away (${expires_value})"
+        fi
+    fi
+fi
+
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \
         "${FAILURES}" >&2
