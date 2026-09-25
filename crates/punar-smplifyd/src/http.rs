@@ -1,7 +1,8 @@
 //! A deliberately small HTTPS/1.1 client: one request per connection, TLS
 //! 1.2+, the platform's root store through the same verifier punar-pimd
 //! uses (ADR-011), an optional client certificate for the device identity,
-//! and a hard wall-clock budget. `http://` is not a scheme this client knows.
+//! and a hard deadline, which the caller fixes before the client is built.
+//! `http://` is not a scheme this client knows.
 //!
 //! Small on purpose: every byte that reaches Smplify is composed here, and
 //! there is no cookie jar, redirect follower, proxy discovery or connection
@@ -143,11 +144,18 @@ impl Response {
 
 pub struct Client {
     config: Arc<ClientConfig>,
-    budget: Duration,
+    /// When every request through this client must have ended.
+    deadline: Instant,
 }
 
 impl Client {
-    pub fn new(identity: Option<ClientIdentity>, budget: Duration) -> Result<Client, HttpError> {
+    /// A client whose every request must end by `deadline`. The caller
+    /// fixes it before calling this, never after: building a client reads
+    /// and parses the system's whole root store (the platform verifier loads
+    /// it here, not lazily), which on a slow disk or a loaded host is no
+    /// small part of a budget, and a deadline counted from the request alone
+    /// let that time run outside every budget the agent keeps for punard.
+    pub fn new(identity: Option<ClientIdentity>, deadline: Instant) -> Result<Client, HttpError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
@@ -162,19 +170,21 @@ impl Client {
         };
         Ok(Client {
             config: Arc::new(config),
-            budget,
+            deadline,
         })
     }
 
+    /// One request, ended by the client's deadline wherever it has got to.
+    /// A request whose deadline passed before it was sent, while its client
+    /// was being built, is not sent at all.
     pub fn send(&self, request: &Request<'_>) -> Result<Response, HttpError> {
-        let started = Instant::now();
         let target = (request.url.host.clone(), request.url.port);
-        let addrs = resolve_within(self.remaining(started)?, move || {
+        let addrs = resolve_within(self.remaining()?, move || {
             target.to_socket_addrs().map(Iterator::collect)
         })?;
         let mut tcp = None;
         for addr in addrs {
-            let remaining = self.remaining(started)?;
+            let remaining = self.remaining()?;
             if let Ok(stream) = TcpStream::connect_timeout(&addr, remaining) {
                 tcp = Some(stream);
                 break;
@@ -190,7 +200,7 @@ impl Client {
             connection,
             Deadlined {
                 tcp,
-                deadline: started + self.budget,
+                deadline: self.deadline,
             },
         );
 
@@ -222,12 +232,12 @@ impl Client {
         parse_response(&raw)
     }
 
-    fn remaining(&self, started: Instant) -> Result<Duration, HttpError> {
-        let elapsed = started.elapsed();
-        if elapsed >= self.budget {
+    fn remaining(&self) -> Result<Duration, HttpError> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
             return Err(HttpError::Timeout);
         }
-        Ok(self.budget - elapsed)
+        Ok(left)
     }
 }
 
@@ -422,7 +432,8 @@ mod tests {
     }
 
     /// A server that accepts the connection and never answers the TLS
-    /// handshake costs one budget, not the agent's every later call.
+    /// handshake costs one budget, not the agent's every later call: the
+    /// request ends at its deadline, however far it has got.
     #[test]
     fn a_silent_server_costs_one_budget_even_during_the_handshake() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -434,11 +445,11 @@ mod tests {
             }
         });
         let budget = Duration::from_millis(500);
-        let client = Client::new(None, budget).unwrap();
+        let deadline = Instant::now() + budget;
+        let client = Client::new(None, deadline).unwrap();
         let url = parse_https_url(&format!("https://127.0.0.1:{port}/x")).unwrap();
         let (sender, answer) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let started = Instant::now();
             let result = client.send(&Request {
                 method: "GET",
                 url: &url,
@@ -446,13 +457,49 @@ mod tests {
                 bearer: None,
                 body: None,
             });
-            let _ = sender.send((started.elapsed(), result.map(|r| r.status)));
+            let _ = sender.send((Instant::now(), result.map(|r| r.status)));
         });
-        let (took, result) = answer
+        let (ended, result) = answer
             .recv_timeout(budget * 10)
             .expect("the request outlived ten budgets");
         assert!(matches!(result, Err(HttpError::Timeout)), "{result:?}");
-        assert!(took < budget * 2, "{took:?}");
+        // How late past its deadline the request ended: the time the host
+        // took to wake it, which a loaded host stretches but never to this.
+        let late = ended.saturating_duration_since(deadline);
+        assert!(
+            late < Duration::from_secs(2),
+            "ended {late:?} after its deadline"
+        );
+    }
+
+    /// The deadline is the caller's, fixed before the client was built, so
+    /// the time building it took is spent from the same budget: a request
+    /// whose deadline passed meanwhile is not sent at all. Measured by what
+    /// reached the server, which a loaded host cannot change: the sleep only
+    /// ever makes the deadline further past.
+    #[test]
+    fn a_request_whose_deadline_passed_while_its_client_was_built_is_not_sent() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let deadline = Instant::now() + Duration::from_millis(50);
+        std::thread::sleep(Duration::from_millis(150));
+        let client = Client::new(None, deadline).unwrap();
+        let url = parse_https_url(&format!("https://127.0.0.1:{port}/x")).unwrap();
+        let result = client.send(&Request {
+            method: "GET",
+            url: &url,
+            accept: ACCEPT_JSON,
+            bearer: None,
+            body: None,
+        });
+        assert!(matches!(result, Err(HttpError::Timeout)), "{result:?}");
+        // A connection the client made would be waiting in the listener's
+        // queue: connect returns only once the handshake has completed.
+        listener.set_nonblocking(true).unwrap();
+        match listener.accept() {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            other => panic!("a request past its deadline reached the server: {other:?}"),
+        }
     }
 
     /// A name lookup is held to the request's budget like everything after

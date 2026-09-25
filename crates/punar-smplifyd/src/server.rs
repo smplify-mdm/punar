@@ -78,9 +78,16 @@ pub struct Daemon {
     /// Every budget a request to Smplify was given, in the order the
     /// requests were made ([`Daemon::grant`]). The tests hold each call to
     /// the budgets it hands out, which the HTTP client then enforces
-    /// (`http::tests`), instead of timing whole calls on a shared host.
+    /// (`http::tests`), and time a whole call only with a margin no load on
+    /// a shared host reaches.
     #[cfg(test)]
     granted: Mutex<Vec<Duration>>,
+    /// Time building a client takes, as reading the identity and the
+    /// system's roots on a slow disk or a loaded host could. Slept, not
+    /// stepped over: the HTTP client keeps its deadline by the real clock,
+    /// and what the tests prove is that this time is spent from it.
+    #[cfg(test)]
+    client_setup: Duration,
     /// When the tenant-key check-in may next be tried after failing. Kept in
     /// memory only: a restart costs one early check-in, not a stale schedule
     /// on disk.
@@ -130,6 +137,8 @@ impl Daemon {
             clock_skew: Mutex::new(Duration::ZERO),
             #[cfg(test)]
             granted: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            client_setup: Duration::ZERO,
             pin_retry: Mutex::new(None),
             link_down: AtomicBool::new(false),
             released: AtomicBool::new(false),
@@ -163,6 +172,12 @@ impl Daemon {
         self
     }
 
+    #[cfg(test)]
+    fn with_client_setup(mut self, takes: Duration) -> Daemon {
+        self.client_setup = takes;
+        self
+    }
+
     /// The clock a report's budget and the check-in's retry schedule are
     /// kept by: the monotonic clock, which only the tests move.
     fn now(&self) -> Instant {
@@ -185,12 +200,16 @@ impl Daemon {
         *self.clock_skew.lock().unwrap() += by;
     }
 
-    /// `budget`, as given to one request to Smplify: every client this agent
-    /// builds takes its budget through here.
-    fn grant(&self, budget: Duration) -> Duration {
+    /// The deadline of one request to Smplify given `budget` from now. Every
+    /// client this agent builds takes its deadline from here, before it is
+    /// built ([`Daemon::api`], [`Daemon::anonymous`]): building one reads the
+    /// identity and the system's whole root store, and a budget the client
+    /// counted from its own request would leave that time outside every
+    /// budget punard waits out.
+    fn grant(&self, budget: Duration) -> Instant {
         #[cfg(test)]
         self.granted.lock().unwrap().push(budget);
-        budget
+        Instant::now() + budget
     }
 
     /// Without systemd (development, tests): socket → bind → chmod 0600 →
@@ -355,13 +374,12 @@ impl Daemon {
         // Resolving is optional, so it may never cost /enroll most of the
         // deadline: a third at most, and an unresolved image enrolls under
         // the canonical identifier.
-        let os_identifier =
-            Api::anonymous(&organization.server, self.grant(self.register_budget / 3))
-                .map_err(internal)?
-                .resolve_os(&os_release)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| crate::device::CANONICAL_OS_IDENTIFIER.to_string());
+        let os_identifier = self
+            .anonymous(&organization.server, self.grant(self.register_budget / 3))?
+            .resolve_os(&os_release)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| crate::device::CANONICAL_OS_IDENTIFIER.to_string());
         eprintln!(
             "punar-smplifyd: registering with {} as {}",
             organization.server.origin(),
@@ -369,19 +387,19 @@ impl Daemon {
         );
 
         let csr = identity::generate_csr().map_err(internal)?;
-        let enrolled = Api::anonymous(
-            &organization.server,
-            self.grant(self.register_budget.saturating_sub(started.elapsed())),
-        )
-        .map_err(internal)?
-        .enroll(
-            &code,
-            &csr.csr_pem,
-            &crate::device::hostname(),
-            &os_identifier,
-            &device_id,
-        )
-        .map_err(enrollment_refusal)?;
+        let enrolled = self
+            .anonymous(
+                &organization.server,
+                self.grant(self.register_budget.saturating_sub(started.elapsed())),
+            )?
+            .enroll(
+                &code,
+                &csr.csr_pem,
+                &crate::device::hostname(),
+                &os_identifier,
+                &device_id,
+            )
+            .map_err(enrollment_refusal)?;
         drop(code);
         self.keep_identity(organization, os_identifier, &csr, enrolled)
     }
@@ -506,8 +524,9 @@ impl Daemon {
     }
 
     fn policy_fetch(&self, params: Option<&Value>) -> Result<Value, CallError> {
+        let started = Instant::now();
         let record = self.authorized(params)?;
-        let api = self.api(self.call_budget)?;
+        let api = self.api(self.grant(self.call_budget.saturating_sub(started.elapsed())))?;
         let bundle = api.bundle(&record.device_id).map_err(upstream_refusal)?;
         Ok(policy_answer(bundle.as_ref()))
     }
@@ -520,7 +539,8 @@ impl Daemon {
     /// check-in rides only the compliance report, which every sync pass
     /// sends first, with [`Daemon::pin_budget`] of its own, and the status
     /// POST has [`Daemon::call_budget`], or less when that is all that is
-    /// left of the call's whole budget, measured from its start:
+    /// left of the call's whole budget, measured from its start and spent on
+    /// building each client as well as on its request ([`Daemon::grant`]):
     /// `compliance.report` answers within their sum, and `inventory.report`
     /// within [`Daemon::call_budget`] (`punar_smplifyd::budget::call_budget`),
     /// which punard waits out.
@@ -558,9 +578,10 @@ impl Daemon {
                  next pass",
             ));
         }
+        let deadline = self.grant(left);
         let body = compose(&record.device_id, payload);
         let mut reached = None;
-        let posted = self.api(left).and_then(|api| {
+        let posted = self.api(deadline).and_then(|api| {
             let posted = api.status(&record.device_id, &body);
             reached = Some(posted.as_ref().map_or_else(reached_smplify, |_| true));
             posted.map_err(upstream_refusal)
@@ -603,7 +624,7 @@ impl Daemon {
             _ => 0,
         };
         let os_release = crate::device::os_release(&self.os_release_path);
-        let answer = self.api(self.pin_budget).and_then(|api| {
+        let answer = self.api(self.grant(self.pin_budget)).and_then(|api| {
             api.checkin(&record.device_id, &record.os_identifier, &os_release)
                 .map_err(internal)
         });
@@ -670,9 +691,11 @@ impl Daemon {
         Ok(record)
     }
 
-    /// A client for this device's identity whose every request must finish
-    /// within `budget`.
-    fn api(&self, budget: Duration) -> Result<Api, CallError> {
+    /// A client for this device's identity whose every request must end by
+    /// `deadline`, which the caller fixed before this builds it
+    /// ([`Daemon::grant`]).
+    fn api(&self, deadline: Instant) -> Result<Api, CallError> {
+        self.building_a_client();
         let record = self.store.load().map_err(internal)?.ok_or_else(|| {
             CallError::new(
                 ErrorCode::Unauthorized,
@@ -683,7 +706,24 @@ impl Daemon {
             CallError::new(ErrorCode::Internal, "the stored server origin is invalid")
         })?;
         let identity = self.store.client_identity().map_err(internal)?;
-        Api::with_identity(&server, identity, self.grant(budget)).map_err(internal)
+        Api::with_identity(&server, identity, deadline).map_err(internal)
+    }
+
+    /// A client without the device's identity, for resolving and enrolling,
+    /// whose every request must end by `deadline`, which the caller fixed
+    /// before this builds it ([`Daemon::grant`]).
+    fn anonymous(&self, server: &crate::http::Url, deadline: Instant) -> Result<Api, CallError> {
+        self.building_a_client();
+        Api::anonymous(server, deadline).map_err(internal)
+    }
+
+    #[cfg(not(test))]
+    fn building_a_client(&self) {}
+
+    /// [`Daemon::client_setup`], spent where building a client spends it.
+    #[cfg(test)]
+    fn building_a_client(&self) {
+        std::thread::sleep(self.client_setup);
     }
 }
 
@@ -857,21 +897,46 @@ mod tests {
     }
 
     /// A Smplify that accepts every connection and never answers: each
-    /// request spends whatever budget it was given. Its port, and when each
-    /// connection arrived.
-    fn silent_smplify() -> (u16, Arc<Mutex<Vec<Instant>>>) {
+    /// request spends whatever budget it was given. Its port, and the port
+    /// each connection it accepted came from, in the order they came
+    /// ([`settled`]).
+    fn silent_smplify() -> (u16, Arc<Mutex<Vec<u16>>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let arrivals = Arc::new(Mutex::new(Vec::new()));
         let counted = Arc::clone(&arrivals);
         std::thread::spawn(move || {
             let mut held = Vec::new();
-            for stream in listener.incoming() {
-                counted.lock().unwrap().push(Instant::now());
+            for stream in listener.incoming().flatten() {
+                let from = stream.peer_addr().map_or(0, |peer| peer.port());
+                counted.lock().unwrap().push(from);
                 held.push(stream);
             }
         });
         (port, arrivals)
+    }
+
+    /// How many connections reached the [`silent_smplify`] at `port` before
+    /// now, exactly, however far behind its accept loop is. Every connection
+    /// the agent made had completed its handshake before the call answered
+    /// (connect returns only then), so it waits in the listener's queue ahead
+    /// of the one this makes now, and the queue is accepted in order: once
+    /// this one is counted, every connection before it has been. Once per
+    /// test, after the calls it counts.
+    fn settled(port: u16, arrivals: &Mutex<Vec<u16>>) -> usize {
+        let marker = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mine = marker.local_addr().unwrap().port();
+        let started = Instant::now();
+        loop {
+            if let Some(before) = arrivals.lock().unwrap().iter().rposition(|&p| p == mine) {
+                return before;
+            }
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the silent Smplify stopped accepting"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// A Smplify nothing gets through to: every connection is closed as soon
@@ -899,6 +964,16 @@ mod tests {
     /// that waited out its budget against a Smplify that refused it at once
     /// fails the test instead of passing it slowly.
     const PATIENCE: Duration = Duration::from_secs(20);
+
+    /// How far past its whole budget a call against a [`silent_smplify`] may
+    /// answer. The call ends at its deadline by the real clock, and this
+    /// margin is the host's time to wake it and hand back the answer, so it
+    /// is far more than any load stretches that to: what it catches is a
+    /// request that outlives its deadline, not a busy scheduler. A client
+    /// given a fresh budget, or built outside its deadline, is caught
+    /// exactly, by what reaches Smplify
+    /// (`the_time_spent_building_a_client_comes_out_of_the_call_budget`).
+    const OVERRUN: Duration = Duration::from_secs(3);
 
     /// Answer one report on a thread of its own, from an agent holding
     /// `token`: the answer, the budget each request it made was given, in
@@ -987,13 +1062,15 @@ mod tests {
     /// enrolling share one deadline, resolving may not spend all of it, and
     /// nothing else is asked of Smplify.
     ///
-    /// Held to the budgets the two requests were given rather than to a
-    /// stopwatch around the call, which on a loaded host measures the host
-    /// as much as the agent: the HTTP client keeps each request to the budget
-    /// it was given (`http::tests`).
+    /// Held to the budgets the two requests were given, and to the whole
+    /// call's time by the real clock with a margin no host load reaches
+    /// ([`OVERRUN`]).
     #[test]
     fn a_registration_answers_within_its_budget_from_a_silent_smplify() {
-        const BUDGET: Duration = Duration::from_millis(1200);
+        // Long enough that building a client, which reads the system's
+        // roots, never spends a third of it even on a loaded host: both
+        // requests are sent, and each waits out its deadline.
+        const BUDGET: Duration = Duration::from_secs(3);
         let (d, root) = daemon();
         let (port, arrivals) = silent_smplify();
         std::fs::write(
@@ -1007,15 +1084,19 @@ mod tests {
         );
         assert!(line.contains(r#""result""#), "{line}");
 
-        let (_, line) = answer_apart(
+        let (took, line) = answer_apart(
             &d,
             json!({"v": 1, "id": "r", "method": "enroll.register",
                    "params": {"device_id": "machine-1", "bootstrap": "b", "code": "lex_1"}}),
-            BUDGET * 10,
+            BUDGET + PATIENCE,
         );
         assert!(
             line.contains(r#""error""#),
             "Smplify never answered: {line}"
+        );
+        assert!(
+            took < BUDGET + OVERRUN,
+            "a registration against a {BUDGET:?} deadline answered after {took:?}"
         );
         let granted = d.granted.lock().unwrap().clone();
         assert_eq!(
@@ -1042,6 +1123,132 @@ mod tests {
             "nothing else reached Smplify"
         );
         assert!(!d.store.exists(), "no identity without a certificate");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Building a client (reading the identity, loading the system's roots)
+    /// takes time before its request is sent, and that time is spent from
+    /// the request's own deadline, fixed before the client is built: never
+    /// from a budget counted afresh when the request starts. Here each client
+    /// takes longer to build than the whole of the budget left for it, so no
+    /// request may go out at all, where a deadline counted from the request
+    /// would send every one. Counted by what reaches Smplify, which no host
+    /// load changes: the setup is slept, so a busy host only makes each
+    /// deadline further past.
+    #[test]
+    fn the_time_spent_building_a_client_comes_out_of_the_call_budget() {
+        const BUDGET: Duration = Duration::from_millis(300);
+        const SETUP: Duration = Duration::from_millis(600);
+        let (d, root) = daemon();
+        let d = d
+            .with_call_budget(BUDGET)
+            .with_pin_budget(BUDGET, Duration::from_secs(600))
+            .with_client_setup(SETUP);
+        let (port, arrivals) = unreachable_smplify();
+        let token = enrolled_at(&d, port);
+        let d = Arc::new(d);
+
+        let (line, granted, _) = report_granting(&d, &token, "inventory.report", "inventory");
+        assert!(line.contains(r#""error""#), "{line}");
+        assert_eq!(granted.len(), 1, "one request: {granted:?}");
+        assert_eq!(
+            *arrivals.lock().unwrap(),
+            0,
+            "the inventory went out after its deadline"
+        );
+
+        // The check-in's client outlives the check-in's budget, and building
+        // it leaves nothing of the report's whole budget for the POST, whose
+        // client is then not even built.
+        let (line, granted, _) = report_granting(&d, &token, "compliance.report", "report");
+        assert!(line.contains("no time was left in this call"), "{line}");
+        assert_eq!(granted, [BUDGET], "only the check-in was given a deadline");
+        assert_eq!(
+            *arrivals.lock().unwrap(),
+            0,
+            "the check-in went out after its deadline"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The same for registering, where punard giving up costs most:
+    /// resolving's client takes longer to build than resolving's third, and
+    /// enrolling's longer than what is then left of the one deadline, so
+    /// neither request may go out. A /enroll given a fresh budget would.
+    #[test]
+    fn a_registration_spends_the_time_building_its_clients_from_its_one_deadline() {
+        const BUDGET: Duration = Duration::from_millis(1200);
+        const SETUP: Duration = Duration::from_millis(700);
+        let (d, root) = daemon();
+        let (port, arrivals) = unreachable_smplify();
+        std::fs::write(
+            root.join("discovery/acme.com.json"),
+            organization_at(port).to_string(),
+        )
+        .unwrap();
+        let d = Arc::new(d.with_register_budget(BUDGET).with_client_setup(SETUP));
+        let line = d.answer_line(
+            r#"{"v":1,"id":"a","method":"org.discover","params":{"domain":"acme.com"}}"#,
+        );
+        assert!(line.contains(r#""result""#), "{line}");
+
+        let (_, line) = answer_apart(
+            &d,
+            json!({"v": 1, "id": "r", "method": "enroll.register",
+                   "params": {"device_id": "machine-1", "bootstrap": "b", "code": "lex_1"}}),
+            PATIENCE,
+        );
+        assert!(line.contains(r#""error""#), "{line}");
+        let granted = d.granted.lock().unwrap().clone();
+        assert_eq!(granted.len(), 2, "resolving and enrolling: {granted:?}");
+        assert_eq!(granted[0], BUDGET / 3);
+        assert!(
+            granted[1] <= BUDGET - SETUP,
+            "enrolling was given {:?} after resolving's client took {SETUP:?} to build",
+            granted[1]
+        );
+        assert_eq!(
+            *arrivals.lock().unwrap(),
+            0,
+            "a request went out after its deadline"
+        );
+        assert!(!d.store.exists(), "no identity without a certificate");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Against a Smplify that never answers, a compliance report waits out
+    /// the check-in's budget and then what is left for its POST, and answers
+    /// once both are spent: by the real clock, within its whole budget and a
+    /// margin no host load reaches ([`OVERRUN`]).
+    #[test]
+    fn a_compliance_report_to_a_silent_smplify_ends_with_its_whole_budget() {
+        // Long enough that building each client never spends it all, even
+        // on a loaded host: both requests are sent and wait out their
+        // deadlines.
+        const BUDGET: Duration = Duration::from_millis(1000);
+        const PIN: Duration = Duration::from_millis(1000);
+        let (d, root) = daemon();
+        let d = d
+            .with_call_budget(BUDGET)
+            .with_pin_budget(PIN, Duration::from_secs(600));
+        let (port, arrivals) = silent_smplify();
+        let token = enrolled_at(&d, port);
+        let d = Arc::new(d);
+        let (line, granted, took) = report_granting(&d, &token, "compliance.report", "report");
+        assert!(line.contains(r#""error""#), "{line}");
+        assert!(
+            took < PIN + BUDGET + OVERRUN,
+            "a compliance report against a {:?} budget answered after {took:?}",
+            PIN + BUDGET
+        );
+        assert_eq!(granted.len(), 2, "the check-in, then the POST: {granted:?}");
+        assert_eq!(granted[0], PIN);
+        assert!(granted[1] <= BUDGET, "{granted:?}");
+        assert_eq!(
+            settled(port, &arrivals),
+            2,
+            "the check-in and the POST reached Smplify, and nothing else did"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1096,8 +1303,13 @@ mod tests {
     ///
     /// Held to the budgets the requests were given, and to the agent's clock,
     /// which the test steps over the retry waits: the HTTP client keeps each
-    /// request to its budget (`http::tests`), while a stopwatch or a sleep on
-    /// a loaded host says as much about the host as about the agent.
+    /// request to its deadline (`http::tests`), the time building its client
+    /// takes included (`the_time_spent_building_a_client_comes_out_of_the_call_budget`),
+    /// and a whole report against a Smplify that never answers is timed
+    /// end to end with a margin no load reaches
+    /// (`a_compliance_report_to_a_silent_smplify_ends_with_its_whole_budget`).
+    /// A stopwatch or a sleep here, on a loaded host, would say as much about
+    /// the host as about the agent.
     #[test]
     fn a_report_answers_within_its_budget_and_a_failing_pin_backs_off() {
         // Handed out, never spent: every request fails at once.

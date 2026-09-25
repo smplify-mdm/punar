@@ -5,7 +5,7 @@
 //! the visibility manifest (docs/development/smplify-enrollment.md section
 //! 3.3).
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::Instant;
 
 use punar_common::ipc::organization_text;
 use serde_json::{Value, json};
@@ -69,23 +69,25 @@ pub struct Enrolled {
 
 impl Api {
     /// A client without the device's identity, for resolving and enrolling,
-    /// whose every request must finish within `budget`.
-    pub fn anonymous(server: &Url, budget: Duration) -> Result<Api, UpstreamError> {
+    /// whose every request must end by `deadline`, fixed before this builds
+    /// it ([`Client::new`]).
+    pub fn anonymous(server: &Url, deadline: Instant) -> Result<Api, UpstreamError> {
         Ok(Api {
             server: server.clone(),
-            client: Client::new(None, budget)?,
+            client: Client::new(None, deadline)?,
         })
     }
 
-    /// A client whose every request must finish within `budget`.
+    /// A client whose every request must end by `deadline`, fixed before
+    /// this builds it ([`Client::new`]).
     pub fn with_identity(
         server: &Url,
         identity: ClientIdentity,
-        budget: Duration,
+        deadline: Instant,
     ) -> Result<Api, UpstreamError> {
         Ok(Api {
             server: server.clone(),
-            client: Client::new(Some(identity), budget)?,
+            client: Client::new(Some(identity), deadline)?,
         })
     }
 
