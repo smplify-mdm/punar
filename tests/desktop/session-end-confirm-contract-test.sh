@@ -14,7 +14,12 @@
 #
 #   1. no keyboard bind in either compositor config calls the exit dispatcher;
 #   2. the Lua bind for PUNAR+SHIFT+E runs ctx.session_end;
-#   3. hyprland.lua defines session_end as the shell's `session endSession` IPC;
+#   3. hyprland.lua defines session_end as punar-end-session, which asks the
+#      shell's `session endSession` IPC first and, only when the shell does not
+#      answer, asks through the compositor: a second press within a bounded
+#      window runs `punarctl session end` — never the exit dispatcher, never on
+#      one press (F0 review: the chord used to be a silent no-op without the
+#      shell);
 #   4. shell.qml's `session` IpcHandler has endSession, and it reaches
 #      SessionMenu.requestSessionEnd without opening anything else;
 #   5. requestSessionEnd arms through activate("sessionEnd"), and activate()
@@ -84,20 +89,38 @@ if not chord:
 elif not re.match(r"hl\.dsp\.exec_cmd\(\s*ctx\.session_end\s*\)", chord.group(1)):
     fail(f"PUNAR+SHIFT+E does not run ctx.session_end: {chord.group(1).strip()}")
 
-# 3. ctx.session_end is the shell's confirming IPC call.
+# 3. ctx.session_end is the confirming helper.
 defined = re.search(r'local\s+sessionEnd\s*=\s*"([^"]*)"', hyprland_lua)
-if not defined or defined.group(1) != "qs -p /usr/share/punar/shell ipc call session endSession":
-    fail("hyprland.lua does not define sessionEnd as `qs -p /usr/share/punar/shell ipc call session endSession`")
+if not defined or defined.group(1) != "/usr/lib/punar/punar-end-session":
+    fail("hyprland.lua does not define sessionEnd as /usr/lib/punar/punar-end-session")
 if not re.search(r"\bsession_end\s*=\s*sessionEnd\b", hyprland_lua):
     fail("hyprland.lua does not pass session_end = sessionEnd to punar-binds.lua")
 
 # The legacy hyprlang file mirrors the same call.
 if not re.search(
-    r"bindd\s*=\s*\$mod SHIFT,\s*E,[^,]*,\s*exec,\s*qs -p /usr/share/punar/shell ipc call session endSession\s*$",
+    r"bindd\s*=\s*\$mod SHIFT,\s*E,[^,]*,\s*exec,\s*/usr/lib/punar/punar-end-session\s*$",
     binds_conf,
     re.M,
 ):
-    fail("punar-binds.conf does not mirror PUNAR+SHIFT+E as the confirming IPC call")
+    fail("punar-binds.conf does not mirror PUNAR+SHIFT+E as the confirming helper")
+
+# The helper asks the shell first, and ends nothing on one press without it.
+helper = strip_hash_comments(read(f"{hypr}/punar-end-session.sh"))
+ipc = helper.find("qs -p /usr/share/punar/shell ipc call session endSession")
+end = helper.find("exec /usr/bin/punarctl session end")
+if ipc < 0:
+    fail("punar-end-session does not ask the shell's session endSession IPC")
+if end < 0:
+    fail("punar-end-session does not end the session through `punarctl session end`")
+if ipc >= 0 and end >= 0 and end < ipc:
+    fail("punar-end-session can end the session before it asks the shell")
+if re.search(r"dispatch\s+exit|hl\.dsp\.exit", helper):
+    fail("punar-end-session calls the compositor's exit dispatcher")
+armed_check = helper.rfind("if [", 0, end if end >= 0 else len(helper))
+if end >= 0 and (armed_check < 0 or "-le 5" not in helper[armed_check:end]):
+    fail("punar-end-session ends the session without a second press inside a bounded window")
+if "hyprctl notify" not in helper:
+    fail("punar-end-session does not tell the person what the second press will do")
 
 # 4. The IPC handler reaches requestSessionEnd.
 shell_qml = read(f"{shell}/shell.qml")

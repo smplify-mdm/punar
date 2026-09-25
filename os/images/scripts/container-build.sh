@@ -155,7 +155,9 @@ stage_desktop_extra() {
     rm -f "${extra}/usr/lib/punar/punar-layout.sh" \
           "${extra}/usr/lib/punar/punar-scratchpad.sh" \
           "${extra}/usr/lib/punar/punar-terminal-app.sh" \
-          "${extra}/usr/lib/punar/punar-graphics-env.sh"
+          "${extra}/usr/lib/punar/punar-graphics-env.sh" \
+          "${extra}/usr/lib/punar/punar-shell-run" \
+          "${extra}/usr/lib/punar/punar-end-session"
     install -m 0755 "${mod}/hypr/punar-layout.sh" \
         "${extra}/usr/lib/punar/punar-layout.sh"
     install -m 0755 "${mod}/hypr/punar-scratchpad.sh" \
@@ -164,6 +166,13 @@ stage_desktop_extra() {
         "${extra}/usr/lib/punar/punar-terminal-app.sh"
     install -m 0755 "${mod}/hypr/punar-graphics-env.sh" \
         "${extra}/usr/lib/punar/punar-graphics-env.sh"
+    # The shell's supervisor (no core dumps; restarted after a crash) and
+    # PUNAR+SHIFT+E's helper, which asks through the compositor when the
+    # shell cannot (F0 review).
+    install -m 0755 "${mod}/hypr/punar-shell-run.sh" \
+        "${extra}/usr/lib/punar/punar-shell-run"
+    install -m 0755 "${mod}/hypr/punar-end-session.sh" \
+        "${extra}/usr/lib/punar/punar-end-session"
     # foot system-wide config (first-found-wins; overwrites the packaged
     # commented example at the same path — intended, see module README).
     cp "${mod}/foot/foot.ini" "${extra}/etc/xdg/foot/foot.ini"

@@ -392,6 +392,8 @@ jobs:
             os/modules/desktop/hypr/punar-scratchpad.sh \
             os/modules/desktop/hypr/punar-graphics-env.sh \
             os/modules/desktop/hypr/punar-terminal-app.sh \
+            os/modules/desktop/hypr/punar-shell-run.sh \
+            os/modules/desktop/hypr/punar-end-session.sh \
             tests/desktop/app-launcher-contract-test.sh \
             tests/desktop/evolution-defaults-contract-test.sh \
             tests/desktop/bar-affordance-contract-test.sh \
@@ -404,6 +406,7 @@ jobs:
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
+            tests/desktop/shell-run-test.sh \
             tests/desktop/terminal-app-test.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/vendor-sandbox-bin/xdg-open \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
@@ -435,6 +438,9 @@ jobs:
 
       - name: Test native Lua layout switching
         run: ./tests/desktop/layout-script-test.sh
+
+      - name: Test the shell supervisor and the end-session fallback
+        run: ./tests/desktop/shell-run-test.sh
 
       - name: Test terminal application launching
         run: ./tests/desktop/terminal-app-test.sh

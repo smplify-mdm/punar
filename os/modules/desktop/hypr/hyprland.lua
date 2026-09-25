@@ -11,10 +11,16 @@ local lock = "qs -p /usr/share/punar/shell ipc call lock lock"
 local session = "qs -p /usr/share/punar/shell ipc call session toggle"
 -- PUNAR+SHIFT+E asks before it ends anything: it opens the session menu with
 -- "End session" already armed, and only a second press (or E, or a click)
--- signs out. Esc keeps the session.
-local sessionEnd = "qs -p /usr/share/punar/shell ipc call session endSession"
+-- signs out. Esc keeps the session. When the shell is not there to ask, the
+-- helper asks through the compositor instead (a notification, then a second
+-- press within five seconds), so the chord is never a silent no-op.
+local sessionEnd = "/usr/lib/punar/punar-end-session"
 local layoutScript = "/usr/lib/punar/punar-layout.sh"
 local shell = "qs -p /usr/share/punar/shell"
+-- The shell itself runs under a small supervisor: no core dumps (soft and
+-- hard RLIMIT_CORE 0 — it holds passwords while people type them) and a
+-- restart after a crash, so the lock chord and the session menu come back.
+local shellRun = "/usr/lib/punar/punar-shell-run"
 
 hl.monitor({ output = "Virtual-1", mode = "preferred", position = "auto", scale = 1 })
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
@@ -32,7 +38,7 @@ hl.on("hyprland.start", function()
     -- Without these two variables a browser can resolve `claude:` against
     -- only the immutable image defaults and leave OAuth stranded in a tab.
     hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE XDG_CONFIG_DIRS XDG_DATA_DIRS")
-    hl.exec_cmd(shell)
+    hl.exec_cmd(shellRun)
     hl.exec_cmd(layoutScript .. " restore")
     -- The import above and this start are two INDEPENDENT spawns, so their
     -- order is not guaranteed — and hyprpolkitagent.service carries
