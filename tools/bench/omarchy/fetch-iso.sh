@@ -3,11 +3,17 @@
 # unless BENCH_OMARCHY_APPROVED=yes (tools/bench/README.md, "Omarchy lane").
 #
 #   BENCH_OMARCHY_APPROVED=yes tools/bench/omarchy/fetch-iso.sh DEST.iso
+#   tools/bench/omarchy/fetch-iso.sh --check     # validate the pin; download nothing
 #
 # The URL and SHA-256 come only from omarchy.env in this directory, never
 # from arguments or the environment. The file is written to DEST.part and
 # renamed only after its SHA-256 matches; a mismatch deletes it and fails.
 # An existing DEST is re-verified instead of downloaded again.
+#
+# The ISO is never put in the Actions cache or an artifact: the repository's
+# 10 GB cache is already full with PR CI's caches, and an artifact of a
+# public repository would re-publish Omarchy's image. Each cell that needs it
+# downloads it here and deletes it after the install.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,14 +24,19 @@ die() {
     exit 1
 }
 
-[ "${BENCH_OMARCHY_APPROVED:-}" = yes ] \
-    || die "the Omarchy lane needs the owner's approval first (tools/bench/README.md); nothing downloaded"
-[ -n "${DEST}" ] || die "usage: fetch-iso.sh DEST.iso"
 url="$(awk -F= '$1 == "OMARCHY_ISO_URL" {print $2}' "${HERE}/omarchy.env")"
 want="$(awk -F= '$1 == "OMARCHY_ISO_SHA256" {print $2}' "${HERE}/omarchy.env")"
 case "${url}" in https://iso.omarchy.org/*.iso) ;; *) die "pinned URL is not an iso.omarchy.org ISO" ;; esac
 case "${want}" in *[!0-9a-f]*|'') die "pinned SHA-256 is malformed" ;; esac
 [ "${#want}" -eq 64 ] || die "pinned SHA-256 is malformed"
+if [ "${DEST}" = --check ]; then
+    echo "fetch-iso: pin ok (${url}, ${want}); nothing downloaded"
+    exit 0
+fi
+
+[ "${BENCH_OMARCHY_APPROVED:-}" = yes ] \
+    || die "the Omarchy lane needs the owner's approval first (tools/bench/README.md); nothing downloaded"
+[ -n "${DEST}" ] || die "usage: fetch-iso.sh DEST.iso | --check"
 
 verify() {
     got="$(sha256sum "$1" | awk '{print $1}')"

@@ -2,17 +2,22 @@
 """Drive one benchmark boot from outside the guest (tools/bench/README.md).
 
     bench_run.py onboard --base PREPARED.qcow2 --out ONBOARDED.qcow2 [--arch x86_64]
+    bench_run.py warmup --disk ONBOARDED.qcow2 --out DIR [--settle 600]
     bench_run.py run --lane punar --disk ONBOARDED.qcow2 --shape 8192 --out DIR [...]
-    bench_run.py install-omarchy --iso ISO --cidata CIDATA.img --secret-file F --out DISK.qcow2
+    bench_run.py install-omarchy --iso ISO --cidata CIDATA.img --secret-file F --out DISK.raw
 
 `onboard` creates the release image's first account once, through the same
 keyboard path tools/test-release-onboarding.sh proves in CI, and keeps the
-result as a qcow2 overlay. Every `run` then boots a fresh overlay of that
-disk cold, types the password at the greeter over QMP (the release image has
-no autologin), follows the in-guest probe's stream, records host clocks and
-host steal, captures the guest's network traffic from power-on to the end of
-the idle window, scans the guest's addresses once the probe is done, and
-writes host.json and result.json.
+result as a qcow2 overlay. `warmup` then boots that disk in place once at the
+measured resolution, signs in at the greeter, stays in the session for the
+settle time and shuts down cleanly, so first-login work is done before any
+measured run (install-omarchy does the same for Omarchy's first session).
+Every `run` then boots a fresh overlay of that disk cold, types the password
+at the greeter over QMP (the release image has no autologin), follows the
+in-guest probe's stream, records host clocks, host steal and host I/O wait,
+captures the guest's network traffic from power-on to the end of the idle
+window (and records whether tcpdump kept up), scans the guest's addresses
+once the probe is done, and writes host.json and result.json.
 
 The VM shape is fixed here so every system gets the same machine: q35 (virt
 on ARM64), 4 vCPU, the requested memory, UEFI with no Secure Boot keys
@@ -46,6 +51,15 @@ import qmp as qmplib  # noqa: E402
 
 GUEST_MAC = "52:54:00:be:0c:01"
 ONBOARDING_SCRIPT = REPO_ROOT / "tools" / "test-release-onboarding.sh"
+MEASURED_RESOLUTION = "1920x1080"
+# Run facts the harness sets itself. --meta may add facts but never replace
+# these: the report's validity and comparability checks trust them.
+RESERVED_META = frozenset({
+    "lane", "shape_mib", "vcpus", "arch", "accel", "resolution", "net", "login", "inject", "run_id",
+    "firmware", "qemu", "graphics", "disk_encryption", "disk_format", "probe_version",
+})
+# Host page cache still to be written back before a run may start (MiB).
+HOST_DIRTY_LIMIT_MIB = 64
 
 X86_FIRMWARE = [
     ("/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
@@ -115,11 +129,11 @@ class Machine:
     """One QEMU process with the harness's fixed shape."""
 
     def __init__(self, arch: str, disk: Path, memory_mib: int, workdir: Path, out: Path,
-                 resolution: str | None = "1920x1080", smp: int = 4, net: str = "user",
+                 resolution: str | None = MEASURED_RESOLUTION, smp: int = 4, net: str = "user",
                  tap: str | None = None, export: Path | None = None, config: Path | None = None,
                  privacy_dump: Path | None = None, extra: list[str] | None = None,
                  no_reboot: bool = True, credentials: list[Path] | None = None,
-                 user_net_options: str = ""):
+                 user_net_options: str = "", disk_format: str = "qcow2"):
         self.arch = arch
         self.accel, cpu = pick_accel(arch)
         self.workdir = workdir
@@ -137,7 +151,7 @@ class Machine:
             "-machine", ("q35" if arch == "x86_64" else "virt,highmem=on") + f",accel={self.accel}",
             "-cpu", cpu, "-smp", str(smp), "-m", str(memory_mib),
             *fw_args,
-            "-drive", f"file={disk},format=qcow2,if=none,id=benchdisk",
+            "-drive", f"file={disk},format={disk_format},if=none,id=benchdisk",
             "-device", device("virtio-blk-pci", "drive=benchdisk", "bootindex=1"),
             "-display", "none",
             "-serial", f"file:{out / 'serial.log'}",
@@ -233,19 +247,54 @@ def timeouts(accel: str) -> dict:
 # ---- host observations --------------------------------------------------------------
 
 def host_cpu_times():
+    """(total, steal, iowait) jiffies from the host's /proc/stat; None off Linux."""
     try:
         with open("/proc/stat") as handle:
             fields = handle.readline().split()
     except OSError:
         return None
     values = [int(v) for v in fields[1:9]]
-    return sum(values), values[7]
+    return sum(values), values[7], values[4]
 
 
-def steal_pct(start, end):
+def steal_pct(start, end, index: int = 1):
     if not start or not end or end[0] <= start[0]:
         return None
-    return round(100.0 * (end[1] - start[1]) / (end[0] - start[0]), 4)
+    return round(100.0 * (end[index] - start[index]) / (end[0] - start[0]), 4)
+
+
+def host_dirty_mib():
+    """Host page cache waiting to be written back (Dirty + Writeback), MiB."""
+    try:
+        text = Path("/proc/meminfo").read_text()
+    except OSError:
+        return None
+    values = {}
+    for line in text.splitlines():
+        key, _, rest = line.partition(":")
+        if key in ("Dirty", "Writeback"):
+            values[key] = int(rest.split()[0])
+    return round(sum(values.values()) / 1024, 1) if values else None
+
+
+def quiesce_host(limit_mib: float = HOST_DIRTY_LIMIT_MIB, timeout: float = 300) -> dict:
+    """Flush the host's page cache before a run starts.
+
+    The first lane of a cell can follow the heaviest host I/O of the cell
+    (an install, an image conversion, the probe injection). The steal gate
+    catches CPU contention but not a disk still writing back gigabytes, so
+    every run waits here until the host's dirty and writeback pages are
+    below the limit, and records how long that took.
+    """
+    started = time.monotonic()
+    os.sync()
+    dirty = host_dirty_mib()
+    while dirty is not None and dirty > limit_mib and time.monotonic() - started < timeout:
+        time.sleep(2)
+        os.sync()
+        dirty = host_dirty_mib()
+    return {"dirty_mib_at_start": dirty, "flush_wait_s": round(time.monotonic() - started, 1),
+            "dirty_limit_mib": limit_mib, "flushed": dirty is None or dirty <= limit_mib}
 
 
 def host_facts() -> dict:
@@ -350,6 +399,50 @@ def make_overlay(base: Path, overlay: Path, relative: bool = False) -> None:
                     str(overlay)], check=True)
 
 
+def parse_meta(items: list[str]) -> dict:
+    """--meta KEY=VALUE pairs; a reserved key is refused, not overwritten."""
+    out = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            die(f"--meta needs KEY=VALUE, got {item!r}")
+        if key in RESERVED_META:
+            die(f"--meta cannot set {key}: the harness records it itself")
+        out[key] = value
+    return out
+
+
+def login(args, machine: Machine, tail, t: dict, frame: Path, out: Path, clocks: dict) -> None:
+    """Get from power-on to the start of the graphical session, as a person would."""
+    q = machine.qmp
+    if args.login == "punar-greeter":
+        secret = Path(args.secret_file).read_text().strip("\r\n") if args.secret_file \
+            else onboarding_credentials()["password"]
+        record = tail.wait(machine, "greeter_ready", t["boot"])
+        if record is None:
+            die("the greeter never became ready (is the account created? was the probe injected?)")
+        clocks["greeter_record_s"] = tail.seen_at["greeter_ready"]
+        qmplib.wait_stable(q, frame, 30, alive=machine.alive)
+        clocks["prompt_stable_s"] = machine.elapsed()
+        save_png(frame, out / "greeter.png")
+        q.type_text(secret, enter=True)
+        clocks["typed_s"] = machine.elapsed()
+        del secret
+    elif args.login == "luks-autologin":
+        secret = Path(args.secret_file).read_text().strip("\r\n")
+        if not qmplib.wait_stable(q, frame, t["boot"], settle=2.0, checks=3, alive=machine.alive):
+            die("no stable disk-unlock prompt appeared")
+        clocks["prompt_stable_s"] = machine.elapsed()
+        save_png(frame, out / "unlock-prompt.png")
+        q.type_text(secret, enter=True)
+        clocks["typed_s"] = machine.elapsed()
+        del secret
+    session = tail.wait(machine, "session_ready", t["session"])
+    if session is None:
+        die("no graphical session within the timeout (wrong password, or no Hyprland/Quickshell)")
+    clocks["session_record_s"] = tail.seen_at["session_ready"]
+
+
 # ---- subcommands --------------------------------------------------------------------------
 
 def cmd_onboard(args) -> int:
@@ -419,13 +512,41 @@ def start_capture(interface: str, path: Path) -> subprocess.Popen:
     return proc
 
 
-def stop_capture(proc: subprocess.Popen | None) -> None:
-    if proc and proc.poll() is None:
+TCPDUMP_COUNTERS = (
+    ("captured", r"(\d+) packets? captured"),
+    ("received_by_filter", r"(\d+) packets? received by filter"),
+    ("dropped_by_kernel", r"(\d+) packets? dropped by kernel"),
+    ("dropped_by_interface", r"(\d+) packets? dropped by interface"),
+)
+
+
+def capture_stats(alive_until_stop: bool, stderr: str) -> dict:
+    """Whether a tcpdump capture is whole: it ran until the harness stopped it
+    and neither the kernel nor the interface dropped a packet. A capture that
+    died early or dropped packets under-counts what the guest sent, which
+    would read as a privacy win, so the report never uses it."""
+    stats: dict = {"method": "tcpdump", "alive_until_stop": alive_until_stop}
+    for key, pattern in TCPDUMP_COUNTERS:
+        match = re.search(pattern, stderr)
+        stats[key] = int(match.group(1)) if match else None
+    stats["complete"] = bool(alive_until_stop and stats["captured"] is not None
+                             and not stats["dropped_by_kernel"] and not stats["dropped_by_interface"])
+    return stats
+
+
+def stop_capture(proc: subprocess.Popen | None) -> dict | None:
+    if proc is None:
+        return None
+    alive = proc.poll() is None
+    if alive:
         subprocess.run(["sudo", "-n", "kill", "-INT", str(proc.pid)], check=False)
         try:
             proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
             subprocess.run(["sudo", "-n", "kill", "-KILL", str(proc.pid)], check=False)
+            proc.wait()
+    stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+    return capture_stats(alive, stderr)
 
 
 def leases_address(leases: Path | None) -> str | None:
@@ -439,6 +560,7 @@ def leases_address(leases: Path | None) -> str | None:
 
 
 def cmd_run(args) -> int:
+    extra_meta = parse_meta(args.meta)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=False)
     workdir = Path(tempfile.mkdtemp(prefix="br-"))
@@ -459,9 +581,12 @@ def cmd_run(args) -> int:
     credentials = []
     if args.inject == "credentials":
         credentials = smbios_credentials(workdir)
+    quiesce = quiesce_host()
     capture = None
+    capture_record = None
     if args.net == "tap":
         capture = start_capture(args.tap, pcap)
+    disk_format = image_format(Path(args.disk))
     machine = Machine(args.arch, overlay, args.shape, workdir, out, resolution=args.resolution,
                       net=args.net, tap=args.tap, export=export, config=config,
                       privacy_dump=pcap if args.net == "user" else None, credentials=credentials)
@@ -478,11 +603,9 @@ def cmd_run(args) -> int:
         "firmware": machine.firmware, "qemu": qemu_version(machine.binary),
         "graphics": "virtio-vga, no GPU acceleration (llvmpipe)" if args.arch == "x86_64"
                     else "virtio-gpu-pci, no GPU acceleration (llvmpipe)",
-        "disk_encryption": args.disk_encryption,
+        "disk_encryption": args.disk_encryption, "disk_format": disk_format,
     }
-    for item in args.meta:
-        key, _, value = item.partition("=")
-        meta[key] = value
+    meta.update(extra_meta)
     frame = workdir / "frame.ppm"
     stat_start = host_cpu_times()
     failure = None
@@ -491,32 +614,7 @@ def cmd_run(args) -> int:
         log(f"run {args.run_id}: {args.lane} {args.shape} MiB ({machine.accel})")
         machine.start()
         q = machine.qmp
-        if args.login == "punar-greeter":
-            secret = Path(args.secret_file).read_text().strip("\r\n") if args.secret_file \
-                else onboarding_credentials()["password"]
-            record = tail.wait(machine, "greeter_ready", t["boot"])
-            if record is None:
-                die("the greeter never became ready (is the account created? was the probe injected?)")
-            clocks["greeter_record_s"] = tail.seen_at["greeter_ready"]
-            qmplib.wait_stable(q, frame, 30, alive=machine.alive)
-            clocks["prompt_stable_s"] = machine.elapsed()
-            save_png(frame, out / "greeter.png")
-            q.type_text(secret, enter=True)
-            clocks["typed_s"] = machine.elapsed()
-            del secret
-        elif args.login == "luks-autologin":
-            secret = Path(args.secret_file).read_text().strip("\r\n")
-            if not qmplib.wait_stable(q, frame, t["boot"], settle=2.0, checks=3, alive=machine.alive):
-                die("no stable disk-unlock prompt appeared")
-            clocks["prompt_stable_s"] = machine.elapsed()
-            save_png(frame, out / "unlock-prompt.png")
-            q.type_text(secret, enter=True)
-            clocks["typed_s"] = machine.elapsed()
-            del secret
-        session = tail.wait(machine, "session_ready", t["session"])
-        if session is None:
-            die("no graphical session within the timeout (wrong password, or no Hyprland/Quickshell)")
-        clocks["session_record_s"] = tail.seen_at["session_ready"]
+        login(args, machine, tail, t, frame, out, clocks)
         time.sleep(5)
         try:
             save_png(q.screendump(frame), out / "desktop.png")
@@ -532,15 +630,18 @@ def cmd_run(args) -> int:
         host_steal["window_end"] = host_cpu_times()
         # The privacy capture covers power-on to the end of the idle window.
         if args.net == "tap":
-            stop_capture(capture)
+            capture_record = stop_capture(capture)
             capture = None
         else:
             q.object_del("privdump")
+            capture_record = {"method": "qemu filter-dump", "complete": True}
         done = tail.wait(machine, "done", t["post"] + (t["workload"] if args.workload else 0))
         if done is None:
             die("the probe did not finish")
         clocks["done_s"] = tail.seen_at["done"]
         privacy = pcap_summary.summarize(pcap, GUEST_MAC) if pcap.exists() else None
+        if privacy is not None:
+            privacy["capture"] = capture_record
         if args.net == "tap" and args.scan:
             targets = []
             lease = leases_address(Path(args.leases) if args.leases else None)
@@ -563,7 +664,11 @@ def cmd_run(args) -> int:
         # says why, and the report lists it as excluded.
         failure = str(error)
     finally:
-        stop_capture(capture)
+        late = stop_capture(capture)
+        if late is not None:
+            # Stopped here only when the run failed before the window ended.
+            late["complete"] = False
+            capture_record = late
         if machine.alive():
             machine.stop()
         clocks["qemu_exit_s"] = machine.elapsed() if machine.started else None
@@ -573,9 +678,12 @@ def cmd_run(args) -> int:
     host = host_facts()
     host["steal_pct_run"] = steal_pct(stat_start, stat_end)
     host["steal_pct_window"] = steal_pct(host_steal.get("window_start"), host_steal.get("window_end"))
+    host["iowait_pct_window"] = steal_pct(host_steal.get("window_start"), host_steal.get("window_end"), index=2)
+    host["quiesce"] = quiesce
     if privacy is None and pcap.exists():
         try:
             privacy = pcap_summary.summarize(pcap, GUEST_MAC)
+            privacy["capture"] = capture_record
         except (OSError, ValueError):
             privacy = None
     host_doc = {"schema": "punar-bench-host/1", "meta": meta, "host": host, "clocks": clocks,
@@ -608,14 +716,73 @@ def smbios_credentials(workdir: Path) -> list[Path]:
     return paths
 
 
+def cmd_warmup(args) -> int:
+    """One signed-in boot of the disk itself before any measured run.
+
+    Every measured run boots a throwaway overlay, so anything a system does
+    once, on its first login (caches, first-run scripts, a wallpaper scaled
+    to the screen), would otherwise be redone inside every run. This boot
+    writes to the disk in place: it signs in exactly as a measured run does,
+    at the measured resolution, stays in the session for --settle seconds
+    (the measured settle, 600 s, by default) and powers off cleanly. Anything
+    short of a clean power-off is a failure, because the next boot would
+    replay a journal in every run.
+    """
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    workdir = Path(tempfile.mkdtemp(prefix="bw-"))
+    os.chmod(workdir, 0o700)
+    config = workdir / "bench.conf"
+    config.write_text("run_id=warmup\nworkload=no\n")
+    export = out / "warmup.jsonl"
+    disk = Path(args.disk)
+    machine = Machine(args.arch, disk, args.shape, workdir, out, resolution=args.resolution,
+                      net=args.net, tap=args.tap, export=export, config=config,
+                      disk_format=image_format(disk))
+    t = timeouts(machine.accel)
+    tail = ExportTail(export)
+    clocks: dict = {}
+    report = {"disk": disk.name, "login": args.login, "resolution": args.resolution, "shape_mib": args.shape,
+              "settle_s": args.settle, "accel": machine.accel, "net": args.net}
+    failure = None
+    try:
+        log(f"warm-up boot of {disk.name} ({machine.accel}, {args.resolution})")
+        machine.start()
+        login(args, machine, tail, t, workdir / "frame.ppm", workdir, clocks)
+        time.sleep(args.settle)
+        report["clean_shutdown"] = machine.stop(graceful_timeout=300)
+        if not report["clean_shutdown"]:
+            die("the guest did not power off within 300 s of an ACPI power-down")
+    except BenchFailure as error:
+        failure = str(error)
+    finally:
+        if machine.alive():
+            machine.stop()
+        report["qemu_exit_s"] = machine.elapsed() if machine.started else None
+        shutil.rmtree(workdir, ignore_errors=True)
+    report["clocks"] = clocks
+    report["failure"] = failure
+    (out / "warmup.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    return 1 if failure else 0
+
+
 def cmd_install_omarchy(args) -> int:
-    """Unattended Omarchy install from its ISO and a CIDATA drive (owner-gated lane)."""
+    """Unattended Omarchy install from its ISO and a CIDATA drive (owner-gated lane).
+
+    The target is a sparse raw file, so it can be injected through a loop
+    device without a second full-size copy. After the installer's reboot the
+    disk passphrase is typed, SDDM signs the person in, and the first
+    session is held for --settle seconds at the measured resolution before a
+    clean power-off over SSH: the same first-login warm-up `warmup` gives
+    Punar (Omarchy binds its power key to a menu, so ACPI cannot power it
+    off). restore-stock.sh removes SSH afterwards.
+    """
     if os.environ.get("BENCH_OMARCHY_APPROVED") != "yes":
         die("the Omarchy lane needs the owner's approval (tools/bench/README.md); BENCH_OMARCHY_APPROVED is not 'yes'")
     out = Path(args.out)
     if out.exists():
         die(f"refusing to overwrite {out}")
-    subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", str(out), "40G"], check=True)
+    subprocess.run(["qemu-img", "create", "-q", "-f", "raw", str(out), "40G"], check=True)
     workdir = Path(tempfile.mkdtemp(prefix="bi-"))
     logdir = Path(args.logs)
     logdir.mkdir(parents=True, exist_ok=True)
@@ -627,8 +794,9 @@ def cmd_install_omarchy(args) -> int:
         "-device", "usb-storage,bus=benchusb.0,drive=benchcidata",
     ]
     # The installer reboots itself into the installed system, so no -no-reboot.
-    machine = Machine("x86_64", out, args.shape, workdir, logdir, resolution=None, net="user",
-                      user_net_options=",hostfwd=tcp:127.0.0.1:2322-:22", extra=extra, no_reboot=False)
+    machine = Machine("x86_64", out, args.shape, workdir, logdir, resolution=MEASURED_RESOLUTION, net="user",
+                      user_net_options=",hostfwd=tcp:127.0.0.1:2322-:22", extra=extra, no_reboot=False,
+                      disk_format="raw")
     ssh = ["ssh", "-i", args.ssh_key, "-p", "2322", "-o", "StrictHostKeyChecking=no",
            "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
            f"{args.user}@127.0.0.1"]
@@ -660,6 +828,19 @@ def cmd_install_omarchy(args) -> int:
         else:
             die("the install did not finish within the timeout")
         report["install_to_ssh_s"] = machine.elapsed()
+        # The first desktop session: wait for Hyprland, then hold it for the
+        # same settle a measured run gets before its window.
+        session_deadline = time.monotonic() + 600
+        while time.monotonic() < session_deadline:
+            if subprocess.run(ssh + ["pgrep", "-u", args.user, "-x", "Hyprland"], capture_output=True,
+                              check=False).returncode == 0:
+                report["desktop_after_s"] = machine.elapsed()
+                break
+            time.sleep(5)
+        else:
+            die("no Hyprland session for the person within 600 s of SSH answering")
+        time.sleep(args.settle)
+        report["warmup_settle_s"] = args.settle
         timing = subprocess.run(ssh + ["cat", "/var/log/omarchy-install-timing.json"], capture_output=True,
                                 text=True, check=False)
         if timing.returncode == 0:
@@ -670,10 +851,12 @@ def cmd_install_omarchy(args) -> int:
         subprocess.run(ssh + ["sudo", "-S", "systemctl", "poweroff"], input=secret + "\n", text=True,
                        capture_output=True, check=False)
         del secret
-        end = time.monotonic() + 180
+        end = time.monotonic() + 300
         while machine.alive() and time.monotonic() < end:
             time.sleep(1)
         report["clean_shutdown"] = not machine.alive()
+        if not report["clean_shutdown"]:
+            die("the installed system did not power off within 300 s")
     finally:
         if machine.alive():
             machine.stop()
@@ -697,6 +880,18 @@ def main(argv: list[str]) -> int:
     onboard.add_argument("--frames")
     onboard.add_argument("--settle", type=int, default=30)
 
+    warm = sub.add_parser("warmup", help="one signed-in boot of the disk in place before measured runs")
+    warm.add_argument("--disk", required=True)
+    warm.add_argument("--out", required=True)
+    warm.add_argument("--arch", default="x86_64", choices=("x86_64", "arm64"))
+    warm.add_argument("--shape", type=int, default=8192)
+    warm.add_argument("--resolution", default=MEASURED_RESOLUTION)
+    warm.add_argument("--net", default="user", choices=("user", "tap"))
+    warm.add_argument("--tap", default="benchtap0")
+    warm.add_argument("--login", default="punar-greeter", choices=("punar-greeter", "luks-autologin"))
+    warm.add_argument("--secret-file", help="file holding the password or passphrase to type")
+    warm.add_argument("--settle", type=int, default=600, help="seconds in the session before powering off")
+
     run = sub.add_parser("run", help="one measured boot")
     run.add_argument("--lane", required=True)
     run.add_argument("--disk", required=True)
@@ -704,7 +899,7 @@ def main(argv: list[str]) -> int:
     run.add_argument("--out", required=True)
     run.add_argument("--run-id", required=True)
     run.add_argument("--arch", default="x86_64", choices=("x86_64", "arm64"))
-    run.add_argument("--resolution", default="1920x1080")
+    run.add_argument("--resolution", default=MEASURED_RESOLUTION)
     run.add_argument("--net", default="user", choices=("user", "tap"))
     run.add_argument("--tap", default="benchtap0")
     run.add_argument("--leases")
@@ -727,6 +922,7 @@ def main(argv: list[str]) -> int:
     install.add_argument("--user", default="bench")
     install.add_argument("--shape", type=int, default=8192)
     install.add_argument("--timeout", type=int, default=2400)
+    install.add_argument("--settle", type=int, default=600, help="seconds in the first session before powering off")
     install.add_argument("--out", required=True)
     install.add_argument("--logs", required=True)
 
@@ -735,6 +931,8 @@ def main(argv: list[str]) -> int:
     try:
         if args.command == "onboard":
             return cmd_onboard(args)
+        if args.command == "warmup":
+            return cmd_warmup(args)
         if args.command == "run":
             return cmd_run(args)
         return cmd_install_omarchy(args)

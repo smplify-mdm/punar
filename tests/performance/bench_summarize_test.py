@@ -7,13 +7,17 @@ printed, one claim per family of figures, like setups only, failed and
 missing runs counted, lower bounds never winning), the parser's edge cases
 (dm-crypt attribution, the validity gate), the privacy summary on a
 synthetic capture (names hidden behind QUIC, ECH and DoH counted), nmap
-parsing, the dispatch plan (balanced order, the cell cap), the Omarchy
-lane's secret, CIDATA rendering and stock restore, and that the release
-image's test account is still where the harness reads it.
+parsing, the dispatch plan (balanced order, the cell cap), which ci.yml
+runs may supply the release image, the runner's capture check and metadata
+guard, the secret scrubber, the Omarchy lane's secret, pin check, CIDATA
+rendering and stock restore, and that the release image's test account is
+still where the harness reads it.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import ipaddress
 import json
 import os
@@ -33,6 +37,8 @@ import bench_plan  # noqa: E402
 import bench_report  # noqa: E402
 import pcap_summary  # noqa: E402
 import portscan  # noqa: E402
+import scrub  # noqa: E402
+import source_run  # noqa: E402
 
 
 def merge(base: dict, extra: dict) -> dict:
@@ -582,6 +588,85 @@ class PlanTest(unittest.TestCase):
                 bench_plan.plan(*args, seed=1, omarchy_approved=False)
 
 
+class SourceRunTest(unittest.TestCase):
+    REPO_ID = 1345461533
+
+    def artifact(self, run_id, created, branch="main", head_repo=REPO_ID, expired=False):
+        return {"expired": expired, "created_at": created,
+                "workflow_run": {"id": run_id, "head_branch": branch, "head_repository_id": head_repo,
+                                 "repository_id": self.REPO_ID}}
+
+    def run_doc(self, **changes):
+        doc = {"id": 7, "path": ".github/workflows/ci.yml", "event": "push", "head_branch": "main",
+               "status": "completed", "head_sha": "abc", "repository": {"id": self.REPO_ID},
+               "head_repository": {"id": self.REPO_ID}}
+        doc.update(changes)
+        return doc
+
+    JOBS = [{"name": "debian-amd64-installer (hybrid ISO + install/refusal parity)", "conclusion": "success"}]
+
+    def test_candidates_skip_forks_other_branches_and_expired(self):
+        stream = "\n".join(json.dumps(a) for a in [
+            self.artifact(1, "2026-09-20T00:00:00Z"),
+            self.artifact(2, "2026-09-24T00:00:00Z", head_repo=999),         # a fork's branch called main
+            self.artifact(3, "2026-09-23T00:00:00Z", branch="feature"),
+            self.artifact(4, "2026-09-25T00:00:00Z", expired=True),
+            self.artifact(5, "2026-09-22T00:00:00Z"),
+        ])
+        artifacts = source_run.flatten(source_run.json_stream(stream), "artifacts")
+        self.assertEqual(source_run.candidates(artifacts), [5, 1])
+        page = json.dumps({"total_count": 1, "artifacts": [self.artifact(8, "2026-09-21T00:00:00Z")]})
+        self.assertEqual(source_run.candidates(source_run.flatten(source_run.json_stream(page), "artifacts")), [8])
+
+    def test_only_a_push_or_dispatch_on_main_of_this_repository_is_trusted(self):
+        self.assertEqual(source_run.check(self.run_doc(), self.JOBS), [])
+        self.assertEqual(source_run.check(self.run_doc(event="workflow_dispatch"), self.JOBS), [])
+        for changes, needle in (({"event": "pull_request"}, "event is 'pull_request'"),
+                                ({"head_repository": {"id": 999}}, "another repository"),
+                                ({"head_branch": "feature"}, "branch is 'feature'"),
+                                ({"path": ".github/workflows/evil.yml"}, "workflow is"),
+                                ({"status": "in_progress"}, "not completed")):
+            reasons = source_run.check(self.run_doc(**changes), self.JOBS)
+            self.assertTrue(any(needle in r for r in reasons), (changes, reasons))
+        failed = [{"name": self.JOBS[0]["name"], "conclusion": "failure"}]
+        self.assertTrue(any("did not succeed" in r for r in source_run.check(self.run_doc(), failed)))
+        self.assertTrue(any("no debian-amd64-installer" in r for r in source_run.check(self.run_doc(), [])))
+
+
+class RunnerTest(unittest.TestCase):
+    def test_capture_is_whole_only_if_tcpdump_lasted_and_dropped_nothing(self):
+        import bench_run
+        good = "listening on benchtap0\n120 packets captured\n120 packets received by filter\n0 packets dropped by kernel\n"
+        self.assertTrue(bench_run.capture_stats(True, good)["complete"])
+        self.assertFalse(bench_run.capture_stats(False, good)["complete"])
+        dropped = good.replace("0 packets dropped by kernel", "3 packets dropped by kernel")
+        self.assertFalse(bench_run.capture_stats(True, dropped)["complete"])
+        self.assertFalse(bench_run.capture_stats(True, "tcpdump: benchtap0: No such device\n")["complete"])
+
+    def test_meta_cannot_overwrite_the_harness_facts(self):
+        import bench_run
+        self.assertEqual(bench_run.parse_meta(["cell=s8192-r1", "position=2"]), {"cell": "s8192-r1", "position": "2"})
+        for item in ("accel=kvm", "login=none", "disk_encryption=luks2", "lane=omarchy", "novalue"):
+            with self.assertRaises(bench_run.BenchFailure), contextlib.redirect_stderr(io.StringIO()):
+                bench_run.parse_meta([item])
+
+
+class ScrubTest(unittest.TestCase):
+    def test_secrets_are_redacted_from_text_files_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "lane").mkdir()
+            (root / "lane" / "serial.log").write_text("typed abc123throwaway at the prompt\n")
+            (root / "lane" / "result.json").write_text('{"x": "amber river lantern"}\n')
+            (root / "lane" / "frame.png").write_bytes(b"abc123throwaway")
+            (root / "lane" / "clean.txt").write_text("nothing here\n")
+            replaced = scrub.scrub([root], [b"abc123throwaway", b"amber river lantern"])
+            self.assertEqual(sorted(Path(p).name for p in replaced), ["result.json", "serial.log"])
+            self.assertEqual((root / "lane" / "serial.log").read_text(), "typed [redacted] at the prompt\n")
+            self.assertNotIn("amber", (root / "lane" / "result.json").read_text())
+            self.assertEqual((root / "lane" / "frame.png").read_bytes(), b"abc123throwaway")
+
+
 class OmarchyLaneTest(unittest.TestCase):
     def test_new_secret_has_no_newline(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -594,6 +679,19 @@ class OmarchyLaneTest(unittest.TestCase):
             again = subprocess.run([str(REPO / "tools/bench/omarchy/new-secret.sh"), str(path)],
                                    capture_output=True, check=False)
             self.assertNotEqual(again.returncode, 0)
+
+    def test_pin_check_downloads_nothing_and_approval_is_still_required(self):
+        env = {k: v for k, v in os.environ.items() if k != "BENCH_OMARCHY_APPROVED"}
+        check = subprocess.run([str(REPO / "tools/bench/omarchy/fetch-iso.sh"), "--check"], env=env,
+                               capture_output=True, text=True, check=False)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertIn("nothing downloaded", check.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            refused = subprocess.run([str(REPO / "tools/bench/omarchy/fetch-iso.sh"), str(Path(directory) / "o.iso")],
+                                     env=env, capture_output=True, text=True, check=False)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("approval", refused.stderr)
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
     @unittest.skipUnless(shutil.which("openssl"), "openssl not installed")
     def test_cidata_renders_valid_json(self):
