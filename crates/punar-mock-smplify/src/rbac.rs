@@ -39,6 +39,7 @@ pub struct AdminDirectory {
     roles: BTreeMap<String, ScopeSet>,
     admins: BTreeMap<String, String>,
     recovery_release_roles: BTreeSet<String>,
+    policy_publish_roles: BTreeSet<String>,
 }
 
 impl AdminDirectory {
@@ -81,20 +82,23 @@ impl AdminDirectory {
                 }
             }
         }
-        let recovery_release_roles = document
-            .get("recovery_release_roles")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect();
+        let role_list = |key: &str| -> BTreeSet<String> {
+            document
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        };
         AdminDirectory {
             source: Some(path),
             unrecognised_scopes,
             roles,
             admins,
-            recovery_release_roles,
+            recovery_release_roles: role_list("recovery_release_roles"),
+            policy_publish_roles: role_list("policy_publish_roles"),
         }
     }
 
@@ -128,6 +132,14 @@ impl AdminDirectory {
     pub fn permits_recovery_release(&self, admin: &str) -> bool {
         self.role_of(admin)
             .is_some_and(|role| self.recovery_release_roles.contains(role))
+    }
+
+    /// Publishing the policy every enrolled device enforces is a permission
+    /// of its own, like recovery release: granted only to a role the fixture
+    /// names in `policy_publish_roles`, and to nobody when it names none.
+    pub fn permits_policy_publish(&self, admin: &str) -> bool {
+        self.role_of(admin)
+            .is_some_and(|role| self.policy_publish_roles.contains(role))
     }
 
     /// Number of known identities (startup log).
@@ -204,6 +216,25 @@ mod tests {
         assert!(!rbac.permits_recovery_release("cio@acme.com"));
         assert!(rbac.permits_recovery_release("secops@acme.com"));
         assert!(!rbac.permits_recovery_release("nobody@acme.com"));
+
+        assert!(!rbac.permits_policy_publish("helpdesk@acme.com"));
+        assert!(!rbac.permits_policy_publish("cio@acme.com"));
+        assert!(rbac.permits_policy_publish("secops@acme.com"));
+        assert!(!rbac.permits_policy_publish("nobody@acme.com"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A table that names no publishing role lets nobody publish, however
+    /// broad an identity's query scopes.
+    #[test]
+    fn publishing_is_granted_only_by_name() {
+        let dir = fixture_dir(
+            "no-publish",
+            r#"{"v":1,"roles":{"security_admin":["inventory","authority"]},
+                "admins":{"secops@acme.com":"security_admin"}}"#,
+        );
+        let rbac = AdminDirectory::load(&dir);
+        assert!(!rbac.permits_policy_publish("secops@acme.com"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

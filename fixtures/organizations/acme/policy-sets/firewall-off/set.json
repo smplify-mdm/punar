@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "_note": "dev/CI fixture — the Acme baseline with its firewall rule turned off. Served by punar-mock-smplify once admin.policy_publish names it; an enrolled device applies it on its next reconcile pass.",
+  "assignment": "policies",
+  "envelopes": [
+    {
+      "envelope": "policy-source-eng-baseline-v12.json",
+      "desired_state": "desired-state-eng-baseline-v12.json"
+    }
+  ]
+}

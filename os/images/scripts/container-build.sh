@@ -239,6 +239,11 @@ stage_desktop_extra() {
     # served until AI capabilities land (M7+).
     cp "${REPO_ROOT}/fixtures/organizations/acme/"*.json \
        "${dev_extra}/usr/share/punar/fixtures/acme/"
+    # The policy sets admin.policy_publish chooses between (milestone-5.md
+    # §4.4): m5-check publishes them in turn to exercise the device's live
+    # policy refresh against the mock the image ships.
+    cp -r "${REPO_ROOT}/fixtures/organizations/acme/policy-sets" \
+       "${dev_extra}/usr/share/punar/fixtures/acme/"
     # M6: Atlas project fixture for the in-VM developer-environment
     # exercise (milestone-6.md §8) — m6-check copies it from
     # /usr/share/punar/fixtures/projects/atlas to ~punar/atlas and asserts

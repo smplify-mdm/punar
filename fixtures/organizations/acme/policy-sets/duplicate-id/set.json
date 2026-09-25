@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "_note": "dev/CI fixture — invalid BY DESIGN: every file is valid against its schema, but the set names the baseline twice. A device must refuse the whole set, keep enforcing the policy it has, and record the refusal once.",
+  "assignment": "policies",
+  "envelopes": [
+    {
+      "envelope": "policy-source-eng-baseline-v12.json",
+      "desired_state": "desired-state-eng-baseline-v12.json"
+    },
+    {
+      "envelope": "policy-source-eng-baseline-v12.json",
+      "desired_state": "desired-state-eng-baseline-v12.json"
+    }
+  ]
+}

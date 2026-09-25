@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | `org.discover` | `{domain}` | `{"organization": <org.json verbatim>}` |
 //! | `enroll.register` | `{device_id, bootstrap}` | `{"device_token", "attestation": "simulated", "organization"}` |
-//! | `policy.fetch` | `{device_token}` | `{"policies": [<envelope + embedded policy>]}` |
+//! | `policy.fetch` | `{device_token}` | `{"policies": [<envelope + embedded policy>], "assignment"}` — the published set |
 //! | `compliance.report` | `{device_token, report}` | `{"accepted": true}` |
 //! | `inventory.report` | `{device_token, inventory}` | `{"accepted": true}` |
 //! | `recovery.key` | `{device_token}` | authenticated tenant HPKE + receipt-verification public material |
@@ -28,6 +28,7 @@
 //! | `admin.query_result` | `{admin, query_id}` | `{status, answer?}` |
 //! | `admin.fleet` | `{admin}` | the section 12.1 aggregate as structured data |
 //! | `admin.recovery_release` | `{admin, device_id, reason}` | one audited plaintext recovery-key release; dev/CI only |
+//! | `admin.policy_publish` | `{admin, set}` | `{published, assignment, policy_ids}` — which fixture policy set every `policy.fetch` serves from now on; audited |
 //!
 //! The admin half is role-gated by [`crate::rbac`] **before** a query is
 //! enqueued — an administrator without the role cannot even ask. That check
@@ -54,7 +55,7 @@ use serde_json::{Value, json};
 use punar_common::query::{MAX_QUERIES_PER_SYNC, PendingQuery, QueryScope};
 
 use crate::config::MockConfig;
-use crate::fixtures::{self, FixtureError, FixtureSet};
+use crate::fixtures::{self, DEFAULT_POLICY_SET, FixtureError, FixtureSet};
 use crate::fleet;
 use crate::protocol::{self, ErrorCode, MockError, error_line, result_line};
 use crate::state::{ATTESTATION_SIMULATED, QueryStatus, StateStore};
@@ -132,6 +133,17 @@ impl MockServer {
     pub fn new(cfg: MockConfig) -> Result<MockServer, StartupError> {
         let fixtures = fixtures::load(&cfg.fixtures_dir).map_err(StartupError::Fixtures)?;
         let state = StateStore::open(&cfg.state_dir).map_err(StartupError::State)?;
+        // A published set this fixture tree no longer has would leave
+        // policy.fetch nothing honest to serve.
+        if let Some(published) = state.published_policy() {
+            if !fixtures.policy_sets.contains_key(&published.set) {
+                return Err(StartupError::Fixtures(FixtureError(format!(
+                    "{}: the published policy set {:?} is not in the fixture tree",
+                    cfg.state_dir.display(),
+                    published.set
+                ))));
+            }
+        }
         Ok(MockServer {
             inner: Arc::new(Inner {
                 socket_path: cfg.socket,
@@ -152,6 +164,16 @@ impl MockServer {
     /// after a restart because state persists deliberately).
     pub fn device_count(&self) -> usize {
         self.inner.state.lock().unwrap().device_count()
+    }
+
+    /// The policy set `policy.fetch` serves (startup log line).
+    pub fn published_policy_set(&self) -> String {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .published_policy()
+            .map_or_else(|| DEFAULT_POLICY_SET.to_string(), |p| p.set.clone())
     }
 
     /// Bind the socket (stale files unlinked), set `0600` **before**
@@ -441,6 +463,16 @@ struct AdminQueryResultParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AdminPolicyPublishParams {
+    admin: String,
+    /// A fixture set's directory name — names only, so the request fits the
+    /// wire's line limit and nothing an administrator sends is served as
+    /// policy.
+    set: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AdminRecoveryReleaseParams {
     admin: String,
     device_id: String,
@@ -490,6 +522,7 @@ fn dispatch(inner: &Inner, method: &str, params: Option<Value>) -> Result<Value,
         "admin.query_result" => admin_query_result(inner, params),
         "admin.fleet" => admin_fleet(inner, params),
         "admin.recovery_release" => admin_recovery_release(inner, params),
+        "admin.policy_publish" => admin_policy_publish(inner, params),
         _ => Err(MockError::with_details(
             ErrorCode::UnknownMethod,
             format!("{method} is not a method of the mock control plane."),
@@ -557,11 +590,23 @@ fn enroll_register(inner: &Inner, params: Option<Value>) -> Result<Value, MockEr
     }))
 }
 
+/// Serve the published set — the default until `admin.policy_publish` names
+/// another — with the marker saying what the list is (docs/api/ipc.md
+/// section 5.9), so an empty one is never read as more than it says.
 fn policy_fetch(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
     let p: PolicyFetchParams = parse_params("policy.fetch", params)?;
     let state = inner.state.lock().unwrap();
     require_token(&state, &p.device_token)?;
-    Ok(json!({"policies": inner.fixtures.policies}))
+    let name = state
+        .published_policy()
+        .map_or(DEFAULT_POLICY_SET, |published| published.set.as_str());
+    let Some(set) = inner.fixtures.policy_sets.get(name) else {
+        return Err(MockError::new(
+            ErrorCode::Internal,
+            format!("The published policy set {name:?} is not in the fixture tree."),
+        ));
+    };
+    Ok(json!({"policies": set.policies, "assignment": set.assignment}))
 }
 
 fn compliance_report(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
@@ -1047,6 +1092,84 @@ fn admin_recovery_release(inner: &Inner, params: Option<Value>) -> Result<Value,
             "release_once": true,
             "warning": "dev/CI mock: asserted fixture identity, not a production IdP; protect this one-time response and never log it",
         })
+    }))
+}
+
+/// Dev/CI: change what the organization serves to every enrolled device, so
+/// the device's live policy refresh can be exercised against the real mock.
+/// A separate permission from every query scope (`policy_publish_roles`),
+/// failing closed, and every attempt is audited — publishing policy is the
+/// most consequential thing an organization does to a fleet.
+fn admin_policy_publish(inner: &Inner, params: Option<Value>) -> Result<Value, MockError> {
+    let p: AdminPolicyPublishParams = parse_params("admin.policy_publish", params)?;
+    if !valid_release_identifier(&p.set, 64) {
+        return Err(MockError::with_details(
+            ErrorCode::InvalidParams,
+            "A policy set is named by its fixture directory: 1–64 letters, numbers, '.', '_', ':' or '-'.",
+            json!({"param": "set"}),
+        ));
+    }
+    let audit = |outcome: &str| {
+        inner
+            .state
+            .lock()
+            .unwrap()
+            .append_policy_publication(&p.admin, &p.set, outcome)
+            .map_err(internal)
+    };
+    if let Err(error) = require_admin(inner, &p.admin) {
+        audit("denied")?;
+        return Err(error);
+    }
+    if !inner.fixtures.admins.permits_policy_publish(&p.admin) {
+        audit("denied")?;
+        return Err(MockError::with_details(
+            ErrorCode::Denied,
+            format!(
+                "The role {:?} may not publish policy. The attempt was audited. Next step: a role listed in policy_publish_roles publishes it.",
+                inner.fixtures.admins.role_of(&p.admin).unwrap_or("unknown")
+            ),
+            json!({"admin": p.admin, "identity_verified": false}),
+        ));
+    }
+    let Some(set) = inner.fixtures.policy_sets.get(&p.set) else {
+        audit("not_found")?;
+        return Err(MockError::with_details(
+            ErrorCode::NotFound,
+            format!(
+                "No policy set {:?} in the fixture tree. Next step: one of {}.",
+                p.set,
+                inner
+                    .fixtures
+                    .policy_sets
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            json!({"set": p.set}),
+        ));
+    };
+    inner
+        .state
+        .lock()
+        .unwrap()
+        .publish_policy(&p.set, &p.admin)
+        .map_err(internal)?;
+    audit("published")?;
+    eprintln!(
+        "punar-mock-smplify: {} published policy set {:?} (assignment {}, {} polic(ies))",
+        p.admin,
+        p.set,
+        set.assignment,
+        set.policies.len()
+    );
+    Ok(json!({
+        "published": p.set,
+        "assignment": set.assignment,
+        "policy_ids": set.policy_ids(),
+        "identity_verified": false,
+        "note": "enrolled devices fetch it on their next sync · one reconcile period (~120 s) · nothing is pushed to a device",
     }))
 }
 

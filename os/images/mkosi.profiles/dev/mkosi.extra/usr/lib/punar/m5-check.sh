@@ -22,7 +22,9 @@
 # asserted on the mock's RECEIVED side (exact category-only key allowlists
 # — the spec 24/54 privacy assertion) → offline (spec 55: cached policy
 # enforced, transition-audited unreachable) → recovery (latest-wins: one
-# new line) → offline unenroll → personal restore. Screenshots capture the
+# new line) → live policy refresh (the organization publishes another set,
+# the next pass enforces it; a refused set changes nothing; the default is
+# restored) → offline unenroll → personal restore. Screenshots capture the
 # enrolled bar chrome and the restored calm-paper bar as human evidence;
 # every machine assertion reads files/IPC directly.
 #
@@ -475,6 +477,116 @@ check_eq "received-compliance grew by exactly one line (latest-wins: the queue i
 recovery_events="$(jq -s '[.[] | select(.action == "enroll.sync" and .result == "success")] | length' "${AUDIT_LOG}" 2>/dev/null)"
 check_eq "enroll.sync recovery events (one per outage, not per retry)" 1 \
     "${recovery_events}"
+
+# --- 14b. live policy refresh (milestone-5.md §5.1, docs/api/ipc.md §5.10) --
+# The organization changes what it serves while the device is enrolled; the
+# next reconcile pass fetches it, checks it whole and enforces it in the same
+# pass. A set the device must refuse changes nothing on disk. The default set
+# is published again at the end, so step 15 and every later check see the
+# policy they always did (the mock's published set persists in MOCK_STATE).
+mock_rpc() {
+    "${CTL}" --socket "${MOCK_SOCK}" debug rpc "$1" --params "$2" 2>&1
+}
+# publish <set> — as the one fixture role allowed to (policy_publish_roles).
+publish() {
+    mock_rpc admin.policy_publish "{\"admin\":\"secops@acme.com\",\"set\":\"$1\"}" \
+        > "${RUN_DIR}/m5-publish-$1.json"
+    jq_check "the mock publishes policy set $1" "${RUN_DIR}/m5-publish-$1.json" \
+        ".published == \"$1\""
+}
+# refresh_pass <label> — one reconcile pass, then enroll status saved as
+# m5-enroll-status-<label>.json. Up to three passes until a refresh newer
+# than the call has been recorded: the two offline passes of step 13 leave
+# the fetch backed off for one pass, and the recovery pass of step 14 may not
+# have spent it. The second's wait keeps an earlier record out of the window.
+refresh_pass() {
+    sleep 1
+    refresh_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    n=0
+    while [ "${n}" -lt 3 ]; do
+        n=$((n + 1))
+        "${CTL}" --json reconcile > "${RUN_DIR}/m5-reconcile-$1.json" 2>&1
+        "${CTL}" --json enroll status > "${RUN_DIR}/m5-enroll-status-$1.json" 2>&1
+        if jq -e --arg since "${refresh_since}" \
+                '(.policy.last_refresh.at // "") >= $since' \
+                "${RUN_DIR}/m5-enroll-status-$1.json" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+}
+baseline_sum="$(sha256sum "${POLICY_D}/eng-baseline-v12.json" 2>/dev/null | cut -d' ' -f1)"
+
+publish firewall-off
+refresh_pass firewall-off
+jq_check "refresh: the changed baseline was applied, and is what enroll status reports" \
+    "${RUN_DIR}/m5-enroll-status-firewall-off.json" \
+    '.policy.last_refresh.result == "applied" and .policy_ids == ["eng-baseline-v12"]
+     and (.policy.revision | startswith("sha256:"))'
+"${CTL}" --json policy explain security.firewall \
+    > "${RUN_DIR}/m5-explain-firewall-off.json" 2>&1
+jq_check "refresh: explain cites the organization's baseline and its new value" \
+    "${RUN_DIR}/m5-explain-firewall-off.json" \
+    '.effective_value == "disabled" and .source.policy_id == "eng-baseline-v12"'
+jq_check "refresh: the same pass remediated the firewall to the new value" \
+    "${RUN_DIR}/m5-reconcile-firewall-off.json" \
+    '[.capabilities[] | select(.capability == "security.firewall")][0]
+     | .desired_state == "disabled" and .current_state == "enabled"
+       and .remediation == "applied"'
+applied_sum="$(sha256sum "${POLICY_D}/eng-baseline-v12.json" 2>/dev/null | cut -d' ' -f1)"
+if [ -n "${applied_sum}" ] && [ "${applied_sum}" != "${baseline_sum}" ]; then
+    note "ok   policy.d/eng-baseline-v12.json replaced by the published set"
+else
+    note "FAIL policy.d/eng-baseline-v12.json unchanged after the refresh"
+    FAILED=1
+fi
+
+publish duplicate-id
+refresh_pass duplicate-id
+jq_check "refresh: a set with a duplicate policy id is refused whole" \
+    "${RUN_DIR}/m5-enroll-status-duplicate-id.json" \
+    '.policy.last_refresh.result == "rejected"
+     and .policy.last_refresh.reason == "duplicate_policy_id"
+     and .policy_ids == ["eng-baseline-v12"]'
+check_eq "refresh: policy.d byte-identical after the refused set" "${applied_sum}" \
+    "$(sha256sum "${POLICY_D}/eng-baseline-v12.json" 2>/dev/null | cut -d' ' -f1)"
+if [ ! -e "${STATE_DIR}/.policy.d.next" ]; then
+    note "ok   no staging directory left beside policy.d"
+else
+    note "FAIL ${STATE_DIR}/.policy.d.next left behind"
+    FAILED=1
+fi
+
+publish plus-role
+refresh_pass plus-role
+jq_check "refresh: an added role policy is written and owned" \
+    "${RUN_DIR}/m5-enroll-status-plus-role.json" \
+    '.policy.last_refresh.result == "applied"
+     and .policy_ids == ["eng-baseline-v12", "eng-role-sre"]'
+check_eq "policy.d/eng-role-sre.json mode" "600" \
+    "$(stat -c '%a' "${POLICY_D}/eng-role-sre.json" 2>/dev/null)"
+
+publish default
+refresh_pass default
+jq_check "refresh: the default set is enforced again (role file removed)" \
+    "${RUN_DIR}/m5-enroll-status-default.json" \
+    '.policy.last_refresh.result == "applied" and .policy_ids == ["eng-baseline-v12"]'
+check_eq "policy.d is back to the baseline alone" "eng-baseline-v12.json" \
+    "$(find "${POLICY_D}" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')"
+check_eq "policy.d/eng-baseline-v12.json byte-identical to the enrolled one" \
+    "${baseline_sum}" \
+    "$(sha256sum "${POLICY_D}/eng-baseline-v12.json" 2>/dev/null | cut -d' ' -f1)"
+if nft -j list table inet punar-base >/dev/null 2>&1; then
+    note "ok   nft table back once the default set re-enabled the firewall"
+else
+    note "FAIL nft table absent after the default set was restored"
+    FAILED=1
+fi
+policy_applied="$(jq -s '[.[] | select(.action == "enroll.policy" and .result == "applied")] | length' "${AUDIT_LOG}" 2>/dev/null)"
+check_eq "enroll.policy applied events (one per commit)" 3 "${policy_applied}"
+policy_rejected="$(jq -s '[.[] | select(.action == "enroll.policy" and .result == "rejected")] | length' "${AUDIT_LOG}" 2>/dev/null)"
+check_eq "enroll.policy rejected events (once for the refused set)" 1 "${policy_rejected}"
+token_grep_zero "post-refresh"
 
 # Snapshot the mock's received side for the export BEFORE unenrolling
 # (the mock keeps history after unenroll — honest: unenrollment stops the

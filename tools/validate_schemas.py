@@ -143,6 +143,16 @@ MANIFEST: list[tuple[str, str | None]] = [
     ("fixtures/organizations/acme/admins.json", None),
     ("fixtures/organizations/acme/desired-state-*.json", "schemas/desired-state/desired-state.json"),
     ("fixtures/organizations/acme/policy-source-*.json", "schemas/policy/policy-source.json"),
+    # Policy sets the dev/CI mock serves once admin.policy_publish names one
+    # (milestone-5.md section 4.4). Every envelope and desired state in them
+    # is schema-valid, including the duplicate-id set, which is invalid only
+    # as a SET (the device must refuse it). set.json is the mock's own
+    # manifest, versioned by review like admins.json.
+    ("fixtures/organizations/acme/policy-sets/*/set.json", None),
+    ("fixtures/organizations/acme/policy-sets/*/desired-state-*.json",
+     "schemas/desired-state/desired-state.json"),
+    ("fixtures/organizations/acme/policy-sets/*/policy-source-*.json",
+     "schemas/policy/policy-source.json"),
     # --- seed data: fixtures/policies/ (fixtures/README.md table) -----------
     ("fixtures/policies/ai-policy-*.yaml", "schemas/policy/ai-policy.json"),
     ("fixtures/policies/policy-source-*.json", "schemas/policy/policy-source.json"),

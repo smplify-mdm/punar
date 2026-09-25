@@ -1101,3 +1101,57 @@ fn a_down_data_owner_does_not_fail_an_enrollment() {
         .result("enroll.start", Some(json!({ "org_domain": "acme.com" })));
     assert_eq!(result["enrolled"], true, "{result}");
 }
+
+/// Not a query: the live policy refresh, against the same real mock. The
+/// organization publishes another policy set, and the enrolled device
+/// enforces it on its next pass; a set the device must refuse changes
+/// nothing; an explicit "nothing assigned" withdraws the policy and leaves
+/// the device enrolled.
+#[test]
+fn a_policy_published_on_the_real_mock_reaches_the_device_on_its_next_pass() {
+    let rig = rig("policy-refresh");
+    rig.enroll();
+    let publish = |set: &str| {
+        rig.cp
+            .result("admin.policy_publish", json!({"admin": SECOPS, "set": set}))
+    };
+    let status = || rig.daemon.result("enroll.status", None);
+
+    publish("firewall-off");
+    rig.reconcile();
+    assert_eq!(status()["policy"]["last_refresh"]["result"], "applied");
+    assert_eq!(
+        rig.daemon.mock.state(),
+        json!("disabled"),
+        "enforced in that pass"
+    );
+
+    publish("duplicate-id");
+    rig.reconcile();
+    let refused = status();
+    assert_eq!(
+        refused["policy"]["last_refresh"],
+        json!({"at": refused["policy"]["last_refresh"]["at"], "result": "rejected",
+               "reason": "duplicate_policy_id"})
+    );
+    assert_eq!(
+        rig.daemon.mock.state(),
+        json!("disabled"),
+        "the last good set"
+    );
+
+    publish("plus-role");
+    rig.reconcile();
+    assert_eq!(
+        status()["policy_ids"],
+        json!(["eng-baseline-v12", "eng-role-sre"])
+    );
+    assert_eq!(rig.daemon.mock.state(), json!("enabled"));
+
+    publish("none");
+    rig.reconcile();
+    let withdrawn = status();
+    assert_eq!(withdrawn["enrolled"], true);
+    assert_eq!(withdrawn["policy_ids"], json!([]));
+    assert_eq!(withdrawn["policy"]["last_refresh"]["result"], "withdrawn");
+}
