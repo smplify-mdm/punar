@@ -419,6 +419,106 @@ baseline.
 
 Waivers granted: none.
 
+### 4.1 Unpacked initramfs
+
+**What it cost (MEASURED).** On the arm64 Debian release image (kernel
+`7.1.12+deb14-arm64`, systemd 261), 132.2 MiB of `Unevictable` memory was the
+unpacked initrd: the 119.1 MiB main archive plus the 13.2 MiB kernel-module
+archive, 33,854 pages carrying the ramfs signature (file-backed, not
+swap-backed, mapped by nothing, charged to the root cgroup). It stayed resident
+for the whole boot although no mount of it was visible. The kernel's
+`Freeing initrd memory` line frees only the compressed image.
+
+**Why (MEASURED, with the systemd part INFER).**
+
+- The `kdevtmpfs` kernel thread has its own mount namespace, copied from the
+  initial one early in boot (`ksys_unshare(CLONE_NEWNS)` in
+  `drivers/base/devtmpfs.c` before Linux 7.3). Entering that namespace and
+  lifting the devtmpfs mounted on top showed the old initramfs intact: 2,851
+  files and 254 symlinks. Unlinking them from there freed 135,416 kB of
+  `Unevictable`, exactly the initrd's pages. MEASURED.
+- systemd's `switch_root()` empties the old root only on its `MS_MOVE`
+  fallback. Since Linux 7.0 (the nullfs root) `pivot_root()` from the
+  initramfs succeeds, and systemd relies on the old superblock being released,
+  which the kdevtmpfs namespace prevents. INFER from systemd v261's source and
+  the intact tree. Affected: Linux 7.0 to 7.2. Earlier kernels take the
+  `MS_MOVE` path, where systemd empties the old root itself.
+- **The real fix is Linux 7.3.** Commit `66d2faeccbff` gives kdevtmpfs an
+  empty namespace (`UNSHARE_EMPTY_MNTNS`). It is not in 7.1.y or 7.2.y and
+  carries no stable tag. On 2026-09-25 (MEASURED from the archives): Debian
+  unstable 7.2.7, testing 7.2.6, trixie-backports 7.1.x, nothing in
+  experimental; Arch `core/linux` 7.2.6; kernel.org mainline 7.3-rc4 and
+  stable 7.2.7. The shipped arm64 image runs 7.1.12, on a branch that ended at
+  7.1.13, which is a security problem of its own.
+
+**Mitigation (every lane, every profile).** `punar-release-initramfs.service`
+(`os/images/initrd-common`, appended to mkosi's default initrd by
+`os/images/mkosi.finalize`) runs after `initrd-cleanup.service` and
+`initrd-switch-root.target`, immediately before `initrd-switch-root.service`.
+It unlinks every file and symlink of the initramfs except what the
+switch-root call still executes: PID 1, `systemd-executor`, the commands PID 1
+has loaded for `initrd-switch-root.service` (upstream: `systemctl`), their
+libraries as the dynamic loader lists them, and the symlinks on those paths.
+The keep set is computed from the initramfs at that moment. It runs only in
+the initrd, on the initramfs, with `/sysroot` mounted and holding an
+executable systemd, and without `init=`, `systemd.unit=`, `rd.systemd.unit=`
+or a debug shell on the command line. Anything it cannot resolve keeps
+everything, and a failure never stops switch-root. It never deletes on another
+file system or through a bind mount. Its one journal and kernel-log line is
+what the stabilized-idle gate requires on every lane
+(`PUNAR_IDLE_INITRAMFS_RELEASED`, section 5). Retire it only once every lane
+ships Linux 7.3 or later and a measured boot without it shows no initramfs
+pages.
+
+**Measured effect.** VM, arm64, greeter-idle: Apple-HVF ARM64 VM, 4 GiB /
+4 vCPU, headless, release image at the first-boot greeter with no login,
+T+3 and T+6 minutes after power-on. Same base image and disk; only the UKI
+differs. "After" is a UKI rebuilt with ukify from the shipped image's own
+sections plus the member the committed builder makes from commit `8692aec`'s
+files (a rebuild without the member is byte-identical to the shipped UKI).
+2026-09-25.
+
+| Measurement | Before (shipped UKI) | After (with the step) | Change |
+|---|---|---|---|
+| `Unevictable` at T+3 and T+6 | 161,212 kB | 37,960 kB | −123,252 kB (−120.4 MiB) |
+| Initrd page group | 33,854 pages (132.2 MiB) | 2,941 pages (11.5 MiB) | −30,913 pages (−120.8 MiB) |
+| `MemAvailable` at T+6 | 3,116,428 kB | 3,248,216 kB | +131,788 kB |
+| Old initramfs left behind | 2,851 files, 254 symlinks | 11 files, 4 symlinks (11,999,640 bytes) | exactly the keep set |
+| Greeter | up (greetd, greeter Hyprland) | up (greetd, greeter Hyprland) | unchanged |
+| Journal warnings at T+3 | 67 | 67 | none new |
+| Initrd phase (`systemd-analyze`) | 1.790 s | 1.891 s | +0.10 s; the step itself took 72 ms |
+
+The step's line on that boot, in the journal and in `dmesg`: `released the
+initramfs: deleted 2843 files (118507696 bytes) and 250 symlinks, kept 15
+paths (11999640 bytes); Unevictable 135444 kB -> 25036 kB; find status 0, 0
+errors`. The rest of the drop happens when PID 1 executes the real init and
+the step's own shell and `find` exit. Repeat boots of the step (commits
+`06088db` to `8692aec`) measured 37,600, 36,296, 38,588 and 37,960 kB, with
+the initrd group at 2,941 pages every time; the spread is the greeter's
+locked memory (8.0 to 10.3 MiB `Mlocked`). Two control boots measured 160,564
+and 161,212 kB. The unchanged pre-existing `systemd-userdbd.socket` ordering
+cycle is reported from a different starting unit on each boot.
+
+**Still open.**
+
+- The 11.5 MiB keep set stays resident until Linux 7.3.
+- x86_64 (Arch 7.2.x and the Debian candidate) and the installer profile are
+  not measured locally. The x86 initrd was never measured; the Arch desktop
+  window of CI run 36040855731 (kernel 7.2.2) showed 256.6 MiB `Unevictable`
+  with a 109.4 MiB UKI. After push, the stabilized-idle gate proves the
+  release on the Arch, Debian x86_64 and arm64 desktop lanes and records
+  `PUNAR_IDLE_UNEVICTABLE_KB`.
+- Raspberry Pi boots a dracut initramfs with the Pi's 6.18 kernel, not this
+  initrd, and does not carry the step. Below Linux 7.0 systemd empties the old
+  root itself (INFER).
+- A failed `switch_root` after the release is still rolled back by boot
+  counting after power cycles, as before. It shows a bare
+  `[FAILED] Failed to start initrd-switch-root.service` instead of the
+  emergency banner, and neither version offers a shell on a release image
+  (MEASURED on the prototype). Rebooting automatically on that failure, or an
+  initrd watchdog, would make the rollback unattended. That needs an owner
+  decision.
+
 ---
 
 ## 5. CI enforcement — stabilized-idle slice implemented
@@ -428,7 +528,9 @@ The stabilized-idle slice of this design is implemented:
 fed by `tools/boot-test.sh --mode desktop` and wired as the CI
 `desktop-test` job. Whole-system RAM and combined per-service PSS are both
 runtime-proven and gated. Per-service CPU, combined first-party writes,
-connected-idle facts and live zram are runtime-proven and gated too. The
+connected-idle facts and live zram are runtime-proven and gated too, and so
+is the initrd having freed the unpacked initramfs before switch-root
+(section 4.1). The
 cgroup-memory cross-check, boot-regression gate, JSON results file and tracked
 history remain planned.
 
@@ -452,7 +554,8 @@ A `tests/performance/` harness that:
    - **Hard failures (build fails):** idle RAM > 1.5 GB hard ceiling;
      Punar service PSS sum > 150 MB MVP ceiling; any first-party cgroup at or
      above 0.50% of one CPU; combined first-party writes above 98,304 bytes
-     per five minutes; missing daemon/runtime/network/zram facts.
+     per five minutes; missing daemon/runtime/network/zram facts; a boot
+     whose initrd did not log a clean release of the unpacked initramfs.
    - **Warnings (annotated, non-fatal initially):** idle RAM above 1.0 GB
      target; service PSS above 100 MB target; boot-time regression beyond the
      (future) recorded baseline threshold.

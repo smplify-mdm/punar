@@ -121,7 +121,14 @@ CI run is the arbiter.
    `mkosi --force --mirror https://archive.archlinux.org/repos/<date> build`.
    mkosi installs `base` + `linux` with pacman, builds an initrd, assembles a
    UKI, installs systemd-boot into the ESP, and emits a GPT disk image via
-   systemd-repart (offline; no loop devices).
+   systemd-repart (offline; no loop devices). The initrd is mkosi's default
+   one plus Punar's own cpio members, which `os/images/mkosi.finalize`
+   publishes under `ARTIFACTDIR/io.mkosi.initrd` so that ukify links them in:
+   on every lane and profile, `os/images/initrd-common`
+   (`punar-release-initramfs.service`, which frees the unpacked initramfs
+   before switch-root because Linux 7.0 to 7.2 otherwise keeps it resident
+   for the whole boot; see PERFORMANCE_BUDGETS.md §4.1), and on installer
+   builds the live-root units from `os/images/installer-initrd`.
 4. Before conversion, `tests/images/check-repart-layout.sh` mounts each raw
    partition read-only and fails the build on a geometry, filesystem, mount,
    subvolume, inactive-slot or UKI-selector mismatch.

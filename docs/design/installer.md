@@ -300,6 +300,12 @@ rule applied:
 
 RAM cost: the tmpfs upper only. The erofs stays on the medium. A 4 GB
 machine can run this installer; the 8 GB §5.1 minimum has room to spare.
+The unpacked initramfs itself is freed before switch-root by the
+`punar-release-initramfs.service` step every Punar UKI carries
+(PERFORMANCE_BUDGETS.md §4.1); on Linux 7.0 to 7.2 it would otherwise stay
+resident for the whole live session. That step is boot-proven and measured
+on the arm64 release image only; the installer lanes' CI boots show whether
+it leaves the live boot intact, and its saving there is not yet measured.
 
 ### 3.5 ISO size, said out loud
 
