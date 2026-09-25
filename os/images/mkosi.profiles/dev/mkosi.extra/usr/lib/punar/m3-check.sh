@@ -353,7 +353,7 @@ kill "${yama_pid}" 2>/dev/null
 wait "${yama_pid}" 2>/dev/null
 
 # F-AUD. The modes, then a person's view of them.
-check_eq "/var/log/punar mode" "750 root punar-audit" \
+check_eq "/var/log/punar mode (setgid: files are born punar-audit)" "2750 root punar-audit" \
     "$(stat -c '%a %U %G' /var/log/punar 2>/dev/null)"
 check_eq "audit.jsonl mode" "640 root punar-audit" \
     "$(stat -c '%a %U %G' /var/log/punar/audit.jsonl 2>/dev/null)"

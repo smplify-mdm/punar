@@ -953,9 +953,11 @@ PUNARD_TMPFILES="${ROOT}/usr/lib/tmpfiles.d/punard.conf"
 if [ ! -f "${PUNARD_TMPFILES}" ]; then
     fail A23 'the audit trail modes are undeclared: usr/lib/tmpfiles.d/punard.conf is missing'
 else
-    if ! grep -Eq '^d[[:space:]]+/var/log/punar[[:space:]]+0750[[:space:]]+root[[:space:]]+punar-audit([[:space:]]|$)' \
+    # Setgid (2750): every file created in it is born group punar-audit,
+    # whichever writer creates it and whatever capabilities it kept.
+    if ! grep -Eq '^d[[:space:]]+/var/log/punar[[:space:]]+2750[[:space:]]+root[[:space:]]+punar-audit([[:space:]]|$)' \
             "${PUNARD_TMPFILES}"; then
-        fail A23 '/var/log/punar is not declared 0750 root:punar-audit'
+        fail A23 '/var/log/punar is not declared 2750 root:punar-audit (setgid)'
     fi
     for audit_file in audit.jsonl audit.jsonl.1 audit.jsonl.lock; do
         if ! grep -Eq "^z[[:space:]]+/var/log/punar/${audit_file}[[:space:]]+0640[[:space:]]+root[[:space:]]+punar-audit([[:space:]]|\$)" \

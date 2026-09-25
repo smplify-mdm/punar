@@ -691,7 +691,13 @@ mutate_a22_capability_drop() {
 # A23: the directory handed back to every account, a file left undeclared,
 # another tmpfiles line granting the trail, and a person in the group.
 mutate_a23() {
-    sed -i 's|^d /var/log/punar 0750 root punar-audit -$|d /var/log/punar 0750 root punar -|' \
+    sed -i 's|^d /var/log/punar 2750 root punar-audit -$|d /var/log/punar 2750 root punar -|' \
+        "${CASE}/usr/lib/tmpfiles.d/punard.conf"
+}
+# The directory without its setgid bit: a writer without CAP_CHOWN creates
+# files in its own group again.
+mutate_a23_setgid() {
+    sed -i 's|^d /var/log/punar 2750 root punar-audit -$|d /var/log/punar 0750 root punar-audit -|' \
         "${CASE}/usr/lib/tmpfiles.d/punard.conf"
 }
 mutate_a23_file() {
@@ -874,6 +880,7 @@ expect_fail A22 mutate_a22_link
 expect_fail A22 mutate_a22_capability
 expect_fail A22 mutate_a22_capability_drop
 expect_fail A23 mutate_a23
+expect_fail A23 mutate_a23_setgid
 expect_fail A23 mutate_a23_file
 expect_fail A23 mutate_a23_grant
 expect_fail A23 mutate_a23_member
