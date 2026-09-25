@@ -486,10 +486,15 @@ impl Daemon {
             move || stop_inner.shutdown.load(Ordering::SeqCst),
             move || {
                 // The audit trail moved: ingest the Level-4 references it
-                // named, and republish the panel's view only if anything
-                // was actually ingested.
+                // named, and republish only if anything was actually
+                // ingested. Both side files, as at every other point: the
+                // AI panel reads a person's ledger through agents.access
+                // (the ledger side file is root:punar-audit), and it learns
+                // that a ledger grew from agents.json being rewritten — so a
+                // drain that rewrote only the ledger file left an open panel
+                // showing the rows it had first read (F0 review).
                 if drain_inner.ledger.drain_audit(&utc_now_rfc3339()) {
-                    drain_inner.publish_ledger_view();
+                    drain_inner.publish_summary();
                 }
             },
         );

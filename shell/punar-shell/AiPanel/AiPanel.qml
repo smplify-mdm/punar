@@ -172,13 +172,15 @@ DeferredSurfaceBase {
         Component.onCompleted: purgeProc.exited.connect(function (exitCode) {
             if (exitCode === 0) {
                 root.purgeError = "";
+                // Deleted: ask agentd for the record again, which now
+                // carries its purged time, so the card stops saying "purge
+                // requested" over rows that are gone. (The panel reads this
+                // person's ledger through agents.access; no side file will
+                // announce the change.)
+                if (root.purgeRequestedId !== "")
+                    Ledger.fetch(root.purgeRequestedId);
                 return;
             }
-            // Deleted: ask agentd for the record again, which now carries
-            // its purged time. (The panel reads this person's ledger through
-            // agents.access; there is no side file to wait for.)
-            if (exitCode === 0 && root.purgeRequestedId !== "")
-                Ledger.fetch(root.purgeRequestedId);
             // Refused: nothing was deleted, so nothing is "requested" any
             // more, and the privacy card says why.
             var said = String(purgeErr.text).trim();
@@ -1074,7 +1076,7 @@ DeferredSurfaceBase {
         // scan. Fixed argv — the shell never composes a shell string.
         Agents.refresh();
         Ledger.refresh();
-        listKick.ask(["punarctl", "agents", "list", "--json"]);
+        listKick.ask(["/usr/bin/punarctl", "agents", "list", "--json"]);
         root.refreshLedger(root.selectedId);
     }
 
@@ -1118,6 +1120,21 @@ DeferredSurfaceBase {
         Ledger.fetch(sessionId);
     }
 
+    // The ledger follows agentd while the panel is open (F0 review): agentd
+    // rewrites agents.json at every point it republishes a ledger — a
+    // session's rows growing as its audit events drain included — so each
+    // rewrite re-asks for the focused session, once, through the queue.
+    // Not a clock: nothing is asked while nothing changes, or while the
+    // panel is closed.
+    Connections {
+        target: Agents
+
+        function onRevisionChanged(): void {
+            if (root.open && root.selectedId !== "" && Ledger.refusal(root.selectedId) === "")
+                Ledger.fetch(root.selectedId);
+        }
+    }
+
     // SHIFT+DEL on the focused session (spec §24.2 + §1.17: deleting your
     // own data cannot be terminal-only). Two-step by design — the first
     // press arms and the privacy card asks, the second press acts — and
@@ -1139,7 +1156,7 @@ DeferredSurfaceBase {
         root.purgeRequestedId = sessionId;
         root.purgeError = "";
         root.purgeErrorId = sessionId;
-        purgeProc.command = ["punarctl", "privacy", "purge", "--session", sessionId, "--yes"];
+        purgeProc.command = ["/usr/bin/punarctl", "privacy", "purge", "--session", sessionId, "--yes"];
         try {
             purgeProc.running = true;
         } catch (e) {

@@ -16,9 +16,13 @@ pragma Singleton
 // agent ledger. It is now `root:punar-audit`, a group no person is in (the
 // audit trail's pattern, F0-S3), and this singleton asks agentd instead.
 //
-// WHEN IT ASKS. On user action only — opening the panel, moving to a
-// session, a purge that went through — never on a clock. One process at a
-// time; requests made while one runs wait their turn, each at most once.
+// WHEN IT ASKS. On user action — opening the panel, moving to a session, a
+// purge that went through — and, while the panel is open, whenever agentd
+// rewrites `/run/punar/agents.json`: agentd rewrites that file at every point
+// it republishes a ledger, audit drains included, so the panel follows the
+// ledger as it grows without a clock and without reading anyone else's rows
+// (F0 review). One process at a time; requests made while one runs wait
+// their turn, each at most once.
 //
 // Fail CLOSED: no answer or an unparsable one reads as "no ledger recorded
 // for this session yet" — never an error surface of its own — and what went
@@ -87,7 +91,10 @@ Singleton {
             return;
         }
         access.sessionId = sessionId;
-        access.command = ["punarctl", "agents", "access", sessionId, "--json"];
+        // By absolute path: a `punarctl` earlier on PATH (a person's
+        // ~/.local/bin, which an agent running as them can write) could
+        // otherwise draw this person's accountability record for them.
+        access.command = ["/usr/bin/punarctl", "agents", "access", sessionId, "--json"];
         try {
             access.running = true;
         } catch (e) {

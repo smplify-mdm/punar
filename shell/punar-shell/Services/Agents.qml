@@ -47,6 +47,11 @@ Singleton {
     // RFC 3339 timestamp of the last detection pass ("" = no data).
     property string scannedAt: ""
 
+    // Bumped on every successful read of the file. agentd rewrites it at
+    // every point it republishes an access ledger — audit drains included —
+    // so a surface that shows a ledger re-asks for it when this changes.
+    property int revision: 0
+
     function countByClass(entries: var, cls: string): int {
         var n = 0;
         for (var i = 0; i < entries.length; i++) {
@@ -94,6 +99,7 @@ Singleton {
             ? j.policy_citation : "";
         root.scannedAt = typeof j.scanned_at === "string"
             ? j.scanned_at : "";
+        root.revision = root.revision + 1;
     }
 
     // One-shot re-read on user action (panel open) — covers a file that
