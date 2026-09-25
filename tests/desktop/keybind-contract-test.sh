@@ -251,96 +251,194 @@ for description in ("Move window with the pointer", "Resize window with the poin
         problems.append(f"{description!r} is not registered with mouse = true")
 
 # ---------------------------------------------------------------------------
-# Appendix B: every Omarchy key family has a Punar row or a stated reason.
-# `binds` are description prefixes that must be live (in the standard
-# grammar unless marked mac:); `reason` covers what Punar does not bind.
+# Rule 5: the login screen and punar_common::keymap agree on which layouts
+# cannot type Latin letters (and so get a US first group). The greeter keeps
+# its own copy because it runs before any session exists; a layout missing
+# from it would load alone at the login screen and leave a Latin password
+# untypeable there.
 # ---------------------------------------------------------------------------
-FAMILIES = [
-    ("K1-K2", ["Close window"],
-     "close-all (Ctrl+Alt+Delete): one chord that discards unsaved work in every "
-     "application is a hazard; End session and the session menu close apps properly"),
-    ("K3-K12", ["Toggle split direction", "Toggle floating", "Toggle fullscreen",
-                "Toggle maximize", "Pop window out", "Next layout preset"],
-     "pseudo-tiling, tiled fullscreen and width save/restore are dwindle niceties "
-     "left to WP-11's override format; the per-workspace preset toggle is PUNAR+comma/period"),
-    ("K13-K16", ["Focus left", "Focus right"],
-     "focus is on H/J/K/L (the Punar grammar); the arrow keys move windows and "
-     "workspaces between monitors"),
-    ("K17-K18", ["Toggle scratchpad terminal", "Toggle notes scratchpad"],
-     "Punar's scratchpads are purpose-built (terminal, assistant, notes); a general "
-     "move-to-stash chord arrives with WP-11's override format"),
-    ("K19-K25", ["Previous workspace", "Next workspace", "Move workspace to left monitor"], ""),
-    ("K26-K29", ["Swap window left", "Swap window right"], ""),
-    ("K30-K35", ["Switch windows", "Focus next monitor", "Focus previous monitor"], ""),
-    ("K36-K47", ["Enter resize mode", "Resize wider"],
-     "one resize step with key repeat, in a mode, instead of three step sizes on nine chords"),
-    ("K48-K51", ["Scroll to the next workspace", "Move window with the pointer",
-                 "Resize window with the pointer"], ""),
-    ("K52-K63", ["Toggle window group", "Next window in group", "Move window into group left"], ""),
-    ("K64-K65", [], "display scaling steps belong to WP-11 (scale chosen from the panel's real PPI)"),
-    ("K66-K74", ["Open command center", "System control", "Session menu"],
-     "emoji, capture and toggle menus arrive with WP-03 and WP-04; the power key is WP-07"),
-    ("K75-K77", ["Shortcut help"], "tmux and herdr cheat sheets: neither ships in Punar"),
-    ("K78-K79", [], "the calculator is inline arithmetic in the command center (WP-03)"),
-    ("K80-K85", ["Toggle window transparency", "Toggle window gaps",
-                 "Toggle square shape for a lone window"],
-     "hiding the bar is WP-03; background and theme pickers are WP-05"),
-    ("K86-K90", ["Notification centre"],
-     "dismiss, silence and invoke are keys inside the notification centre"),
-    ("K91-K96", [], "idle, night light, laptop display, mirroring and lid are WP-07 and WP-11"),
-    ("K97-K104", ["Screenshot output to clipboard", "Screenshot region to clipboard"],
-     "recording, colour picker, OCR, share and transcode are WP-04 and WP-12"),
-    ("K105-K110", [], "reminders, time, battery and weather notices are WP-03 and WP-17"),
-    ("K111", ["AI on this device"], ""),
-    ("K112-K118", ["System control"],
-     "one System Control opens every panel; per-panel chords follow WP-03"),
-    ("K119-K120", [], "screen zoom is an accessibility feature (WP-29)"),
-    ("K121", ["Lock session"], ""),
-    ("K122-K149", ["Open terminal", "Open browser", "Open files"],
-     "third-party app and web-app chords: apps are opened from the command center, "
-     "and a person binds their own with WP-11's override format. The file manager "
-     "in the focused terminal's folder (K125) waits for WP-15's shell integration: "
-     "every foot window belongs to one server process, so only the shell reporting "
-     "its folder (OSC 7) can say which folder a window is in, and guessing from the "
-     "process tree, as Omarchy's helper does, opens the newest shell's folder"),
-    ("K150-K153", ["mac:Copy", "mac:Paste", "mac:Cut"],
-     "off by default (punarctl keyboard clipboard-keys on); the clipboard manager is WP-04"),
-    ("K154-K156", ["Volume up", "Volume down", "Toggle mute"], ""),
-    ("K157", ["Toggle microphone mute"], ""),
-    ("K158-K164", ["Brightness up", "Brightness down", "Keyboard light up"],
-     "brightness maximum/minimum chords: the verb takes set 100% and set 1%"),
-    ("K165-K167", [],
-     "touchpad on/off needs the per-device enable that WP-11's input-device settings "
-     "add; Hyprland names the device, and Punar will not guess one"),
-    ("K168-K171", ["Volume up a little", "Brightness up a little"], ""),
-    ("K172-K181", ["Play or pause", "Next track", "Previous track"],
-     "output and source switching arrive with WP-03's audio panel"),
-    ("K182-K184", [], "dictation (push-to-talk speech to text) arrives with WP-26"),
-    ("K185-K187", ["Workspace 1", "Move window to workspace 1", "Move window quietly to workspace 1"], ""),
-    ("K188", ["Previous window in group"],
-     "jumping to the Nth window of a group: groups are walked with [ and ]"),
-    ("K189", ["Focus status cluster"], "per-panel chords follow WP-03"),
-    ("K190-K193", [], "keyboard window picking in the capture picker is WP-04"),
-]
+root_dir = pathlib.Path(sys.argv[2])
+rust = (root_dir / "crates/punar-common/src/keymap.rs").read_text()
+greeter = (root_dir / "shell/punar-shell/Greeter/shell.qml").read_text()
+rust_list = re.search(r"pub const NON_LATIN: &\[&str\] = &\[(.*?)\];", rust, re.S)
+qml_list = re.search(r"readonly property var nonLatin: \[(.*?)\]", greeter, re.S)
+if rust_list is None or qml_list is None:
+    problems.append("could not find NON_LATIN in keymap.rs or nonLatin in Greeter/shell.qml")
+else:
+    rust_codes = re.findall(r'"([a-z]+)"', rust_list.group(1))
+    qml_codes = re.findall(r'"([a-z]+)"', qml_list.group(1))
+    if len(rust_codes) < 30 or sorted(rust_codes) != sorted(qml_codes):
+        problems.append(
+            f"the greeter's non-Latin layouts differ from punar_common::keymap's: "
+            f"only in Rust {sorted(set(rust_codes) - set(qml_codes))}, "
+            f"only in the greeter {sorted(set(qml_codes) - set(rust_codes))}"
+        )
 
-covered = set()
-for family, binds, reason in FAMILIES:
-    low, _, high = family.partition("-")
-    first = int(low[1:])
-    last = int(high[1:]) if high else first
-    for number in range(first, last + 1):
-        if number in covered:
-            problems.append(f"{family}: K{number} is claimed by two families")
-        covered.add(number)
-    for bind in binds:
-        where, prefix = (mac, bind[4:]) if bind.startswith("mac:") else (standard, bind)
-        if not present(prefix, where):
-            problems.append(f"{family}: no live bind is described {prefix!r}")
-    if not binds and len(reason) < 30:
-        problems.append(f"{family}: Punar binds nothing here, so it needs a real reason")
-missing = sorted(set(range(1, 194)) - covered)
-if missing:
-    problems.append(f"Omarchy keys with no family row: {missing}")
+# ---------------------------------------------------------------------------
+# Appendix B, one Omarchy key at a time. BOUND names the live description
+# that does the same thing in Punar (a prefix; `mac:` for the Mac-style
+# grammar); UNBOUND says why Punar has no chord for it. Every one of K1-K193
+# must be in exactly one of the two.
+# ---------------------------------------------------------------------------
+WP03 = "arrives with WP-03's bar and palette, which gives each panel its own chord"
+WP04 = "the capture suite and clipboard history are WP-04"
+WP07 = "idle, lid and power keys are WP-07 (suspend that fails closed, power and lid)"
+WP11 = ("a dwindle nicety left to WP-11's override format, where a person binds "
+        "their own keys as data that cannot run commands")
+APPS = ("third-party app and web-app chords: apps open from the command center "
+        "(PUNAR+Space), and a person binds their own with WP-11's override format")
+BOUND = {
+    1: "Close window",
+    3: "Toggle split direction", 5: "Toggle floating", 6: "Toggle fullscreen",
+    8: "Toggle maximize", 9: "Pop window out", 12: "Next layout preset",
+    13: "Focus left", 14: "Focus right", 15: "Focus up", 16: "Focus down",
+    17: "Toggle scratchpad terminal",
+    19: "Next workspace", 20: "Previous workspace",
+    22: "Move workspace to left monitor", 23: "Move workspace to right monitor",
+    24: "Move workspace to upper monitor", 25: "Move workspace to lower monitor",
+    26: "Swap window left", 27: "Swap window right", 28: "Swap window up", 29: "Swap window down",
+    30: "Switch windows", 31: "Switch windows backwards", 32: "Switch windows",
+    33: "Switch windows backwards", 34: "Focus next monitor", 35: "Focus previous monitor",
+    36: "Resize narrower", 37: "Resize wider", 38: "Resize shorter", 39: "Resize taller",
+    48: "Scroll to the next workspace", 49: "Scroll to the previous workspace",
+    50: "Move window with the pointer", 51: "Resize window with the pointer",
+    52: "Toggle window group", 53: "Move window out of group",
+    54: "Move window into group left", 55: "Move window into group right",
+    56: "Move window into group above", 57: "Move window into group below",
+    58: "Next window in group (any layout)", 59: "Previous window in group (any layout)",
+    60: "Previous window in group", 61: "Next window in group",
+    66: "Open command center", 67: "Open command center", 71: "System control",
+    73: "Session menu", 75: "Shortcut help",
+    83: "Toggle window transparency", 84: "Toggle window gaps",
+    85: "Toggle square shape for a lone window",
+    90: "Notification centre", 97: "Screenshot output to clipboard",
+    111: "AI on this device", 121: "Lock session",
+    122: "Open terminal", 123: "Open browser", 124: "Open files", 126: "Open browser",
+    150: "mac:Copy", 151: "mac:Paste", 152: "mac:Cut",
+    154: "Volume up", 155: "Volume down", 156: "Toggle mute", 157: "Toggle microphone mute",
+    158: "Brightness up", 159: "Brightness down",
+    160: "Brightness to full", 161: "Brightness to lowest",
+    162: "Keyboard light up", 163: "Keyboard light down",
+    168: "Volume up a little", 169: "Volume down a little",
+    170: "Brightness up a little", 171: "Brightness down a little",
+    172: "Next track", 173: "Next track (Alt + Play)", 174: "Play or pause (pause key)",
+    175: "Play or pause", 176: "Previous track", 177: "Previous track (Alt + Shift + Play)",
+    185: "Workspace 1", 186: "Move window to workspace 1", 187: "Move window quietly to workspace 1",
+}
+UNBOUND = {
+    2: "close-all (Ctrl+Alt+Delete): one chord that discards unsaved work in every "
+       "application is a hazard; End session and the session menu close apps properly",
+    4: "pseudo-tiling is " + WP11,
+    7: "tiled fullscreen is " + WP11,
+    10: "saving a window's width is " + WP11,
+    11: "restoring a window's width is " + WP11,
+    18: "Punar's scratchpads are purpose-built (terminal, assistant, notes); a general "
+        "move-to-stash chord arrives with WP-11's override format",
+    21: "going back to the former workspace: Alt+Tab's quick tap returns to the last "
+        "window, wherever it is, and PUNAR+CTRL+Tab is next workspace in Punar's grammar",
+    40: "fine resize steps: resize mode (PUNAR+R) repeats one step while held",
+    41: "fine resize steps: resize mode (PUNAR+R) repeats one step while held",
+    42: "fine resize steps: resize mode (PUNAR+R) repeats one step while held",
+    43: "fine resize steps: resize mode (PUNAR+R) repeats one step while held",
+    44: "coarse resize steps: resize mode (PUNAR+R) repeats one step while held",
+    45: "coarse resize steps: resize mode (PUNAR+R) repeats one step while held",
+    46: "coarse resize steps: resize mode (PUNAR+R) repeats one step while held",
+    47: "coarse resize steps: resize mode (PUNAR+R) repeats one step while held",
+    62: "walking a group with the wheel: Punar's wheel walks workspaces, and the group "
+        "is walked with PUNAR+[ ] or PUNAR+ALT+Tab",
+    63: "walking a group with the wheel: Punar's wheel walks workspaces, and the group "
+        "is walked with PUNAR+[ ] or PUNAR+ALT+Tab",
+    64: "display scaling steps belong to WP-11 (scale chosen from the panel's real PPI)",
+    65: "display scaling steps belong to WP-11 (scale chosen from the panel's real PPI)",
+    68: "the emoji picker " + WP03,
+    69: "the capture menu: " + WP04,
+    70: "the toggle menu " + WP03,
+    72: "the Copilot key (Super+Shift+F23) is left to WP-11's override format; "
+        "PUNAR+Space opens the command center",
+    74: "the power key: " + WP07,
+    76: "a tmux cheat sheet: Punar ships no tmux",
+    77: "a herdr cheat sheet: Punar ships no herdr",
+    78: "the calculator is inline arithmetic in the command center (WP-03)",
+    79: "the calculator is inline arithmetic in the command center (WP-03)",
+    80: "hiding the bar " + WP03,
+    81: "the background picker is WP-05's wallpaper work",
+    82: "the theme menu is WP-05's one theme switch",
+    86: "dismissing the last notification is a key inside the notification centre",
+    87: "dismissing every notification is a key inside the notification centre",
+    88: "silencing notifications is do-not-disturb in the notification centre "
+        "(punarctl notifications dnd on)",
+    89: "invoking the last notification is a key inside the notification centre",
+    91: "the idle-lock toggle: " + WP07,
+    92: "night light is WP-11's display work",
+    93: "turning the laptop display off is WP-11's display work",
+    94: "mirroring the laptop display is WP-11's display work",
+    95: "lid close: " + WP07,
+    96: "lid open (clamshell): " + WP07,
+    98: "screen recording: " + WP04,
+    99: "the webcam overlay: " + WP04,
+    100: "the webcam overlay: " + WP04,
+    101: "the colour picker: " + WP04,
+    102: "text from a screenshot (OCR): " + WP04,
+    103: "sharing is WP-12's nearby sharing, as an expiring lease",
+    104: "transcoding: " + WP04,
+    105: "reminders arrive with WP-17's conveniences that do not leak",
+    106: "reminders arrive with WP-17's conveniences that do not leak",
+    107: "reminders arrive with WP-17's conveniences that do not leak",
+    108: "a time notice: the bar's clock is WP-03",
+    109: "a battery notice: the bar's battery is WP-03, on hardware WP-23 proves",
+    110: "weather is WP-17's opt-in city weather, never located by IP",
+    112: "the audio panel " + WP03,
+    113: "the Bluetooth panel is WP-13, pairing you confirm",
+    114: "a display panel chord arrives with WP-11's displays and input devices",
+    115: "the calendar panel " + WP03,
+    116: "a network panel chord arrives with WP-06's Wi-Fi, DNS and VPN work",
+    117: "a power panel chord arrives with WP-07's power profiles and lid",
+    118: "an activity monitor " + WP03,
+    119: "screen zoom is an accessibility feature (WP-29)",
+    120: "screen zoom is an accessibility feature (WP-29)",
+    125: "the file manager in the focused terminal's folder waits for WP-15's shell "
+         "integration: every foot window belongs to one server process, so only the "
+         "shell reporting its folder (OSC 7) can say which folder a window is in, and "
+         "guessing from the process tree, as Omarchy's helper does, opens the newest "
+         "shell's folder",
+    127: "a private browser window: " + APPS,
+    128: "the editor: " + APPS,
+    **{k: APPS for k in range(129, 150)},
+    153: "the clipboard manager: " + WP04,
+    164: "a keyboard-light cycle key: the up and down keys walk the light's levels, and "
+         "a keyboard that has a cycle key is proven on WP-23's hardware",
+    165: "touchpad on/off needs the per-device enable that WP-11's input-device settings "
+         "add; Hyprland names the device, and Punar will not guess one",
+    166: "touchpad on needs the per-device enable that WP-11's input-device settings add",
+    167: "touchpad off needs the per-device enable that WP-11's input-device settings add",
+    178: "eject belongs with WP-19's removable media (notify-then-mount, and unmount "
+         "before power-off through udisks)",
+    179: "switching the audio output arrives with WP-03's audio panel",
+    180: "switching the media source arrives with WP-03's audio panel",
+    181: "switching the media source arrives with WP-03's audio panel",
+    182: "dictation (speech to text) arrives with WP-26",
+    183: "push-to-talk dictation arrives with WP-26",
+    184: "push-to-talk dictation arrives with WP-26",
+    188: "jumping to the Nth window of a group: groups are walked with PUNAR+[ ] or "
+         "PUNAR+ALT+Tab",
+    189: "a chord per bar panel " + WP03 + "; PUNAR+SHIFT+B focuses the status cluster today",
+    190: "keyboard window picking in the capture picker is WP-04",
+    191: "keyboard window picking in the capture picker is WP-04",
+    192: "keyboard window picking in the capture picker is WP-04",
+    193: "keyboard window picking in the capture picker is WP-04",
+}
+
+for number in range(1, 194):
+    listed = (number in BOUND) + (number in UNBOUND)
+    if listed != 1:
+        problems.append(f"K{number} must be bound or unbound exactly once (listed {listed} times)")
+for number, bind in BOUND.items():
+    where, prefix = (mac, bind[4:]) if bind.startswith("mac:") else (standard, bind)
+    if not present(prefix, where):
+        problems.append(f"K{number}: no live bind is described {prefix!r}")
+for number, reason in UNBOUND.items():
+    if len(reason) < 30:
+        problems.append(f"K{number}: Punar binds nothing here, so it needs a real reason")
 
 if problems:
     for problem in problems:
@@ -348,7 +446,7 @@ if problems:
     sys.exit(1)
 print(
     f"keybind-contract-test: ok ({len(modes['standard'])} binds standard, "
-    f"{len(modes['mac'])} Mac-style; every one described, no chord twice; "
-    f"K1-K193 in {len(FAMILIES)} families)"
+    f"{len(modes['mac'])} Mac-style; every one described, no chord twice, every "
+    f"chord layout-safe; K1-K193: {len(BOUND)} bound, {len(UNBOUND)} unbound with a reason)"
 )
 PY

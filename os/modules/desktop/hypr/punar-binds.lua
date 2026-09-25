@@ -261,10 +261,17 @@ return function(ctx)
     bind("XF86AudioPause", hl.dsp.exec_cmd(ctx.punarctl .. " media play-pause"), "Play or pause (pause key)", { locked = true })
     bind("XF86AudioNext", hl.dsp.exec_cmd(ctx.punarctl .. " media next"), "Next track", { locked = true })
     bind("XF86AudioPrev", hl.dsp.exec_cmd(ctx.punarctl .. " media previous"), "Previous track", { locked = true })
+    -- Keyboards with a Play key and no Next or Previous (Omarchy K173, K177).
+    bind("ALT + XF86AudioPlay", hl.dsp.exec_cmd(ctx.punarctl .. " media next"), "Next track (Alt + Play)", { locked = true })
+    bind("ALT + SHIFT + XF86AudioPlay", hl.dsp.exec_cmd(ctx.punarctl .. " media previous"), "Previous track (Alt + Shift + Play)", { locked = true })
     bind("XF86MonBrightnessUp", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness +5%"), "Brightness up", { repeating = true, locked = true })
     bind("XF86MonBrightnessDown", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness -5%"), "Brightness down", { repeating = true, locked = true })
     bind("ALT + XF86MonBrightnessUp", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness +1%"), "Brightness up a little", { repeating = true, locked = true })
     bind("ALT + XF86MonBrightnessDown", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness -1%"), "Brightness down a little", { repeating = true, locked = true })
+    -- Straight to either end (Omarchy K160, K161); the display's end is 1%,
+    -- never dark.
+    bind("SHIFT + XF86MonBrightnessUp", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness set 100%"), "Brightness to full", { locked = true })
+    bind("SHIFT + XF86MonBrightnessDown", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness set 1%"), "Brightness to lowest", { locked = true })
     bind("XF86KbdBrightnessUp", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness --keyboard +34%"), "Keyboard light up", { locked = true })
     bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd(ctx.punarctl .. " display brightness --keyboard -34%"), "Keyboard light down", { locked = true })
 
