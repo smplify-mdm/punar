@@ -889,11 +889,27 @@ else
 fi
 for sysctl_dir in usr/lib/sysctl.d usr/local/lib/sysctl.d etc/sysctl.d run/sysctl.d; do
     [ -d "${ROOT}/${sysctl_dir}" ] || continue
+    # A file of the same name in a directory that outranks /usr/lib replaces
+    # the shipped one whatever it says — a symlink to /dev/null included.
+    if [ "${sysctl_dir}" != usr/lib/sysctl.d ] \
+        && { [ -e "${ROOT}/${sysctl_dir}/50-punar-yama.conf" ] \
+            || [ -L "${ROOT}/${sysctl_dir}/50-punar-yama.conf" ]; }; then
+        fail A22 "${sysctl_dir}/50-punar-yama.conf replaces the shipped Yama policy"
+    fi
     for sysctl_conf in "${ROOT}/${sysctl_dir}"/*.conf; do
-        [ -f "${sysctl_conf}" ] && [ ! -L "${sysctl_conf}" ] || continue
         [ "${sysctl_conf}" = "${YAMA_CONF}" ] && continue
+        # A link is read where it points, inside this tree.
+        sysctl_read="${sysctl_conf}"
+        if [ -L "${sysctl_conf}" ]; then
+            sysctl_target=$(readlink "${sysctl_conf}")
+            case "${sysctl_target}" in
+                /*) sysctl_read="${ROOT}${sysctl_target}" ;;
+                *) sysctl_read="$(dirname "${sysctl_conf}")/${sysctl_target}" ;;
+            esac
+        fi
+        [ -f "${sysctl_read}" ] || continue
         if grep -Eq '^[[:space:]]*-?kernel[./]yama[./]ptrace_scope[[:space:]]*=' \
-                "${sysctl_conf}"; then
+                "${sysctl_read}"; then
             fail A22 "${sysctl_conf#"${ROOT}"/} also sets kernel.yama.ptrace_scope"
         fi
     done
@@ -903,6 +919,29 @@ if [ -f "${ROOT}/etc/sysctl.conf" ] \
         "${ROOT}/etc/sysctl.conf"; then
     fail A22 'etc/sysctl.conf also sets kernel.yama.ptrace_scope'
 fi
+# What the value of 1 rests on: punard fetches a caller's descriptor by pid
+# (pidfd_getfd, the install.apply path), an ATTACH-mode access Yama now
+# restricts, and it keeps working only because punard holds CAP_SYS_PTRACE
+# (yama_ptrace_access_check lets that capability through). punard.service
+# names no bounding set today; one that left CAP_SYS_PTRACE out would break
+# that fetch on every lane, so none may.
+for unit_root in usr/lib/systemd/system etc/systemd/system run/systemd/system; do
+    for punard_unit in "${ROOT}/${unit_root}/punard.service" \
+        "${ROOT}/${unit_root}"/punard.service.d/*.conf; do
+        [ -f "${punard_unit}" ] || continue
+        if awk '
+            /^[[:space:]]*CapabilityBoundingSet[[:space:]]*=/ {
+                value = $0
+                sub(/^[^=]*=[[:space:]]*/, "", value)
+                if (value ~ /^~/) { if (value ~ /CAP_SYS_PTRACE/) bad = 1 }
+                else if (value !~ /CAP_SYS_PTRACE/) bad = 1
+            }
+            END { exit bad ? 0 : 1 }
+        ' "${punard_unit}"; then
+            fail A22 "${punard_unit#"${ROOT}"/} takes CAP_SYS_PTRACE from punard, which its by-pid descriptor fetch needs under Yama 1"
+        fi
+    done
+done
 
 # A23 (F0-S3): the audit trail belongs to root and group punar-audit, which no
 # person is in. It used to be group punar — every account — so every person

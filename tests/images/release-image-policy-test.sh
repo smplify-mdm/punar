@@ -667,6 +667,27 @@ mutate_a22_override() {
     mkdir -p "${CASE}/etc/sysctl.d"
     printf '%s\n' 'kernel.yama.ptrace_scope = 0' > "${CASE}/etc/sysctl.d/99-debug.conf"
 }
+# A same-named file that outranks /usr/lib masks the policy without setting
+# anything, and a link is read where it points.
+mutate_a22_mask() {
+    mkdir -p "${CASE}/etc/sysctl.d"
+    ln -s /dev/null "${CASE}/etc/sysctl.d/50-punar-yama.conf"
+}
+mutate_a22_link() {
+    mkdir -p "${CASE}/etc/sysctl.d" "${CASE}/usr/share/punar-debug"
+    printf '%s\n' 'kernel.yama.ptrace_scope = 0' > "${CASE}/usr/share/punar-debug/yama.conf"
+    ln -s /usr/share/punar-debug/yama.conf "${CASE}/etc/sysctl.d/99-debug.conf"
+}
+# punard's by-pid descriptor fetch needs CAP_SYS_PTRACE under Yama 1.
+mutate_a22_capability() {
+    mkdir -p "${CASE}/usr/lib/systemd/system/punard.service.d"
+    printf '%s\n' '[Service]' 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE' \
+        > "${CASE}/usr/lib/systemd/system/punard.service.d/50-trim.conf"
+}
+mutate_a22_capability_drop() {
+    printf '%s\n' 'CapabilityBoundingSet=~CAP_SYS_PTRACE' \
+        >> "${CASE}/usr/lib/systemd/system/punard.service"
+}
 # A23: the directory handed back to every account, a file left undeclared,
 # another tmpfiles line granting the trail, and a person in the group.
 mutate_a23() {
@@ -848,6 +869,10 @@ expect_fail A21 mutate_a21_missing
 expect_fail A22 mutate_a22
 expect_fail A22 mutate_a22_zero
 expect_fail A22 mutate_a22_override
+expect_fail A22 mutate_a22_mask
+expect_fail A22 mutate_a22_link
+expect_fail A22 mutate_a22_capability
+expect_fail A22 mutate_a22_capability_drop
 expect_fail A23 mutate_a23
 expect_fail A23 mutate_a23_file
 expect_fail A23 mutate_a23_grant
