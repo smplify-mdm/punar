@@ -17,8 +17,11 @@ ExecStart=-/usr/lib/punar/release-initramfs
 # PID 1 keeps /usr read-only in the initrd. The helper makes it writable only
 # inside this unit's own mount namespace, and refuses to without one.
 PrivateMounts=yes
-# kmsg is the journal and the kernel log buffer both.
+# kmsg is the journal and the kernel log buffer both. journald forwards only
+# notice and above to the kernel log (MaxLevelKMsg=), so the one summary line
+# is logged at notice. loglevel=3 still keeps it off the console.
 StandardOutput=kmsg
 StandardError=kmsg
 SyslogIdentifier=punar-release-initramfs
+SyslogLevel=notice
 TimeoutStartSec=30s

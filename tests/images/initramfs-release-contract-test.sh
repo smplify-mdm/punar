@@ -55,6 +55,8 @@ assert_line "${UNIT}" 'Type=oneshot'
 assert_line "${UNIT}" 'ExecStart=-/usr/lib/punar/release-initramfs'
 assert_line "${UNIT}" 'PrivateMounts=yes'
 assert_line "${UNIT}" 'StandardOutput=kmsg'
+# journald forwards only notice and above to the kernel log.
+assert_line "${UNIT}" 'SyslogLevel=notice'
 # systemd ignores an output setting it cannot parse (journal+kmsg once slipped
 # through this way), so pin each one to a value systemd.exec(5) documents.
 while IFS= read -r setting; do
