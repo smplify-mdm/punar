@@ -1302,6 +1302,7 @@ dependencies = [
  "base64",
  "clap",
  "punar-common",
+ "punar-workspace",
  "rustix",
  "serde",
  "serde_json",

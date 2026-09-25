@@ -839,16 +839,15 @@ Scope {
                 return;
             }
             data.powerArmed = "";
-            // Absolute, for the reason SessionMenu.qml gives: this surface
-            // must not depend on whatever PATH the login manager handed the
-            // session. The two power routes were left spelled differently and
-            // that difference was not a decision.
+            // The `punarctl session` verbs, as SessionMenu.qml runs them, by
+            // absolute path for the reason it gives: this surface must not
+            // depend on whatever PATH the login manager handed the session.
             if (kind === "sessionEnd")
-                data.runMutation(["/usr/bin/hyprctl", "dispatch", "exit"]);
+                data.runMutation(["/usr/bin/punarctl", "session", "end"]);
             else if (kind === "systemRestart")
-                data.runMutation(["/usr/bin/systemctl", "reboot"]);
+                data.runMutation(["/usr/bin/punarctl", "session", "restart"]);
             else
-                data.runMutation(["/usr/bin/systemctl", "poweroff"]);
+                data.runMutation(["/usr/bin/punarctl", "session", "shutdown"]);
         } else if (kind === "webContext") {
             // The same write a person types: punarctl checks the context
             // against punard's list and the workspace name against the

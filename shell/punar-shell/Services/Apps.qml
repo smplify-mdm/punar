@@ -511,10 +511,11 @@ Singleton {
             if (appId !== "" && candidates[appId] === true) {
                 // Keep the protocol-level activation request for compositor
                 // portability, then use Hyprland's typed focus dispatcher to
-                // guarantee macOS-like task switching across workspaces.
+                // guarantee macOS-like task switching across workspaces:
+                // `punarctl window focus --class`, which escapes the class
+                // into an exact-match selector.
                 list[i].activate();
-                var exactClass = observedAppId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                HyprlandActions.focusWindow("class:^" + exactClass + "$");
+                HyprlandActions.focusWindowClass(observedAppId);
                 return true;
             }
         }

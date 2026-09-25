@@ -63,9 +63,11 @@
 
 mod desktop;
 mod fmt;
+mod hypr;
 mod ipc;
 mod model;
 mod peer;
+mod session;
 mod views;
 mod watch;
 mod webapps;
@@ -140,6 +142,39 @@ enum Command {
         /// shows every row.
         #[arg(long)]
         all: bool,
+    },
+    /// Workspaces of this session: list them, switch, name them, or open a
+    /// named project workspace.
+    Workspace {
+        #[command(subcommand)]
+        command: session::WorkspaceCommand,
+    },
+    /// Apply a tiling layout preset (balanced, columns, rows, focus, stack,
+    /// next, prev, restore), or show the current one with `status`.
+    Layout {
+        #[arg(value_parser = session::LAYOUT_ARGS)]
+        preset: String,
+    },
+    /// Windows of this session: list, show the focused one, raise, close, or
+    /// kill one exact window.
+    Window {
+        #[command(subcommand)]
+        command: session::WindowCommand,
+    },
+    /// Lock the screen, end the session, restart or shut down.
+    Session {
+        #[command(subcommand)]
+        command: session::SessionCommand,
+    },
+    /// Connected displays.
+    Display {
+        #[command(subcommand)]
+        command: session::DisplayCommand,
+    },
+    /// Output and input volume and mute.
+    Audio {
+        #[command(subcommand)]
+        command: session::AudioCommand,
     },
     /// Show this device: identity, class, hardware and power. `device
     /// posture` shows what it can prove about its own security: disk
@@ -4462,6 +4497,12 @@ fn main() -> ExitCode {
             }),
             Err(error) => fail(&error),
         },
+        Command::Workspace { command } => session::workspace(command, &style, json),
+        Command::Layout { preset } => session::layout(&preset, &style, json),
+        Command::Window { command } => session::window(command, &style, json),
+        Command::Session { command } => session::session(command, &style, json),
+        Command::Display { command } => session::display(command, &style, json),
+        Command::Audio { command } => session::audio(command, &style, json),
         Command::Device { command } => match client.call("device.posture", None) {
             // `--json` is the device.posture result verbatim for both verbs.
             // The human `device` view adds the identity and class rows from

@@ -1919,6 +1919,31 @@ or path other than the confirmed target device. An installed system returns
   the `device.posture` result verbatim for both verbs. System Control's
   Encryption, Secure Boot and Power panes read `punarctl device posture
   --json` and nothing else.
+- **Session verbs (client-side, no punard method):** these act on the
+  person's own session, as their own uid.
+  - `punarctl workspace list|focus <id|name>|rename <id> [name]|new
+    <name>`: `new` is the command center's "Open <name>". It takes the
+    first id no live or stored workspace holds, then names it.
+  - `punarctl layout <preset>|status`: this runs
+    `/usr/lib/punar/punar-layout.sh`, the presets' one implementation.
+  - `punarctl window list|active|focus --class|--address|close
+    [--address]|kill --address`: kill always needs an exact address.
+  - `punarctl display list`.
+  - How they reach Hyprland: over its own request socket
+    (`$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`),
+    sending the Lua dispatcher expressions HyprlandActions.qml used to send.
+    Every value is quoted as a Lua string literal. `--json` prints
+    Hyprland's own answer.
+  - `punarctl session lock|end|restart|shutdown`: these run `loginctl
+    lock-session`, the compositor's `exit`, and `systemctl reboot|poweroff`,
+    so polkit still decides.
+  - `punarctl audio status|volume ±N%|N%|mute [on|off|toggle]`: this runs
+    `wpctl`, capped at 100% like the volume keys.
+  - Exit codes: 5 with no compositor or PipeWire, 3 when polkit refuses, 2
+    for a bad name, address or volume.
+  - The GUI runs these same verbs: the overview, the command center, the
+    workspace store, WindowActions, SessionMenu and System Control's Power
+    actions.
 - **App parity (client-side, no new method):** `punarctl app list` joins
   `apps.catalog {}` for category, trust tier and catalog version, and its
   `--json` is still `apps.list` verbatim. `app list --all` adds every

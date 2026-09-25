@@ -45,7 +45,7 @@ contains "${COMMAND}" 'root.askApp(item.arg);'
 # Existing windows are activated through the compositor before any desktop
 # entry execution. The typed focus dispatcher performs the workspace switch.
 contains "${APPS}" 'list[i].activate();'
-contains "${APPS}" 'HyprlandActions.focusWindow("class:^" + exactClass + "$");'
+contains "${APPS}" 'HyprlandActions.focusWindowClass(observedAppId);'
 contains "${APPS}" 'if (root.focusExisting(root.entryWindowCandidates(entry)))'
 contains "${APPS}" 'entry.execute();'
 

@@ -158,14 +158,15 @@ DeferredSurfaceBase {
         // snapshotted. An exclusive layer-shell keyboard surface becomes the
         // compositor's active focus as soon as it is mapped; mapping first
         // made `hyprctl -j activewindow` observe the overlay instead of the
-        // application the user intended to manage.
+        // application the user intended to manage. The snapshot is
+        // `punarctl window active`, the terminal's own read.
         root.windowVisible = false;
         root.open = true;
 
         if (snapshotProc.running)
             snapshotProc.running = false;
         try {
-            snapshotProc.command = ["hyprctl", "-j", "activewindow"];
+            snapshotProc.command = ["punarctl", "--json", "window", "active"];
             snapshotProc.running = true;
         } catch (e) {
             root.phase = "failed";
@@ -246,11 +247,9 @@ DeferredSurfaceBase {
     function closeWindow(): void {
         if (!root.ready || dispatchProc.running)
             return;
-        var address = root.targetAddress;
-        // The Lua dispatcher sends the normal compositor close request. It
-        // does not send a process signal. The address is safe to interpolate
-        // because finishSnapshot() accepts hexadecimal addresses only.
-        root.runDispatcher("hl.dsp.window.close({ window = 'address:" + address + "' })");
+        // `punarctl window close` sends the compositor's normal close
+        // request. It does not send a process signal.
+        root.runWindowVerb(["punarctl", "window", "close", "--address", root.targetAddress]);
     }
 
     function armForceQuit(): void {
@@ -265,22 +264,20 @@ DeferredSurfaceBase {
     function forceQuit(): void {
         if (!root.ready || !root.forceArmed || dispatchProc.running)
             return;
-        var address = root.targetAddress;
-        // The kill dispatcher is intentionally confined to this confirmed
-        // path. It sends SIGKILL to the process owning the exact snapshotted
-        // window.
-        root.runDispatcher("hl.dsp.window.kill({ window = 'address:" + address + "' })");
+        // Kill is intentionally confined to this confirmed path. It sends
+        // SIGKILL to the process owning the exact snapshotted window, and
+        // `punarctl window kill` refuses anything but an exact address.
+        root.runWindowVerb(["punarctl", "window", "kill", "--address", root.targetAddress]);
     }
 
-    function runDispatcher(expression: string): void {
+    function runWindowVerb(argv: var): void {
         if (dispatchProc.running)
             return;
         try {
-            // Hyprland 0.56's request socket accepts Lua dispatchers, but
-            // Quickshell 0.3 can race an asynchronously opened socket with a
-            // deferred surface unloading. Keep this short-lived process
-            // owned until its result is known instead.
-            dispatchProc.command = ["hyprctl", "dispatch", expression];
+            // A short-lived process owned until its result is known:
+            // Quickshell 0.3 can race an asynchronously opened compositor
+            // socket with a deferred surface unloading.
+            dispatchProc.command = argv;
             dispatchProc.running = true;
         } catch (e) {
             root.forceArmed = false;
@@ -324,9 +321,10 @@ DeferredSurfaceBase {
             waitForEnd: true
         }
 
+        // punarctl exits 0 only when the compositor answered `ok`; any other
+        // answer is a non-zero exit with the reason on stderr.
         Component.onCompleted: dispatchProc.exited.connect(function (exitCode) {
-            var response = String(dispatchOut.text).trim();
-            if (exitCode === 0 && response === "ok") {
+            if (exitCode === 0) {
                 root.dismiss();
                 return;
             }

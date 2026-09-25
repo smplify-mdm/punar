@@ -98,10 +98,10 @@ QtObject {
     //
     // punar-binds.conf names the command center as a consumer of this
     // script in so many words: "the compositor binds (PUNAR+comma/period →
-    // prev/next), the command center (exec, by preset name)". Five presets;
-    // `grid` is not shipped (no native grid algorithm in Hyprland 0.56.2)
-    // and therefore is not offered.
-    readonly property string layoutScript: "/usr/lib/punar/punar-layout.sh"
+    // prev/next), the command center (exec, by preset name)". The command
+    // center reaches it through `punarctl layout <preset>`, the verb a
+    // terminal uses. Five presets; `grid` is not shipped (no native grid
+    // algorithm in Hyprland 0.56.2) and therefore is not offered.
     readonly property var layouts: [
         {
             "preset": "balanced",
@@ -217,12 +217,7 @@ QtObject {
     }
 
     function applyLayout(preset: string): bool {
-        try {
-            Quickshell.execDetached([root.layoutScript, preset]);
-        } catch (e) {
-            console.warn("punar-shell: layout preset failed", preset, e);
-            return false;
-        }
+        HyprlandActions.applyLayout(preset);
         return true;
     }
 
