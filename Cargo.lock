@@ -1127,6 +1127,7 @@ version = "0.1.0"
 dependencies = [
  "pam-client2",
  "punar-common",
+ "punar-reauth",
  "rustix",
  "serde",
  "serde_json",

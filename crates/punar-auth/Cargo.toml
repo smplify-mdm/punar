@@ -50,6 +50,11 @@ pam-client2 = { version = "=0.5.5", default-features = false }
 # drift. Everything it pulls in is already in the workspace tree; nothing new
 # is locked, and no libpam dependency flows the other way.
 punar-common = { workspace = true }
+# One thing only, for the unprivileged relay binary: `harden()`, so the
+# process that holds the lock screen's password is not dumpable and leaves no
+# core (F0-S4). The same definition every other password holder calls; the
+# library links no libpam, so nothing flows back.
+punar-reauth = { workspace = true }
 rustix = { workspace = true, features = ["net", "rand"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -39,7 +39,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -116,6 +116,10 @@ pub enum SourceError {
     Timeout,
     /// The rendezvous was answered by a process that did not start this one.
     NotTheParent,
+    /// Nothing arrived, and the rendezvous name no longer names this
+    /// process's socket: another program removed or replaced it, and the
+    /// parent may have sent the password there instead.
+    Intercepted(PathBuf),
     /// The private rendezvous directory is not private.
     UnsafeDirectory(PathBuf),
     /// This process may not take over its own descriptors: `pidfd_getfd` is
@@ -153,6 +157,14 @@ impl fmt::Display for SourceError {
             SourceError::NotTheParent => f.write_str(
                 "a program other than the one that started this command tried to answer its \
                  password prompt, so nothing was read",
+            ),
+            SourceError::Intercepted(path) => write!(
+                f,
+                "the private socket at {} was removed or replaced by another program before \
+                 your password arrived, so it may have been sent to that program instead. \
+                 Nothing was changed. Treat your account password as known to that \
+                 program: change it, and look for a program you did not start",
+                path.display()
             ),
             SourceError::UnsafeDirectory(dir) => write!(
                 f,
@@ -388,11 +400,17 @@ fn read_delivered_line(stream: &mut UnixStream) -> Result<Password, SourceError>
 /// WHAT THIS DOES NOT STOP, stated rather than implied: another program of
 /// the same person that watches the directory can race to replace the socket
 /// between the moment its path is printed and the moment the parent connects,
-/// and receive what the parent sends. Closing that needs the prompt itself to
-/// move into a trusted process (docs/api/ipc.md section 23.5).
+/// and receive what the parent sends. It cannot do so unseen: the name is
+/// bound to one inode, and a wait that ends with no connection checks it —
+/// a name that is gone or names another socket is reported as
+/// [`SourceError::Intercepted`], telling the person to change their password.
+/// Closing the race itself needs the prompt to move into a trusted process
+/// (docs/api/ipc.md section 23.5).
 pub struct ParentHandoff {
     listener: UnixListener,
     path: PathBuf,
+    /// `(st_dev, st_ino)` of the socket this process bound at `path`.
+    bound: (u64, u64),
 }
 
 impl ParentHandoff {
@@ -410,7 +428,12 @@ impl ParentHandoff {
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
-        Ok(ParentHandoff { listener, path })
+        let meta = fs::symlink_metadata(&path)?;
+        Ok(ParentHandoff {
+            listener,
+            path,
+            bound: (meta.dev(), meta.ino()),
+        })
     }
 
     /// Where the parent connects.
@@ -419,38 +442,76 @@ impl ParentHandoff {
     }
 
     /// Wait for the parent (`expected_pid`) and read the one line it sends.
+    ///
+    /// A connection from anyone else is closed unread and the wait goes on,
+    /// so a stranger that connects first cannot use up the rendezvous; if
+    /// the parent never arrives, the answer says a stranger tried. The name
+    /// is removed the moment the parent's connection is in.
     pub fn receive(self, expected_pid: i32, timeout: Duration) -> Result<Password, SourceError> {
         use rustix::event::{PollFd, PollFlags, Timespec, poll};
-        let spec = Timespec {
-            tv_sec: timeout.as_secs() as _,
-            tv_nsec: timeout.subsec_nanos() as _,
-        };
+        let deadline = std::time::Instant::now() + timeout;
+        let mut stranger = false;
         loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(if !self.name_is_still_ours() {
+                    SourceError::Intercepted(self.path.clone())
+                } else if stranger {
+                    SourceError::NotTheParent
+                } else {
+                    SourceError::Timeout
+                });
+            }
+            let spec = Timespec {
+                tv_sec: remaining.as_secs() as _,
+                tv_nsec: remaining.subsec_nanos() as _,
+            };
             let mut fds = [PollFd::new(&self.listener, PollFlags::IN)];
             match poll(&mut fds, Some(&spec)) {
-                Ok(0) => return Err(SourceError::Timeout),
-                Ok(_) => break,
+                Ok(0) => continue,
+                Ok(_) => {}
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(errno) => return Err(SourceError::from(errno)),
             }
+            let mut stream = match self.listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(SourceError::Io(error)),
+            };
+            let peer = rustix::net::sockopt::socket_peercred(stream.as_fd())?;
+            if peer.uid != rustix::process::getuid()
+                || peer.pid.as_raw_nonzero().get() != expected_pid
+            {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                stranger = true;
+                continue;
+            }
+            // The parent is in: nobody else may even try from here on.
+            if self.name_is_still_ours() {
+                let _ = fs::remove_file(&self.path);
+            }
+            stream.set_nonblocking(false)?;
+            return read_delivered_line(&mut stream);
         }
-        let (mut stream, _) = self.listener.accept()?;
-        // Nobody else may even try once one connection is in.
-        let _ = fs::remove_file(&self.path);
-        stream.set_nonblocking(false)?;
-        let peer = rustix::net::sockopt::socket_peercred(stream.as_fd())?;
-        if peer.uid != rustix::process::getuid() || peer.pid.as_raw_nonzero().get() != expected_pid
-        {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-            return Err(SourceError::NotTheParent);
-        }
-        read_delivered_line(&mut stream)
+    }
+}
+
+impl ParentHandoff {
+    /// Whether `path` still names the socket this process bound.
+    fn name_is_still_ours(&self) -> bool {
+        fs::symlink_metadata(&self.path).is_ok_and(|meta| {
+            meta.file_type().is_socket() && (meta.dev(), meta.ino()) == self.bound
+        })
     }
 }
 
 impl Drop for ParentHandoff {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // Only ever this process's own name: a replacement is evidence, and
+        // is left where it is for the person to find.
+        if self.name_is_still_ours() {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -814,10 +875,58 @@ mod tests {
             let _ = stream.write_all(b"not yours\n");
         });
         assert!(matches!(
-            handoff.receive(me + 1, Duration::from_secs(10)),
+            handoff.receive(me + 1, Duration::from_millis(500)),
             Err(SourceError::NotTheParent)
         ));
         sender.join().unwrap();
+
+        // A stranger that connects first does not use the rendezvous up: it
+        // is closed unread, and the parent that follows is still heard. The
+        // stranger is another process (this test binary, re-run as the
+        // helper below), so the kernel reports a pid that is not ours.
+        let handoff = ParentHandoff::open_in(&dir).unwrap();
+        let path = handoff.path().to_path_buf();
+        let stranger = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::rendezvous_stranger_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(STRANGER_ENV, &path)
+            .status()
+            .unwrap();
+        assert!(stranger.success());
+        let sender = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut stream = UnixStream::connect(path).unwrap();
+                stream.write_all(b"three amber rivers\n").unwrap();
+            })
+        };
+        let password = handoff.receive(me, Duration::from_secs(10)).unwrap();
+        sender.join().unwrap();
+        assert_eq!(
+            password.as_str(),
+            "three amber rivers",
+            "the parent's line is read, and the stranger's never is"
+        );
+
+        // A name another program replaced is reported as an interception,
+        // and the replacement is left for the person to find.
+        let handoff = ParentHandoff::open_in(&dir).unwrap();
+        let path = handoff.path().to_path_buf();
+        fs::remove_file(&path).unwrap();
+        let _impostor = UnixListener::bind(&path).unwrap();
+        assert!(matches!(
+            handoff.receive(me, Duration::from_millis(100)),
+            Err(SourceError::Intercepted(_))
+        ));
+        assert!(
+            path.exists(),
+            "the impostor's socket is evidence, not cleaned up"
+        );
+        fs::remove_file(&path).unwrap();
 
         // Nobody at all: a bounded wait, then the name is removed.
         let handoff = ParentHandoff::open_in(&dir).unwrap();
@@ -828,6 +937,21 @@ mod tests {
         ));
         assert!(!path.exists());
         let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// Where the stranger helper connects, when it is run as one.
+    const STRANGER_ENV: &str = "PUNAR_REAUTH_TEST_STRANGER";
+
+    /// Not a test on its own: re-run by
+    /// `the_rendezvous_answers_only_the_parent_and_leaves_no_name_behind` as
+    /// a separate process, it connects to the rendezvous and offers a line
+    /// that must never be read. Without the variable it does nothing.
+    #[test]
+    fn rendezvous_stranger_helper() {
+        if let Some(path) = std::env::var_os(STRANGER_ENV) {
+            let mut stream = UnixStream::connect(path).unwrap();
+            let _ = stream.write_all(b"from a stranger\n");
+        }
     }
 
     #[test]

@@ -29,6 +29,14 @@ use zeroize::{Zeroize, Zeroizing};
 const SOCKET: &str = "/run/punar-authd/auth.sock";
 
 fn main() -> ExitCode {
+    // Not dumpable, no core file, before the password is read (F0-S4): no
+    // other program of this person can open this process's /proc/<pid>/fd or
+    // memory while it holds the secret. A failure here answers `unavailable`
+    // rather than reading a secret into an unprotected process.
+    if punar_reauth::harden().is_err() {
+        let _ = writeln!(io::stdout(), "unavailable");
+        return ExitCode::SUCCESS;
+    }
     // A closed argv: one optional flag, compared literally. Nothing here is a
     // path, a name, or anything else a caller could aim somewhere.
     let admin = std::env::args().skip(1).any(|arg| arg == "--admin");
