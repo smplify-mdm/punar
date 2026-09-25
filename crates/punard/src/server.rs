@@ -195,8 +195,8 @@ fn release_failure_reason(error: &UpstreamError) -> String {
 enum Liveness {
     Available,
     Unavailable(AgentFault),
-    /// This pass cannot tell (the call did not fit what was left of its
-    /// budget, or its answer was garbled); nothing changes.
+    /// This pass cannot tell: the call was not sent, because it did not fit
+    /// what was left of the pass's budget. Nothing changes.
     Unknown,
 }
 
@@ -4244,8 +4244,15 @@ impl Inner {
         // pass on a slow or black-holed link still answers inside
         // punarctl's wait for it.
         let budget = CallBudget::new(self.cfg.reconcile_control_plane_budget);
-        self.refresh_policy_if_enrolled(&actor, &budget);
-        let report = self.reconcile_and_remediate(&actor, &budget);
+        // The agent before anything is asked of it: one that cannot be used
+        // is management interrupted (the enroll.agent episode), and a policy
+        // fetch through it would only fail the same way, recorded as the
+        // network's.
+        let agent = self.check_agent(&actor, &budget);
+        if !matches!(agent, Some((_, Liveness::Unavailable(_)))) {
+            self.refresh_policy_if_enrolled(&actor, &budget);
+        }
+        let report = self.reconcile_with(&actor, &budget, agent);
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
         Ok(to_value(report))
     }
@@ -4262,6 +4269,17 @@ impl Inner {
     /// M3 result fields keep their M3 meaning: `drift` / `drift_count`
     /// describe the **pre-remediation** observation.
     fn reconcile_and_remediate(&self, actor: &AuditActor, budget: &CallBudget) -> ReconcileResult {
+        self.reconcile_with(actor, budget, None)
+    }
+
+    /// [`Inner::reconcile_and_remediate`], with what [`Inner::check_agent`]
+    /// already found at the start of the pass, so the agent is asked once.
+    fn reconcile_with(
+        &self,
+        actor: &AuditActor,
+        budget: &CallBudget,
+        agent: Option<(u64, Liveness)>,
+    ) -> ReconcileResult {
         // M9: the lazy expiry sweep rides the existing reconcile timer, so
         // an unattended device still retires lapsed approvals and grants
         // without punard growing a timer of its own (SPEC section 6.3).
@@ -4350,7 +4368,7 @@ impl Inner {
         // reconcile timer is the sync cadence; no new timers, no new
         // wakeup sources. The section 9 summary file is refreshed
         // afterwards (write-on-change only).
-        self.sync_if_enrolled(actor, budget);
+        self.sync_if_enrolled(actor, budget, agent);
         self.publish_status_summary();
 
         let compliance = self.tracker.lock().unwrap().block(&self.registry);
@@ -6030,7 +6048,12 @@ impl Inner {
     /// inventory that failed waits before it is sent again unless it changed
     /// ([`InventoryRetry`]); `enroll.sync` is audited on **transitions
     /// only**.
-    fn sync_if_enrolled(&self, actor: &AuditActor, budget: &CallBudget) {
+    fn sync_if_enrolled(
+        &self,
+        actor: &AuditActor,
+        budget: &CallBudget,
+        agent: Option<(u64, Liveness)>,
+    ) {
         let (enrollment, epoch) = {
             let slot = self.enrollment.lock().unwrap();
             (slot.clone(), self.enrollment_epoch.load(Ordering::SeqCst))
@@ -6061,10 +6084,18 @@ impl Inner {
         // every pass, not only when a report happens to fail, and is told
         // apart from the network. While it cannot be used nothing more is
         // sent this pass (every call would fail the same way, a frozen agent
-        // only after its whole timeout): the reports stay pending.
-        let liveness = self.agent_liveness(&client, token.as_ref());
-        self.note_agent(actor, epoch, liveness);
-        let agent_down = matches!(liveness, Liveness::Unavailable(_));
+        // only after its whole timeout): the reports stay pending. A pass
+        // that began with `check_agent` already knows.
+        let mut liveness = match agent {
+            Some((checked, liveness)) if checked == epoch => liveness,
+            _ => {
+                let liveness = self.agent_liveness(&client, token.as_ref());
+                self.note_agent(actor, epoch, liveness);
+                liveness
+            }
+        };
+        let noted = liveness;
+        let down = |liveness: &Liveness| matches!(liveness, Liveness::Unavailable(_));
 
         // Compliance: overall + per-category states. Nothing else — no
         // values, no hostnames, no events (SPEC sections 24, 54).
@@ -6078,8 +6109,18 @@ impl Inner {
                 )
             }),
         );
+        // A report the agent's own socket fails is the agent's too: the
+        // episode, never the network (it may have been killed since the
+        // liveness call).
         let compliance_ok = match &token {
-            Some(token) if !agent_down => client.compliance_report(token, &report).is_ok(),
+            Some(token) if !down(&liveness) => match client.compliance_report(token, &report) {
+                Ok(()) => true,
+                Err(UpstreamError::AgentUnavailable(fault)) => {
+                    liveness = Liveness::Unavailable(fault);
+                    false
+                }
+                Err(_) => false,
+            },
             _ => false,
         };
         // The link is back. The waits an inventory and the policy refresh
@@ -6150,14 +6191,23 @@ impl Inner {
                 .is_some_and(|retry| retry.defers(epoch, &hash, attempted_at));
         let mut delivered = None;
         let mut failed_hash = None;
-        let inventory_outcome = if deferred {
-            "unreachable"
-        } else if !due {
+        let inventory_outcome = if !due {
             "unchanged"
+        } else if down(&liveness) {
+            "agent_unavailable"
+        } else if deferred {
+            "unreachable"
         } else {
             let answer = match &token {
-                Some(token) if !agent_down => client.inventory_report(token, &inventory).ok(),
-                _ => None,
+                Some(token) => match client.inventory_report(token, &inventory) {
+                    Ok(sent) => Some(sent),
+                    Err(UpstreamError::AgentUnavailable(fault)) => {
+                        liveness = Liveness::Unavailable(fault);
+                        None
+                    }
+                    Err(_) => None,
+                },
+                None => None,
             };
             match answer {
                 Some(sent) => {
@@ -6169,6 +6219,7 @@ impl Inner {
                     delivered = Some((hash, now, sent.unwrap_or(inventory)));
                     "success"
                 }
+                None if down(&liveness) => "agent_unavailable",
                 None => {
                     failed_hash = Some(hash);
                     "unreachable"
@@ -6181,9 +6232,15 @@ impl Inner {
         // obligations, and answering questions is a courtesy that must not
         // delay them.
         let last_query = match &token {
-            Some(token) if !agent_down => self.drain_pending_queries(&client, token),
+            Some(token) if !down(&liveness) => self.drain_pending_queries(&client, token),
             _ => None,
         };
+        // A report the agent's socket failed after the liveness call said it
+        // answered starts the episode now.
+        if liveness != noted {
+            self.note_agent(actor, epoch, liveness);
+        }
+        let agent_down = down(&liveness);
 
         // Everything this pass learned is written back only while the
         // enrollment it began with is still the one in the slot: the pending
@@ -6204,8 +6261,10 @@ impl Inner {
         };
         self.pending_compliance
             .store(!compliance_ok, Ordering::SeqCst);
-        self.pending_inventory
-            .store(inventory_outcome == "unreachable", Ordering::SeqCst);
+        self.pending_inventory.store(
+            matches!(inventory_outcome, "unreachable" | "agent_unavailable"),
+            Ordering::SeqCst,
+        );
         {
             let mut retry = self.inventory_retry.lock().unwrap();
             // A failure counts toward the inventory's wait only when the
@@ -6233,24 +6292,31 @@ impl Inner {
         }
         *self.last_sync_outcome.lock().unwrap() = Some(FirstSync {
             compliance: if compliance_ok {
-                "success".to_string()
+                "success"
+            } else if agent_down {
+                "agent_unavailable"
             } else {
-                "unreachable".to_string()
-            },
+                "unreachable"
+            }
+            .to_string(),
             inventory: inventory_outcome.to_string(),
         });
         self.audit_applications_withheld(actor, withheld, current);
 
         // Transition-only audit (milestone-5.md section 7): once on
         // reachable→unreachable, once on recovery — never one event per
-        // 120 s retry.
+        // 120 s retry. A pass the agent could not carry is not a sync
+        // attempt at all: the network was never asked, so it neither starts
+        // nor ends an outage, and `last_sync` keeps the last sync that was
+        // attempted. The agent's own episode is `enroll.agent`, and
+        // `pending` says the reports wait.
         let overall = if compliance_ok && inventory_outcome != "unreachable" {
             "success"
         } else {
             "unreachable"
         };
         let previous = current.last_sync.result.clone();
-        if overall == "unreachable" && previous.as_deref() != Some("unreachable") {
+        if !agent_down && overall == "unreachable" && previous.as_deref() != Some("unreachable") {
             self.log_audit(self.enroll_event(
                 actor,
                 "enroll.sync",
@@ -6259,7 +6325,7 @@ impl Inner {
                 current.policy_ids(),
             ));
         }
-        if overall == "success" && previous.as_deref() == Some("unreachable") {
+        if !agent_down && overall == "success" && previous.as_deref() == Some("unreachable") {
             self.log_audit(self.enroll_event(
                 actor,
                 "enroll.sync",
@@ -6278,10 +6344,12 @@ impl Inner {
             current.last_inventory_hash = Some(hash);
             current.last_inventory_sent_at = Some(at);
         }
-        current.last_sync = LastSyncRecord {
-            at: Some(utc_now_rfc3339()),
-            result: Some(overall.to_string()),
-        };
+        if !agent_down {
+            current.last_sync = LastSyncRecord {
+                at: Some(utc_now_rfc3339()),
+                result: Some(overall.to_string()),
+            };
+        }
         if last_query.is_some() {
             current.last_query = last_query;
         }
@@ -6290,16 +6358,49 @@ impl Inner {
         }
     }
 
-    /// punard's liveness check of the built-in agent: `identity.status`,
-    /// which the agent answers locally. An answer that it holds no identity,
-    /// or not the one this device's token names, is management interrupted
-    /// as surely as a socket that is gone: the reports would all be refused.
+    /// punard's liveness check of the built-in agent at the start of a pass
+    /// while enrolled ([`Inner::agent_liveness`]), recorded as the episode it
+    /// starts or ends: the enrollment epoch it was made for and what it
+    /// found, or `None` on a personal device.
+    fn check_agent(&self, actor: &AuditActor, budget: &CallBudget) -> Option<(u64, Liveness)> {
+        let epoch = {
+            let slot = self.enrollment.lock().unwrap();
+            slot.as_ref()?;
+            self.enrollment_epoch.load(Ordering::SeqCst)
+        };
+        let token = self.device_token.lock().unwrap().clone();
+        let client = self.control_plane().within(budget.clone());
+        let liveness = self.agent_liveness(&client, token.as_ref());
+        self.note_agent(actor, epoch, liveness);
+        Some((epoch, liveness))
+    }
+
+    /// punard's liveness check of the built-in agent: `identity.status` with
+    /// this device's token, which the agent answers locally. It FAILS
+    /// CLOSED: the one answer that means the agent is there and is this
+    /// device's is `enrolled: true` with `token_matches: true`, and anything
+    /// else is management interrupted, with the reason. An agent that holds
+    /// no identity, or not the one the token names, is as unusable as a
+    /// socket that is gone (every report would be refused), and an answer the
+    /// agent never gives (no `token_matches` for the token it was handed, an
+    /// error other than its own `internal`, a line that is not the protocol)
+    /// is something else answering on its socket. Without the token there is
+    /// nothing to ask: the device cannot be reported on at all. The only
+    /// pass that learns nothing is one whose call was not sent, because it
+    /// did not fit what the pass had left.
     fn agent_liveness(
         &self,
         client: &ControlPlaneClient,
         token: Option<&Redacted<String>>,
     ) -> Liveness {
-        match client.identity_status(token) {
+        let Some(token) = token else {
+            return Liveness::Unavailable(AgentFault::TokenMissing);
+        };
+        match client.identity_status(Some(token)) {
+            Ok(AgentIdentity {
+                enrolled: true,
+                token_matches: Some(true),
+            }) => Liveness::Available,
             Ok(AgentIdentity {
                 enrolled: false, ..
             }) => Liveness::Unavailable(AgentFault::IdentityMissing),
@@ -6307,16 +6408,19 @@ impl Inner {
                 token_matches: Some(false),
                 ..
             }) => Liveness::Unavailable(AgentFault::IdentityMismatch),
-            Ok(_) => Liveness::Available,
+            Ok(AgentIdentity {
+                token_matches: None,
+                ..
+            }) => Liveness::Unavailable(AgentFault::UnexpectedAnswer),
             Err(UpstreamError::AgentUnavailable(fault)) => Liveness::Unavailable(fault),
             // It answered, and could not read its own identity.
             Err(UpstreamError::Refused { code, .. }) if code == "internal" => {
                 Liveness::Unavailable(AgentFault::IdentityUnreadable)
             }
-            // It answered: a control plane without this call (an older
-            // development mock) is there, and the reports say the rest.
-            Err(UpstreamError::Refused { .. }) => Liveness::Available,
-            Err(UpstreamError::Unreachable(_) | UpstreamError::TooLarge) => Liveness::Unknown,
+            Err(UpstreamError::Refused { .. } | UpstreamError::TooLarge) => {
+                Liveness::Unavailable(AgentFault::UnexpectedAnswer)
+            }
+            Err(UpstreamError::Unreachable(_)) => Liveness::Unknown,
         }
     }
 

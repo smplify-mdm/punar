@@ -347,13 +347,14 @@ impl Inner {
                 outcome.detail = Some(why);
                 outcome
             }
-            // The agent itself: the sync's liveness check records it as
-            // management interrupted; for the policy it is one more fetch
-            // that did not get through.
-            Err(error @ UpstreamError::AgentUnavailable(_)) => {
-                let mut outcome = Outcome::new(RefreshResult::Unreachable, None);
-                outcome.detail = Some(error.to_string());
-                outcome
+            // The agent itself, which the pass's liveness call found
+            // answering and which failed since: management interrupted, the
+            // enroll.agent episode, and never the network's. The fetch says
+            // nothing about the organization's policy or the link to it, so
+            // nothing is recorded for the policy and nothing backs off.
+            Err(UpstreamError::AgentUnavailable(fault)) => {
+                self.note_agent(actor, epoch, super::Liveness::Unavailable(fault));
+                return;
             }
             Err(UpstreamError::Refused { code, message }) => {
                 let mut outcome = Outcome::new(RefreshResult::Refused, Some(refused_reason(&code)));

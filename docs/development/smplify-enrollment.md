@@ -551,21 +551,31 @@ What is left is another root process:
 |---|---|---|
 | `systemctl stop` or `restart` of the service or the socket, `disable --now` | refused (`RefuseManualStop=yes`); nothing is enabled to disable | nothing: the agent keeps running |
 | `kill -TERM`, `kill -KILL`, `systemctl kill` | restarted after 10 s, or at once by the next call | a call in flight: `connection_reset` or `closed_without_answer`; then the agent again |
-| `kill -STOP` | stays `active`, never answers | `not_answering` (the liveness call gets no answer in 2 s) |
+| `kill -STOP`, `systemctl freeze` | stays `active`, never answers | `not_answering` (the liveness call gets no answer in 10 s) |
 | `mask`, then `stop`; a runtime drop-in lifting `RefuseManualStop=` | stopped | `socket_missing`, `connection_refused` or `connection_reset` |
 | a target with `Conflicts=` on it | stopped until the next call starts it again | the agent back, or `socket_missing` if the socket went too |
 | delete `device.json` and leave the key | the agent keeps running | `identity_missing` |
 | delete every identity file | the agent goes dormant 30 s later | `identity_missing`: the next call starts it, and it holds none |
 | an identity punard did not register | the agent answers for it | `identity_mismatch` |
+| delete punard's `device-token` and restart punard | punard cannot ask about or report on this device | `token_missing` (nothing is sent) |
+| another program answering on the agent's socket with anything but this device's identity | whatever it says | `unexpected_answer` (the liveness call fails closed) |
 | an agent that cannot start (a missing or broken binary) | the socket fails after 20 starts in 10 s | `connection_refused` |
 
 **How it is noticed.** Every reconcile pass while enrolled first calls
-`identity.status`, which the agent answers from one file read. Any failure of
-the agent's own socket (a connect error of any kind, a reset, a connection
-closed before the answer, no answer to a call that needs no network) is
-`AgentUnavailable`, never the network, and so is an agent that answers that
-it holds no identity, or not this device's. While it lasts nothing more is
-sent that pass and the reports stay pending. One `enroll.agent` audit event
+`identity.status`, before the policy fetch, and the agent answers it from
+one file read. The check fails closed: the only answer that means the agent
+is there and is this device's is `enrolled: true` with `token_matches: true`.
+Any failure of the agent's own socket (a connect error of any kind, a reset,
+a connection closed before the answer, no answer in 10 s to a call that
+needs no network) is `AgentUnavailable`, never the network, and so is an
+agent that answers that it holds no identity, or not this device's, an
+answer the agent never gives (`unexpected_answer`), and a device token
+punard no longer holds (`token_missing`). While it lasts nothing more is
+sent that pass, the policy is not fetched and the reports stay pending; a
+report or fetch the agent's socket fails later in the same pass starts the
+episode just the same. None of it is recorded as a network outage: no
+`enroll.sync` `unreachable`, no `enroll.policy` `unreachable`, and
+`last_sync` keeps the last sync that was attempted. One `enroll.agent` audit event
 with result `agent_unavailable` and resource `agent.<reason>` starts an
 episode and one `success` event ends it; the episode is kept in
 `enrollment.json`, so a restart neither repeats nor loses it. `status.json`

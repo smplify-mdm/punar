@@ -94,9 +94,12 @@ struct ControlPlaneState {
     /// Refuse `org.discover` of an unknown domain with this message: words
     /// the control plane chose.
     not_found_message: Mutex<Option<String>>,
-    /// Take every request and answer none: a link that drops everything past
-    /// the connection.
+    /// Take every request that needs the organization's server and answer
+    /// none: a link that drops everything past the connection. The calls
+    /// the agent answers from the device alone still work.
     black_hole: AtomicBool,
+    /// Take every request and answer none, those included: a frozen agent.
+    frozen: AtomicBool,
     /// Answer every call that needs the organization's server as the
     /// built-in agent does while the device is offline: with its own
     /// `internal` error, promptly. The calls it answers from the device alone
@@ -122,6 +125,14 @@ struct ControlPlaneState {
     /// Every method punard called, in order: proves whether anything left
     /// the device on behalf of a caller.
     methods: Mutex<Vec<String>>,
+    /// Every connection accepted, whether or not a call followed: with the
+    /// agent's socket owned by systemd, a bare connect is enough to start
+    /// the agent (`Accept=no` triggers on the connection), so a device that
+    /// must never run it must never connect.
+    connections: AtomicUsize,
+    /// Answer `identity.status` with this line verbatim instead: something
+    /// that is not the agent answering on its socket.
+    raw_identity_status: Mutex<Option<String>>,
     /// Every request line exactly as it arrived, to prove what never did.
     lines: Mutex<Vec<String>>,
     /// Serve this as the organization document's `enrollment.removable`
@@ -374,6 +385,7 @@ impl ControlPlane {
                     break;
                 }
                 let Ok(stream) = stream else { break };
+                accept_state.connections.fetch_add(1, Ordering::SeqCst);
                 let state = Arc::clone(&accept_state);
                 std::thread::spawn(move || serve_connection(stream, &state));
             }
@@ -431,7 +443,10 @@ fn serve_connection(stream: UnixStream, state: &ControlPlaneState) {
         let params = request.get("params").cloned().unwrap_or(json!({}));
         state.methods.lock().unwrap().push(method.to_string());
         state.lines.lock().unwrap().push(line.clone());
-        if state.black_hole.load(Ordering::SeqCst) {
+        let local = matches!(method, "identity.status" | "enroll.unregister");
+        if state.frozen.load(Ordering::SeqCst)
+            || (state.black_hole.load(Ordering::SeqCst) && !local)
+        {
             // Held until punard stops waiting and hangs up.
             line.clear();
             let _ = reader.read_line(&mut line);
@@ -439,6 +454,12 @@ fn serve_connection(stream: UnixStream, state: &ControlPlaneState) {
         }
         if state.hang_up.load(Ordering::SeqCst) {
             break;
+        }
+        if method == "identity.status" {
+            if let Some(raw) = state.raw_identity_status.lock().unwrap().clone() {
+                let _ = writeln!(writer, "{raw}");
+                break;
+            }
         }
         let response = match state.handle(method, &params) {
             Ok(result) => json!({"v": 1, "id": id, "result": result}),
@@ -1151,27 +1172,29 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     let report = daemon.result("reconcile", None);
     assert_eq!(report["compliance"]["overall"], "compliant");
     let enroll_status = daemon.result("enroll.status", None);
-    assert_eq!(enroll_status["last_sync"]["result"], "unreachable");
+    // The control plane here is the built-in agent's socket, on this device:
+    // one that is gone is management interrupted, told apart from the
+    // network, and audited once for the episode. The network was never
+    // asked, so no sync was attempted: last_sync keeps the last one, the
+    // reports wait, and no enroll.sync outage is recorded.
+    assert_eq!(enroll_status["last_sync"]["result"], "success");
     assert_eq!(enroll_status["last_sync"]["pending"], true);
     assert_eq!(enroll_status["attestation"], "simulated");
-    let unreachable_events = |daemon: &TestDaemon| {
+    let sync_events = |daemon: &TestDaemon| {
         daemon
             .audit_events()
             .iter()
-            .filter(|e| e["action"] == "enroll.sync" && e["result"] == "unreachable")
+            .filter(|e| e["action"] == "enroll.sync")
             .count()
     };
-    assert_eq!(unreachable_events(&daemon), 1);
-    // The control plane here is the built-in agent's socket, on this device:
-    // one that is gone is management interrupted, told apart from the
-    // network, and audited once for the episode.
+    assert_eq!(sync_events(&daemon), 0);
     assert_eq!(enroll_status["management"]["state"], "interrupted");
     assert_eq!(enroll_status["management"]["reason"], "socket_missing");
     assert_eq!(daemon.status_summary()["management"], "interrupted");
-    // A second failing pass adds no second transition event (transitions
+    // A second failing pass adds no second episode event (transitions
     // only, never per-retry spam).
     daemon.result("reconcile", None);
-    assert_eq!(unreachable_events(&daemon), 1);
+    assert_eq!(sync_events(&daemon), 0);
     assert_eq!(
         agent_events(&daemon),
         [(
@@ -1194,12 +1217,11 @@ fn enroll_lifecycle_org_wins_sync_flows_offline_survives_unenroll_restores() {
     assert_eq!(enroll_status["last_sync"]["pending"], false);
     assert_eq!(control_plane.state.compliance.lock().unwrap().len(), 3);
     assert_eq!(control_plane.state.inventory.lock().unwrap().len(), 1);
-    let success_transitions = daemon
-        .audit_events()
-        .iter()
-        .filter(|e| e["action"] == "enroll.sync" && e["result"] == "success")
-        .count();
-    assert_eq!(success_transitions, 1);
+    assert_eq!(
+        sync_events(&daemon),
+        0,
+        "the agent's episode is not an outage"
+    );
     assert_eq!(enroll_status["management"], json!({"state": "active"}));
     assert_eq!(daemon.status_summary()["management"], "active");
     assert_eq!(
@@ -4295,12 +4317,15 @@ fn a_set_the_device_cannot_install_backs_off_like_a_failed_fetch() {
 /// however the link fails, so punarctl's wait for it (and the timer's unit)
 /// never runs out: on a link that takes every request and answers none, the
 /// policy fetch is waited out, and the reports that no longer fit in what is
-/// left are not sent at all, staying pending for the next pass.
+/// left are not sent at all, staying pending for the next pass. A frozen
+/// agent, which does not answer even the liveness call it answers from the
+/// device alone, is waited out once and asked nothing more: management
+/// interrupted, not the network.
 #[test]
 fn a_pass_on_a_black_holed_link_ends_inside_its_budget() {
     // Room for the fetch and a compliance report on a link that answers
     // (5 + 9 s waited out would not fit, 0 + 9 does); on one that does not,
-    // the fetch alone is waited out.
+    // the fetch alone is waited out. The liveness call's whole wait fits.
     const BUDGET: Duration = Duration::from_secs(10);
     let dir = test_dir("black-hole");
     let control_plane = ControlPlane::start(&dir);
@@ -4321,17 +4346,30 @@ fn a_pass_on_a_black_holed_link_ends_inside_its_budget() {
     daemon.result("reconcile", None);
     let took = started.elapsed();
     assert!(took < BUDGET + Duration::from_secs(1), "{took:?}");
-    // The fetch is waited out (it may wait on the organization's server);
-    // the liveness call is not, and an agent that does not answer a call it
-    // answers locally is not answering at all: nothing more is sent.
+    // The agent answers the liveness call; the fetch is waited out (it may
+    // wait on the organization's server), and the reports no longer fit.
     assert_eq!(
         *state.methods.lock().unwrap(),
-        ["policy.fetch", "identity.status"],
+        ["identity.status", "policy.fetch"],
         "the reports were not sent"
     );
     let status = daemon.result("enroll.status", None);
     assert_eq!(status["last_sync"]["pending"], true, "{status}");
+    assert_eq!(status["last_sync"]["result"], "unreachable", "{status}");
+    assert_eq!(status["management"]["state"], "active", "{status}");
+
+    // A frozen agent: the liveness call is waited out, and nothing more is
+    // asked of it.
+    state.frozen.store(true, Ordering::SeqCst);
+    state.methods.lock().unwrap().clear();
+    let started = std::time::Instant::now();
+    daemon.result("reconcile", None);
+    let took = started.elapsed();
+    assert!(took < BUDGET + Duration::from_secs(1), "{took:?}");
+    assert_eq!(*state.methods.lock().unwrap(), ["identity.status"]);
+    let status = daemon.result("enroll.status", None);
     assert_eq!(status["management"]["reason"], "not_answering", "{status}");
+    state.frozen.store(false, Ordering::SeqCst);
 
     // The link back: the next pass sends what was pending.
     state.black_hole.store(false, Ordering::SeqCst);
@@ -4617,6 +4655,9 @@ fn a_device_that_never_enrolled_never_calls_the_agent() {
         "{:?}",
         control_plane.state.methods.lock().unwrap()
     );
+    // Not even a connection without a call: that alone would start the
+    // agent through its socket.
+    assert_eq!(control_plane.state.connections.load(Ordering::SeqCst), 0);
     assert_eq!(daemon.status_summary()["management"], Value::Null);
 }
 
@@ -4718,6 +4759,122 @@ fn every_way_the_agent_stops_serving_is_audited_once_per_episode() {
     mended("connection_refused");
 
     assert_eq!(agent_events(&daemon).len(), 12, "two per episode, no more");
+    // None of it was the network: no sync outage, no policy fetch recorded
+    // as unreachable, and last_sync still names the last real sync.
+    let events = daemon.audit_events();
+    assert!(
+        events.iter().all(|e| e["action"] != "enroll.sync"
+            && !(e["action"] == "enroll.policy" && e["result"] == "unreachable")),
+        "{events:?}"
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["result"], "success", "{status}");
+}
+
+/// The liveness check fails closed: the one answer that means the agent is
+/// there and is this device's is `enrolled: true` with `token_matches: true`.
+/// Something else answering on the agent's socket, with an answer the agent
+/// never gives, is management interrupted (`unexpected_answer`), not a pass
+/// that learned nothing: a stand-in that claims an identity but not this
+/// device's token, one that refuses with an error the agent never uses, one
+/// that writes a line that is not the protocol, and one that speaks another
+/// version of it.
+#[test]
+fn an_answer_that_is_not_the_agents_is_management_interrupted() {
+    let dir = test_dir("agent-impostor");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let state = &control_plane.state;
+    for raw in [
+        r#"{"v":1,"id":"x","result":{"enrolled":true}}"#,
+        r#"{"v":1,"id":"x","error":{"code":"x","message":"y"}}"#,
+        r#"{"v":1,"id":"x","result":{}}"#,
+        "not the protocol",
+        r#"{"v":2,"id":"x","result":{"enrolled":true,"token_matches":true}}"#,
+    ] {
+        *state.raw_identity_status.lock().unwrap() = Some(raw.to_string());
+        let reports = state.compliance.lock().unwrap().len();
+        daemon.result("reconcile", None);
+        let status = daemon.result("enroll.status", None);
+        assert_eq!(status["management"]["state"], "interrupted", "{raw}");
+        assert_eq!(
+            status["management"]["reason"], "unexpected_answer",
+            "{raw}: {status}"
+        );
+        assert_eq!(
+            state.compliance.lock().unwrap().len(),
+            reports,
+            "{raw}: nothing more is sent to it"
+        );
+        *state.raw_identity_status.lock().unwrap() = None;
+        daemon.result("reconcile", None);
+        assert_eq!(
+            daemon.result("enroll.status", None)["management"]["state"],
+            "active",
+            "{raw}"
+        );
+    }
+    assert_eq!(
+        agent_events(&daemon),
+        [
+            "agent_unavailable",
+            "success",
+            "agent_unavailable",
+            "success",
+            "agent_unavailable",
+            "success",
+            "agent_unavailable",
+            "success",
+            "agent_unavailable",
+            "success"
+        ]
+        .iter()
+        .map(|result| (result.to_string(), "agent.unexpected_answer".to_string()))
+        .collect::<Vec<_>>()
+    );
+}
+
+/// punard's own device token deleted while the device is enrolled: it can
+/// neither ask the agent about this device's identity nor report on it, and
+/// that is management interrupted (`token_missing`), audited once, never a
+/// network outage. Nothing is sent: not even the liveness call, which would
+/// have no token to present.
+#[test]
+fn a_deleted_device_token_is_management_interrupted() {
+    let dir = test_dir("token-deleted");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    daemon.stop();
+    fs::remove_file(dir.join("state/device-token")).unwrap();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    let before = control_plane.state.connections.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        daemon.result("reconcile", None);
+    }
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["management"]["state"], "interrupted", "{status}");
+    assert_eq!(status["management"]["reason"], "token_missing", "{status}");
+    assert_eq!(status["last_sync"]["pending"], true, "{status}");
+    assert_eq!(daemon.status_summary()["management"], "interrupted");
+    assert_eq!(
+        agent_events(&daemon),
+        [(
+            "agent_unavailable".to_string(),
+            "agent.token_missing".to_string()
+        )]
+    );
+    assert!(
+        daemon
+            .audit_events()
+            .iter()
+            .all(|e| e["action"] != "enroll.sync"),
+        "not the network"
+    );
+    assert_eq!(
+        control_plane.state.connections.load(Ordering::SeqCst),
+        before,
+        "nothing asked without the token"
+    );
 }
 
 /// An episode that began before a restart is the same episode after it: no

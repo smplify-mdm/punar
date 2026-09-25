@@ -115,11 +115,14 @@ each direction. No length prefixes, no binary framing.
   first `org.discover` of an `enroll.start`, the boot reconcile's first call
   on an enrolled device) includes starting it, tens of milliseconds, inside
   the second each wait keeps above the agent's own budget. While enrolled,
-  every pass first makes the liveness call `identity.status`, which the agent
-  answers locally and punard waits 2 s for: it either answers at once or ends
-  the pass's calls to the agent (section 6, `enroll.agent`), so it never adds
-  a full wait to the four above. Every other method keeps the 10 s/15 s
-  bounds unchanged.
+  every pass first makes the liveness call `identity.status`, before the
+  policy fetch. The agent answers it locally, in milliseconds when it is
+  running; punard waits up to 10 s, room for a cold start (the socket
+  starting a sandboxed service on slow hardware under boot load, unmeasured
+  on the release image). An answer that does not come, or is not the
+  agent's, ends the pass's calls to the agent (section 6, `enroll.agent`),
+  so it never adds a full wait to the four above. Every other method keeps
+  the 10 s/15 s bounds unchanged.
   **Application amendment:** `apps.catalog` may spend 30 s verifying remote
   metadata (`punarctl`: 45 s), while `apps.install`, `apps.update`, and
   `apps.remove` have bounded 30-minute/30-minute/10-minute per-app backend
@@ -1009,7 +1012,10 @@ crash is removed and the enrollment's record trimmed to the files
 
 `attestation` is the literal honesty label: the spec 49 attestation step is
 **simulated** by the mock and reported as such wherever enrollment state
-appears. Errors: `conflict`, `upstream_unreachable`, `invalid_params`
+appears. `first_sync` says how the first pass's reports went, each
+`"success"`, `"unreachable"` (the network), or `"agent_unavailable"` (the
+built-in agent could not be used: section 6, `enroll.agent`); a report that
+did not go stays pending for a later pass. Errors: `conflict`, `upstream_unreachable`, `invalid_params`
 (malformed domain / a policy set that fails a rule above), `internal` (the
 device could not stage or install a set), `denied`. `enroll.start` and
 `enroll.stop` wait up to 2 s for a policy refresh that is committing before
@@ -1097,7 +1103,9 @@ inventory also carries the serial number and every application installed
 for all users. `enroll.start`'s result carries both.
 `last_sync.result` ∈ `"success" | "unreachable" | null`; `pending` is true
 while a report is queued (bounded latest-wins queue, spec section 55;
-milestone-5.md section 7). The device token appears in no field.
+milestone-5.md section 7). A pass the built-in agent could not carry is not a
+sync attempt at all (the network was never asked): `last_sync` keeps the last
+attempted sync, and `pending` is true. The device token appears in no field.
 `management` (present exactly when enrolled) is `{"state": "active"}`, or
 `{"state": "interrupted", "reason": …, "since": …}` while the built-in agent
 cannot be used: `reason` is the section 6 `enroll.agent` reason the last pass
@@ -1917,11 +1925,20 @@ or path other than the confirmed target device. An installed system returns
   `connection_refused` (nobody listens: the socket unit stopped or failed),
   `permission_denied`, `connect_failed`, `connection_reset` (the connection
   broke mid-call), `closed_without_answer` (killed mid-call),
-  `not_answering` (no answer to a call it answers without the network:
-  frozen), `identity_missing` (it holds no identity while this device is
-  enrolled), `identity_mismatch` (not this device's), `identity_unreadable`.
-  None of these is the network: the agent is on this device and answers an
-  outage itself, inside its budget. `enroll.release` (resource
+  `not_answering` (no answer to a call it answers without the network, in
+  the liveness call's 10 s: frozen, or unable to start), `identity_missing`
+  (it holds no identity while this device is enrolled), `identity_mismatch`
+  (not this device's), `identity_unreadable`, `unexpected_answer` (an answer
+  the agent never gives: something else answers on its socket), and
+  `token_missing` (punard's own device token is gone, so this device cannot
+  be asked about or reported on at all). The liveness call fails closed: the
+  one answer that means the agent is there is `enrolled: true` with
+  `token_matches: true`, and only a call that was not sent (it did not fit
+  the pass's budget) leaves the state as it was. None of these is the
+  network: the agent is on this device and answers an outage itself, inside
+  its budget. So an episode is never also an `enroll.sync` outage, and a
+  policy fetch the agent's socket failed is not an `enroll.policy`
+  `unreachable`: the network was not asked, and the episode is the record. `enroll.release` (resource
   `agent.<reason>` or `agent`): `pending` once when an unenrollment's
   identity wipe is not confirmed, `success` once when it is (section 5.11).
 - **Installer planning addition:** `install.plan` is audited even though it

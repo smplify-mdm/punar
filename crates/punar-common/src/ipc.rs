@@ -2199,7 +2199,8 @@ pub struct ManagementStatus {
     /// While interrupted: why, a closed code (`socket_missing`,
     /// `connection_refused`, `permission_denied`, `connect_failed`,
     /// `connection_reset`, `closed_without_answer`, `not_answering`,
-    /// `identity_missing`, `identity_mismatch`, `identity_unreadable`).
+    /// `identity_missing`, `identity_mismatch`, `identity_unreadable`,
+    /// `unexpected_answer`, `token_missing`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// While interrupted: since when.

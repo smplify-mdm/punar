@@ -299,8 +299,11 @@ fn every_failure_of_the_agents_own_socket_is_the_agent_unavailable() {
     );
     served.join().unwrap();
 
-    let (socket, served) = serving(2, |stream| {
-        std::thread::sleep(std::time::Duration::from_secs(6));
+    // Held past the liveness call's whole wait, which leaves room for a cold
+    // start (IDENTITY_STATUS_CALL_TIMEOUT), and then some.
+    let held = punard::enroll::IDENTITY_STATUS_CALL_TIMEOUT + std::time::Duration::from_secs(2);
+    let (socket, served) = serving(2, move |stream| {
+        std::thread::sleep(held);
         drop(stream);
     });
     let started = std::time::Instant::now();
@@ -308,7 +311,8 @@ fn every_failure_of_the_agents_own_socket_is_the_agent_unavailable() {
         agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
         AgentFault::NotAnswering
     );
-    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    assert!(started.elapsed() >= punard::enroll::IDENTITY_STATUS_CALL_TIMEOUT);
+    assert!(started.elapsed() < held);
     match ControlPlaneClient::new(&socket).policy_fetch(&token) {
         Err(UpstreamError::Unreachable(why)) => assert!(why.starts_with("no answer"), "{why}"),
         other => panic!("a fetch that may wait on the network is not the agent's: {other:?}"),
@@ -331,4 +335,49 @@ fn a_socket_punard_may_not_open_is_the_agent_unavailable() {
         agent_fault(ControlPlaneClient::new(&socket).identity_status(None)),
         AgentFault::PermissionDenied
     );
+}
+
+/// An answer to the liveness call that is not the agent's is the agent
+/// unavailable (`unexpected_answer`): the agent answers it from this device
+/// alone and always in the protocol, so a malformed or oversized line,
+/// another version, an envelope with neither result nor error, or a result
+/// that does not say whether it holds an identity came from something else
+/// on its socket. The same answers to a call that may wait on the
+/// organization's server stay what they were.
+#[test]
+fn an_answer_to_the_liveness_call_that_is_not_the_agents_is_unexpected() {
+    let token = Redacted::new("tok_x".to_string());
+    let answer = |line: String| {
+        serving(1, move |stream| {
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            let mut writer = &stream;
+            let _ = writer.write_all(line.as_bytes());
+        })
+    };
+    for line in [
+        "not the protocol\n".to_string(),
+        "{\"v\":2,\"id\":\"x\",\"result\":{\"enrolled\":true}}\n".to_string(),
+        "{\"v\":1,\"id\":\"x\"}\n".to_string(),
+        "{\"v\":1,\"id\":\"x\",\"result\":{}}\n".to_string(),
+        format!(
+            "{{\"v\":1,\"result\":{{\"pad\":\"{}\"}}}}\n",
+            "x".repeat(MAX_ANSWER_BYTES as usize)
+        ),
+    ] {
+        let (socket, served) = answer(line.clone());
+        assert_eq!(
+            agent_fault(ControlPlaneClient::new(&socket).identity_status(Some(&token))),
+            AgentFault::UnexpectedAnswer,
+            "{}",
+            &line[..line.len().min(60)]
+        );
+        served.join().unwrap();
+    }
+    let (socket, served) = answer("not the protocol\n".to_string());
+    match ControlPlaneClient::new(&socket).policy_fetch(&token) {
+        Err(UpstreamError::Unreachable(why)) => assert!(why.contains("malformed"), "{why}"),
+        other => panic!("a network call's garbled answer is not the agent's: {other:?}"),
+    }
+    served.join().unwrap();
 }

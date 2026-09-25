@@ -80,10 +80,17 @@ pub const COMPLIANCE_REPORT_CALL_TIMEOUT: Duration = Duration::from_secs(9);
 /// `identity.status`'s timeout: punard's liveness call on every pass while
 /// enrolled. The agent answers it from one file read and asks Smplify
 /// nothing (`punar_smplifyd::budget::LOCAL_METHODS`), so an answer that does
-/// not come in this long is an agent that is not answering: frozen, or
-/// stopped with its socket held. Room for the agent's own start when the
-/// socket has to start it first, which takes tens of milliseconds.
-pub const IDENTITY_STATUS_CALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// not come in this long is an agent that is not answering: frozen, stopped
+/// with its socket held, or unable to start at all. Most of it is room for a
+/// cold start: the first call after a boot, a kill or a dormant exit has the
+/// socket start a sandboxed service first (namespaces, the state directory,
+/// its accounting), on hardware as slow as a Raspberry Pi under the boot's
+/// own load. A warm agent answers in milliseconds, and a restart after a
+/// kill waits at most `RestartMaxDelaySec=` (punar-smplifyd.service), well
+/// inside this. How long a cold start takes on the release image is
+/// unmeasured (docs/development/smplify-enrollment.md section 3.4); a pass
+/// never waits on it longer than this.
+pub const IDENTITY_STATUS_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The calls the built-in agent answers from this device alone, asking
 /// Smplify nothing (`punar_smplifyd::budget::LOCAL_METHODS`, which a test
@@ -108,7 +115,9 @@ pub fn call_timeout(method: &str) -> Duration {
 /// The most one reconcile pass spends on the control plane: every call it
 /// makes together, the time each waits behind calls already in flight
 /// included ([`CallBudget`], docs/api/ipc.md section 2). Its calls, in order,
-/// are `policy.fetch`, `compliance.report`, `inventory.report` and
+/// are the liveness call `identity.status`, which a working agent answers in
+/// milliseconds and which ends the pass's calls when it fails, then
+/// `policy.fetch`, `compliance.report`, `inventory.report` and
 /// `queries.pending`, which wait at most 5 + 9 + 5 + 5 = 24 s with nothing
 /// ahead of them; answering queries uses what is left, 5 s a question. A call
 /// that no longer fits is not sent (a report stays pending for the next
@@ -260,6 +269,15 @@ pub enum AgentFault {
     IdentityMismatch,
     /// The agent cannot read its identity.
     IdentityUnreadable,
+    /// An answer to a call the agent answers from this device alone that is
+    /// not the agent's: a malformed or oversized line, another protocol
+    /// version, neither result nor error, an error the agent never gives, or
+    /// a liveness answer that does not say this device's identity is the one
+    /// it holds. What answers is not the agent this device enrolled with.
+    UnexpectedAnswer,
+    /// punard holds no device token while the device is enrolled: it cannot
+    /// ask for, or report on, this device's identity at all.
+    TokenMissing,
 }
 
 impl AgentFault {
@@ -277,6 +295,8 @@ impl AgentFault {
             AgentFault::IdentityMissing => "identity_missing",
             AgentFault::IdentityMismatch => "identity_mismatch",
             AgentFault::IdentityUnreadable => "identity_unreadable",
+            AgentFault::UnexpectedAnswer => "unexpected_answer",
+            AgentFault::TokenMissing => "token_missing",
         }
     }
 
@@ -340,6 +360,19 @@ pub struct RecoveryEscrowOutcome {
 }
 
 impl UpstreamError {
+    /// An answer that is not a valid protocol frame. From a call the agent
+    /// answers without the network, only the agent could have written it,
+    /// and the agent never does: something else answers on its socket, or
+    /// the agent is broken ([`AgentFault::UnexpectedAnswer`]). From any
+    /// other call it stays what it always was.
+    fn malformed(method: &str, what: &str) -> UpstreamError {
+        if AGENT_LOCAL_METHODS.contains(&method) {
+            UpstreamError::AgentUnavailable(AgentFault::UnexpectedAnswer)
+        } else {
+            UpstreamError::Unreachable(what.to_string())
+        }
+    }
+
     /// A failure to connect to the agent's socket: always the agent's.
     fn connect(err: &io::Error) -> UpstreamError {
         UpstreamError::AgentUnavailable(AgentFault::of_connect(err))
@@ -485,15 +518,21 @@ impl ControlPlaneClient {
             ));
         }
         if read as u64 > MAX_ANSWER_BYTES {
+            if AGENT_LOCAL_METHODS.contains(&method) {
+                return Err(UpstreamError::AgentUnavailable(
+                    AgentFault::UnexpectedAnswer,
+                ));
+            }
             return Err(UpstreamError::TooLarge);
         }
 
         let mut value: Value = serde_json::from_str(response.trim_end()).map_err(|_| {
-            UpstreamError::Unreachable("the control plane answered with a malformed line".into())
+            UpstreamError::malformed(method, "the control plane answered with a malformed line")
         })?;
         if value.get("v") != Some(&json!(1)) {
-            return Err(UpstreamError::Unreachable(
-                "the control plane answered with an unsupported protocol version".into(),
+            return Err(UpstreamError::malformed(
+                method,
+                "the control plane answered with an unsupported protocol version",
             ));
         }
         if let Some(error) = value.get("error") {
@@ -516,8 +555,9 @@ impl ControlPlaneClient {
             });
         }
         value.get_mut("result").map(Value::take).ok_or_else(|| {
-            UpstreamError::Unreachable(
-                "the control plane answered with neither result nor error".into(),
+            UpstreamError::malformed(
+                method,
+                "the control plane answered with neither result nor error",
             )
         })
     }
@@ -579,14 +619,11 @@ impl ControlPlaneClient {
             None => json!({}),
         };
         let result = self.call("identity.status", params)?;
-        let enrolled = result
-            .get("enrolled")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| {
-                UpstreamError::Unreachable(
-                    "identity.status answered without saying whether it is enrolled".into(),
-                )
-            })?;
+        // The agent always says whether it holds an identity; an answer that
+        // does not is not the agent's.
+        let enrolled = result.get("enrolled").and_then(Value::as_bool).ok_or(
+            UpstreamError::AgentUnavailable(AgentFault::UnexpectedAnswer),
+        )?;
         Ok(AgentIdentity {
             enrolled,
             token_matches: result.get("token_matches").and_then(Value::as_bool),
