@@ -161,9 +161,10 @@ INITRD_BUILDER="${CHECKER_DIR}/scripts/build-installer-initrd.sh"
 }
 mkdir -p "${ARTIFACTDIR}/io.mkosi.initrd"
 
-# Every lane and every profile: free the unpacked initramfs before switch-root.
-# On Linux 7.0 to 7.2 it otherwise stays resident as Unevictable memory for the
-# whole boot (PERFORMANCE_BUDGETS.md, "Unpacked initramfs").
+# Every lane and every profile: free the unpacked initramfs before switch-root
+# on Linux 7.0 to 7.2, and reboot on a failed switch-root. On the arm64 release
+# image (Linux 7.1) it otherwise stayed resident as Unevictable memory for the
+# whole boot (MEASURED; 7.0 and 7.2 INFER; PERFORMANCE_BUDGETS.md §4.1).
 COMMON_INITRD_SOURCE="${CHECKER_DIR}/initrd-common"
 [ -d "${COMMON_INITRD_SOURCE}" ] || {
     echo "error: common initrd source is missing: ${COMMON_INITRD_SOURCE}" >&2

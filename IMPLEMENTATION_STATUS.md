@@ -46,16 +46,22 @@ write and zram gate passed, as did M2–M10/M12, 129 desktop-surface assertions
 and 15 isolated surface samples. Canonical x86 CI and physical-device proof
 remain open; this native-VM result is not a bare-metal claim.
 
-Most of the remaining `Unevictable` memory was the unpacked initrd itself. On
-Linux 7.0 to 7.2 it stays resident for the whole boot, because the kdevtmpfs
-kernel thread's copied mount namespace holds the old root after systemd's
-`pivot_root()`: 132.2 MiB on the arm64 release image. Linux 7.3 fixes it, and
-no Debian or Arch kernel ships 7.3 yet. Every lane's initrd now frees it
-before switch-root (`punar-release-initramfs.service`). Measured on the arm64
-release image at the greeter, `Unevictable` fell from 161,212 kB to 37,960 kB,
-the greeter still came up and the journal showed no new warnings. The
-stabilized-idle gate requires the release on every desktop lane, so CI proves
-the x86 lanes. See PERFORMANCE_BUDGETS.md §4.1.
+Separately from that x86 regression, and not measured on x86: on the arm64
+release image (Linux 7.1.12, 4 GiB, greeter-idle) 132.2 MiB of `Unevictable`
+memory was the unpacked initrd, resident for the whole boot because the
+kdevtmpfs kernel thread's copied mount namespace holds the old root after
+systemd's `pivot_root()` (MEASURED). The same should hold on Linux 7.0 to 7.2
+and end with 7.3 (INFER from the sources; no Debian or Arch kernel ships 7.3
+yet). Every lane's initrd now frees it before switch-root on those kernels
+(`punar-release-initramfs.service`); a failed switch-root then reboots so
+boot counting can fall back unattended. On the arm64 release image
+`Unevictable` fell from 162,464 kB to 38,032 kB (about 120.8 MiB over five
+step boots and three controls), the greeter came up with no new journal
+warnings, and a forced switch-root failure rebooted by itself (MEASURED).
+After push, the stabilized-idle gate shows on every desktop lane, x86
+included, that the step ran, that the kernel's own memory figures fell by what
+it freed, and that nothing warned before the switch; the x86 idle saving
+itself stays unmeasured. See PERFORMANCE_BUDGETS.md §4.1.
 
 The pinned-Debian x86_64 migration candidate is now independently green in
 [run 33840661515](https://github.com/smplify-mdm/punar/actions/runs/33840661515),

@@ -54,9 +54,14 @@ qcow2 (mkosi)                │  QEMU: -m 8192 -smp 4 -device virtio-vga,
    expose CPU and I/O counters; zram facts must reach the host report. The
    boot's journal must also show that `punar-release-initramfs.service` freed
    the unpacked initramfs before switch-root
-   (`PUNAR_IDLE_INITRAMFS_RELEASED=yes`; the window-end `Unevictable` figure
-   travels with it as context). Missing evidence is a failure on both native
-   and emulated runs.
+   (`PUNAR_IDLE_INITRAMFS_RELEASED=yes`), or said it was not needed on a
+   kernel outside Linux 7.0 to 7.2 (`not-needed`). A release must have freed
+   more than it kept, `Unevictable` + `Shmem` must have fallen by at least
+   half of what it freed (`PUNAR_IDLE_INITRAMFS_DROP_KB`, the kernel's own
+   figures), and no warning-or-worse userspace journal entry may fall between
+   the release and the switch-root (`PUNAR_IDLE_INITRAMFS_LATE_WARNINGS`).
+   The kernel release and window-end `Unevictable` travel with it as context.
+   Missing evidence is a failure on both native and emulated runs.
 4. **Gate 4 — budget verdict.** `check-budgets.sh` reads `ram-report.txt`
    and applies the RAM, service-PSS, per-service CPU and combined first-party
    write ceilings. Whole-guest writes are retained as context and are not
@@ -149,7 +154,7 @@ not the cross-architecture TCG path this caveat describes.
 | `punar-desktop-screenshot.png` | grim capture from inside the session — proof of real (llvmpipe) rendering. Uploaded as the `punar-desktop-screenshot` CI artifact. |
 | `ram-report.txt` | Typed host budget input: RAM, service PSS, idle CPU/write facts, zram facts, environment, image, timestamp and the informational desktop proxy. |
 | `ram-samples.txt` | raw per-sample `epoch used-MB` lines from the guest window. |
-| `runtime-report.txt` | Raw guest-emitted per-service/whole-guest CPU and write counters, live zram facts, and whether the initrd freed the unpacked initramfs (with window-end `Unevictable`). |
+| `runtime-report.txt` | Raw guest-emitted per-service/whole-guest CPU and write counters, live zram facts, and what the initrd's initramfs release freed, kept and was followed by (with the kernel release and window-end `Unevictable`). |
 | `ram-processes.txt` | Per-process PSS ranking at stabilized idle. |
 | `ram-process-memory.txt` | Window-end per-process PSS, locked, anonymous, file and shared-memory attribution plus whole-process totals and the non-process accounting remainder. The remainder is diagnostic, not a budget metric. |
 | `ram-meminfo-start.txt`, `ram-meminfo-end.txt` | Exact `/proc/meminfo` snapshots bracketing the stabilized five-minute window. |

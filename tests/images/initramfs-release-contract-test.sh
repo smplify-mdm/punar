@@ -2,8 +2,9 @@
 # Contract for the step that frees the unpacked initramfs before switch-root
 # (os/images/initrd-common; PERFORMANCE_BUDGETS.md, "Unpacked initramfs").
 #
-# On Linux 7.0 to 7.2 the unpacked initramfs stays resident as Unevictable
-# memory for the whole boot. punar-release-initramfs.service deletes it, less
+# On the arm64 release image (Linux 7.1) the unpacked initramfs stayed
+# resident as Unevictable memory for the whole boot (MEASURED; Linux 7.0 to 7.2
+# INFER). punar-release-initramfs.service deletes it, less
 # what the switch-root call still executes, as the last step in the initrd. A
 # mistake here either wastes that memory silently or deletes a file the boot
 # still needs, so this pins:
