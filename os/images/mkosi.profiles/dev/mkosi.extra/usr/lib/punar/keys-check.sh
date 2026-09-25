@@ -13,9 +13,12 @@
 #     switch chord, so PUNAR+Return still opens a terminal, and after the
 #     chord that terminal receives Cyrillic;
 #   * a workspace keeps its own layout preset, live and across sessions;
+#   * the login screen's choice, as session start adopts it, becomes the
+#     device's layout under the signed-in person's name;
 #   * the keys do what the grammar says, pressed as REAL KEYS: Alt+Tab, the
-#     tenth workspace, a quiet move, maximize, pop-out, and pointer move and
-#     resize with PUNAR held.
+#     tenth workspace, a quiet move, maximize, pop-out, pointer move and
+#     resize with PUNAR held, swap, toggle split, the file manager, next
+#     workspace and the workspace wheel.
 #
 # HOW KEYS ARE PRESSED. The desktop gate (tools/boot-test.sh) runs
 # tools/qmp-keys.py beside QEMU. This script prints `PUNAR_QMP_KEYS <id>
@@ -199,6 +202,35 @@ if [ "${non_latin_count:-0}" -gt 0 ] && [ -z "${non_latin_missing}" ]; then
 else
     fail "non-Latin layouts missing from the image's XKB list: '${non_latin_missing}' (of ${non_latin_count:-0})"
 fi
+
+# --- 1a. the login screen's choice, as session start adopts it -------------
+# greetd starts a session with PUNAR_KEYMAP only after a successful sign-in
+# (punar-onboard's greetd tests), and session.sh then runs exactly this
+# command before the compositor reads the file. The dev image signs in
+# without the login screen, so the check makes session start's own call as
+# the seated person and follows the choice to the device, the audit log and
+# the session's data file.
+case "${ORIGINAL}" in
+    de|de[+,]*) GREETER_CHOICE=fr ;;
+    *) GREETER_CHOICE=de ;;
+esac
+adopt="$("${CTL}" --json keyboard layout render --adopt "${GREETER_CHOICE}" 2>/run/punar/keys-adopt.txt)"
+if [ "$(printf '%s' "${adopt}" | jq -r '.adopted // false' 2>/dev/null)" = true ]; then
+    ORIGINAL_LAYOUT="${ORIGINAL}"
+    note "ok   session start adopted the login screen's ${GREETER_CHOICE} as the device's layout"
+else
+    fail "session start did not adopt the login screen's ${GREETER_CHOICE}: $(printf '%s' "${adopt}" | head -c 200) $(head -c 200 /run/punar/keys-adopt.txt)"
+fi
+check_eq "XKBLAYOUT after the login screen's choice" "XKBLAYOUT=${GREETER_CHOICE}" \
+    "$(grep '^XKBLAYOUT=' /etc/vconsole.conf 2>/dev/null)"
+if grep -q "^    kb_layout = \"${GREETER_CHOICE}\",\$" "${XDG_RUNTIME_DIR}/punar/session/input.lua" 2>/dev/null; then
+    note "ok   the session's data file carries ${GREETER_CHOICE}"
+else
+    fail "the session's data file does not carry ${GREETER_CHOICE}: $(tr '\n' ' ' < "${XDG_RUNTIME_DIR}/punar/session/input.lua" 2>/dev/null | head -c 200)"
+fi
+adopter="$("${CTL}" --json audit tail -n 20 2>/dev/null \
+    | jq -r '[.events[]? | select(.action == "capabilities.set" and .resource == "system.keymap" and .decision == "allow")] | last | .user_id // ""')"
+check_eq "the adoption is audited under the person's name" "$(id -un)" "${adopter}"
 
 if "${CTL}" keyboard layout set ru > /run/punar/keys-set.txt 2>&1; then
     ORIGINAL_LAYOUT="${ORIGINAL}"
@@ -406,6 +438,107 @@ if [ -n "${PROBE_B}" ] && field_is "${PROBE_B}" .floating true; then
 else
     fail "no popped-out window to drag"
 fi
+
+# --- 9b. swap, split, the file manager, and walking the workspaces ----------
+# Two fresh windows on an empty workspace laid out balanced (dwindle), so the
+# geometry has one answer: side by side, swapped, stacked, side by side.
+GRAMMAR_WS=7
+"${CTL}" workspace focus "${GRAMMAR_WS}" >/dev/null 2>&1
+if wait_for 10 on_workspace "${GRAMMAR_WS}"; then
+    "${CTL}" layout balanced --workspace active >/dev/null 2>&1 \
+        || fail "workspace ${GRAMMAR_WS} did not take the balanced preset"
+    PROBE_D="$(open_probe punar-keys-d "${XDG_RUNTIME_DIR}/punar/keys-probe-d.txt")" || PROBE_D=""
+    PROBES="${PROBES} ${PROBE_D}"
+    PROBE_E="$(open_probe punar-keys-e "${XDG_RUNTIME_DIR}/punar/keys-probe-e.txt")" || PROBE_E=""
+    PROBES="${PROBES} ${PROBE_E}"
+else
+    fail "workspace ${GRAMMAR_WS} did not take focus"
+    PROBE_D=""; PROBE_E=""
+fi
+x_of() { client_field "$1" '.at[0]'; }
+y_of() { client_field "$1" '.at[1]'; }
+left_of() { [ "$(x_of "$1")" -lt "$(x_of "$2")" ]; }
+stacked() { [ "$(x_of "$1")" = "$(x_of "$2")" ] && [ "$(y_of "$1")" != "$(y_of "$2")" ]; }
+side_by_side() { left_of "$1" "$2" || left_of "$2" "$1"; }
+if [ -n "${PROBE_D}" ] && [ -n "${PROBE_E}" ] && wait_for 5 side_by_side "${PROBE_D}" "${PROBE_E}"; then
+    if left_of "${PROBE_D}" "${PROBE_E}"; then
+        LEFT="${PROBE_D}"; RIGHT="${PROBE_E}"
+    else
+        LEFT="${PROBE_E}"; RIGHT="${PROBE_D}"
+    fi
+    focus_window "${LEFT}"
+    press punar-alt-l
+    if wait_for 10 left_of "${RIGHT}" "${LEFT}"; then
+        note "ok   PUNAR+ALT+L swapped the window with its right-hand neighbour"
+    else
+        fail "PUNAR+ALT+L did not swap (x $(x_of "${LEFT}") vs $(x_of "${RIGHT}"))"
+    fi
+    press punar-d
+    if wait_for 10 stacked "${LEFT}" "${RIGHT}"; then
+        note "ok   PUNAR+D turned the side-by-side pair into a stacked one"
+    else
+        fail "PUNAR+D did not toggle the split (at $(client_field "${LEFT}" '.at | join(",")') and $(client_field "${RIGHT}" '.at | join(",")'))"
+    fi
+    press punar-d
+    wait_for 10 left_of "${RIGHT}" "${LEFT}" || fail "a second PUNAR+D did not put the pair side by side again"
+else
+    fail "the two windows for swap and split did not open side by side"
+fi
+
+# PUNAR+E: the file manager, through `punarctl app open thunar`. It raises a
+# window that is already open, so the proof is that a file manager window is
+# the focused one afterwards.
+file_managers() { clients | jq '[.[] | select((.class | ascii_downcase) == "thunar")] | length'; }
+file_manager_focused() {
+    [ "$(hyprctl -j activewindow 2>/dev/null | jq -r '.class // "" | ascii_downcase')" = thunar ]
+}
+had_file_managers="$(file_managers)"
+press punar-e
+if wait_for 30 file_manager_focused; then
+    note "ok   PUNAR+E opened the file manager"
+    if [ "$(file_managers)" -gt "${had_file_managers:-0}" ]; then
+        PROBES="${PROBES} $(active_address)"
+    fi
+else
+    fail "PUNAR+E did not bring up the file manager (focused class '$(hyprctl -j activewindow 2>/dev/null | jq -r '.class // ""')')"
+fi
+"${CTL}" layout default --workspace "${GRAMMAR_WS}" >/dev/null 2>&1 || true
+
+# Next workspace and the wheel walk the OPEN workspaces upwards from 1
+# (workspace 2 holds the quietly moved window, 7 the pair above), so the
+# expected answer is read from the compositor rather than assumed.
+next_open() {
+    hyprctl -j workspaces 2>/dev/null \
+        | jq -r --argjson cur "$1" '[.[] | select(.id > $cur) | .id] | sort | first // ""'
+}
+"${CTL}" workspace focus 1 >/dev/null 2>&1
+wait_for 10 on_workspace 1 || fail "workspace 1 did not take focus again"
+expected_ws="$(next_open 1)"
+if [ -n "${expected_ws}" ]; then
+    press punar-ctrl-tab
+    if wait_for 10 on_workspace "${expected_ws}"; then
+        note "ok   PUNAR+CTRL+TAB went to the next open workspace (${expected_ws})"
+    else
+        fail "PUNAR+CTRL+TAB left the session on workspace $(active_workspace), not ${expected_ws}"
+    fi
+    from_ws="$(active_workspace)"
+    expected_ws="$(next_open "${from_ws}")"
+    if [ -n "${expected_ws}" ]; then
+        press punar-wheel-down
+        if wait_for 10 on_workspace "${expected_ws}"; then
+            note "ok   PUNAR+wheel scrolled to the next open workspace (${expected_ws})"
+        else
+            fail "PUNAR+wheel left the session on workspace $(active_workspace), not ${expected_ws}"
+        fi
+    else
+        fail "no open workspace above ${from_ws} to scroll to"
+    fi
+else
+    fail "no open workspace above 1 to walk to"
+fi
+# Moving a workspace between monitors (PUNAR+ALT+arrows) needs a second
+# monitor, which this VM does not have; hyprland-verify.sh proves the binds
+# parse and keybind-contract-test.sh that they exist.
 
 # --- 10. the layout goes back, and the compositor follows ----------------------
 cleanup

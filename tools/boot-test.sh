@@ -656,6 +656,7 @@ run_desktop() {
           "${PROOF_DIR}/recovery-report.txt" \
           "${PROOF_DIR}/keys-report.txt" \
           "${PROOF_DIR}/keys-set.txt" \
+          "${PROOF_DIR}/keys-adopt.txt" \
           "${PROOF_DIR}/qmp-keys.log" \
           "${PROOF_DIR}"/lock-frost-*.png \
           "${PROOF_DIR}/surfaces-report.txt" \
@@ -824,7 +825,7 @@ run_desktop() {
                      m4-report.txt m4-explain-timezone.txt \
                      m4-explain-unknown.txt \
                      wifi-report.txt wifi-link.txt wifi-devices.txt \
-                     recovery-report.txt keys-report.txt keys-set.txt \
+                     recovery-report.txt keys-report.txt keys-set.txt keys-adopt.txt \
                      lock-frost-a.png lock-frost-a2.png lock-frost-b.png \
                      surfaces-report.txt surfaces-latency.txt surfaces-costs.txt \
                      surfaces-mail-launch.txt surfaces-mail.png \

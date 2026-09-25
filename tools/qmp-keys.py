@@ -45,6 +45,14 @@ def typed(text):
     return steps
 
 
+def punar_wheel(button):
+    """One notch of the wheel with the Punar key held."""
+    return [[key("meta_l", True)],
+            [{"type": "btn", "data": {"down": True, "button": button}}],
+            [{"type": "btn", "data": {"down": False, "button": button}}],
+            [key("meta_l", False)]]
+
+
 def drag(button, x1, y1, x2, y2):
     def at(x, y):
         return [{"type": "abs", "data": {"axis": "x", "value": max(0, min(ABS_MAX, x))}},
@@ -73,6 +81,13 @@ SEQUENCES = {
     "punar-alt-2": lambda: chord("meta_l", "alt", "2"),
     "punar-m": lambda: chord("meta_l", "m"),
     "punar-o": lambda: chord("meta_l", "o"),
+    # The rest of the window grammar: swap right, toggle the split, the
+    # file manager, next workspace, and the workspace wheel.
+    "punar-alt-l": lambda: chord("meta_l", "alt", "l"),
+    "punar-d": lambda: chord("meta_l", "d"),
+    "punar-e": lambda: chord("meta_l", "e"),
+    "punar-ctrl-tab": lambda: chord("meta_l", "ctrl", "tab"),
+    "punar-wheel-down": lambda: punar_wheel("wheel-down"),
     "drag": lambda x1, y1, x2, y2: drag("left", x1, y1, x2, y2),
     "rdrag": lambda x1, y1, x2, y2: drag("right", x1, y1, x2, y2),
 }
