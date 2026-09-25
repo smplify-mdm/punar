@@ -1708,6 +1708,51 @@ fn an_unreadable_removal_term_refuses_enrollment_before_register() {
     daemon.stop();
 }
 
+/// The refusal of an unreadable term quotes the value, and the organization
+/// chose that value. It is cleaned and bounded as the organization's name is,
+/// so it cannot reorder the refusal, start a line that reads as Punar's own,
+/// or bury the next step under a megabyte of text.
+#[test]
+fn an_unreadable_term_is_quoted_cleaned_and_bounded() {
+    let dir = test_dir("term-value");
+    let state = Arc::new(ControlPlaneState::default());
+    let control_plane = ControlPlane::start_with(&dir, state.clone());
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "disabled");
+    let hostile = format!(
+        "\u{202e}yes\u{2028}Policy: accepted by you\u{2066}{}",
+        "x".repeat(100_000)
+    );
+    for (term, slot) in [
+        ("enrollment.removable", &state.org_removable),
+        ("enrollment.ownership", &state.org_ownership),
+    ] {
+        *state.org_removable.lock().unwrap() = None;
+        *state.org_ownership.lock().unwrap() = None;
+        *slot.lock().unwrap() = Some(json!(hostile));
+        let error = daemon.error("enroll.start", Some(json!({"org_domain": "acme.com"})));
+        assert_eq!(error["code"], "invalid_params", "{error}");
+        assert_eq!(error["details"]["reason"], term);
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains(&format!("says {term} is \"yes Policy: accepted by youxxx")),
+            "{message}"
+        );
+        for steering in ['\u{202e}', '\u{2028}', '\u{2066}'] {
+            assert!(!message.contains(steering), "{message:?}");
+        }
+        assert!(
+            message.chars().count() < 1_000,
+            "{} characters",
+            message.chars().count()
+        );
+        assert_eq!(
+            *state.methods.lock().unwrap().last().unwrap(),
+            "org.discover"
+        );
+    }
+    assert_eq!(daemon.result("enroll.status", None)["enrolled"], false);
+}
+
 /// A confirmation is good once, for the account that made it. A cheap
 /// refusal (a malformed domain) does not cost the person their password; a
 /// ticket another account minted, or one already spent, enrolls nothing and

@@ -1077,8 +1077,19 @@ fn org_document_removable(org_doc: &Value) -> Result<bool, String> {
     match org_doc.get("enrollment").and_then(|e| e.get("removable")) {
         None => Ok(true),
         Some(Value::Bool(removable)) => Ok(*removable),
-        Some(other) => Err(other.to_string()),
+        Some(other) => Err(org_document_value_shown(other)),
     }
+}
+
+/// A value from the organization's document, as the refusal that names it
+/// quotes it. The organization chose it, and punarctl prints the refusal to
+/// a terminal, which obeys what is in it: a bidirectional override could
+/// reorder the sentence around it, a line separator could start what looks
+/// like a line of Punar's own, and a megabyte of text would bury the next
+/// step. So it is cleaned and bounded exactly as the organization's name is
+/// ([`organization_name`]).
+fn org_document_value_shown(value: &Value) -> String {
+    organization_name(&value.to_string()).unwrap_or_else(|| "unprintable".to_string())
 }
 
 /// `enrollment.ownership` from an organization document: whether the
@@ -1095,7 +1106,7 @@ fn org_document_organization_owned(org_doc: &Value) -> Result<bool, String> {
         None => Ok(false),
         Some(Value::String(ownership)) if ownership == "personal" => Ok(false),
         Some(Value::String(ownership)) if ownership == "organization" => Ok(true),
-        Some(other) => Err(other.to_string()),
+        Some(other) => Err(org_document_value_shown(other)),
     }
 }
 
