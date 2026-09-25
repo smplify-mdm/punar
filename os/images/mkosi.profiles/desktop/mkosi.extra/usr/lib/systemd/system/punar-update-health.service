@@ -11,6 +11,10 @@ Type=oneshot
 ExecStart=/usr/lib/punar/update-health.sh
 TimeoutStartSec=180
 RemainAfterExit=yes
+# This service never sets the clock, and privilege grants and approvals
+# expire by it: ProtectClock drops CAP_SYS_TIME and refuses the
+# clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
+ProtectClock=yes
 StandardOutput=journal+console
 StandardError=journal+console
 

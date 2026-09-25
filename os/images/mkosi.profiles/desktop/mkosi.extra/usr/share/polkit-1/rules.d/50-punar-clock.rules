@@ -1,0 +1,41 @@
+// Punar: nobody sets this machine's clock through timedated.
+//
+// WHY THIS FILE EXISTS. Privilege grants and pending approvals (M9) expire by
+// the wall clock: Grant::is_live and ApprovalEnvelope::has_lapsed in
+// crates/punar-common/src/approval.rs compare it with `expires_at`. Step the
+// clock back and an elevated grant outlives the 1-60 minute window the person
+// approved, and an approval stays answerable after it should have lapsed.
+// systemd ships the three actions below as auth_admin_keep, so any account
+// that can answer an administrator prompt could move the clock, and every
+// expiry with it.
+//
+// THE DECISION. NO, for every subject. Not a password prompt, because a prompt
+// is a yes to whoever can get one answered:
+//   * set-time      — step the wall clock to any instant.
+//   * set-ntp       — turn synchronization off, so a clock moved by any other
+//                     route stays wrong.
+//   * set-local-rtc — read the hardware clock as local time, which moves the
+//                     wall clock by the zone's offset at the next boot.
+//
+// WHAT THIS DOES NOT DO, stated so nobody reads more into it:
+//   * set-timezone is DELIBERATELY ABSENT. A zone changes how the instant is
+//     shown, not which instant it is, and expiry compares UTC; the
+//     time.timezone capability and the network-provided zone keep working.
+//   * Root is unaffected. timedated skips polkit for a caller that holds
+//     CAP_SYS_ADMIN, so a root shell can still `timedatectl set-time`. This
+//     closes the unprivileged path; it does not claim to stop root.
+//   * The network's path to the clock is closed separately (UseNTP=no in
+//     usr/lib/systemd/network/*.network), and Punar's own root services lose
+//     the power to set it with ProtectClock=yes.
+//   * The dev profile adds nothing here. The CI desktop image (profiles
+//     desktop,dev) carries this same file, and none of its checks sets the
+//     clock through timedated.
+polkit.addRule(function (action, subject) {
+    switch (action.id) {
+    case "org.freedesktop.timedate1.set-time":
+    case "org.freedesktop.timedate1.set-ntp":
+    case "org.freedesktop.timedate1.set-local-rtc":
+        return polkit.Result.NO;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

@@ -45,6 +45,10 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
+# This service never sets the clock, and privilege grants and approvals
+# expire by it: ProtectClock drops CAP_SYS_TIME and refuses the
+# clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
+ProtectClock=yes
 # The complete writable set: the registry state dir, the shared audit log
 # (+ its rotation lock), the socket dir, and /run/punar for the atomic
 # tmp+rename of agents.json.

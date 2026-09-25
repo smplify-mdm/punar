@@ -22,5 +22,9 @@ MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
+# This service never sets the clock, and privilege grants and approvals
+# expire by it: ProtectClock drops CAP_SYS_TIME and refuses the
+# clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
+ProtectClock=yes
 StandardOutput=journal
 StandardError=journal

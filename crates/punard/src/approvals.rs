@@ -38,13 +38,14 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use punar_common::approval::{
     APPROVAL_RECORD_MAX_BYTES, APPROVALS_DIR_NAME, ApprovalEnvelope, ApprovalStatus,
     ApprovalsSummary, GRANTS_DIR_NAME, Grant, MAX_APPROVAL_RECORDS, SummaryApproval, SummaryGrant,
     SummaryRequester, validate_approval_schema,
 };
-use punar_common::time::{unix_seconds_from_rfc3339, utc_now_rfc3339};
+use punar_common::time::utc_now_rfc3339;
 use serde::{Deserialize, Serialize};
 
 use crate::util::{remove_synced, write_atomic_synced};
@@ -475,11 +476,34 @@ fn read_json_files(dir: &Path) -> io::Result<Vec<(PathBuf, String)>> {
     Ok(out)
 }
 
-/// Seconds since the epoch, for the expiry comparisons. A clock before the
-/// epoch reads as 0, which expires everything — fail closed, like every
-/// other unreadable-time path in this module.
+/// Seconds since the epoch, for the expiry comparisons.
+///
+/// Expiry is `now >= expires_at`, so the fail-closed reading of a clock that
+/// cannot be read is the far FUTURE, never the far past. A clock set before
+/// the epoch reads as `u64::MAX`: no grant is live ([`Grant::is_live`]),
+/// every pending approval has lapsed ([`ApprovalEnvelope::has_lapsed`]), and
+/// anything minted meanwhile gets an `expires_at` that no parser accepts,
+/// which both of those treat as expired.
+///
+/// It used to read as 0, under a comment that called that fail closed. It
+/// was the opposite: `is_live(0)` is `0 < expires_at`, true for every grant
+/// ever issued, and `has_lapsed(0)` is false, so a clock stepped back to 1970
+/// kept every elevation alive and every approval answerable. A clock beyond
+/// the year 9999 went the same way, through an RFC 3339 round trip that
+/// could not parse its own output. (A clock stepped back to any instant
+/// after the epoch is a separate hole, only narrowed so far: the image
+/// refuses the network and timedated the power to move the clock, see
+/// 50-punar-clock.rules, but expiry trusts the wall clock until it moves to
+/// a boot-relative one.)
 pub fn now_secs() -> u64 {
-    unix_seconds_from_rfc3339(&utc_now_rfc3339()).unwrap_or(0)
+    secs_since_epoch(SystemTime::now())
+}
+
+/// [`now_secs`] for a given instant, so the unreadable branch is testable
+/// without moving the machine's clock.
+fn secs_since_epoch(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .map_or(u64::MAX, |elapsed| elapsed.as_secs())
 }
 
 /// `now + secs` as an RFC 3339 string.
@@ -727,6 +751,45 @@ mod tests {
         assert_eq!(row["requester"]["type"], "ai_agent");
         assert!(row["requester"].get("agent_name").is_none());
         assert_eq!(value["grants"][0]["grant_id"], "gnt_0000cc01");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A clock that cannot be read must expire everything. The fallback used
+    /// to be 0, the far past, under which every grant read as live and every
+    /// pending approval as answerable.
+    #[test]
+    fn a_clock_before_the_epoch_expires_grants_and_approvals() {
+        let now = secs_since_epoch(UNIX_EPOCH - std::time::Duration::from_secs(1));
+
+        let elevated = grant("gnt_0000ab01", 1000, "time.timezone", 3600);
+        assert!(
+            !elevated.is_live(now),
+            "a grant outlived an unreadable clock"
+        );
+        let pending = envelope("apr_0000ab01", "agt_one", 300);
+        assert!(
+            pending.has_lapsed(now),
+            "an approval outlived an unreadable clock"
+        );
+        assert!(!pending.is_answerable(now));
+
+        // The store's views agree, and a sweep expires both.
+        let (dir, mut store) = store("pre-epoch");
+        store.put_grant(elevated).unwrap();
+        store.put(pending).unwrap();
+        assert!(store.live_grant(1000, "time.timezone", now).is_none());
+        assert!(store.live_grants(None, now).is_empty());
+        assert_eq!(store.pending_count(now), 0);
+        assert_eq!(store.sweep_grants(now).len(), 1);
+        assert_eq!(store.sweep(now).len(), 1);
+
+        // Anything minted while the clock is unreadable is born expired.
+        let minted = punar_common::time::rfc3339_utc_from_unix_seconds(now.saturating_add(600));
+        assert_eq!(punar_common::time::unix_seconds_from_rfc3339(&minted), None);
+
+        // A readable clock is read exactly.
+        let readable = UNIX_EPOCH + std::time::Duration::from_secs(1_790_000_000);
+        assert_eq!(secs_since_epoch(readable), 1_790_000_000);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

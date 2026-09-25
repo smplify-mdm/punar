@@ -28,6 +28,10 @@ ProtectSystem=strict
 # could never create one, which is why deny=5 has been counting nothing.
 ReadWritePaths=/run/faillock -/run/punar-authd
 ProtectHome=yes
+# This service never sets the clock, and privilege grants and approvals
+# expire by it: ProtectClock drops CAP_SYS_TIME and refuses the
+# clock-setting syscalls (why: polkit-1/rules.d/50-punar-clock.rules).
+ProtectClock=yes
 RestrictAddressFamilies=AF_UNIX
 LockPersonality=yes
 RestrictRealtime=yes
