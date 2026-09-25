@@ -1904,6 +1904,64 @@ fi
 # do with what those groups test.
 check_eq "lock.state at the end of the round trip" "unlocked" "$(ipc lock state | tr -d '[:space:]"')"
 
+# --- group 8c: a password sign-in leaves the login keyring encrypted ---------
+#
+# THE WEAKNESS THIS GUARDS AGAINST. A gnome-keyring collection created with an
+# empty password is written as a PLAINTEXT `[keyring]` INI file: every stored
+# secret, browser keys included, readable by anything that can read the home
+# directory, on disk and in every backup. Omarchy's default keyring is exactly
+# that. Punar's greetd stack hands the sign-in password to pam_gnome_keyring
+# (etc/pam.d/greetd), which unlocks the login keyring with it or creates it
+# encrypted under it, so the file on disk is the binary format.
+#
+# WHAT THIS GATE CAN AND CANNOT EXERCISE. This image's session autologins, so
+# no PAM password stage ever runs for it. The gate therefore performs the one
+# step pam_gnome_keyring's auth stage performs at a password sign-in, the
+# daemon's unlock-or-create with the account's password
+# (`gnome-keyring-daemon --unlock`, password on stdin), and then reads the
+# file's format. The classifier is proven on both formats first, so a check
+# that could not tell them apart fails instead of passing.
+keyring_format() {
+    if [ ! -f "$1" ]; then
+        echo absent
+        return
+    fi
+    case "$(head -c 12 "$1" 2>/dev/null)" in
+        GnomeKeyring) echo encrypted ;;
+        "[keyring]"*) echo plaintext ;;
+        *) echo unknown ;;
+    esac
+}
+keyring_fixtures="$(mktemp -d)"
+printf '[keyring]\ndisplay-name=login\nctime=0\n' > "${keyring_fixtures}/plain.keyring"
+printf 'GnomeKeyring\n\r\000\n\000\001\000\000' > "${keyring_fixtures}/sealed.keyring"
+check_eq "the keyring check reads a plaintext keyring as plaintext" "plaintext" \
+    "$(keyring_format "${keyring_fixtures}/plain.keyring")"
+check_eq "the keyring check reads an encrypted keyring as encrypted" "encrypted" \
+    "$(keyring_format "${keyring_fixtures}/sealed.keyring")"
+rm -rf "${keyring_fixtures}"
+
+login_keyring="${HOME:-/home/$(id -un)}/.local/share/keyrings/login.keyring"
+if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    printf '%s' "${lock_password}" \
+        | DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus" \
+            timeout 20 gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1 || true
+    keyring_waited=0
+    while [ "${keyring_waited}" -lt 10 ] && [ ! -f "${login_keyring}" ]; do
+        sleep 1
+        keyring_waited=$((keyring_waited + 1))
+    done
+    check_eq "after a password sign-in the login keyring on disk is" "encrypted" \
+        "$(keyring_format "${login_keyring}")"
+    if [ -f "${login_keyring}" ]; then
+        check_eq "the login keyring is readable only by its owner (mode)" "600" \
+            "$(stat -c '%a' "${login_keyring}" 2>/dev/null)"
+    fi
+else
+    note "FAIL gnome-keyring-daemon is not installed, so no login keyring exists to hold a secret"
+    FAILED=1
+fi
+
 # --- group 8d: the lock's frosted glass samples the wallpaper ---------------
 #
 # THE BUG THIS WOULD HAVE CAUGHT. The lock surface blurs the active wallpaper
