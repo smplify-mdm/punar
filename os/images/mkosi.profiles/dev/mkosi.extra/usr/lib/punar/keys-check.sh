@@ -186,7 +186,10 @@ clients() { hyprctl -j clients 2>/dev/null; }
 address_of() { clients | jq -r --arg c "$1" '[.[] | select(.class == $c)][0].address // ""'; }
 active_address() { hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""'; }
 active_workspace() { hyprctl -j activeworkspace 2>/dev/null | jq -r '.id // ""'; }
-client_field() { clients | jq -r --arg a "$1" "[.[] | select(.address == \$a)][0]$2 // \"\""; }
+# Absent is "", never jq's `// ""`: that also turns a real `false` into "",
+# so a wait for `.pinned false` could never succeed (it failed the pop-out's
+# way back in the VM while the window was in fact back in the layout).
+client_field() { clients | jq -r --arg a "$1" "[.[] | select(.address == \$a)][0]$2 | if . == null then \"\" else . end"; }
 terminal_count() { clients | jq '[.[] | select(.class == "foot" or .class == "footclient")] | length'; }
 keymaps() { hyprctl -j devices 2>/dev/null | jq -r '[.keyboards[].active_keymap] | join(",")'; }
 option() { hyprctl -j getoption "$1" 2>/dev/null | jq -r '.str // ""'; }
@@ -203,10 +206,13 @@ PROBE_SCRIPT="${XDG_RUNTIME_DIR}/punar/keys-probe.sh"
 mkdir -p "${XDG_RUNTIME_DIR}/punar"
 cat > "${PROBE_SCRIPT}" <<'PROBE'
 #!/bin/sh
-# One line typed into this window, recorded verbatim.
+# One line typed into this window, recorded verbatim. The window then stays
+# until the check closes it (cleanup, or the unit's end): a probe that exited
+# 30 s after its line vanished mid-check in the VM, and the workspace walk
+# that still needed its workspace failed for that reason alone.
 IFS= read -r line
 printf '%s\n' "${line}" > "$1"
-sleep 30
+exec sleep 900
 PROBE
 chmod 0700 "${PROBE_SCRIPT}"
 
@@ -628,7 +634,12 @@ if [ -n "${PROBE_B}" ] && field_is "${PROBE_B}" .floating true; then
         fail "PUNAR+right-drag did not resize the window (still $(client_field "${PROBE_B}" '.size | join("x")'))"
     fi
     press punar-o
-    wait_for 10 field_is "${PROBE_B}" .pinned false || fail "PUNAR+O did not put the window back"
+    back_in_layout() { field_is "$1" .pinned false && field_is "$1" .floating false; }
+    if wait_for 10 back_in_layout "${PROBE_B}"; then
+        note "ok   PUNAR+O put the popped-out window back in the layout (unpinned, tiled)"
+    else
+        fail "PUNAR+O did not put the window back (floating=$(client_field "${PROBE_B}" .floating) pinned=$(client_field "${PROBE_B}" .pinned))"
+    fi
 else
     fail "no popped-out window to drag"
 fi

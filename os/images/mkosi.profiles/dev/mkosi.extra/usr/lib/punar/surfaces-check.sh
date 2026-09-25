@@ -2373,7 +2373,7 @@ rm -f "${idle_probe_conf}" "${idle_probe_flag}"
 # service-context answer is kept as an info line: the contrast between the two
 # is the evidence for which subject polkit is judging.
 mkdir -p /run/punar
-rm -f /run/punar/canpower.txt
+rm -f /run/punar/canpower.txt /run/punar/canpower.txt.part
 
 # The facts a failure needs in order to name its own cause, rather than leaving
 # a reader to guess between "no rule", "no authority" and "wrong subject".
@@ -2411,7 +2411,10 @@ cat > /run/punar/canpower.sh <<'POWERPROBE'
 # menu's rows actually run in. logind answers CanReboot/CanPowerOff for the
 # CALLER over the same rules `systemctl reboot` consults, which is how this asks
 # "would the row work" without rebooting the machine to find out.
-exec > /run/punar/canpower.txt 2>&1
+# Written aside and renamed at the end: the checker starts reading as soon
+# as the file has content, and under load it once read only this first line
+# while busctl was still asking logind (every verdict then read as "nothing").
+exec > /run/punar/canpower.txt.part 2>&1
 printf 'session=%s\n' "${XDG_SESSION_ID:-none}"
 for verb in CanReboot CanPowerOff; do
     printf '%s=%s\n' "${verb}" "$(busctl --system call org.freedesktop.login1 \
@@ -2437,6 +2440,7 @@ else
 fi
 loginctl list-sessions --no-legend 2>/dev/null | tr -s ' ' | cut -d' ' -f1-4 \
     | while IFS= read -r row; do printf 'session_row=%s\n' "${row}"; done
+mv /run/punar/canpower.txt.part /run/punar/canpower.txt
 POWERPROBE
 chmod +x /run/punar/canpower.sh
 hyprctl dispatch "hl.dsp.exec_cmd('/run/punar/canpower.sh')" >/dev/null 2>&1
