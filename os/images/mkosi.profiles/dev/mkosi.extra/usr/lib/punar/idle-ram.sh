@@ -238,6 +238,69 @@ emit_fact "PUNAR_IDLE_SERVICE_WRITE_BYTES=${service_write_bytes}"
 emit_fact "PUNAR_IDLE_SYSTEM_CPU_BPS=${system_cpu_bps}"
 emit_fact "PUNAR_IDLE_BLOCK_WRITE_BYTES=${block_write_bytes}"
 
+# --- initramfs release facts (begin) ---------------------------------------
+# What the initrd's punar-release-initramfs.service did before switch-root
+# (PERFORMANCE_BUDGETS.md §4.1). On the arm64 release image with Linux 7.1 the
+# unpacked initramfs otherwise stayed resident as Unevictable memory for the
+# whole boot (MEASURED); the helper acts on Linux 7.0 to 7.2 and says "not
+# needed" elsewhere. check-budgets.sh decides; these are the facts:
+#   RELEASED        yes, not-needed or no (refused, failed or absent)
+#   FREED_KB        bytes the release unlinked for good, in KiB
+#   KEPT_KB         the keep set it left, in KiB
+#   DROP_KB         how far Unevictable + Shmem fell across the unlinking,
+#                   in KiB: the kernel's own word that the pages went
+#   LATE_WARNINGS   warning-or-worse userspace journal entries between the
+#                   release and the switch (a program it deleted and something
+#                   still needed shows up here); "unknown" without both marks
+initramfs_released=no
+initramfs_freed_kb=absent
+initramfs_kept_kb=absent
+initramfs_drop_kb=absent
+initramfs_late_warnings=unknown
+initramfs_line="$(journalctl -b -u punar-release-initramfs.service -o cat --no-pager 2>/dev/null \
+    | grep -E '^(released the initramfs|initramfs release not needed|keeping the initramfs): ' \
+    | tail -n 1)"
+case "${initramfs_line}" in
+    'initramfs release not needed: '*)
+        initramfs_released=not-needed
+        ;;
+    'released the initramfs: '*)
+        initramfs_numbers="$(printf '%s\n' "${initramfs_line}" | sed -nE \
+            's/^released the initramfs: deleted [0-9]+ files \(([0-9]+) bytes\) and [0-9]+ symlinks, kept [0-9]+ paths \(([0-9]+) bytes\); Unevictable ([0-9]+) kB -> ([0-9]+) kB, Shmem ([0-9]+) kB -> ([0-9]+) kB; find status 0, 0 errors$/\1 \2 \3 \4 \5 \6/p')"
+        if [ -n "${initramfs_numbers}" ]; then
+            # shellcheck disable=SC2086 # six numbers, split on purpose
+            set -- ${initramfs_numbers}
+            initramfs_released=yes
+            initramfs_freed_kb=$(($1 / 1024))
+            initramfs_kept_kb=$(($2 / 1024))
+            initramfs_drop_kb=$((($3 + $5) - ($4 + $6)))
+            initramfs_window="$(journalctl -b -o short-monotonic --no-pager 2>/dev/null | awk '
+                function ts(line) { sub(/^\[ */, "", line); sub(/\].*/, "", line); return line + 0 }
+                !start && / punar-release-initramfs\[[0-9]+\]: released the initramfs: / { start = ts($0); next }
+                start && !stop && (/ systemd\[1\]: Switching root\.$/ || / systemd\[1\]: systemd [0-9]+ running in system mode/) { stop = ts($0) }
+                END { if (start && stop) printf "%.6f %.6f\n", start, stop }')"
+            if [ -n "${initramfs_window}" ]; then
+                initramfs_late_warnings="$(journalctl -b -p warning -o short-monotonic --no-pager 2>/dev/null \
+                    | awk -v window="${initramfs_window}" '
+                        BEGIN { split(window, w, " ") }
+                        / kernel: / { next }
+                        { t = $0; sub(/^\[ */, "", t); sub(/\].*/, "", t); t += 0 }
+                        t > w[1] + 0 && t <= w[2] + 0 { n++ }
+                        END { print n + 0 }')"
+            fi
+        fi
+        ;;
+esac
+emit_fact "PUNAR_IDLE_INITRAMFS_RELEASED=${initramfs_released}"
+emit_fact "PUNAR_IDLE_INITRAMFS_FREED_KB=${initramfs_freed_kb}"
+emit_fact "PUNAR_IDLE_INITRAMFS_KEPT_KB=${initramfs_kept_kb}"
+emit_fact "PUNAR_IDLE_INITRAMFS_DROP_KB=${initramfs_drop_kb}"
+emit_fact "PUNAR_IDLE_INITRAMFS_LATE_WARNINGS=${initramfs_late_warnings}"
+emit_fact "PUNAR_IDLE_KERNEL=$(uname -r)"
+# --- initramfs release facts (end) -----------------------------------------
+unevictable_kb="$(awk '/^Unevictable:/ {print $2}' "${RUN_DIR}/ram-meminfo-end.txt")"
+emit_fact "PUNAR_IDLE_UNEVICTABLE_KB=${unevictable_kb:-absent}"
+
 # The line the CI desktop test greps for (gates: fail mean > 1536 MB hard
 # ceiling, warn > 1024 MB target; TCG runs are warn-only, labeled emulated).
 emit_fact "PUNAR_RAM_MEAN_MB=${mean}"

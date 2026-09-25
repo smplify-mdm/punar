@@ -42,6 +42,21 @@
 #   combined Punar service writes > 98,304 bytes  ::error:: -> exit 1
 #   short/missing runtime, network or zram facts  ::error:: -> exit 1
 #
+# The initrd must also have freed the unpacked initramfs before switch-root
+# (punar-release-initramfs.service; PERFORMANCE_BUDGETS.md §4.1). On the arm64
+# release image with Linux 7.1 it otherwise stayed resident as Unevictable
+# memory for the whole boot (MEASURED; 7.0 to 7.2 INFER). The helper acts only
+# on those kernels and logs "not needed" elsewhere. The kernel's own memory
+# figures, not just the helper's word, must show the pages went, and nothing
+# may go wrong between the release and the switch. Behaviors, not budgets, so
+# they fail on every accelerator:
+#
+#   PUNAR_IDLE_INITRAMFS_RELEASED not yes/not-needed  ::error:: -> exit 1
+#   released, FREED_KB <= KEPT_KB                     ::error:: -> exit 1
+#   released, DROP_KB * 2 < FREED_KB                  ::error:: -> exit 1
+#   released, LATE_WARNINGS != 0                      ::error:: -> exit 1
+#   PUNAR_IDLE_UNEVICTABLE_KB, PUNAR_IDLE_KERNEL      context only
+#
 # CPU is stored in hundredths of a percentage point (`bps`): 50 is 0.50%.
 # The write ceiling is the engineering interpretation recorded after two
 # native Apple-HVF windows each wrote exactly 8,192 first-party bytes and a
@@ -138,6 +153,13 @@ IDLE_CPU_MAX_BPS="$(get_field PUNAR_IDLE_CPU_MAX_BPS)"
 IDLE_SERVICE_WRITE_BYTES="$(get_field PUNAR_IDLE_SERVICE_WRITE_BYTES)"
 IDLE_SYSTEM_CPU_BPS="$(get_field PUNAR_IDLE_SYSTEM_CPU_BPS)"
 IDLE_BLOCK_WRITE_BYTES="$(get_field PUNAR_IDLE_BLOCK_WRITE_BYTES)"
+INITRAMFS_RELEASED="$(get_field PUNAR_IDLE_INITRAMFS_RELEASED)"
+INITRAMFS_FREED_KB="$(get_field PUNAR_IDLE_INITRAMFS_FREED_KB)"
+INITRAMFS_KEPT_KB="$(get_field PUNAR_IDLE_INITRAMFS_KEPT_KB)"
+INITRAMFS_DROP_KB="$(get_field PUNAR_IDLE_INITRAMFS_DROP_KB)"
+INITRAMFS_LATE_WARNINGS="$(get_field PUNAR_IDLE_INITRAMFS_LATE_WARNINGS)"
+IDLE_KERNEL="$(get_field PUNAR_IDLE_KERNEL)"
+UNEVICTABLE_KB="$(get_field PUNAR_IDLE_UNEVICTABLE_KB)"
 NETWORK_ONLINE="$(get_field PUNAR_NETWORK_ONLINE)"
 ZRAM_PRESENT="$(get_field PUNAR_ZRAM_PRESENT)"
 ZRAM_DISKSIZE_MB="$(get_field PUNAR_ZRAM_DISKSIZE_MB)"
@@ -220,6 +242,49 @@ if [ "${RUNTIME_PRESENT}" != "yes" ]; then
     annotate error "idle runtime facts are incomplete or missing (PUNAR_IDLE_RUNTIME_PRESENT='${RUNTIME_PRESENT:-missing}') — every Punar service cgroup must expose CPU and I/O counters"
     fail=1
 fi
+case "${INITRAMFS_RELEASED}" in
+    not-needed)
+        echo "==> OK: the initrd did not need to free the unpacked initramfs on Linux ${IDLE_KERNEL:-unknown} (the helper acts only on 7.0 to 7.2); Unevictable ${UNEVICTABLE_KB:-missing} kB at the end of the window (context only)"
+        ;;
+    yes)
+        initramfs_ok=1
+        for field_and_value in \
+            "PUNAR_IDLE_INITRAMFS_FREED_KB:${INITRAMFS_FREED_KB}" \
+            "PUNAR_IDLE_INITRAMFS_KEPT_KB:${INITRAMFS_KEPT_KB}" \
+            "PUNAR_IDLE_INITRAMFS_DROP_KB:${INITRAMFS_DROP_KB#-}" \
+            "PUNAR_IDLE_INITRAMFS_LATE_WARNINGS:${INITRAMFS_LATE_WARNINGS}"; do
+            case "${field_and_value#*:}" in
+                ''|*[!0-9]*)
+                    annotate error "the initramfs release evidence is incomplete: ${field_and_value%%:*}='${field_and_value#*:}' (PERFORMANCE_BUDGETS.md §4.1)"
+                    initramfs_ok=0
+                    ;;
+            esac
+        done
+        if [ "${initramfs_ok}" -eq 1 ]; then
+            if [ "${INITRAMFS_FREED_KB}" -le "${INITRAMFS_KEPT_KB}" ]; then
+                annotate error "the initramfs release freed ${INITRAMFS_FREED_KB} KiB but kept ${INITRAMFS_KEPT_KB} KiB — the keep set must be the small part (PERFORMANCE_BUDGETS.md §4.1)"
+                initramfs_ok=0
+            fi
+            if [ "$((INITRAMFS_DROP_KB * 2))" -lt "${INITRAMFS_FREED_KB}" ]; then
+                annotate error "the initramfs release unlinked ${INITRAMFS_FREED_KB} KiB but Unevictable + Shmem fell only ${INITRAMFS_DROP_KB} KiB — the pages did not go (PERFORMANCE_BUDGETS.md §4.1)"
+                initramfs_ok=0
+            fi
+            if [ "${INITRAMFS_LATE_WARNINGS}" -ne 0 ]; then
+                annotate error "${INITRAMFS_LATE_WARNINGS} warning-or-worse journal entries between the initramfs release and the switch-root — something still needed a program it deleted (journalctl -b -p warning)"
+                initramfs_ok=0
+            fi
+        fi
+        if [ "${initramfs_ok}" -eq 1 ]; then
+            echo "==> OK: the initrd freed the unpacked initramfs before switch-root on Linux ${IDLE_KERNEL:-unknown}: ${INITRAMFS_FREED_KB} KiB unlinked, Unevictable + Shmem down ${INITRAMFS_DROP_KB} KiB, ${INITRAMFS_KEPT_KB} KiB kept, no warnings before the switch; Unevictable ${UNEVICTABLE_KB:-missing} kB at the end of the window (context only)"
+        else
+            fail=1
+        fi
+        ;;
+    *)
+        annotate error "the unpacked initramfs was not freed before switch-root (PUNAR_IDLE_INITRAMFS_RELEASED='${INITRAMFS_RELEASED:-missing}') — punar-release-initramfs.service refused, failed or did not run, so on Linux ${IDLE_KERNEL:-unknown} it may stay resident for the whole boot (PERFORMANCE_BUDGETS.md §4.1)"
+        fail=1
+        ;;
+esac
 if [ "${NETWORK_ONLINE}" != "yes" ]; then
     annotate error "stabilized idle was not DHCP-connected (PUNAR_NETWORK_ONLINE='${NETWORK_ONLINE:-missing}') — the canonical method requires a live non-loopback link and default route"
     fail=1
