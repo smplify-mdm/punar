@@ -5835,12 +5835,22 @@ impl Inner {
             (slot.clone(), self.enrollment_epoch.load(Ordering::SeqCst))
         };
         let Some(enrollment) = enrollment else {
-            *self.last_sync_outcome.lock().unwrap() = None;
-            self.applications_withheld.store(false, Ordering::SeqCst);
+            // Only while the device is still personal, and under the lock
+            // enroll.start commits under: one committed since this pass
+            // looked has its own first sync coming, whose outcome this must
+            // not erase.
+            let slot = self.enrollment.lock().unwrap();
+            if slot.is_none() {
+                *self.last_sync_outcome.lock().unwrap() = None;
+                self.applications_withheld.store(false, Ordering::SeqCst);
+            }
             return;
         };
         let token = self.device_token.lock().unwrap().clone();
         let client = self.control_plane().within(budget.clone());
+        // Whether the last pass got nothing through: then a report that
+        // gets through now means the link is back.
+        let link_was_down = self.pending_compliance.load(Ordering::SeqCst);
 
         // Compliance: overall + per-category states. Nothing else — no
         // values, no hostnames, no events (SPEC sections 24, 54).
@@ -5858,6 +5868,13 @@ impl Inner {
             Some(token) => client.compliance_report(token, &report).is_ok(),
             None => false,
         };
+        // The link is back. The waits an inventory built up while nothing
+        // got through say nothing about the inventory, and would hold a
+        // changed one back for up to half an hour after the device is
+        // online again.
+        if compliance_ok && link_was_down {
+            *self.inventory_retry.lock().unwrap() = None;
+        }
 
         // Inventory: device facts, which capabilities are supported, posture
         // states, and the tier's applications. Sent when its hash changed,
@@ -5915,9 +5932,7 @@ impl Inner {
                 .unwrap()
                 .as_ref()
                 .is_some_and(|retry| retry.defers(epoch, &hash, attempted_at));
-        let mut new_hash = enrollment.last_inventory_hash.clone();
-        let mut sent_at = enrollment.last_inventory_sent_at.clone();
-        let mut received = None;
+        let mut delivered = None;
         let mut failed_hash = None;
         let inventory_outcome = if deferred {
             "unreachable"
@@ -5935,9 +5950,7 @@ impl Inner {
                     // which keeps the inventory itself), what it was handed.
                     // Recorded below, only if this enrollment is still the
                     // one in the slot.
-                    received = Some(sent.unwrap_or(inventory));
-                    new_hash = Some(hash);
-                    sent_at = Some(now);
+                    delivered = Some((hash, now, sent.unwrap_or(inventory)));
                     "success"
                 }
                 None => {
@@ -5979,7 +5992,12 @@ impl Inner {
             .store(inventory_outcome == "unreachable", Ordering::SeqCst);
         {
             let mut retry = self.inventory_retry.lock().unwrap();
-            if let Some(hash) = failed_hash {
+            // A failure counts toward the inventory's wait only when the
+            // compliance report of the same pass got through: a link that
+            // carries a report but not the inventory. When nothing got
+            // through, the device is offline, and the failure says nothing
+            // about the inventory.
+            if let Some(hash) = failed_hash.filter(|_| compliance_ok) {
                 let next = InventoryRetry::after_failure(
                     retry.as_ref(),
                     epoch,
@@ -6035,15 +6053,19 @@ impl Inner {
             ));
         }
 
-        if let (Some(sent), Some(at)) = (received, sent_at.as_deref()) {
-            self.record_organization_view(current, at, sent);
+        // Only a send this pass made moves the hash and the send time: two
+        // passes of this one enrollment can overlap, and one that sent
+        // nothing, or failed, must not put back the values it read at its
+        // start over what the other recorded meanwhile.
+        if let Some((hash, at, received)) = delivered {
+            self.record_organization_view(current, &at, received);
+            current.last_inventory_hash = Some(hash);
+            current.last_inventory_sent_at = Some(at);
         }
         current.last_sync = LastSyncRecord {
             at: Some(utc_now_rfc3339()),
             result: Some(overall.to_string()),
         };
-        current.last_inventory_hash = new_hash;
-        current.last_inventory_sent_at = sent_at;
         if last_query.is_some() {
             current.last_query = last_query;
         }

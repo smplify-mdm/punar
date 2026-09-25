@@ -2450,6 +2450,86 @@ fn a_failing_inventory_waits_longer_each_time_unless_it_changes() {
     );
 }
 
+/// Two passes of one enrollment can overlap (the timer's and a root
+/// administrator's), each working from the record it read at its start. One
+/// whose inventory report failed must not put that record's hash and send
+/// time back over what the other pass, which sent the same inventory, has
+/// recorded since: the device would read as never having sent it.
+#[test]
+fn an_overlapping_pass_that_failed_does_not_undo_one_that_sent() {
+    const SECURE_BOOT: &str =
+        "machine/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    let dir = test_dir("overlapping-passes");
+    let control_plane = ControlPlane::start(&dir);
+    let state = Arc::clone(&control_plane.state);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let record = |field: &str| read_json(&daemon.state_path("enrollment.json"))[field].clone();
+    let before = record("last_inventory_hash");
+
+    write_file(&dir.join(SECURE_BOOT), [6u8, 0, 0, 0, 1]);
+    let sent = Mutex::new(Value::Null);
+    pass_held_at(&daemon, &state, "inventory.report", &|| {
+        // The other pass sends the changed inventory and records it; then
+        // the held one's report fails.
+        daemon.result("reconcile", None);
+        let recorded = record("last_inventory_hash");
+        assert_ne!(recorded, before);
+        *sent.lock().unwrap() = json!([recorded, record("last_inventory_sent_at")]);
+        state.refuse_inventory.store(true, Ordering::SeqCst);
+    });
+    assert_eq!(
+        json!([
+            record("last_inventory_hash"),
+            record("last_inventory_sent_at")
+        ]),
+        *sent.lock().unwrap(),
+        "the failed pass put back what it had read"
+    );
+}
+
+/// A changed inventory goes on the first pass after the link comes back.
+/// While nothing gets through, a failing inventory builds up no wait (the
+/// failure says nothing about the inventory), so it is not held back for up
+/// to half an hour by an outage that is already over.
+#[test]
+fn a_changed_inventory_goes_as_soon_as_the_link_is_back() {
+    const SECURE_BOOT: &str =
+        "machine/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    const RETRY: Duration = Duration::from_millis(400);
+    let dir = test_dir("offline-inventory");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = TestDaemon::start_with(
+        &dir,
+        Peer::root(),
+        &control_plane.socket,
+        "enabled",
+        Vec::new(),
+        |cfg| cfg.inventory_retry_base = RETRY,
+    );
+    daemon.result("enroll.start", Some(json!({"org_domain": "acme.com"})));
+
+    // Offline for a while, as on a flight, with an inventory that changed.
+    let state = control_plane.stop();
+    write_file(&dir.join(SECURE_BOOT), [6u8, 0, 0, 0, 1]);
+    for wait in [RETRY, RETRY * 2, RETRY * 4] {
+        daemon.result("reconcile", None);
+        std::thread::sleep(wait + Duration::from_millis(50));
+    }
+    daemon.result("reconcile", None);
+
+    // Back online: the very next pass sends it.
+    let control_plane = ControlPlane::start_with(&dir, state);
+    let sent = control_plane.state.inventory.lock().unwrap().len();
+    daemon.result("reconcile", None);
+    assert_eq!(
+        control_plane.state.inventory.lock().unwrap().len(),
+        sent + 1,
+        "held back by the outage"
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["last_sync"]["pending"], false, "{status}");
+}
+
 /// The resend gate hashes what can leave the device and nothing else. The
 /// hostname and a capability's value — the timezone a network hands out when
 /// its owner travels — are never sent, so changing them sends no inventory:

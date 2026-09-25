@@ -546,7 +546,12 @@ RPC with the stored token; per-call failure marks that report pending (§7).
   failed waits before the same body goes again: a minute, doubled after each
   further failure up to 30 minutes, kept in memory with the flags. A body
   that changed goes at once, and a send that gets through starts the waits
-  afresh. Otherwise an inventory too large to upload within the agent's
+  afresh. Only a failure in a pass whose compliance report got through
+  counts (a link that carries reports but not the inventory); while nothing
+  gets through the device is offline, and the first pass whose report gets
+  through again clears the wait. Only a send a pass made moves the recorded
+  hash and send time, so an overlapping pass that failed cannot undo one
+  that sent. Otherwise an inventory too large to upload within the agent's
   budget on a slow link, or one the receiver kept although its answer came
   late, went up on every pass, indefinitely. The compliance report is a few
   hundred bytes and still retries every pass. No spool of
