@@ -124,7 +124,13 @@ return function(ctx)
     bind("XF86AudioRaiseVolume", hl.dsp.exec_cmd("wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"), "Volume up", { repeating = true })
     bind("XF86AudioLowerVolume", hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"), "Volume down", { repeating = true })
     bind("XF86AudioMute", hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"), "Toggle mute")
-    bind(mod .. " + SHIFT + E", hl.dsp.exit(), "End session")
+    -- End session asks first. SHIFT+E sits beside SHIFT+W, SHIFT+Q and
+    -- SHIFT+F, and ending a session closes every window in it with no undo,
+    -- so the chord opens the session menu with "End session" armed: pressing
+    -- the chord again, or E, or clicking the row, signs out; Esc or any
+    -- other row keeps the session. The menu's own row runs `punarctl session
+    -- end`, the same verb a terminal uses.
+    bind(mod .. " + SHIFT + E", hl.dsp.exec_cmd(ctx.session_end), "End session")
     bind(mod .. " + slash", hl.dsp.exec_cmd(ctx.shell .. " ipc call shortcuts toggle"), "Shortcut help")
     bind(mod .. " + SHIFT + B", hl.dsp.exec_cmd(ctx.shell .. " ipc call bar focus"), "Focus status cluster")
     bind(mod .. " + S", hl.dsp.exec_cmd(ctx.shell .. " ipc call systemcontrol toggle"), "System control")

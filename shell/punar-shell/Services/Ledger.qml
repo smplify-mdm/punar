@@ -1,30 +1,28 @@
 pragma Singleton
-// Ledger — AI access-ledger display state (Milestone 8).
+// Ledger — AI access-ledger display state (Milestone 8), for THIS person.
 //
-// Follows `/run/punar-agentd/ledger.json`, the side file punar-agentd
-// rewrites atomically at the same points it rewrites `agents.json`
-// (side contract: docs/api/ipc.md §13.2; design: milestone-8.md §8.2).
-// Watched with a FileView change watch (inotify — the Services/Status.qml
-// and Services/Agents.qml pattern): event-driven, ZERO polling, no socket
-// client in the shell.
+// WHERE THE ROWS COME FROM. `punarctl agents access <session> --json`: the
+// terminal verb, which asks punar-agentd's `agents.access` — owner or root
+// (docs/api/ipc.md §12.2). A person therefore sees the ledger of their own
+// sessions and nobody else's, through the same command a terminal runs
+// (terminal parity), and the answer is exactly the object that method
+// returns: `summary`, `detail`, `not_yet_observed`, `retention`, `privacy`,
+// and `purged_at` on a session the person deleted.
 //
-// WHY A SECOND FILE, AND WHY NOT IN /run/punar (milestone-8.md §8.2):
-// a ledger is personal data. `agents.json` is world-readable and lives in
-// a user-writable directory, so it carries only the counts-only ledger
-// FINGERPRINT (ipc.md §12.4) — never a class name, a zone or an `evt_` id.
-// The rows below come from `/run/punar-agentd/ledger.json`, `0640
-// root:punar`, inside the root-owned agentd runtime directory: only group
-// `punar` (the agentd socket's own admission set) can read it, and because
-// the directory is root-owned a local user cannot unlink it and substitute
-// a forgery.
+// WHY NOT THE SIDE FILE ANY MORE. This used to follow
+// `/run/punar-agentd/ledger.json` with a FileView. That file holds EVERY
+// person's rows, and it was `0640 root:punar` — readable by every account on
+// the device, so on a shared device each person could read each person's
+// agent ledger. It is now `root:punar-audit`, a group no person is in (the
+// audit trail's pattern, F0-S3), and this singleton asks agentd instead.
 //
-// NON-AUTHORITATIVE, exactly as §9/§11/§13.2 state: the socket is the
-// authority and `punarctl agents access` is the authenticated view. This
-// is display data for the user's own panel.
+// WHEN IT ASKS. On user action only — opening the panel, moving to a
+// session, a purge that went through — never on a clock. One process at a
+// time; a request made while one runs replaces any earlier queued one.
 //
-// Fail CLOSED: a missing or unparsable file, or a session with no record,
-// reads as "no ledger recorded for this session yet" — never an error
-// surface (milestone-8.md §8.2).
+// Fail CLOSED: no answer, a refusal or an unparsable one reads as "no ledger
+// recorded for this session yet" — never an error surface of its own. What
+// went wrong is kept in `error` for the panel's agentd line.
 
 import QtQuick
 import Quickshell
@@ -33,26 +31,22 @@ import Quickshell.Io
 Singleton {
     id: root
 
-    readonly property string ledgerPath: "/run/punar-agentd/ledger.json"
-
-    // session_id → the per-session ledger view, which is the same object
-    // `agents.access` returns (ipc.md §12.2): `summary`, `detail`,
-    // `not_yet_observed`, `retention`, `privacy`, and `purged_at` on a
-    // session the user deleted.
+    // session_id → the per-session ledger view `agents.access` returned.
     property var views: ({})
 
-    // RFC 3339 timestamp of the file itself ("" = no data).
+    // When the last answer arrived (RFC 3339-ish local stamp; "" = none).
     property string updatedAt: ""
 
-    // True once a parse has succeeded, so the panel can tell "agentd has
-    // not written a ledger yet" from "this session has no rows".
+    // True once any answer has parsed, so the panel can tell "not asked
+    // yet" from "this session has no rows".
     property bool loaded: false
 
-    function resetEmpty(): void {
-        root.views = ({});
-        root.updatedAt = "";
-        root.loaded = false;
-    }
+    // The last refusal or failure, in punarctl's words ("" when the last
+    // ask was answered).
+    property string error: ""
+
+    // The session to ask about once the running ask finishes.
+    property string queued: ""
 
     // The record for one session, or null. Callers must treat null as
     // "nothing recorded yet", never as an error.
@@ -67,74 +61,80 @@ Singleton {
         return root.view(sessionId) !== null;
     }
 
-    // The session id a record belongs to. The primary spelling is the one
-    // `agents.access` uses (`summary.session_id`); a top-level
-    // `session_id` is accepted too so the daemon may key its own file
-    // either way without the panel going blank.
-    function idOf(entry: var): string {
-        if (entry === null || entry === undefined || typeof entry !== "object")
-            return "";
-        if (typeof entry.session_id === "string")
-            return entry.session_id;
-        var s = entry.summary;
-        if (s !== null && s !== undefined && typeof s === "object"
-                && typeof s.session_id === "string")
-            return s.session_id;
-        return "";
-    }
-
-    function loadLedger(): void {
-        var j = null;
-        try {
-            j = JSON.parse(ledgerFile.text());
-        } catch (e) {
-            j = null;
-        }
-        if (j === null || typeof j !== "object") {
-            root.resetEmpty();
+    /// Ask agentd for one of this person's sessions. Fixed argv, never a
+    /// shell string; the daemon is the authorization point.
+    function fetch(sessionId: string): void {
+        if (sessionId === "")
+            return;
+        if (access.running) {
+            root.queued = sessionId;
             return;
         }
-        var out = ({});
-        var sessions = j.sessions;
-        if (Array.isArray(sessions)) {
-            for (var i = 0; i < sessions.length; i++) {
-                var id = root.idOf(sessions[i]);
-                if (id !== "")
-                    out[id] = sessions[i];
-            }
-        } else if (sessions !== null && sessions !== undefined && typeof sessions === "object") {
-            // Keyed-by-id spelling: the key wins, the record is kept whole.
-            var keys = Object.keys(sessions);
-            for (var k = 0; k < keys.length; k++) {
-                var entry = sessions[keys[k]];
-                if (entry !== null && entry !== undefined && typeof entry === "object")
-                    out[keys[k]] = entry;
-            }
+        access.sessionId = sessionId;
+        access.command = ["punarctl", "agents", "access", sessionId, "--json"];
+        try {
+            access.running = true;
+        } catch (e) {
+            root.error = "punarctl could not be started";
         }
-        root.views = out;
-        root.updatedAt = typeof j.ts === "string" ? j.ts
-            : (typeof j.updated_at === "string" ? j.updated_at : "");
+    }
+
+    /// Re-ask for every session already on hand (panel open). The newest
+    /// asked-for session goes first; the rest follow one at a time.
+    function refresh(): void {
+        var ids = Object.keys(root.views);
+        for (var i = 0; i < ids.length; i++)
+            root.fetch(ids[i]);
+    }
+
+    function keep(sessionId: string, record: var): void {
+        var next = ({});
+        for (var key in root.views)
+            next[key] = root.views[key];
+        next[sessionId] = record;
+        root.views = next;
+        root.updatedAt = new Date().toISOString();
         root.loaded = true;
     }
 
-    // One-shot re-read on user action (panel open) — covers a file that
-    // did not exist when the watch was armed (agentd started after the
-    // shell). An event per open, not a poll.
-    function refresh(): void {
-        ledgerFile.reload();
-    }
+    Process {
+        id: access
 
-    FileView {
-        id: ledgerFile
-        path: root.ledgerPath
-        // agentd replaces the file atomically; the inotify watch follows
-        // the change — event-driven, never a timer (PERFORMANCE_BUDGETS.md:
-        // no polling loops).
-        watchChanges: true
-        onLoaded: root.loadLedger()
-        onFileChanged: ledgerFile.reload()
-        // Absent or unreadable: agentd not running, or this user is not in
-        // group punar. Either way the panel says so calmly.
-        onLoadFailed: root.resetEmpty()
+        property string sessionId: ""
+
+        stdout: StdioCollector {
+            id: accessOut
+            waitForEnd: true
+        }
+        stderr: StdioCollector {
+            id: accessErr
+            waitForEnd: true
+        }
+
+        // Connected, not declared: see Probe in SystemControl/ControlData.qml.
+        Component.onCompleted: access.exited.connect(function (exitCode) {
+            var asked = access.sessionId;
+            if (exitCode === 0) {
+                var record = null;
+                try {
+                    record = JSON.parse(String(accessOut.text));
+                } catch (e) {
+                    record = null;
+                }
+                if (record !== null && typeof record === "object") {
+                    root.keep(asked, record);
+                    root.error = "";
+                } else {
+                    root.error = "agents access answered something unreadable";
+                }
+            } else {
+                var said = String(accessErr.text).trim().split("\n")[0];
+                root.error = said !== "" ? said : "punarctl exited with " + exitCode;
+            }
+            var next = root.queued;
+            root.queued = "";
+            if (next !== "" && next !== asked)
+                root.fetch(next);
+        })
     }
 }

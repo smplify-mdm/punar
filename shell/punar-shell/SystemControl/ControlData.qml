@@ -343,26 +343,8 @@ Scope {
             waitForEnd: true
         }
 
-        onStarted: {
-            // KEYED ON `stdinEnabled`, NOT ON THE SECRET BEING NON-EMPTY.
-            // Returning early for an empty secret left stdin OPEN, and the
-            // helper's `read` then blocked forever: `mutation.running` stayed
-            // true, and runMutation() — which returns early while it is —
-            // silently swallowed every later Restart, Shut down, log out,
-            // web-app change and policy edit for the life of the session, with
-            // no error anywhere. Whatever was typed, the pipe gets exactly one
-            // line and is then closed.
-            if (!mutation.stdinEnabled)
-                return;
-            mutation.write(adminSecret.value + "\n");
-            adminSecret.value = "";
-            mutation.stdinEnabled = false;
-        }
-
         // Connected, not declared — see the note on Probe above.
         Component.onCompleted: mutation.exited.connect(function (exitCode) {
-            adminSecret.value = "";
-            mutation.stdinEnabled = false;
             data.lastActionPending = false;
             data.lastActionExit = exitCode;
             data.lastActionError = String(mutationErr.text).trim();
@@ -916,30 +898,31 @@ Scope {
         data.adminStage = "password";
     }
 
-    /// The second step. The password is written on an anonymous pipe to a
-    /// fixed helper — never an argument, never an environment variable, and
-    /// never held in a property, which is why it is a parameter that falls
-    /// out of scope the moment this returns.
+    /// The second step. The password goes to `punarctl policy set|clear` —
+    /// the very command a terminal runs — over a private socket that
+    /// punarctl opens for this surface and nobody else may answer
+    /// (`--password-from-parent`, F0-S4). It is never an argument, never an
+    /// environment variable, never a pipe, and never held past the handoff:
+    /// PasswordRun keeps it only until it has been written.
     function submitAdminPassword(password: string): void {
-        if (data.adminStage !== "password" || mutation.running)
+        if (data.adminStage !== "password" || mutation.running || adminRun.running)
             return;
         // An empty submit is a person pressing Enter twice, not a request. It
-        // is refused HERE rather than by the helper, because reaching the
-        // helper at all means spawning a process to be told what this line
-        // already knows — and punar-authd would count the attempt against the
-        // account's faillock tally for nothing.
+        // is refused HERE rather than by punarctl, because reaching it at all
+        // means spawning a process to be told what this line already knows —
+        // and punar-authd would count the attempt against the account's
+        // faillock tally for nothing.
         if (password === "") {
             data.lastActionArgv = "punarctl policy set " + data.adminPath;
             data.lastActionExit = 2;
             data.lastActionError = "Enter your password to confirm this change.";
             return;
         }
-        var argv = [
-            "/usr/lib/punar/punar-policy-set.sh",
-            data.adminPath,
-            data.adminValue === "" ? "--clear" : data.adminValue,
-            data.adminReason
-        ];
+        var argv = data.adminValue === ""
+            ? ["punarctl", "policy", "clear", data.adminPath,
+               "--reason", data.adminReason, "--password-from-parent"]
+            : ["punarctl", "policy", "set", data.adminPath, data.adminValue,
+               "--reason", data.adminReason, "--password-from-parent"];
         data.adminStage = "";
         // The command a person would type for the same change, whole: it
         // asks for the password on a terminal, as this surface just did.
@@ -952,32 +935,27 @@ Scope {
         data.lastActionError = "";
         data.lastActionPending = true;
         data.pendingTimeZone = "";
-        mutation.command = argv;
-        adminSecret.value = password;
-        try {
-            mutation.stdinEnabled = true;
-            mutation.running = true;
-        } catch (e) {
-            // stdinEnabled is reset too: a process that never started leaves it
-            // set, and the next ORDINARY mutation would then inherit a pipe
-            // nothing ever writes to or closes.
-            adminSecret.value = "";
-            mutation.stdinEnabled = false;
+        if (!adminRun.start(argv, password)) {
             data.lastActionPending = false;
             data.lastActionExit = 127;
-            data.lastActionError = "The policy helper is not installed on this machine.";
+            data.lastActionError = "punarctl could not be started on this machine.";
         }
         data.adminPath = "";
         data.adminValue = "";
         data.adminReason = "";
     }
 
-    /// Holds the typed secret for exactly as long as it takes the helper to
-    /// start and read one line. Cleared by onStarted, and again on exit, so
-    /// no code path leaves it set.
-    QtObject {
-        id: adminSecret
-        property string value: ""
+    // The administrator path's own process: the password crosses a socket,
+    // and the answer is shown exactly like any other mutation's.
+    PasswordRun {
+        id: adminRun
+
+        onFinished: function (exitCode, said) {
+            data.lastActionPending = false;
+            data.lastActionExit = exitCode;
+            data.lastActionError = said;
+            data.refreshProbes();
+        }
     }
 
     function submitReason(reason: string): void {

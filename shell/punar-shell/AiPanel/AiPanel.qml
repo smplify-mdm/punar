@@ -47,16 +47,17 @@ pragma ComponentBehavior: Bound
 // PERSONAL DEFAULTS as the authority source and shows no org chrome.
 //
 // DATA (milestone-7.md §8.2, milestone-8.md §8.2, docs/api/ipc.md §11
-// and §13.2): the Agents singleton follows `/run/punar/agents.json` and
-// the Ledger singleton follows `/run/punar-agentd/ledger.json`, both
-// with an inotify FileView — no socket client in the shell, no polling,
-// no timers. Opening the panel fires ONE detached
-// `punarctl agents list --json`, and one `punarctl agents access <id>
-// --json` for a session whose ledger is not on hand yet (fixed argv,
-// never a shell string) — the daemon drains and samples on that read
-// and rewrites both files; the FileViews deliver the rewrite. A missing
-// or unparsable file renders the calm empty panel — fail closed, never
-// an error surface.
+// and §13.2): the Agents singleton follows `/run/punar/agents.json` with an
+// inotify FileView — no socket client in the shell, no polling, no timers.
+// Opening the panel fires ONE `punarctl agents list --json`, and the Ledger
+// singleton runs `punarctl agents access <id> --json` for a session whose
+// ledger is not on hand yet (fixed argv, never a shell string): agentd
+// drains and samples on that read, and its answer — this person's own
+// sessions only, since the method is owner-or-root — is the record. The
+// device-wide side file `/run/punar-agentd/ledger.json` holds every
+// person's rows and is `root:punar-audit`, so the panel no longer reads it.
+// A missing or unparsable answer renders the calm empty panel — fail closed,
+// never an error surface.
 //
 // PUNAR+A shows the data; SHIFT+DEL deletes it (spec §24.2 + §1.17:
 // deleting your own data cannot be terminal-only). The keystroke runs
@@ -91,8 +92,8 @@ DeferredSurfaceBase {
     // action never stays armed behind the reader's back.
     property string purgeArmedId: ""
     // The session whose purge has been handed to punarctl but whose
-    // ledger.json rewrite has not arrived yet. Cleared when the record
-    // comes back purged (or disappears).
+    // purged record has not come back from agents.access yet. Cleared when
+    // the record comes back purged (or the purge is refused).
     property string purgeRequestedId: ""
 
     // ---- shared type grammar (DESIGN_LANGUAGE.md §1) ----
@@ -111,13 +112,13 @@ DeferredSurfaceBase {
         color: Theme.shellInk3
     }
 
-    // The two refresh calls below are asked for their effect, not their
-    // output: `agents list` makes agentd rescan when its view is stale, and
-    // `agents access` makes it drain the audit tail into the ledger, and the
-    // results reach this panel through the files it already watches. What
-    // the panel still needs from them is whether agentd ANSWERED — run
-    // detached, a dead or refusing agentd looked like a quiet machine.
-    // "" when the last refresh was answered.
+    // The list refresh below is asked for its effect, not its output:
+    // `agents list` makes agentd rescan when its view is stale, and the
+    // result reaches this panel through agents.json. What the panel still
+    // needs from it is whether agentd ANSWERED — run detached, a dead or
+    // refusing agentd looked like a quiet machine. "" when the last refresh
+    // was answered. (The ledger's own answer, and its failures, are the
+    // Ledger singleton's.)
     property string agentdError: ""
     // A purge agentd refused, and the session it was for.
     property string purgeError: ""
@@ -159,9 +160,6 @@ DeferredSurfaceBase {
     Kick {
         id: listKick
     }
-    Kick {
-        id: accessKick
-    }
 
     Process {
         id: purgeProc
@@ -176,6 +174,11 @@ DeferredSurfaceBase {
                 root.purgeError = "";
                 return;
             }
+            // Deleted: ask agentd for the record again, which now carries
+            // its purged time. (The panel reads this person's ledger through
+            // agents.access; there is no side file to wait for.)
+            if (exitCode === 0 && root.purgeRequestedId !== "")
+                Ledger.fetch(root.purgeRequestedId);
             // Refused: nothing was deleted, so nothing is "requested" any
             // more, and the privacy card says why.
             var said = String(purgeErr.text).trim();
@@ -1104,14 +1107,15 @@ DeferredSurfaceBase {
 
     // Ask agentd for one session's ledger, once, on user action — the
     // read itself is what makes agentd drain the audit tail and sample the
-    // scope cgroup (milestone-8.md §5.1), and the rewrite reaches the
-    // shell through the Ledger FileView. Skipped when the record is
-    // already on hand, so walking the rail with the arrow keys does not
-    // spawn a process per row. Fixed argv, never a shell string.
+    // scope cgroup (milestone-8.md §5.1), and its answer IS the record: the
+    // Ledger singleton keeps what `agents.access` (owner or root) returned,
+    // so this person only ever sees their own sessions. Skipped when the
+    // record is already on hand, so walking the rail with the arrow keys
+    // does not spawn a process per row.
     function refreshLedger(sessionId: string): void {
         if (sessionId === "" || Ledger.has(sessionId))
             return;
-        accessKick.ask(["punarctl", "agents", "access", sessionId, "--json"]);
+        Ledger.fetch(sessionId);
     }
 
     // SHIFT+DEL on the focused session (spec §24.2 + §1.17: deleting your
@@ -2247,9 +2251,12 @@ DeferredSurfaceBase {
                     font.pixelSize: 8
                     font.weight: 500
                     font.letterSpacing: Theme.tracking(8, 0.14)
-                    color: root.agentdError === "" ? Theme.shellInk3 : Theme.shellStatusBad
+                    color: root.agentdError === "" && Ledger.error === ""
+                        ? Theme.shellInk3 : Theme.shellStatusBad
                     text: root.agentdError !== ""
                         ? "Agentd did not answer · " + root.agentdError
+                        : Ledger.error !== ""
+                        ? "Agentd did not answer · " + Ledger.error
                         : "Last scan · " + (Agents.scannedAt === ""
                             ? "never" : root.shortTime(Agents.scannedAt))
                 }

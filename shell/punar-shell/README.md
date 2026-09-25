@@ -49,7 +49,8 @@ the machine.
 | `Services/WorkspaceState.qml` | Singleton: workspace-name persistence + restore (M2, milestone-2.md §6) |
 | `Services/WallpaperState.qml` | Singleton: four-entry wallpaper catalog + atomic user preference + `wallpaper` IPC handler |
 | `Services/Agents.qml` | Singleton: AI-panel display state — watches `/run/punar/agents.json` (M7, ipc.md §11) |
-| `Services/Ledger.qml` | Singleton: AI access-ledger display state — watches `/run/punar-agentd/ledger.json` (M8, ipc.md §13.2) |
+| `Services/Ledger.qml` | Singleton: AI access-ledger display state for this person — asks `punarctl agents access <id> --json` (owner-or-root `agents.access`, M8, ipc.md §12.2); the device-wide side file is `root:punar-audit` and not read by the shell |
+| `Services/PasswordRun.qml` | Component: runs one punarctl verb that needs the person's password with `--password-from-parent`, handing the password over the private socket punarctl opens — never a pipe (F0-S4, ipc.md §23.5) |
 | `Services/Approvals.qml` | Singleton: approval + grant display state — watches `/run/punard/approvals.json` (M9, ipc.md §15) |
 | `Services/Alerts.qml` | Singleton: shadow-AI alert display state — watches `/run/punar-agentd/alerts.json` (M10, ipc.md §20) |
 | `Bar/Bar.qml` | Top bar (30px paper masthead, hairline rule; active workspace NAME; org chrome when enrolled) |

@@ -90,8 +90,10 @@ PUNAR + SHIFT + S            Region → clipboard (pointer-assisted: slurp
 ### Session
 
 ```text
-PUNAR + SHIFT + E            End session (greetd falls back to agreety,
-                             milestone-1.md §4)
+PUNAR + SHIFT + E            End session — asks first: opens the session
+                             menu with End session armed; press it again
+                             (or E) to sign out, Esc to stay (greetd falls
+                             back to agreety, milestone-1.md §4)
 ```
 
 ## M2 — implemented in config

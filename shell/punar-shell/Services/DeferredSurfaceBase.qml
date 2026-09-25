@@ -83,4 +83,7 @@ Scope {
 
     function showDetection(detectionId: string): void {
     }
+
+    function requestSessionEnd(): void {
+    }
 }

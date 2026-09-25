@@ -198,6 +198,13 @@ ShellRoot {
         function open(): void {
             sessionMenuSurface.openSurface();
         }
+        // PUNAR+SHIFT+E: open the menu with "End session" armed, or — when it
+        // is already armed — confirm it. Never ends a session on one press.
+        function endSession(): void {
+            var menu = sessionMenuSurface.ensureLoaded(false);
+            if (menu !== null)
+                menu.requestSessionEnd();
+        }
         function close(): void {
             sessionMenuSurface.closeSurface();
         }

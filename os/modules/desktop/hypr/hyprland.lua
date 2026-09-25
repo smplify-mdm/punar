@@ -9,6 +9,10 @@ local overview = "qs -p /usr/share/punar/shell ipc call overview toggle"
 local aiPanel = "qs -p /usr/share/punar/shell ipc call aipanel toggle"
 local lock = "qs -p /usr/share/punar/shell ipc call lock lock"
 local session = "qs -p /usr/share/punar/shell ipc call session toggle"
+-- PUNAR+SHIFT+E asks before it ends anything: it opens the session menu with
+-- "End session" already armed, and only a second press (or E, or a click)
+-- signs out. Esc keeps the session.
+local sessionEnd = "qs -p /usr/share/punar/shell ipc call session endSession"
 local layoutScript = "/usr/lib/punar/punar-layout.sh"
 local shell = "qs -p /usr/share/punar/shell"
 
@@ -81,6 +85,7 @@ require("/etc/xdg/hypr/punar-binds.lua")({
     ai_panel = aiPanel,
     lock = lock,
     session = session,
+    session_end = sessionEnd,
     layout_script = layoutScript,
     shell = shell,
     -- --no-wait returns success as soon as the server accepts the window.

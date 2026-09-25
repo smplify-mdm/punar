@@ -1798,8 +1798,9 @@ DeferredSurfaceBase {
                     // ACCIDENT: echoMode is set to Password so the shell never
                     // paints the secret, and the text is handed straight to
                     // ControlData and cleared here, so it lives in exactly one
-                    // place for exactly as long as it takes to write it to a
-                    // pipe.
+                    // place for exactly as long as it takes to hand it to
+                    // punarctl over the private socket it opens (F0-S4) —
+                    // never a pipe.
                     Item {
                         id: adminBox
 
