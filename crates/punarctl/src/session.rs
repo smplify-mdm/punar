@@ -1265,6 +1265,32 @@ fn volume_arg(change: &str) -> Option<String> {
     (value <= 100).then(|| format!("{value}%{sign}"))
 }
 
+/// A device the verb would drive is not there, while PipeWire itself
+/// answers: exit 6, like `display brightness` with no backlight, rather
+/// than blaming PipeWire (SMP-1405 WP-02).
+fn audio_absent(what: &str, why: &str) -> ExitCode {
+    refuse(
+        &format!(
+            "This machine has no {what} PipeWire can use, so nothing was changed.
+             Why: PipeWire answers but reports no default {what} ({}).
+             Next step: connect one; the key works as soon as PipeWire sees it.",
+            if why.is_empty() {
+                "wpctl gave no reason"
+            } else {
+                why
+            }
+        ),
+        crate::ipc::EXIT_ABSENT,
+    )
+}
+
+/// Whether PipeWire answers at all.
+fn pipewire_reachable() -> bool {
+    wpctl(&["status"]).is_ok()
+}
+
+/// Both default devices, `null` where there is none. An error only when
+/// PipeWire itself does not answer.
 fn audio_state() -> Result<Value, String> {
     let read = |node: &str| -> Result<Value, String> {
         let line = wpctl(&["get-volume", node])?;
@@ -1273,9 +1299,17 @@ fn audio_state() -> Result<Value, String> {
             None => Value::Null,
         })
     };
+    let output = read("@DEFAULT_AUDIO_SINK@");
+    let input = read("@DEFAULT_AUDIO_SOURCE@");
+    if let (Err(why), Err(_)) = (&output, &input) {
+        // Neither device answered: PipeWire is down, or has no devices.
+        if !pipewire_reachable() {
+            return Err(why.clone());
+        }
+    }
     Ok(json!({
-        "output": read("@DEFAULT_AUDIO_SINK@")?,
-        "input": read("@DEFAULT_AUDIO_SOURCE@").unwrap_or(Value::Null),
+        "output": output.unwrap_or(Value::Null),
+        "input": input.unwrap_or(Value::Null),
     }))
 }
 
@@ -1319,7 +1353,15 @@ pub fn audio(command: AudioCommand, style: &Style, json_output: bool) -> ExitCod
     if let Some(args) = change {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         if let Err(why) = wpctl(&args) {
-            return audio_unreachable(&why);
+            if !pipewire_reachable() {
+                return audio_unreachable(&why);
+            }
+            let what = if matches!(command, AudioCommand::Mute { input: true, .. }) {
+                "microphone"
+            } else {
+                "audio output"
+            };
+            return audio_absent(what, &why);
         }
     }
     let state = match audio_state() {

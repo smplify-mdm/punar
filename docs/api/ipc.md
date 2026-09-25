@@ -2167,7 +2167,9 @@ or path other than the confirmed target device. An installed system returns
   `2` usage (clap) · `3` denied · `4` approval_required (reserved until M9) ·
   `5` daemon unreachable · `6` not present (SMP-1405 WP-02): what the verb
   drives is absent, not broken — `display brightness` on a machine with no
-  backlight (every VM), `media` with no player running. A script can tell
+  backlight (every VM), `media` with no player running, `audio mute
+  --input` or a volume change when PipeWire answers but has no such device
+  (the CI VM has no sound card). A script can tell
   "nothing to do here" from a failure without parsing text.
 - **M4 verbs:** `punarctl policy effective` (D-014 table over 5.7) and
   `punarctl policy explain <path>` (spec section 40 layout verbatim over
@@ -2263,8 +2265,9 @@ or path other than the confirmed target device. An installed system returns
     `punarctl keyboard clipboard-keys on|off|status`; `punarctl keys list
     [--filter] [--untried]` (the compositor's `j/binds`); `punarctl window
     pop`; `punarctl layout <preset>|default --workspace <n|active>`.
-  - Exit codes: 5 with no compositor or PipeWire, 3 when polkit refuses, 2
-    for a bad name, address or volume.
+  - Exit codes: 5 with no compositor or PipeWire, 6 when PipeWire answers
+    but has no microphone or output to change, 3 when polkit refuses, 2 for
+    a bad name, address or volume.
   - The GUI runs these same verbs: the overview, the command center, the
     workspace store, WindowActions, SessionMenu and System Control's Power
     actions.

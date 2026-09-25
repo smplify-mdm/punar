@@ -645,6 +645,47 @@ fn media_keys_reach_the_playing_player_over_mpris() {
     assert!(stderr(&output).contains("No media player is running"));
 }
 
+/// A PipeWire that answers but has no microphone (every CI VM): the
+/// microphone key says so and exits 6, the "not present" code, instead of
+/// calling PipeWire unreachable; status reports the missing device as null.
+#[test]
+fn a_missing_microphone_is_absent_not_unreachable() {
+    let session = Session::start(desktop);
+    let bin = session.root.join("nomic/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("wpctl");
+    fs::write(
+        &script,
+        "#!/bin/sh\ncase \"$1 $2\" in\n\
+         'status '*) echo 'PipeWire 1.4'; exit 0 ;;\n\
+         *@DEFAULT_AUDIO_SOURCE@*) echo \"Translate ID error: '$2' is not a valid ID\" >&2; exit 1 ;;\n\
+         'get-volume @DEFAULT_AUDIO_SINK@') echo 'Volume: 0.40' ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = session
+        .command(&["audio", "mute", "--input"])
+        .env("PATH", with_path(&[&bin]))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no microphone"),
+        "{}",
+        stderr(&output)
+    );
+    let output = session
+        .command(&["--json", "audio", "status"])
+        .env("PATH", with_path(&[&bin]))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let state: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(state["input"], Value::Null);
+    assert_eq!(state["output"]["volume_percent"], 40);
+}
+
 /// The microphone key mutes the default source, never the output.
 #[test]
 fn mic_mute_targets_the_default_input() {
