@@ -246,10 +246,20 @@ jobs:
       - name: Validate bounded early-boot module policy
         run: ./tests/images/initrd-module-policy-test.sh
 
-      # On Linux 7.0-7.2 the unpacked initramfs stays resident as
-      # Unevictable memory for the whole boot; every lane frees it before
-      # switch-root. Pins the unit's ordering, that it cannot run outside the
-      # initrd, and the keep set against fake initramfs trees.
+      # The unpacked initramfs stayed resident as Unevictable memory for the
+      # whole boot on the arm64 release image (Linux 7.1; PERFORMANCE_BUDGETS.md
+      # §4.1); every lane frees it before switch-root on Linux 7.0 to 7.2.
+      # Pins the unit's ordering and hardening, the reboot-on-failure drop-ins,
+      # the kernel range, the job wait, the keep set against fake initramfs
+      # trees, and the mount boundaries with real mounts. That last check needs
+      # an unprivileged user and mount namespace, which Ubuntu 24.04 restricts
+      # through AppArmor; under CI the test fails rather than skip it.
+      - name: Allow unprivileged user namespaces for the mount-boundary check
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Validate the initramfs release step and its keep set
         run: ./tests/images/initramfs-release-contract-test.sh
 

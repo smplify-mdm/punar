@@ -2,37 +2,46 @@
 # Free the unpacked initramfs before switch-root.
 #
 # WHY. The kernel unpacks the initrd into the initial ramfs, whose pages can
-# never be reclaimed while that file system exists. On Linux 7.0 to 7.2 it
-# exists for the whole boot: pivot_root() from the initramfs now succeeds, so
-# systemd takes the path that does not empty the old root, and the kdevtmpfs
-# kernel thread holds a copy of the initial mount namespace that keeps the old
-# root's superblock alive. On the arm64 release image that was 132.2 MiB of
-# Unevictable memory for the life of the boot (PERFORMANCE_BUDGETS.md,
-# "Unpacked initramfs"). Linux 7.3 gives kdevtmpfs an empty namespace instead
-# (commit 66d2faeccbff); this step is the mitigation until every lane runs it.
+# never be reclaimed while that file system exists. On the arm64 release image
+# (Linux 7.1.12) it existed for the whole boot: 132.2 MiB of Unevictable memory
+# (MEASURED, PERFORMANCE_BUDGETS.md, "Unpacked initramfs"). Since Linux 7.0
+# pivot_root() from the initramfs succeeds, so systemd takes the path that
+# does not empty the old root, and the kdevtmpfs kernel thread holds a copy of
+# the initial mount namespace that keeps the old root's superblock alive
+# (INFER from the kernel and systemd sources for 7.0 to 7.2; only 7.1 was
+# measured). Linux 7.3 gives kdevtmpfs an empty namespace instead (commit
+# 66d2faeccbff). On any other kernel this step logs that it is not needed and
+# does nothing.
 #
 # WHAT. Unlinking a ramfs file that nothing has open or mapped frees its pages
 # at once. This deletes every regular file and symlink of the initramfs except
-# what still runs before PID 1 executes the real init: PID 1 itself (a failed
-# switch_root() re-executes it), systemd-executor, every command
-# initrd-switch-root.service runs, the libraries the dynamic loader maps for
-# each of them, and every symlink on those paths. The keep set is computed
-# here, from this initramfs, immediately before deleting, so it cannot go
-# stale when systemd or glibc change. A deleted file that is still open or
-# mapped (this script's own shell, for one) is freed when its last user exits;
-# the keep set itself stays resident.
+# what can still run before PID 1 executes the real init: PID 1 itself (a
+# failed switch_root() re-executes it), systemd-executor, systemd-shutdown (a
+# reboot needs it), every command initrd-switch-root.service runs, the
+# libraries the dynamic loader maps for each of them, every symlink on those
+# paths, and PID 1's initrd crash setting. The keep set is computed here, from
+# this initramfs, immediately before deleting, so it cannot go stale when
+# systemd or glibc change. A deleted file that is still open or mapped (this
+# script's own shell, for one) is freed when its last user exits; the keep set
+# itself stays resident. The emergency shell's programs are deleted on
+# purpose: a failed switch-root reboots instead (the initrd-switch-root.service
+# drop-in beside this unit), so the boot counter can fall back to the other
+# slot without anyone at the machine.
 #
 # SAFETY. It acts only on the ordinary path: in the initrd, on the initramfs
-# itself, with /sysroot mounted and holding an executable systemd and an
-# os-release, and with no init=, systemd.unit=, rd.systemd.unit= or debug-shell
-# override on the kernel command line. Anything it cannot resolve makes it
-# keep everything, and the unit ignores its exit status, so the worst case is
-# the boot as it was before this step existed. It never deletes on another
-# file system: find stays on the initramfs device (-xdev), and every mount
-# point except the initramfs bound onto its own path (PID 1's read-only /usr)
-# is excluded together with everything below it. PID 1 keeps /usr read-only in
-# the initrd (ProtectSystem=auto); this makes it writable only inside the
-# unit's private mount namespace, and refuses to do so in PID 1's.
+# itself, on Linux 7.0 to 7.2, with /sysroot mounted and holding an executable
+# systemd and an os-release, and with no init=, systemd.unit=, rd.systemd.unit=
+# or debug-shell override on the kernel command line. It deletes only once PID
+# 1 has no job left but this one and the switch-root, so no unit being stopped
+# (the TPM PCR barrier's leave-initrd, an extension unmerge) can still need a
+# program it deletes. Anything it cannot resolve makes it keep everything, and
+# the unit ignores its exit status, so the worst case is the boot as it was
+# before this step existed. It never deletes on another file system: find
+# stays on the initramfs device (-xdev), and every mount point except the
+# initramfs bound onto its own path (PID 1's read-only /usr) is excluded
+# together with everything below it. PID 1 keeps /usr read-only in the initrd
+# (ProtectSystem=auto); this makes it writable only inside the unit's private
+# mount namespace, and refuses to do so in PID 1's.
 #
 # It needs only bash builtins, find, mount, the dynamic loader and systemctl.
 # Every lane names findutils in InitrdPackages= so find is always present.
@@ -40,43 +49,85 @@
 # Usage:
 #   release-initramfs            the boot step (punar-release-initramfs.service)
 #   release-initramfs --check    run only the safety checks; delete nothing
-#   release-initramfs --dry-run [--root DIR]
+#   release-initramfs --dry-run [--root DIR [--show FILE]]
 #                                print the keep set and every path that would
 #                                be deleted from DIR (default /); delete
-#                                nothing. Without a PID 1 to ask (a chroot, a
-#                                test tree) it says so and uses the fixed set.
+#                                nothing. On a live initrd PID 1 names the
+#                                switch-root commands. In a chroot nothing
+#                                answers, and the fixed set is used. With
+#                                --root, no program of DIR is asked: FILE holds
+#                                what "systemctl show" would print for
+#                                initrd-switch-root.service, else the fixed set
+#                                is used. --root still runs DIR's dynamic
+#                                loader to list libraries, so it is only for a
+#                                tree you built, and it is refused as root.
 set -uf
 export LC_ALL=C
 
 MODE=boot
 ROOT=
+SHOW_FILE=
+# What the helper reads from the kernel, as variables so the contract test can
+# point them at fixtures when it sources this file.
+SELF_NS=/proc/self/ns/mnt
+PID1_NS=/proc/1/ns/mnt
+KERNEL_RELEASE=/proc/sys/kernel/osrelease
+UID_MAP=/proc/self/uid_map
+# Up to 50 polls 0.1 s apart for PID 1's other jobs to finish.
+JOB_WAIT_POLLS=50
 
 usage() {
-    printf 'usage: %s [--check | --dry-run [--root DIR]]\n' "${0##*/}" >&2
+    printf 'usage: %s [--check | --dry-run [--root DIR [--show FILE]]]\n' "${0##*/}" >&2
     exit 2
 }
 
-while [ "$#" -gt 0 ]; do
-    case $1 in
-        --check) MODE=check ;;
-        --dry-run) MODE=dry-run ;;
-        --root)
-            [ "$#" -ge 2 ] || usage
-            ROOT=$2
-            shift
-            ;;
-        *) usage ;;
-    esac
-    shift
-done
-if [ -n "$ROOT" ]; then
-    [ "$MODE" = dry-run ] || usage
-    case $ROOT in /*) ;; *) usage ;; esac
-    while [ "${ROOT%/}" != "$ROOT" ]; do
-        ROOT=${ROOT%/}
+# True for uid 0 in the initial user namespace. Root in a user namespace of
+# its own (the contract test's real-mount check) is not real root.
+real_root() {
+    local inside='' outside='' count=''
+    [ "$EUID" -eq 0 ] || return 1
+    read -r inside outside count < "$UID_MAP" || return 0
+    [ "$inside" = 0 ] && [ "$outside" = 0 ] && [ "$count" = 4294967295 ]
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case $1 in
+            --check) MODE=check ;;
+            --dry-run) MODE=dry-run ;;
+            --root)
+                [ "$#" -ge 2 ] || usage
+                ROOT=$2
+                shift
+                ;;
+            --show)
+                [ "$#" -ge 2 ] || usage
+                SHOW_FILE=$2
+                shift
+                ;;
+            *) usage ;;
+        esac
+        shift
     done
-    [ -z "$ROOT" ] || [ -d "$ROOT" ] || usage
-fi
+    if [ -n "$ROOT" ]; then
+        [ "$MODE" = dry-run ] || usage
+        case $ROOT in /*) ;; *) usage ;; esac
+        while [ "${ROOT%/}" != "$ROOT" ]; do
+            ROOT=${ROOT%/}
+        done
+        [ -z "$ROOT" ] || [ -d "$ROOT" ] || usage
+    fi
+    if [ -n "$SHOW_FILE" ]; then
+        [ -n "$ROOT" ] && [ -f "$SHOW_FILE" ] && [ -r "$SHOW_FILE" ] || usage
+    fi
+    # --root runs DIR's own dynamic loader. As root that would hand a tree
+    # someone else built the whole machine.
+    if [ -n "$ROOT" ] && real_root; then
+        printf '%s: refusing --root as root: it runs the dynamic loader of %s; use a chroot of a tree you trust, or an unprivileged user\n' \
+            "${0##*/}" "$ROOT" >&2
+        exit 2
+    fi
+}
 
 log() {
     printf '%s\n' "$*"
@@ -87,15 +138,19 @@ keep_nothing() {
     exit 0
 }
 
-meminfo_kb() {
+# Unevictable and Shmem from /proc/meminfo, into MEM_UNEVICTABLE and
+# MEM_SHMEM. A ramfs initramfs is Unevictable; a tmpfs one (no root= on the
+# kernel command line) is Shmem.
+MEM_UNEVICTABLE='?' MEM_SHMEM='?'
+read_memory() {
     local key value
+    MEM_UNEVICTABLE='?' MEM_SHMEM='?'
     while read -r key value _; do
-        if [ "$key" = "$1:" ]; then
-            printf '%s' "$value"
-            return 0
-        fi
+        case $key in
+            Unevictable:) MEM_UNEVICTABLE=$value ;;
+            Shmem:) MEM_SHMEM=$value ;;
+        esac
     done < /proc/meminfo
-    printf '?'
 }
 
 # Split $1 into the LINES array, one element per non-empty line, without a
@@ -141,10 +196,41 @@ read_mounts() {
     done
 }
 
+not_needed() {
+    log "initramfs release not needed: $*"
+    exit 0
+}
+
+# The old root stays resident only on Linux 7.0 to 7.2 (see WHY). Before 7.0
+# pivot_root() out of the initramfs fails, and systemd's MS_MOVE fallback
+# empties the old root itself. From 7.3 on kdevtmpfs holds no copy of it, so
+# it is released at switch-root. Either way this step would only add risk.
+check_kernel() {
+    local release='' major rest minor
+    read -r release < "$KERNEL_RELEASE" || true
+    case $release in
+        [0-9]*.[0-9]*) ;;
+        *) keep_nothing "cannot read a kernel version from '${release}'" ;;
+    esac
+    major=${release%%.*}
+    rest=${release#*.}
+    minor=${rest%%[!0-9]*}
+    case $major$minor in
+        *[!0-9]*) keep_nothing "cannot read a kernel version from '${release}'" ;;
+    esac
+    if [ "$major" -lt 7 ]; then
+        not_needed "Linux ${release} is older than 7.0, where systemd empties the old root itself"
+    fi
+    if [ "$major" -gt 7 ] || [ "$minor" -ge 3 ]; then
+        not_needed "Linux ${release} is 7.3 or later, where the old root is released at switch-root"
+    fi
+}
+
 check_boot_path() {
     local cmdline word i sysroot=no
     [ -e /etc/initrd-release ] \
         || keep_nothing "not in the initrd: /etc/initrd-release does not exist"
+    check_kernel
     read_mounts || keep_nothing "cannot read /proc/self/mountinfo"
     case $ROOT_TYPE in
         rootfs|ramfs|tmpfs) ;;
@@ -269,18 +355,29 @@ keep_command() {
 }
 
 # Keep what initrd-switch-root.service itself runs, as PID 1 has loaded it
-# (drop-ins included). In a chroot systemctl answers "show" with nothing and
-# succeeds. It does not take this unit's private mount namespace for one
-# today; SYSTEMD_IGNORE_CHROOT keeps the answer from ever depending on that.
-# The boot step refuses when PID 1 names no command; a dry run has no PID 1
-# to ask and says it uses the fixed set.
+# (drop-ins included). The boot step asks PID 1 through systemctl, and
+# refuses when PID 1 names no command. SYSTEMD_IGNORE_CHROOT keeps that answer
+# from ever depending on systemctl's chroot detection (it does not take this
+# unit's private mount namespace for a chroot today). A dry run in a chroot
+# gets no answer and says it uses the fixed set. A dry run of a --root tree
+# executes nothing of that tree to ask: it reads --show FILE, or uses the
+# fixed set.
+SYSTEMCTL=
 keep_switch_root_commands() {
-    local show word found=no
+    local show='' word found=no
+    local -a properties=(--property=ExecCondition --property=ExecStartPre
+        --property=ExecStart --property=ExecStartPost)
     resolve /usr/bin/systemctl || keep_nothing "cannot resolve /usr/bin/systemctl"
-    show=$(SYSTEMD_IGNORE_CHROOT=1 "$ROOT$RESOLVED" show --value \
-            --property=ExecCondition --property=ExecStartPre \
-            --property=ExecStart --property=ExecStartPost \
-            initrd-switch-root.service 2>&1) || show="systemctl failed: $show"
+    SYSTEMCTL=$ROOT$RESOLVED
+    if [ -n "$ROOT" ]; then
+        [ -z "$SHOW_FILE" ] || show=$(< "$SHOW_FILE")
+    elif [ "$MODE" = boot ]; then
+        show=$(SYSTEMD_IGNORE_CHROOT=1 "$SYSTEMCTL" show --value "${properties[@]}" \
+                initrd-switch-root.service 2>&1) || show="systemctl failed: $show"
+    else
+        show=$("$SYSTEMCTL" show --value "${properties[@]}" \
+                initrd-switch-root.service 2>&1) || show="systemctl failed: $show"
+    fi
     for word in $show; do
         case $word in
             path=*)
@@ -293,7 +390,7 @@ keep_switch_root_commands() {
     lines_of "$show"
     [ "$MODE" = dry-run ] \
         || keep_nothing "PID 1 reported no command for initrd-switch-root.service (${LINES[0]-no output})"
-    log "dry run: no PID 1 reported initrd-switch-root.service's commands; using the fixed set"
+    log "dry run: nothing reported initrd-switch-root.service's commands; using the fixed set"
 }
 
 KEPT_BYTES=0
@@ -369,8 +466,8 @@ remount_writable() {
             *) continue ;;
         esac
         if [ "$checked" = no ]; then
-            own_ns=$(find /proc/self/ns/mnt -maxdepth 0 -printf '%l')
-            pid1_ns=$(find /proc/1/ns/mnt -maxdepth 0 -printf '%l')
+            own_ns=$(find "$SELF_NS" -maxdepth 0 -printf '%l' 2>/dev/null)
+            pid1_ns=$(find "$PID1_NS" -maxdepth 0 -printf '%l' 2>/dev/null)
             [ -n "$own_ns" ] && [ -n "$pid1_ns" ] && [ "$own_ns" != "$pid1_ns" ] \
                 || keep_nothing "$point is read-only and this is not a private mount namespace (the unit needs PrivateMounts=yes)"
             checked=yes
@@ -401,6 +498,36 @@ dry_run() {
     log "dry run: would delete ${files} files (${bytes} bytes) and ${symlinks} symlinks, keep ${#KEEP[@]} paths (${KEPT_BYTES} bytes)"
 }
 
+# Wait until PID 1 has no job left but this unit's and the switch-root's.
+# Any other job may still execute a program of the initramfs: the stop of a
+# unit that isolating initrd-switch-root.target ends (the TPM PCR barrier's
+# leave-initrd, an extension unmerge, a umount), or a unit started beside this
+# one. Keep everything if one is still there after the wait.
+PAUSE_FD=
+wait_for_other_jobs() {
+    local jobs line polls=0 other
+    while :; do
+        jobs=$("$SYSTEMCTL" list-jobs --no-legend --no-pager 2>&1) \
+            || keep_nothing "cannot list PID 1's jobs: ${jobs%%$'\n'*}"
+        other=
+        lines_of "$jobs"
+        for line in "${LINES[@]}"; do
+            words_of "$line"
+            case "$WORD2 $WORD3" in
+                'punar-release-initramfs.service start'|'initrd-switch-root.service start') ;;
+                *) other="$WORD2 $WORD3"; break ;;
+            esac
+        done
+        [ -n "$other" ] || return 0
+        polls=$((polls + 1))
+        [ "$polls" -lt "$JOB_WAIT_POLLS" ] \
+            || keep_nothing "PID 1 still has a job that may run a program of the initramfs: ${other}"
+        # A builtin pause: read from a pipe this shell holds both ends of.
+        [ -n "$PAUSE_FD" ] || exec {PAUSE_FD}<> <(:)
+        read -r -t 0.1 -u "$PAUSE_FD" _ || true
+    done
+}
+
 # One line per entry, printed before it is unlinked: find reads what it
 # prints from the entry, and after -delete there is nothing left to read. A
 # failed unlink adds its own "find: cannot delete" line.
@@ -409,13 +536,15 @@ DELETE_ACTIONS=(-printf 'D %y %s %n\n' -delete)
 # From the first unlink on, use nothing but builtins and processes already
 # started: every other file of the initramfs is gone.
 release() {
-    local before after output status line rest type size links
-    local files=0 symlinks=0 freed=0 errors=0 first_error=
+    local output status line rest type size links
+    local unevictable_before shmem_before files=0 symlinks=0 freed=0 errors=0 first_error=
+    wait_for_other_jobs
     remount_writable
-    before=$(meminfo_kb Unevictable)
+    read_memory
+    unevictable_before=$MEM_UNEVICTABLE shmem_before=$MEM_SHMEM
     output=$(find "${SCOPE[@]}" "${DELETE_ACTIONS[@]}" 2>&1)
     status=$?
-    after=$(meminfo_kb Unevictable)
+    read_memory
     lines_of "$output"
     for line in "${LINES[@]}"; do
         case $line in
@@ -440,44 +569,61 @@ release() {
                 ;;
         esac
     done
-    # With an error the counts are of attempts; Unevictable says what was freed.
+    # With an error the counts are of attempts; the memory figures say what
+    # was freed.
     local verb=deleted
     [ "$errors" -eq 0 ] || verb='tried to delete'
-    log "released the initramfs: ${verb} ${files} files (${freed} bytes) and ${symlinks} symlinks, kept ${#KEEP[@]} paths (${KEPT_BYTES} bytes); Unevictable ${before} kB -> ${after} kB; find status ${status}, ${errors} errors${first_error:+ (first: ${first_error})}"
+    log "released the initramfs: ${verb} ${files} files (${freed} bytes) and ${symlinks} symlinks, kept ${#KEEP[@]} paths (${KEPT_BYTES} bytes); Unevictable ${unevictable_before} kB -> ${MEM_UNEVICTABLE} kB, Shmem ${shmem_before} kB -> ${MEM_SHMEM} kB; find status ${status}, ${errors} errors${first_error:+ (first: ${first_error})}"
 }
 
-command -v find >/dev/null 2>&1 || keep_nothing "find is missing from the initrd"
-case $MODE in
-    check)
-        check_boot_path
-        log "the safety checks pass: the boot step would release the initramfs"
-        exit 0
-        ;;
-    boot)
-        check_boot_path
-        command -v mount >/dev/null 2>&1 || keep_nothing "mount is missing from the initrd"
-        ;;
-    dry-run)
-        read_mounts || true
-        ;;
-esac
+# PID 1 reads this in the initrd (and again if a failed switch_root()
+# re-executes it there): a crash or a failed shutdown exec reboots instead of
+# freezing.
+CRASH_ACTION_CONF=/usr/lib/systemd/system.conf.d/50-punar-initrd-crash-action.conf
 
-find_loader
-for exe in /usr/lib/systemd/systemd /usr/lib/systemd/systemd-executor /usr/bin/systemctl; do
-    keep_binary "$exe"
-done
-keep_switch_root_commands
-for path in /init /etc/initrd-release /etc/os-release /usr/lib/os-release /etc/ld.so.cache; do
-    if [ -L "$ROOT$path" ] || [ -e "$ROOT$path" ]; then
-        keep "$path" || keep_nothing "cannot resolve $path"
+main() {
+    local exe path
+    parse_args "$@"
+    command -v find >/dev/null 2>&1 || keep_nothing "find is missing from the initrd"
+    case $MODE in
+        check)
+            check_boot_path
+            log "the safety checks pass: the boot step would release the initramfs"
+            exit 0
+            ;;
+        boot)
+            check_boot_path
+            command -v mount >/dev/null 2>&1 || keep_nothing "mount is missing from the initrd"
+            ;;
+        dry-run)
+            read_mounts || true
+            ;;
+    esac
+
+    find_loader
+    for exe in /usr/lib/systemd/systemd /usr/lib/systemd/systemd-executor \
+            /usr/lib/systemd/systemd-shutdown /usr/bin/systemctl; do
+        keep_binary "$exe"
+    done
+    keep_switch_root_commands
+    for path in /init /etc/initrd-release /etc/os-release /usr/lib/os-release /etc/ld.so.cache \
+            "$CRASH_ACTION_CONF"; do
+        if [ -L "$ROOT$path" ] || [ -e "$ROOT$path" ]; then
+            keep "$path" || keep_nothing "cannot resolve $path"
+        fi
+    done
+    count_kept_bytes
+    build_scope
+
+    if [ "$MODE" = dry-run ]; then
+        dry_run
+    else
+        release
     fi
-done
-count_kept_bytes
-build_scope
+    exit 0
+}
 
-if [ "$MODE" = dry-run ]; then
-    dry_run
-else
-    release
+# The contract test sources this file to exercise single functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
 fi
-exit 0

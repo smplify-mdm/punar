@@ -7,6 +7,12 @@ ConditionPathExists=/etc/initrd-release
 # that target waits for (the udev database cleanup among them) has finished.
 # Only the switch-root call itself runs after this.
 After=initrd-switch-root.target initrd-cleanup.service initrd-udevadm-cleanup-db.service
+# Isolating initrd-switch-root.target stops these, and their ExecStop= runs a
+# program this deletes: the TPM PCR barrier extends leave-initrd into PCR 11,
+# and the extension services unmerge. Upstream orders those stops before the
+# target today; this says so here instead of relying on it, and the helper
+# also waits for every other job of PID 1 to finish.
+After=systemd-pcrphase-initrd.service systemd-sysext-initrd.service systemd-confext-initrd.service
 Before=initrd-switch-root.service
 
 [Service]
@@ -17,6 +23,15 @@ ExecStart=-/usr/lib/punar/release-initramfs
 # PID 1 keeps /usr read-only in the initrd. The helper makes it writable only
 # inside this unit's own mount namespace, and refuses to without one.
 PrivateMounts=yes
+# The helper remounts (CAP_SYS_ADMIN), reads PID 1's mount namespace to prove
+# it is not in it (CAP_SYS_PTRACE: its capabilities are fewer than PID 1's),
+# and unlinks in directories it may not own (CAP_DAC_OVERRIDE, CAP_FOWNER for
+# sticky ones). It talks only to PID 1, over AF_UNIX. ProtectKernelModules=
+# is left out on purpose: it hides /usr/lib/modules behind a mount in this
+# namespace, and the helper never deletes below a mount point.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_DAC_OVERRIDE CAP_FOWNER
+RestrictAddressFamilies=AF_UNIX
 # kmsg is the journal and the kernel log buffer both. journald forwards only
 # notice and above to the kernel log (MaxLevelKMsg=), so the one summary line
 # is logged at notice. loglevel=3 still keeps it off the console.
