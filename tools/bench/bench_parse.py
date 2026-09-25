@@ -10,12 +10,18 @@ one place, from raw counters the probe recorded, so a reader can recompute
 it. Nothing here decides a winner: bench_report.py does that.
 
 Rules this file keeps (tools/bench/README.md, "Attribution"):
-- idle writes: the device total comes from the root cgroup's io.stat (the
-  disk's own counter) or diskstats; top-level cgroups are summed; the rest is
-  the kernel/filesystem remainder. The root is never added to its children.
+- idle writes: the device total comes from the root cgroup's io.stat for the
+  physical disks (the disk's own counter) or diskstats. Cgroups are charged
+  on the device their writes enter: the top of each device-mapper/md stack
+  (dm-crypt's dm-0, not the disk under it) and any physical disk that
+  carries no such stack. Top-level cgroups are summed; the rest is the
+  kernel/filesystem remainder. The root is never added to its children, and
+  a cgroup's bytes on the disk under a stack are never added to its bytes
+  on the stack.
 - the probe's own CPU, memory and writes are reported and subtracted.
 - a run is valid for a claim only when it is canonical (600 s settle, 30
-  samples at 10 s), complete, and host and guest steal are both <= 2%.
+  samples at 10 s), complete, ran under KVM, and host and guest steal were
+  both measured and both <= 2%. Missing data never passes the gate.
 """
 
 from __future__ import annotations
@@ -75,7 +81,8 @@ def rnd(value, places=3):
 
 # ---- memory -------------------------------------------------------------------
 
-def memory_section(samples: list[dict], processes: dict | None, mm: dict | None) -> dict:
+def memory_section(samples: list[dict], processes: dict | None, mm: dict | None,
+                   shape_mib: float | None = None) -> dict:
     def series(key):
         return [num(s["meminfo"].get(key)) for s in samples if key in s.get("meminfo", {})]
 
@@ -97,12 +104,18 @@ def memory_section(samples: list[dict], processes: dict | None, mm: dict | None)
         return mean(series(key))
 
     reclaimable = "KReclaimable" if any("KReclaimable" in s.get("meminfo", {}) for s in samples) else "SReclaimable"
-    reserve = []
+    # MemAvailable = MemFree - totalreserve + (file LRU - min(file LRU/2, low))
+    #              + (KReclaimable - min(KReclaimable/2, low))      (si_mem_available)
+    # so MemFree + file LRU + KReclaimable - MemAvailable is exactly what the
+    # kernel held back for its watermarks: totalreserve (high watermark and
+    # lowmem reserve, from /proc/zoneinfo) plus up to twice the low watermark
+    # kept out of page cache and reclaimable slab.
+    deductions = []
     for s in samples:
         m = s.get("meminfo", {})
         parts = [num(m.get(k)) for k in ("MemFree", "Active(file)", "Inactive(file)", reclaimable, "MemAvailable")]
         if None not in parts:
-            reserve.append(parts[0] + parts[1] + parts[2] + parts[3] - parts[4])
+            deductions.append(parts[0] + parts[1] + parts[2] + parts[3] - parts[4])
     swap_used = [num(s["meminfo"].get("SwapTotal")) - num(s["meminfo"].get("SwapFree"))
                  for s in samples
                  if num(s.get("meminfo", {}).get("SwapTotal")) is not None
@@ -111,6 +124,11 @@ def memory_section(samples: list[dict], processes: dict | None, mm: dict | None)
     def mib(value):
         return rnd(value / KIB if value is not None else None, 1)
 
+    totalreserve_kib = None
+    if mm and num(mm.get("zone_totalreserve_pages")) is not None:
+        page_kib = (num(mm.get("pagesize"), 4096) or 4096) / 1024.0
+        totalreserve_kib = num(mm.get("zone_totalreserve_pages")) * page_kib
+    available = series("MemAvailable")
     out = {
         "samples": len(used),
         "used_mean_mib": mib(mean(used)),
@@ -118,8 +136,20 @@ def memory_section(samples: list[dict], processes: dict | None, mm: dict | None)
         "used_min_mib": mib(min(used) if used else None),
         "probe_mean_mib": mib(mean(probe)),
         "used_net_mean_mib": mib(mean(net)) if net else None,
-        "kernel_reserve_mean_mib": mib(mean(reserve)),
-        "used_minus_reserve_mean_mib": mib(mean(used) - mean(reserve)) if used and reserve else None,
+        # Everything MemAvailable leaves out for watermarks (see above).
+        "watermark_deductions_mean_mib": mib(mean(deductions)),
+        # MemTotal - MemFree - file LRU - KReclaimable: memory that is neither
+        # free nor page cache nor reclaimable slab.
+        "unreclaimable_used_mean_mib": mib(mean(used) - mean(deductions)) if used and deductions else None,
+        # The kernel's own reserve (high watermark + lowmem reserve, which
+        # THP's min_free_kbytes raises), from /proc/zoneinfo, and used without it.
+        "totalreserve_mib": mib(totalreserve_kib),
+        "used_minus_totalreserve_mean_mib": mib(mean(used) - totalreserve_kib)
+        if used and totalreserve_kib is not None else None,
+        # Memory at boot never reaches MemTotal (kernel image, reservations),
+        # so "used" cannot see it; the machine's memory minus MemAvailable can.
+        "shape_minus_available_mean_mib": rnd(shape_mib - mean(available) / KIB, 1)
+        if shape_mib and available else None,
         "mem_available_mean_mib": mib(kb_mean("MemAvailable")),
         "anon_mean_mib": mib(kb_mean("AnonPages")),
         "unevictable_mean_mib": mib(kb_mean("Unevictable")),
@@ -268,9 +298,38 @@ def io_wbytes(entry: dict | None, devices: list[str]):
     return sum(num(io[d][1], 0) for d in devices if d in io)
 
 
+def is_partition_of(name: str, disk: str) -> bool:
+    rest = name[len(disk):] if name.startswith(disk) else None
+    return rest is not None and re.fullmatch(r"p?\d+", rest) is not None
+
+
+def device_roles(device_list: list[dict]) -> tuple[list[str], list[str]]:
+    """(physical disks, attribution devices) as MAJ:MIN.
+
+    A write enters the block layer on the device its filesystem sits on and
+    is charged there to the writer's cgroup. Under dm-crypt that is dm-0;
+    the encrypted copy reaches the disk from a kernel worker, charged to the
+    root cgroup or (on newer kernels) to the same cgroup again. So cgroups
+    are attributed on the top of each dm/md stack plus every physical disk
+    that no stack sits on, and the device total is always the physical
+    disks'. zram is swap, not storage, and is in neither list.
+    """
+    disks = [d for d in device_list if d.get("kind") == "disk" and d.get("dev")]
+    stacked = [d for d in device_list if d.get("kind") == "virtual" and d.get("dev")
+               and not str(d.get("name", "")).startswith("zram")]
+    slaves = {d.get("name"): [x for x in str(d.get("slaves") or "").split(",") if x and x != "-"] for d in stacked}
+    below_a_stack = {x for names in slaves.values() for x in names}
+    tops = [d["dev"] for d in stacked if d.get("name") not in below_a_stack and slaves.get(d.get("name"))]
+    held = {d.get("name") for d in disks
+            if any(x == d.get("name") or is_partition_of(x, str(d.get("name"))) for x in below_a_stack)}
+    plain = [d["dev"] for d in disks if d.get("name") not in held]
+    return [d["dev"] for d in disks], tops + plain
+
+
 def writes_section(devices: list[str], cg_start: dict, cg_end: dict, start: dict, end: dict,
-                   probe_cgroup: str | None) -> dict:
-    out = {"devices": devices}
+                   probe_cgroup: str | None, attribution: list[str] | None = None) -> dict:
+    attribution = devices if attribution is None else attribution
+    out = {"devices": devices, "attribution_devices": attribution}
     notes = []
     root_start = io_wbytes(cg_start.get("/"), devices)
     root_end = io_wbytes(cg_end.get("/"), devices)
@@ -287,10 +346,10 @@ def writes_section(devices: list[str], cg_start: dict, cg_end: dict, start: dict
     out["diskstats_bytes"] = diskstats_bytes
 
     def write_delta(path):
-        e = io_wbytes(cg_end.get(path), devices)
+        e = io_wbytes(cg_end.get(path), attribution)
         if e is None:
             return None
-        s = io_wbytes(cg_start.get(path), devices) or 0.0
+        s = io_wbytes(cg_start.get(path), attribution) or 0.0
         return e - s
 
     journald = write_delta("/system.slice/systemd-journald.service")
@@ -410,7 +469,8 @@ def security_section(b: dict, facts: dict) -> dict:
     units = []
     for line in b.get("systemd_analyze_security", {}).get("text", "").splitlines():
         match = re.match(r"^(\S+\.service)\s+(\d+(?:\.\d+)?)\s+(\S+)", line.strip())
-        if match:
+        # The harness's own probe is on every measured disk; it is not the system's.
+        if match and match.group(1) != "bench-probe.service":
             units.append({"unit": match.group(1), "exposure": float(match.group(2)), "predicate": match.group(3)})
     setuid = setgid = 0
     setid_files = []
@@ -434,6 +494,9 @@ def security_section(b: dict, facts: dict) -> dict:
     exposures = [u["exposure"] for u in units]
     return {
         "services_analyzed": len(units),
+        # The sum can only grow with every service a system runs; a mean
+        # would fall by adding many small sandboxed units.
+        "exposure_sum": rnd(sum(exposures), 2) if units else None,
         "exposure_mean": rnd(mean(exposures), 2),
         "exposure_max": max(exposures) if exposures else None,
         "services_unsafe": sum(1 for u in units if u["predicate"] == "UNSAFE"),
@@ -509,10 +572,28 @@ def footprint_section(b: dict, facts: dict) -> dict:
     root = next((f for f in filesystems if f["mount"] == "/"), None)
     enabled = [l for l in b.get("units_enabled", {}).get("text", "").splitlines() if l.strip()]
     running = [l for l in b.get("services_running", {}).get("text", "").splitlines() if l.strip()]
+    os_files = {}
+    size_kind = None
+    for name, kind in (("os_files_apparent", "apparent"), ("os_files_allocated", "allocated")):
+        blob = b.get(name)
+        if not blob or blob.get("rc") not in (0, "0"):
+            continue
+        for line in blob.get("text", "").splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit():
+                os_files[parts[1].strip()] = int(parts[0])
+        size_kind = kind
+        break
     return {
         "filesystems": filesystems,
+        # Recorded, never compared: df / is the whole btrfs filesystem on one
+        # system and one A/B root slot on another.
         "root_used_mib": rnd(root["used_kib"] / KIB, 1) if root else None,
+        "os_files_mib": rnd(sum(os_files.values()) / KIB, 1) if os_files else None,
+        "os_files_trees": os_files,
+        "os_files_size": size_kind,
         "packages": num(facts.get("packages")),
+        "package_manager": facts.get("package_manager") or None,
         "enabled_unit_files": len(enabled),
         "running_services": len(running),
     }
@@ -524,7 +605,11 @@ def workload_section(record: dict | None, start: dict | None) -> dict | None:
     out = {k: v for k, v in record.items() if k not in ("type", "uptime")}
     for key in ("completion_ms", "editor_ms", "container_ms", "browser_peak_bytes",
                 "psi_full_avg10_max", "mem_available_min_kb", "swap_used_max_kb",
-                "oom_kills_kernel", "oom_kills_oomd", "psi_full_total_start_us", "psi_full_total_end_us"):
+                "oom_kills_kernel", "oom_kills_oomd", "psi_full_total_start_us", "psi_full_total_end_us",
+                "before_container_ms", "before_container_psi_full_avg10_max",
+                "before_container_mem_available_min_kb", "before_container_swap_used_max_kb",
+                "before_container_oom_kills_kernel", "before_container_oom_kills_oomd",
+                "before_container_psi_full_total_end_us", "before_container_samples"):
         out[key] = num(record.get(key))
     if out.get("completion_ms") is not None:
         out["completion_s"] = rnd(out["completion_ms"] / 1000, 2)
@@ -538,8 +623,28 @@ def workload_section(record: dict | None, start: dict | None) -> dict | None:
     s, e = out.get("psi_full_total_start_us"), out.get("psi_full_total_end_us")
     if s is not None and e is not None and out.get("completion_ms"):
         out["psi_full_stall_pct"] = rnd(100.0 * (e - s) / (out["completion_ms"] * 1000), 3)
-    steps = [record.get("browser_status"), record.get("editor_status"), record.get("container_status")]
-    out["all_steps_ran"] = all(step == "ok" for step in steps)
+    # The browser and editor phase (identical on every system) on its own.
+    before = {}
+    if out.get("before_container_mem_available_min_kb") is not None:
+        before["mem_available_min_mib"] = rnd(out["before_container_mem_available_min_kb"] / KIB, 1)
+    if out.get("before_container_psi_full_avg10_max") is not None:
+        before["psi_full_avg10_max"] = out["before_container_psi_full_avg10_max"]
+    if out.get("before_container_oom_kills_kernel") is not None:
+        before["oom_kills_total"] = out["before_container_oom_kills_kernel"] + (
+            out.get("before_container_oom_kills_oomd") or 0)
+    e = out.get("before_container_psi_full_total_end_us")
+    if s is not None and e is not None and out.get("before_container_ms"):
+        before["psi_full_stall_pct"] = rnd(100.0 * (e - s) / (out["before_container_ms"] * 1000), 3)
+    out["before_container"] = before or None
+    steps = {"browser": record.get("browser_status"), "editor": record.get("editor_status"),
+             "container": record.get("container_status")}
+    out["steps_ok"] = sum(1 for status in steps.values() if status == "ok")
+    # A step that was attempted and failed (the browser killed by oomd, say)
+    # is a result; a step that never started (tool missing) means the
+    # systems did not do the same work.
+    out["browser_editor_attempted"] = all(steps[k] in ("ok", "failed") for k in ("browser", "editor"))
+    out["all_steps_attempted"] = all(status in ("ok", "failed") for status in steps.values())
+    out["all_steps_ran"] = all(status == "ok" for status in steps.values())
     out["experimental"] = True
     if start:
         out["start"] = {k: v for k, v in start.items() if k not in ("type",)}
@@ -560,7 +665,7 @@ def parse_run(records: list[dict], host: dict | None = None) -> dict:
     cg_end = cgroup_map(first(records, "cgroups", phase="end"))
     samples = sorted((r for r in records if r.get("type") == "sample"), key=lambda r: num(r.get("i"), 0))
     devices_record = first(records, "devices") or {}
-    devices = [d["dev"] for d in devices_record.get("list", []) if d.get("kind") == "disk"]
+    devices, attribution = device_roles(devices_record.get("list", []))
     mm = first(records, "mm", phase="session") or first(records, "mm", phase="end")
     b = blobs(records)
     errors = [r for r in records if r.get("type") == "error"]
@@ -602,11 +707,13 @@ def parse_run(records: list[dict], host: dict | None = None) -> dict:
         "done": (done or {}).get("status"),
     }
     if samples:
-        result["idle"]["memory"] = memory_section(samples, first(records, "processes"), mm)
+        result["idle"]["memory"] = memory_section(samples, first(records, "processes"), mm,
+                                                  num(host.get("meta", {}).get("shape_mib")))
     if counters_start and counters_end:
         result["idle"]["cpu"] = cpu_section(counters_start, counters_end, cg_start, cg_end, samples, probe_cgroup)
         result["idle"]["pressure"] = pressure_section(counters_start, counters_end, samples)
-        result["idle"]["writes"] = writes_section(devices, cg_start, cg_end, counters_start, counters_end, probe_cgroup)
+        result["idle"]["writes"] = writes_section(devices, cg_start, cg_end, counters_start, counters_end,
+                                                  probe_cgroup, attribution)
 
     reasons = []
     if host.get("failure"):
@@ -618,13 +725,19 @@ def parse_run(records: list[dict], host: dict | None = None) -> dict:
     if errors:
         reasons.append("probe errors: " + ", ".join(e.get("reason", "?") for e in errors))
     guest_steal = (result["idle"].get("cpu") or {}).get("steal_pct")
-    if guest_steal is not None and guest_steal > STEAL_LIMIT_PCT:
+    if guest_steal is None:
+        reasons.append("guest steal not measured")
+    elif guest_steal > STEAL_LIMIT_PCT:
         reasons.append(f"guest steal {guest_steal}% > {STEAL_LIMIT_PCT}%")
     host_steal = (host.get("host") or {}).get("steal_pct_window")
-    if host_steal is not None and host_steal > STEAL_LIMIT_PCT:
+    if host_steal is None:
+        reasons.append("host steal not measured (no host /proc/stat over the window)")
+    elif host_steal > STEAL_LIMIT_PCT:
         reasons.append(f"host steal {host_steal}% > {STEAL_LIMIT_PCT}%")
-    if host.get("meta", {}).get("accel") not in (None, "kvm", "hvf"):
-        reasons.append("not hardware-accelerated")
+    accel = host.get("meta", {}).get("accel")
+    if accel != "kvm":
+        # HVF (a Mac) cannot report host steal and TCG is emulation: smoke only.
+        reasons.append(f"accelerator is {accel or 'unrecorded'}, not KVM")
     result["validity"] = {
         "complete": complete,
         "canonical": canonical,

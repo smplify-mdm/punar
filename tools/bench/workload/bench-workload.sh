@@ -14,6 +14,14 @@
 # each step took. A step whose tool is missing or cannot start is recorded as
 # skipped with the reason; the lane is labelled experimental until every step
 # has run on every measured system.
+#
+# The container step cannot be the same program everywhere (rootless podman
+# on Punar, root dockerd through one sudo rule on Omarchy, whose work lands
+# in system.slice), so the pressure, OOM and lowest-MemAvailable figures are
+# also recorded at the moment the container step starts (before_container_*):
+# the browser and editor phase is identical on every system and is what the
+# report compares; the whole-workload figures are compared only between runs
+# that used the same container tool.
 
 WL_BROWSER_SETTLE_SECS="${BENCH_WL_BROWSER_SETTLE_SECS:-60}"
 WL_TABS=20
@@ -52,6 +60,24 @@ wl_oom_kills() {
 wl_psi_full_total() {
     awk '$1 == "full" { for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[1] == "total") print kv[2] } }' \
         "${PROC}/pressure/memory" 2>/dev/null
+}
+
+wl_summarize() {
+    # wl_summarize SAMPLES [LINES]: "psi_full_max available_min_kb swap_max_kb n"
+    # over the first LINES one-second samples (all of them without LINES).
+    awk -v limit="${2:-0}" '
+        limit > 0 && NR > limit { exit }
+        NR == 1 { maxp = $1; mina = $2; maxs = $3 }
+        { if ($1 + 0 > maxp + 0) maxp = $1; if ($2 + 0 < mina + 0) mina = $2; if ($3 + 0 > maxs + 0) maxs = $3; n++ }
+        END { if (n == 0) print "- - - 0"; else printf "%s %s %s %d\n", maxp, mina, maxs, n }' "$1"
+}
+
+wl_oomd_kills_since() {
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u systemd-oomd.service --since "@$1" -o cat --no-pager 2>/dev/null | grep -c -i 'killed' || true
+    else
+        echo unknown
+    fi
 }
 
 wl_generate_fixtures() {
@@ -189,6 +215,13 @@ run_workload() {
         editor_ms=$(($(wl_uptime_ms) - t0))
     fi
 
+    # The browser and editor phase ends here; it is the same on every system.
+    before_container_ms=$(($(wl_uptime_ms) - wl_start_ms))
+    before_lines="$(wc -l < "${samples}" | tr -d ' ')"
+    before_oom="$(wl_oom_kills)"
+    before_psi="$(wl_psi_full_total)"
+    before_oomd="$(wl_oomd_kills_since "${oomd_since}")"
+
     # Step 3: a container build of the fixture, with the system's own tool.
     emit_kv workload_step step=container
     container_status=skipped
@@ -243,16 +276,16 @@ run_workload() {
 
     oom_end="$(wl_oom_kills)"
     psi_end="$(wl_psi_full_total)"
-    oomd_kills=unknown
-    if command -v journalctl >/dev/null 2>&1; then
-        oomd_kills="$(journalctl -u systemd-oomd.service --since "@${oomd_since}" -o cat --no-pager 2>/dev/null \
-            | grep -c -i 'killed' || true)"
+    oomd_kills="$(wl_oomd_kills_since "${oomd_since}")"
+    before="$(wl_summarize "${samples}" "${before_lines:-0}")"
+    if [ "${before_lines:-0}" -eq 0 ]; then
+        before="- - - 0"
     fi
-    summary="$(awk '
-        NR == 1 { maxp = $1; mina = $2; maxs = $3 }
-        { if ($1 + 0 > maxp + 0) maxp = $1; if ($2 + 0 < mina + 0) mina = $2; if ($3 + 0 > maxs + 0) maxs = $3; n++ }
-        END { printf "%s %s %s %d\n", maxp, mina, maxs, n }' "${samples}")"
+    summary="$(wl_summarize "${samples}")"
     # shellcheck disable=SC2086 # four space-separated numbers
+    set -- ${before:-"- - - 0"}
+    before_psi_max=$1 before_avail_min=$2 before_swap_max=$3 before_n=$4
+    # shellcheck disable=SC2086
     set -- ${summary:-"- - - 0"}
     rm -f -- "${samples}"
     rm -rf -- "${WL_DIR}"
@@ -266,5 +299,11 @@ run_workload() {
         container_tool="${container_tool}" container_ms="${container_ms}" \
         psi_full_avg10_max="$1" mem_available_min_kb="$2" swap_used_max_kb="$3" pressure_samples="$4" \
         psi_full_total_start_us="${psi_start}" psi_full_total_end_us="${psi_end}" \
-        oom_kills_kernel="$((${oom_end:-0} - ${oom_start:-0}))" oom_kills_oomd="${oomd_kills}"
+        oom_kills_kernel="$((${oom_end:-0} - ${oom_start:-0}))" oom_kills_oomd="${oomd_kills}" \
+        before_container_ms="${before_container_ms}" before_container_psi_full_avg10_max="${before_psi_max}" \
+        before_container_mem_available_min_kb="${before_avail_min}" \
+        before_container_swap_used_max_kb="${before_swap_max}" before_container_samples="${before_n}" \
+        before_container_psi_full_total_end_us="${before_psi}" \
+        before_container_oom_kills_kernel="$((${before_oom:-0} - ${oom_start:-0}))" \
+        before_container_oom_kills_oomd="${before_oomd}"
 }

@@ -553,6 +553,34 @@ emit_mm_facts() {
             printf 'zram_%s_mm_stat=%s\n' "${z##*/}" "$(cat "${z}/mm_stat" 2>/dev/null)"
         done
         awk 'NR > 1 {printf "swap_%s=%s %s %s %s\n", NR - 1, $1, $2, $3, $5}' "${PROC}/swaps" 2>/dev/null
+        printf 'pagesize=%s\n' "$(getconf PAGESIZE 2>/dev/null || getconf PAGE_SIZE 2>/dev/null)"
+        # The kernel's own reserve, zone by zone, as calculate_totalreserve_pages
+        # computes it: the largest lowmem_reserve plus the high watermark
+        # (without any temporary boost), capped at the zone's managed pages.
+        # MemAvailable subtracts this, and THP raises it through min_free_kbytes.
+        [ -r "${PROC}/zoneinfo" ] && awk '
+            function flush() {
+                if (!inzone) return
+                reserve = protmax + (high - boost)
+                if (reserve > managed) reserve = managed
+                if (reserve < 0) reserve = 0
+                total += reserve; sumlow += low; summin += min; sumhigh += high; zones++
+            }
+            /^Node [0-9]+, zone/ { flush(); inzone = 1; high = low = min = boost = managed = protmax = 0; next }
+            $1 == "min" && NF == 2 { min = $2 }
+            $1 == "low" && NF == 2 { low = $2 }
+            $1 == "high" && NF == 2 { high = $2 }
+            $1 == "boost" && NF == 2 { boost = $2 }
+            $1 == "managed" && NF == 2 { managed = $2 }
+            $1 == "protection:" {
+                line = $0; gsub(/[^0-9 ]/, " ", line)
+                n = split(line, v, " ")
+                for (i = 1; i <= n; i++) if (v[i] + 0 > protmax) protmax = v[i] + 0
+            }
+            END {
+                flush()
+                if (zones) printf "zone_totalreserve_pages=%.0f\nzone_wmark_min_pages=%.0f\nzone_wmark_low_pages=%.0f\nzone_wmark_high_pages=%.0f\nzone_count=%d\n", total, summin, sumlow, sumhigh, zones
+            }' "${PROC}/zoneinfo"
     } | awk -v phase="$1" -v up="$(uptime_now)" "${AWK_LIB}"'
         BEGIN { printf "{\"type\":\"mm\",\"phase\":%s,\"uptime\":%s", jstr(phase), jnum(up) }
         {
@@ -568,11 +596,15 @@ emit_facts() {
     os_version="$(awk -F= '$1 == "VERSION_ID" || $1 == "BUILD_ID" {gsub(/"/, "", $2); print $2; exit}' "${R}/etc/os-release" 2>/dev/null)"
     os_pretty="$(awk -F= '$1 == "PRETTY_NAME" {gsub(/"/, "", $2); print $2}' "${R}/etc/os-release" 2>/dev/null)"
     packages=unknown
+    package_manager=unknown
     if command -v dpkg-query >/dev/null 2>&1; then
+        package_manager=dpkg
         packages="$(dpkg-query -W -f '${Package}\n' 2>/dev/null | wc -l | tr -d ' ')"
     elif command -v pacman >/dev/null 2>&1; then
+        package_manager=pacman
         packages="$(pacman -Qq 2>/dev/null | wc -l | tr -d ' ')"
     elif command -v rpm >/dev/null 2>&1; then
+        package_manager=rpm
         packages="$(rpm -qa 2>/dev/null | wc -l | tr -d ' ')"
     fi
     cpu_model="$(awk -F': ' '/^model name/ {print $2; exit}' "${PROC}/cpuinfo" 2>/dev/null)"
@@ -594,6 +626,7 @@ emit_facts() {
         os_version="${os_version}" \
         os_pretty="${os_pretty}" \
         packages="${packages}" \
+        package_manager="${package_manager}" \
         cpu_model="${cpu_model}" \
         ncpu="${ncpu}" \
         clk_tck="$(getconf CLK_TCK 2>/dev/null || echo 100)" \
@@ -707,6 +740,22 @@ emit_systemd() {
         blob nft_ruleset bounded 60 nft list ruleset
     fi
     blob df bounded 60 df -kP -x tmpfs -x devtmpfs -x efivarfs
+    # The operating system's own files, whatever the disk layout: the
+    # logical (apparent) size of /usr and /opt, one filesystem each, so
+    # compression, subvolumes, snapshots, package caches, logs and home
+    # directories count on no system. `df /` would measure the whole btrfs
+    # filesystem on one system and one A/B root slot on another.
+    os_trees=""
+    for tree in "${R}/usr" "${R}/opt"; do
+        [ -d "${tree}" ] && os_trees="${os_trees} ${tree}"
+    done
+    if du -sk --apparent-size /dev/null >/dev/null 2>&1; then
+        # shellcheck disable=SC2086 # one word per existing tree
+        blob os_files_apparent bounded 300 du -skx --apparent-size ${os_trees}
+    else
+        # shellcheck disable=SC2086
+        blob os_files_allocated bounded 300 du -skx ${os_trees}
+    fi
 }
 
 # ---- main -------------------------------------------------------------------

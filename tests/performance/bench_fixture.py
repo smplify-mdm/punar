@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """Fixture /proc, /sys and /run trees for tests/performance/bench-probe-test.sh.
 
-    bench_fixture.py build ROOT      write a guest at the moment the probe starts
-    bench_fixture.py tick ROOT PHASE advance it (the probe's BENCH_TEST_TICK hook)
-    bench_fixture.py check RESULT.json SAMPLES   assert the parsed result
+    bench_fixture.py build ROOT [plain|luks]      write a guest at the moment the probe starts
+    bench_fixture.py tick ROOT PHASE              advance it (the probe's BENCH_TEST_TICK hook)
+    bench_fixture.py check RESULT.json SAMPLES [plain|luks]   assert the parsed result
 
 Every counter moves by a fixed step per sample, so the expected figures are
 exact: per 10 s step the CPU adds 30 busy and 10 steal ticks out of 4,000,
 the disk takes 400,000 bytes of which the top-level cgroups were charged
 300,000 (journald 100,000 and the probe 10,000 inside system.slice), and the
 probe's cgroup uses 5,000 us of CPU.
+
+The luks layout puts the filesystem on dm-0 (dm-crypt over vda2): every
+cgroup's writes are charged on dm-0 (253:0) only, and the encrypted copies
+reach vda from kcryptd charged to the root cgroup. The expected figures are
+the same as the plain layout's: the device total is still vda's, and each
+cgroup is attributed where it wrote. (tests/performance/bench_summarize_test.py
+covers kernels that charge the clone to the same cgroup again.)
 """
 
 from __future__ import annotations
@@ -50,6 +57,52 @@ def state_path(root: Path) -> Path:
     return root / "fixture-state.json"
 
 
+ZONEINFO = """Node 0, zone      DMA
+  per-node stats
+      nr_inactive_anon 0
+  pages free     3840
+        boost    0
+        min      8
+        low      11
+        high     14
+        spanned  4095
+        present  3998
+        managed  3840
+        cma      0
+        protection: (0, 2911, 7863, 7863, 7863)
+  pagesets
+    cpu: 0
+              count: 0
+              high:  0
+              batch: 1
+Node 0, zone    DMA32
+  pages free     700000
+        boost    100
+        min      5000
+        low      6250
+        high     7600
+        spanned  1044480
+        present  782288
+        managed  745400
+        cma      0
+        protection: (0, 0, 4952, 4952, 4952)
+Node 0, zone   Normal
+  pages free     500000
+        boost    0
+        min      8500
+        low      10625
+        high     12750
+        spanned  1310720
+        present  1310720
+        managed  1267632
+        cma      0
+        protection: (0, 0, 0, 0, 0)
+"""
+# DMA: 7863 + 14 capped at 3840 managed; DMA32: 4952 + (7600 - 100 boost);
+# Normal: 0 + 12750.
+TOTALRESERVE_PAGES = 3840 + 4952 + 7500 + 12750
+
+
 def render(root: Path, state: dict) -> None:
     step = state["step"]
     cpu = [20 * step + 1000, 0, 10 * step + 500, 3960 * step + 100000, 0, 0, 0, 10 * step, 0, 0]
@@ -84,16 +137,26 @@ def render(root: Path, state: dict) -> None:
                     for name, base, desc in (("LOC", 100, "Local timer interrupts"),
                                              ("  1", 5, "IO-APIC 1-edge i8042")))
           + "ERR:          0\n")
+    luks = state.get("layout") == "luks"
     write(root / "proc/diskstats",
           f" 254       0 vda 100 0 2000 50 200 0 {781 * step + 4000} 60 0 100 110 0 0 0 0\n"
-          f" 252       0 zram0 5 0 40 0 0 0 {999 * step} 0 0 0 0 0 0 0 0\n")
+          f" 252       0 zram0 5 0 40 0 0 0 {999 * step} 0 0 0 0 0 0 0 0\n"
+          + (f" 253       0 dm-0 90 0 1900 40 190 0 {700 * step + 3000} 55 0 90 100 0 0 0 0\n" if luks else ""))
     for rel, counters in CGROUPS.items():
         base = root / "sys/fs/cgroup" / rel
         cpu_us = counters["cpu"] + STEP[rel]["cpu"] * step
         wbytes = counters["wbytes"] + STEP[rel]["wbytes"] * step
         write(base / "cpu.stat", f"usage_usec {cpu_us}\nuser_usec {cpu_us // 2}\nsystem_usec {cpu_us // 2}\n")
-        write(base / "io.stat", f"254:0 rbytes=4096 wbytes={wbytes} rios=1 wios={step} dbytes=0 dios=0\n"
-              f"252:0 rbytes=0 wbytes={wbytes * 3} rios=0 wios=0 dbytes=0 dios=0\n")
+        io = f"252:0 rbytes=0 wbytes={wbytes * 3} rios=0 wios=0 dbytes=0 dios=0\n"
+        if not luks or not rel:
+            io = f"254:0 rbytes=4096 wbytes={wbytes} rios=1 wios={step} dbytes=0 dios=0\n" + io
+        if luks and rel:
+            # Charged on dm-0, where the write entered; the encrypted clone
+            # reaches vda from a kcryptd worker, charged to the root.
+            io += f"253:0 rbytes=0 wbytes={wbytes} rios=0 wios={step} dbytes=0 dios=0\n"
+        elif luks:
+            io += f"253:0 rbytes=0 wbytes={350000 * step} rios=0 wios={step} dbytes=0 dios=0\n"
+        write(base / "io.stat", io)
         write(base / "memory.stat", "anon 2097152\nfile 1048576\nkernel 524288\nshmem 0\n")
         if rel:
             write(base / "memory.current", "4194304\n")
@@ -102,9 +165,9 @@ def render(root: Path, state: dict) -> None:
           "anon 1048576\nfile 4096\nkernel 524288\nshmem 0\n")
 
 
-def build(root: Path) -> None:
+def build(root: Path, layout: str = "plain") -> None:
     root.mkdir(parents=True, exist_ok=True)
-    state = {"step": 0, "polls": 0}
+    state = {"step": 0, "polls": 0, "layout": layout}
     state_path(root).write_text(json.dumps(state))
     render(root, state)
     write(root / "etc/os-release", 'ID=fixture\nVERSION_ID="1"\nPRETTY_NAME="Fixture OS 1"\n')
@@ -125,7 +188,11 @@ def build(root: Path) -> None:
     write(root / "sys/kernel/mm/transparent_hugepage/shmem_enabled", "always within_size advise [never] deny force\n")
     write(root / "sys/kernel/security/lsm", "capability,landlock,lockdown,yama,bpf\n")
     write(root / "sys/kernel/security/lockdown", "[none] integrity confidentiality\n")
+    write(root / "proc/zoneinfo", ZONEINFO)
     write(root / "sys/block/vda/dev", "254:0\n")
+    if layout == "luks":
+        write(root / "sys/block/dm-0/dev", "253:0\n")
+        write(root / "sys/block/dm-0/slaves/vda2", "")
     write(root / "sys/block/zram0/dev", "252:0\n")
     write(root / "sys/block/zram0/disksize", "4096000000\n")
     write(root / "sys/block/zram0/comp_algorithm", "lzo [zstd]\n")
@@ -182,7 +249,7 @@ def tick(root: Path, phase: str) -> None:
     state_path(root).write_text(json.dumps(state))
 
 
-def check(result_path: Path, samples: int) -> None:
+def check(result_path: Path, samples: int, layout: str = "plain") -> None:
     result = json.loads(result_path.read_text())
     failures = []
 
@@ -214,6 +281,25 @@ def check(result_path: Path, samples: int) -> None:
     expect("probe bytes", writes["probe_bytes"], 10000.0 * samples)
     if writes["devices"] != ["254:0"]:
         failures.append(f"physical devices {writes['devices']} (zram must be excluded)")
+    wanted_attribution = ["253:0"] if layout == "luks" else ["254:0"]
+    if writes["attribution_devices"] != wanted_attribution:
+        failures.append(f"attribution devices {writes['attribution_devices']}, want {wanted_attribution}")
+    page_kib = float(result["idle"]["memory"]["settings"]["pagesize"]) / 1024
+    reserve_mib = TOTALRESERVE_PAGES * page_kib / 1024
+    expect("totalreserve MiB", memory.get("totalreserve_mib"), round(reserve_mib, 1))
+    expect("used minus totalreserve MiB", memory.get("used_minus_totalreserve_mean_mib"),
+           round(sum(used) / len(used) / 1024 - reserve_mib, 1), tolerance=0.11)
+    # meminfo: MemTotal 8,000,000 - MemFree 5,000,000 - file LRU 1,700,000 - KReclaimable 60,000 kB.
+    expect("unreclaimable used MiB", memory.get("unreclaimable_used_mean_mib"), round(1240000 / 1024, 1),
+           tolerance=0.11)
+    available = [7000000 - 1000 * (k % 3) for k in range(samples)]
+    expect("shape minus available MiB", memory.get("shape_minus_available_mean_mib"),
+           round(8192 - sum(available) / len(available) / 1024, 1), tolerance=0.11)
+    footprint = result["footprint"]
+    if footprint.get("os_files_size") != "apparent" or footprint.get("os_files_mib") is None:
+        failures.append(f"OS files {footprint.get('os_files_size')} {footprint.get('os_files_mib')}")
+    if footprint.get("package_manager") != "dpkg":
+        failures.append(f"package manager {footprint.get('package_manager')}")
     if memory.get("thp_mode") != "madvise":
         failures.append(f"THP mode {memory.get('thp_mode')}")
     expect("min_free_kbytes", memory.get("min_free_kbytes"), 67584)
@@ -226,8 +312,10 @@ def check(result_path: Path, samples: int) -> None:
     security = result["security"]
     if (security["setuid_count"], security["setgid_count"]) != (1, 1):
         failures.append(f"setuid/setgid {security['setuid_count']}/{security['setgid_count']}")
-    if security["services_analyzed"] != 3 or security["services_unsafe"] != 1:
+    # bench-probe.service is the harness's own and is left out.
+    if security["services_analyzed"] != 2 or security["services_unsafe"] != 1:
         failures.append(f"systemd-analyze security parse {security['services_analyzed']}/{security['services_unsafe']}")
+    expect("exposure sum", security.get("exposure_sum"), 15.8)
     if security["nft_input_policy"] != "drop":
         failures.append(f"nft input policy {security['nft_input_policy']}")
     boot = result["boot"]
@@ -247,11 +335,11 @@ def check(result_path: Path, samples: int) -> None:
 
 def main(argv: list[str]) -> int:
     if argv[0] == "build":
-        build(Path(argv[1]))
+        build(Path(argv[1]), argv[2] if len(argv) > 2 else "plain")
     elif argv[0] == "tick":
         tick(Path(argv[1]), argv[2])
     elif argv[0] == "check":
-        check(Path(argv[1]), int(argv[2]))
+        check(Path(argv[1]), int(argv[2]), argv[3] if len(argv) > 3 else "plain")
     else:
         raise SystemExit(f"unknown command {argv[0]}")
     return 0
