@@ -16,6 +16,7 @@ use punard::backends::browser_policy::BrowserPolicyBackend;
 use punard::backends::credential_isolation::CredentialIsolationBackend;
 use punard::backends::firewall::FirewallBackend;
 use punard::backends::hostname::HostnameBackend;
+use punard::backends::keymap::KeymapBackend;
 use punard::backends::timezone::TimezoneBackend;
 use punard::backends::update_channel::UpdateChannelBackend;
 use punard::capability::Registry;
@@ -165,6 +166,9 @@ fn build_registry(args: &RunArgs) -> Registry {
                 ),
             ]),
         ),
+        // The keyboard layout (SMP-1405 WP-02): /etc/vconsole.conf, checked
+        // against the image's XKB list, first defaulted from the install seed.
+        Box::new(KeymapBackend::for_image()),
         Box::new(UpdateChannelBackend::new(
             args.state_dir.join("update/channel"),
             vec![

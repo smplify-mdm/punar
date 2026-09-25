@@ -317,6 +317,20 @@ printf '%s\n' '#!/bin/sh' '# a comment may mention curl' 'exec /usr/bin/punarctl
 chmod 0755 "${CLEAN}/usr/lib/punar/session.sh"
 # A20: the shipped security.txt.
 cp "${SHIPPED_SECURITY_TXT}" "${CLEAN}/usr/share/punar/security.txt"
+# A22: the stock systemd rules that name the backlight (seat assignment and
+# save/restore), which logind's SetBrightness needs and which loosen nothing.
+mkdir -p "${CLEAN}/usr/lib/udev/rules.d"
+printf '%s\n' '# Assign keyboard and LCD backlights to the seat' \
+    'SUBSYSTEM=="leds", TAG+="seat"' 'SUBSYSTEM=="backlight", TAG+="seat"' \
+    > "${CLEAN}/usr/lib/udev/rules.d/71-seat.rules"
+# shellcheck disable=SC2016 # $name is udev's substitution, written verbatim
+printf '%s\n' \
+    'SUBSYSTEM=="backlight", TAG+="systemd", IMPORT{builtin}="path_id", ENV{SYSTEMD_WANTS}+="systemd-backlight@backlight:$name.service"' \
+    'SUBSYSTEM=="leds", KERNEL=="*kbd_backlight*", TAG+="systemd", IMPORT{builtin}="path_id", ENV{SYSTEMD_WANTS}+="systemd-backlight@leds:$name.service"' \
+    > "${CLEAN}/usr/lib/udev/rules.d/99-systemd.rules"
+# A controller's player LEDs are not a backlight.
+printf '%s\n' 'SUBSYSTEM=="leds", KERNEL=="*:player-*", MODE="0664"' \
+    > "${CLEAN}/usr/lib/udev/rules.d/70-controller-leds.rules"
 # A19 and A21: the shipped punard unit and sign-in PAM stack, and the keyring
 # module where Arch installs it.
 cp "${SHIPPED_PUNARD_UNIT}" "${CLEAN}/usr/lib/systemd/system/punard.service"
@@ -640,6 +654,55 @@ mutate_a21_order() {
 mutate_a21_module() { rm -f "${CASE}/usr/lib/security/pam_gnome_keyring.so"; }
 mutate_a21_missing() { rm -f "${CASE}/etc/pam.d/greetd"; }
 
+# A22: brightnessctl's own rule (chgrp video + g+w), a world-writable keyboard
+# light, a uaccess tag in /etc, and a rule split over a continuation line.
+mutate_a22_brightnessctl() {
+    printf '%s\n' \
+        'ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video /sys/class/backlight/%k/brightness"' \
+        'ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chmod g+w /sys/class/backlight/%k/brightness"' \
+        > "${CASE}/usr/lib/udev/rules.d/90-brightnessctl.rules"
+}
+mutate_a22_mode() {
+    printf '%s\n' 'SUBSYSTEM=="leds", KERNEL=="*kbd_backlight*", MODE="0666"' \
+        > "${CASE}/usr/lib/udev/rules.d/60-kbd.rules"
+}
+mutate_a22_uaccess() {
+    mkdir -p "${CASE}/etc/udev/rules.d"
+    printf '%s\n' 'SUBSYSTEM=="backlight", TAG+="uaccess"' > "${CASE}/etc/udev/rules.d/70-panel.rules"
+}
+# brightnessctl's rule for the whole leds class, which covers keyboard lights.
+mutate_a22_leds_class() {
+    printf '%s\n' 'ACTION=="add", SUBSYSTEM=="leds", RUN+="/bin/chgrp input /sys/class/leds/%k/brightness"' \
+        > "${CASE}/usr/lib/udev/rules.d/90-brightnessctl.rules"
+}
+# The two the security review wrote and the first A22 missed: a rule that
+# matches the backlight by KERNEL, and one whose chmod hides in a helper.
+mutate_a22_kernel_match() {
+    printf '%s\n' 'ACTION=="add", KERNEL=="*_backlight", RUN+="/bin/chmod 0666 /sys%p/brightness"' \
+        > "${CASE}/usr/lib/udev/rules.d/90-kernel-match.rules"
+}
+mutate_a22_helper() {
+    printf '%s\n' 'SUBSYSTEM=="backlight", RUN+="/usr/bin/sh -c /usr/lib/x/perm"' \
+        > "${CASE}/usr/lib/udev/rules.d/90-helper.rules"
+}
+# No udev rule at all: tmpfiles.d loosening the panel at every boot.
+mutate_a22_tmpfiles() {
+    mkdir -p "${CASE}/usr/lib/tmpfiles.d"
+    printf '%s\n' '# a comment naming /sys/class/backlight is fine' \
+        'z /sys/class/backlight/*/brightness 0666 - - -' \
+        > "${CASE}/usr/lib/tmpfiles.d/panel.conf"
+}
+mutate_a22_tmpfiles_leds() {
+    mkdir -p "${CASE}/etc/tmpfiles.d"
+    printf '%s\n' 'a+ /sys/devices/platform/x/leds/tpacpi::kbd_backlight/brightness - - - - u:1000:rw' \
+        > "${CASE}/etc/tmpfiles.d/kbd.conf"
+}
+mutate_a22_continued() {
+    # shellcheck disable=SC1003 # the backslash is udev's line continuation
+    printf '%s\n' 'SUBSYSTEM=="backlight", \' '  GROUP="video"' \
+        > "${CASE}/usr/lib/udev/rules.d/61-split.rules"
+}
+
 reset_case
 "${CHECKER}" "${CASE}" desktop "${KERNEL}" "${EXPECTED}" \
     | grep -q PUNAR_RELEASE_IMAGE_POLICY_OK
@@ -796,6 +859,15 @@ expect_fail A21 mutate_a21_session
 expect_fail A21 mutate_a21_order
 expect_fail A21 mutate_a21_module
 expect_fail A21 mutate_a21_missing
+expect_fail A22 mutate_a22_brightnessctl
+expect_fail A22 mutate_a22_mode
+expect_fail A22 mutate_a22_uaccess
+expect_fail A22 mutate_a22_continued
+expect_fail A22 mutate_a22_leds_class
+expect_fail A22 mutate_a22_kernel_match
+expect_fail A22 mutate_a22_helper
+expect_fail A22 mutate_a22_tmpfiles
+expect_fail A22 mutate_a22_tmpfiles_leds
 
 reset_case
 if "${CHECKER}" "${CASE}" desktop "${KERNEL} console=ttyS0" "${EXPECTED}" \

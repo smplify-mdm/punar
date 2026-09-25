@@ -500,6 +500,35 @@ baseline.
 
 Waivers granted: none.
 
+**The desktop gate's VM changed with SMP-1405 WP-02.** From WP-02 on,
+`tools/boot-test.sh` gives the desktop VM a `virtio-keyboard-pci` and a
+`virtio-tablet-pci` so the keys exercise can press real keys over QMP. Two more
+kernel input drivers and their event nodes, and two more libinput devices in
+the compositor, now sit in every desktop-gate figure. Figures above this note
+were measured without them; the first figure with them is not strictly like
+for like with those, and is recorded with that label.
+
+**WP-02's own idle budget (keys, input and window grammar).** Plan rule 3.1-3
+makes budgets cumulative, held by `tools/bench/idle-gate.sh` against WP-08's
+Punar-only baseline; that gate is not built yet (tools/bench/README.md, "Not
+built yet"), so WP-02 states its share here for it to hold: **no new process,
+no new unit, no timer, no listening socket, no idle writes**; brightness,
+media, microphone and the look toggles run a `punarctl` verb per key press
+and exit; the Alt+Tab switcher is a deferred surface, built on the first
+Alt+Tab and destroyed after it; the one always-resident addition is the
+shell's `ShortcutUsage` singleton (a switch over the socket2 events the shell
+already receives, and a few hundred bytes of state), which writes its file
+once per account and once per newly tried key family, never per key press.
+The switcher's cost is gated relative to the overview's
+(`surface-cost-check.sh`). Both draw the same three windows, one per
+workspace, so each draws three plates of one window, and the switcher's
+median must stay within the overview's highest sample of the same run. On
+an arm64 overlay boot (HVF, 2026-09-25, not a CI figure) the switcher was
+15.7 MiB resident and 105 ms to first map, against the overview's 18.0 MiB
+and 150 ms medians. With all three windows on one workspace, the switcher
+drew three plates of three windows against the overview's one, and was
+2.3 MiB heavier. That setup measured the wrong thing and was corrected.
+
 ### 4.1 Unpacked initramfs
 
 **What it cost (MEASURED).** On the arm64 Debian release image (kernel

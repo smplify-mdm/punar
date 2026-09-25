@@ -328,6 +328,19 @@ jobs:
       - name: Enforce Hyprland 0.56 dispatcher API
         run: ./tools/check-hyprland-dispatchers.sh
 
+      # SMP-1405 WP-02. A Hyprland Lua error is not a build failure: it shows
+      # up at login as a desktop with no key binds. The pinned Hyprland's own
+      # --verify-config evaluates every configuration file (four sessions),
+      # the data-only keyboard reader's contract, and foot.ini.
+      - name: Verify the Hyprland Lua configuration and foot.ini (pinned Hyprland)
+        run: ./tools/hyprland-verify.sh
+
+      - name: Test the key grammar contract (described, no chord twice, Omarchy families)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends lua5.4
+          ./tests/desktop/keybind-contract-test.sh
+
       - name: Lint pipeline shell scripts (shellcheck, pinned)
         run: |
           docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.11.0 \
@@ -392,11 +405,16 @@ jobs:
             tests/desktop/terminal-parity-gate-test.sh \
             tests/desktop/mail-identity-contract-test.sh \
             tests/desktop/qml-inline-component-depth-test.sh \
+            tests/desktop/qml-url-surface-import-test.sh \
             tests/desktop/browser-integration-contract-test.sh \
             tests/desktop/graphics-env-test.sh \
             tests/desktop/framebuffer-probe-test.sh \
             tests/desktop/layout-script-test.sh \
             tests/desktop/terminal-app-test.sh \
+            tests/desktop/keybind-contract-test.sh \
+            tools/hyprland-verify.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/session.sh \
+            os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/greeter-session.sh \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/vendor-sandbox-bin/xdg-open \
             os/images/mkosi.profiles/desktop/mkosi.extra/usr/lib/punar/punar-policy-set.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/idle-ram.sh \
@@ -404,6 +422,7 @@ jobs:
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/recovery-check.sh \
             tools/check-doc-freshness.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surfaces-check.sh \
+            os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/surface-cost-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m2-check.sh \
             os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/m3-check.sh \
@@ -481,6 +500,13 @@ jobs:
       # that, so it is now caught in seconds by a script.
       - name: Validate inline component placement
         run: ./tests/desktop/qml-inline-component-depth-test.sh
+
+      # The surface-cost probe loads each deferred surface by URL, and such a
+      # file does not see its directory's other files by bare name: the
+      # Overview and the Alt+Tab switcher failed to load there, which only
+      # the desktop gate's VM showed. Caught here in seconds instead.
+      - name: Validate URL-loaded surface imports
+        run: ./tests/desktop/qml-url-surface-import-test.sh
 
       - name: Test governed browser and Lua-rule contract
         run: ./tests/desktop/browser-integration-contract-test.sh

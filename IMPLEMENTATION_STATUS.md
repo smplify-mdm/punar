@@ -243,13 +243,55 @@ Deliverables (spec section 76, Milestone 1):
 - [x] Podman — podman 6.1.0-1 + crun, netavark, aardvark-dns; rootless
   setup (subuid/subgid, dev user) in the profile postinst.
 - [x] Keyboard navigation — PUNAR-leader grammar in
-  `os/modules/desktop/hypr/punar-binds.conf`, documented in
+  `os/modules/desktop/hypr/punar-binds.lua` (the `.conf` beside it is the
+  superseded provider), documented in
   [`docs/development/keyboard-grammar.md`](docs/development/keyboard-grammar.md);
   config verified against the pinned hyprland; the config demonstrably
   loads in-VM (the session came up). Behavior is exercised by the M2 CI
   exercise (green — run
   [32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021))
-  and the human walkthrough.
+  and the human walkthrough. SMP-1405 WP-02 added the window grammar,
+  Alt+Tab, media/microphone/brightness keys and the device keyboard layout,
+  each with a `punarctl` verb; `tools/hyprland-verify.sh` and
+  `tests/desktop/keybind-contract-test.sh` gate the config in CI, and
+  `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh`
+  presses real keys through QMP. **It has not run in CI yet** (its first
+  run is the next desktop gate). It has run on qcow2 overlays of the arm64
+  release image carrying this branch (2026-09-25, HVF), with a final
+  `PUNAR_KEYS_OK` (55 assertions) and the switcher's surface-cost budget
+  met. Those boots found and fixed two product faults: the Alt-release bind
+  never fired after a Tab, so every Alt+Tab took the five-second fallback,
+  and the overview and the switcher failed to load when opened on their
+  own. They also fixed four check faults. On a release overlay with no dev
+  fixtures, the login screen's keyboard picker was pressed for real
+  (Russian, then German) and followed into the session, the audit log and
+  the lock screen.
+  After the WP-02 review: every chord works under every keyboard layout (the
+  number row by key code; PUNAR+F1 and PUNAR+ALT+Tab twins for / and [ ]),
+  the keyboard layout is set only from the person's own seat session, the
+  install seed applies only on a device with no account yet, the login
+  screen names variants and forgets a stale choice, the look toggles are
+  kept as data (`punarctl window look`), and keys-check also proves the
+  French number row, the Mac-style clipboard keys in a terminal, the
+  microphone key on a real PipeWire source, a kept look across a reload,
+  and the lock screen's layout line after a configuration load.
+  **What this earns against Omarchy, once that CI run is green** (plan
+  rules 0.3 and 3.1-4): J14 PUNAR_BETTER (most-recent-first with previews,
+  measured against a compositor-only switch on an overlay boot: a median of
+  341 ms against 305 ms from request to focus through the same QMP path,
+  inside the compositor-only switch's own 219-369 ms spread; CI's KVM run
+  records its own figure); B19, J04, J11, J13, J16 and J19 PARITY (B19's
+  login-screen picker was pressed on a release overlay, but CI's dev image
+  signs in without it, so CI proves it only through session start's own
+  call; J16's workspace-to-monitor move needs a second monitor and is proven
+  by configuration only); K06 NOT_COMPARABLE_YET (no backlight in a VM,
+  WP-23). **Not earned by WP-02:**
+  J15 stays OMARCHY_BETTER (pseudo-tiling, tiled fullscreen, width
+  save/restore and move-to-scratchpad wait for WP-11), P06 stays
+  OMARCHY_BETTER (the file manager in the terminal's folder waits for
+  WP-15's shell integration), and K15 stays OMARCHY_BETTER (media keys are
+  bound, but output/source switching and the bar widget are WP-03, eject is
+  WP-19, and no in-VM check drives a real MPRIS player yet).
 
 Acceptance (spec section 76, Milestone 1):
 

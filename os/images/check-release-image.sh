@@ -115,6 +115,7 @@ scan_dev_paths() {
         -o -name 'punar-surface-cost-check.service' \
         -o -name 'punar-surfaces-check.service' \
         -o -name 'punar-wifi-check.service' \
+        -o -name 'punar-keys-check.service' \
         -o -name 'punar-mock-smplify.service' \
         -o -name 'punar-boot-marker.service' \
         -o -name 'punar-desktop-marker.*' \
@@ -127,6 +128,7 @@ scan_dev_paths() {
         -o -name 'surface-cost-check.sh' \
         -o -name 'surfaces-check.sh' \
         -o -name 'wifi-check.sh' \
+        -o -name 'keys-check.sh' \
         -o -name 'idle-ram.sh' \
         -o -name 'desktop-ready.sh' \
         -o -name 'foo-agent-fixture.sh' \
@@ -169,6 +171,7 @@ if [ -d "${ROOT}/usr/lib/systemd/system" ]; then
         case "${target}" in
             punar-m*-check.service|punar-surface-cost-check.service|\
             punar-surfaces-check.service|punar-wifi-check.service|\
+            punar-keys-check.service|\
             punar-mock-smplify.service|punar-boot-marker.service|\
             punar-desktop-marker.*|punar-desktop-diag.*|\
             punar-idle-ram.service)
@@ -868,6 +871,68 @@ for keyring_so in \
 done
 [ "${keyring_module}" = yes ] \
     || fail A21 'pam_gnome_keyring.so is not installed, so the sign-in stack cannot unlock the keyring'
+
+# A22: no udev rule loosens the backlight (SMP-1405 WP-02). Brightness keys
+# go through logind's Session.SetBrightness for the caller's own session,
+# which needs only the stock `TAG+="seat"` that assigns the device to the
+# seat. The usual shortcut (brightnessctl's and light's rules) chgrp's the
+# sysfs file to `video` and makes it group-writable, which hands the panel to
+# every process in that group, on or off the seat; a `uaccess` tag or a
+# GROUP/MODE/OWNER assignment does the same by another road. A rule naming the
+# backlight or leds class may tag it for systemd and the seat, nothing more.
+for udev_dir in usr/lib/udev/rules.d lib/udev/rules.d etc/udev/rules.d run/udev/rules.d; do
+    [ -d "${ROOT}/${udev_dir}" ] || continue
+    for udev_rules in "${ROOT}/${udev_dir}"/*.rules; do
+        [ -f "${udev_rules}" ] || continue
+        loosened=$(awk '
+            /^[[:space:]]*#/ && rule == "" { next }
+            {
+                line = $0
+                if (sub(/\\$/, "", line)) { rule = rule line " "; next }
+                rule = rule line
+                # Loosening a sysfs file takes a program: chmod and friends
+                # on anything in either class (brightnessctl does the whole
+                # leds class). And ANY program run for a backlight, however
+                # the rule matches it (SUBSYSTEM, KERNEL=="*_backlight", a
+                # DEVPATH, a /sys path) is refused outright: a helper script
+                # hides its chmod from any pattern, and the stock rules run
+                # nothing for a backlight (systemd-backlight is a unit, not a
+                # RUN). An ownership, mode or uaccess key does nothing to a
+                # device without a /dev node, but on the backlight it is the
+                # same intent, so it is refused there too; the player LEDs of
+                # a game controller may carry one.
+                backlight = (rule ~ /(SUBSYSTEM=="backlight"|backlight|\/sys\/class\/backlight\/)/)
+                runs = (rule ~ /RUN(\{[a-z]+\})?\+?=/)
+                if ((rule ~ /(SUBSYSTEM=="(backlight|leds)"|\/sys\/class\/(backlight|leds)\/)/ &&
+                     rule ~ /RUN(\{[a-z]+\})?\+?=.*(chmod|chgrp|chown|setfacl)/) ||
+                    (backlight && runs) ||
+                    (rule ~ /(SUBSYSTEM=="backlight"|kbd_backlight)/ &&
+                     rule ~ /((GROUP|MODE|OWNER)[:+]?=|TAG\+?=+"uaccess")/)) {
+                    print FNR
+                }
+                rule = ""
+            }' "${udev_rules}" | head -n 1)
+        if [ -n "${loosened}" ]; then
+            fail A22 "${udev_rules#"${ROOT}"/}:${loosened} loosens backlight permissions; brightness goes through logind's SetBrightness"
+        fi
+    done
+done
+# The same loosening needs no udev rule at all: a tmpfiles.d line can chmod,
+# chown or ACL a sysfs file (z, Z, a, a+, m) or write to it (w) at every
+# boot. No line may name a backlight or leds device.
+for tmpfiles_dir in usr/lib/tmpfiles.d lib/tmpfiles.d etc/tmpfiles.d run/tmpfiles.d; do
+    [ -d "${ROOT}/${tmpfiles_dir}" ] || continue
+    for tmpfiles_conf in "${ROOT}/${tmpfiles_dir}"/*.conf; do
+        [ -f "${tmpfiles_conf}" ] || continue
+        loosened=$(awk '
+            /^[[:space:]]*#/ { next }
+            $2 ~ /^\/sys\/(class\/(backlight|leds)|devices\/.*\/(backlight|leds))\// { print FNR; exit }
+        ' "${tmpfiles_conf}")
+        if [ -n "${loosened}" ]; then
+            fail A22 "${tmpfiles_conf#"${ROOT}"/}:${loosened} changes a backlight or LED file through tmpfiles.d; brightness goes through logind's SetBrightness"
+        fi
+    done
+done
 
 if [ "${FAILURES}" -ne 0 ]; then
     printf 'PUNAR_RELEASE_IMAGE_POLICY_FAILED violations=%s\n' \

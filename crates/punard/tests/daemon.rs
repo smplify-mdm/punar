@@ -904,6 +904,175 @@ fn set_as_non_root_is_denied_audited_and_does_not_mutate() {
     assert_eq!(ev["policy_ids"], json!(["personal-defaults"]));
 }
 
+/// SMP-1405 WP-02: seat someone. Writes logind's seat0 record, one session
+/// record and the peer's `/proc/<pid>/cgroup`, and points the daemon at
+/// them. `session` is the session file's body; `cgroup` the process's.
+fn seat_person(
+    cfg: &mut DaemonConfig,
+    dir: &Path,
+    seat: Option<&str>,
+    session: &str,
+    cgroup: &str,
+) {
+    let seat_file = dir.join("seat0");
+    if let Some(text) = seat {
+        fs::write(&seat_file, text).unwrap();
+    }
+    cfg.seat_state_file = seat_file;
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(sessions.join("3"), session).unwrap();
+    cfg.sessions_dir = sessions;
+    let proc_root = dir.join("proc");
+    fs::create_dir_all(proc_root.join(SEATED_PID.to_string())).unwrap();
+    fs::write(
+        proc_root.join(SEATED_PID.to_string()).join("cgroup"),
+        cgroup,
+    )
+    .unwrap();
+    cfg.proc_root = proc_root;
+}
+
+const SEATED_PID: i32 = 4250;
+const SEATED_SESSION: &str =
+    "UID=1000\nUSER=punar\nACTIVE=1\nSTATE=active\nREMOTE=0\nCLASS=user\nSEAT=seat0\nVTNR=1\n";
+const SEATED_CGROUP: &str = "0::/user.slice/user-1000.slice/session-3.scope\n";
+
+fn seated_peer() -> PeerSource {
+    PeerSource::Fixed(Peer {
+        uid: 1000,
+        gid: 1000,
+        pid: Some(SEATED_PID),
+    })
+}
+
+/// SMP-1405 WP-02: the keyboard layout is the person's own tool. The person
+/// at the machine, calling from their own session on it, sets it without a
+/// grant; the change is still validated, applied through the typed backend,
+/// and audited under their name.
+#[test]
+fn the_active_local_person_sets_their_keyboard_layout_and_it_is_audited() {
+    let keymap = MockCapability::new("system.keymap", json!("us"));
+    let td = TestDaemon::start_configured(
+        seated_peer(),
+        keymap,
+        |_| {},
+        |cfg, dir| {
+            seat_person(
+                cfg,
+                dir,
+                Some("IS_SEAT0=1\nACTIVE=3\nACTIVE_UID=1000\n"),
+                SEATED_SESSION,
+                SEATED_CGROUP,
+            );
+        },
+    );
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({ "capability": "system.keymap", "desired_state": "ru" })),
+    );
+    assert!(resp.get("error").is_none(), "{resp}");
+    assert_eq!(resp["result"]["changed"], true);
+    assert_eq!(td.mock.state(), json!("ru"));
+    let event = td.audit_lines().last().cloned().unwrap();
+    assert_schema_shaped(&event);
+    assert_eq!(event["action"], "capabilities.set");
+    assert_eq!(event["resource"], "system.keymap");
+    assert_eq!(event["decision"], "allow");
+    assert_eq!(event["user_id"], "punar");
+}
+
+/// Someone else on the seat, or nobody: the rule does not apply, and the
+/// unchanged denial is audited.
+#[test]
+fn a_person_who_is_not_at_the_seat_cannot_set_the_keyboard_layout() {
+    for seat_text in [None, Some("ACTIVE_UID=1001\n"), Some("ACTIVE=2\n")] {
+        let keymap = MockCapability::new("system.keymap", json!("us"));
+        let td = TestDaemon::start_configured(
+            seated_peer(),
+            keymap,
+            |_| {},
+            |cfg, dir| {
+                seat_person(cfg, dir, seat_text, SEATED_SESSION, SEATED_CGROUP);
+            },
+        );
+        let resp = td.call(
+            "capabilities.set",
+            Some(json!({ "capability": "system.keymap", "desired_state": "ru" })),
+        );
+        assert_eq!(resp["error"]["code"], "denied", "{seat_text:?}: {resp}");
+        assert_eq!(td.mock.state(), json!("us"));
+        assert_eq!(td.mock.apply_calls(), 0);
+        assert_eq!(td.audit_lines().last().unwrap()["decision"], "deny");
+    }
+}
+
+/// The seated person's uid is not enough (review finding M1): a user
+/// service, a helper an escaped agent started with `systemd-run --user`, an
+/// SSH login and a session on another VT all run as that uid while the
+/// person is at the machine, and none of them may change the device's
+/// keyboard layout.
+#[test]
+fn the_seated_uid_outside_its_seat_session_cannot_set_the_keyboard_layout() {
+    let user_service =
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-u9.service\n";
+    let ssh = SEATED_SESSION
+        .replace("REMOTE=0", "REMOTE=1")
+        .replace("SEAT=seat0\n", "");
+    let other_vt = SEATED_SESSION.replace("ACTIVE=1", "ACTIVE=0");
+    for (label, session, cgroup) in [
+        ("user service", SEATED_SESSION.to_string(), user_service),
+        ("ssh login", ssh, SEATED_CGROUP),
+        ("inactive session", other_vt, SEATED_CGROUP),
+    ] {
+        let keymap = MockCapability::new("system.keymap", json!("us"));
+        let td = TestDaemon::start_configured(
+            seated_peer(),
+            keymap,
+            |_| {},
+            |cfg, dir| {
+                seat_person(cfg, dir, Some("ACTIVE_UID=1000\n"), &session, cgroup);
+            },
+        );
+        let resp = td.call(
+            "capabilities.set",
+            Some(json!({ "capability": "system.keymap", "desired_state": "us+dvorak" })),
+        );
+        assert_eq!(resp["error"]["code"], "denied", "{label}: {resp}");
+        assert_eq!(td.mock.apply_calls(), 0, "{label}");
+        assert_eq!(
+            td.audit_lines().last().unwrap()["decision"],
+            "deny",
+            "{label}"
+        );
+    }
+}
+
+/// Being at the seat buys nothing on any other capability.
+#[test]
+fn the_seat_rule_covers_only_person_scoped_capabilities() {
+    let td = TestDaemon::start_configured(
+        seated_peer(),
+        MockCapability::new("mock.widget", json!("off")),
+        |_| {},
+        |cfg, dir| {
+            seat_person(
+                cfg,
+                dir,
+                Some("ACTIVE_UID=1000\n"),
+                SEATED_SESSION,
+                SEATED_CGROUP,
+            );
+        },
+    );
+    let resp = td.call(
+        "capabilities.set",
+        Some(json!({ "capability": "mock.widget", "desired_state": "on" })),
+    );
+    assert_eq!(resp["error"]["code"], "denied", "{resp}");
+    assert_eq!(td.mock.apply_calls(), 0);
+}
+
 #[test]
 fn reads_are_open_to_non_root_peers_and_are_not_audited() {
     let td = TestDaemon::start_as_uid(1000);

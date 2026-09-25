@@ -17,6 +17,7 @@
       "exception": "No Bluetooth stack ships, and the view is a statement of that absence; there is nothing for a verb to report."
     },
     "displays": { "verb": ["display", "list"] },
+    "keyboard": { "verb": ["keyboard", "layout", "status"] },
     "audio": { "verb": ["audio", "status"] },
     "power": { "verb": ["device"] },
     "applications": { "verb": ["app", "list", "--all"] },

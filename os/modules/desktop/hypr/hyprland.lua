@@ -47,11 +47,77 @@ hl.on("hyprland.start", function()
     hl.exec_cmd("hypridle -c /etc/xdg/hypr/punar-hypridle.conf")
 end)
 
+-- A configuration reload (a web-app sync, the clipboard-keys setting) re-reads
+-- this file but not the presets punar-layout.sh applied with `hyprctl eval`,
+-- so the session's preset and every workspace's own preset are put back
+-- here. `config.reloaded` fires once per reload, never at startup.
+hl.on("config.reloaded", function()
+    hl.exec_cmd(layoutScript .. " restore")
+end)
+
+-- Keyboard layout (read as data from the session's rendered file, see
+-- punar-input.lua), key repeat, touchpad and pointer. SMP-1405 WP-02.
+local input = require("/etc/xdg/hypr/punar-input.lua")
+
+local function config_home()
+    local home = os.getenv("XDG_CONFIG_HOME")
+    if not home or home:sub(1, 1) ~= "/" then
+        home = (os.getenv("HOME") or "") .. "/.config"
+    end
+    return home
+end
+
+-- The first 4 KiB of one of the person's small preference files, or "".
+local function preference_text(name)
+    local file = io.open(config_home() .. "/punar/" .. name, "r")
+    if not file then
+        return ""
+    end
+    local text = file:read(4096) or ""
+    file:close()
+    return text
+end
+
+-- The person's optional Mac-style clipboard grammar, as data: one word from
+-- ~/.config/punar/keyboard.json, written by `punarctl keyboard clipboard-keys`.
+-- Anything but "mac" is the standard grammar.
+local function clipboard_keys()
+    if preference_text("keyboard.json"):match('"clipboardKeys"%s*:%s*"mac"') then
+        return "mac"
+    end
+    return "standard"
+end
+
+-- The person's window look (transparency, gaps, a square lone window), as
+-- data: three booleans from ~/.config/punar/look.json, written by `punarctl
+-- window look`, which PUNAR+CTRL+T/G/A run. Matched with patterns, never
+-- run, so the toggles survive a reload and the next session without the
+-- code-as-state files Omarchy keeps (SMP-1405 WP-02). Missing or malformed
+-- is the default look.
+local function look()
+    local text = preference_text("look.json")
+    local versioned = text:match('"version"%s*:%s*1[^%d]') ~= nil
+    local function flag(key, default)
+        if not versioned then
+            return default
+        end
+        local value = text:match('"' .. key .. '"%s*:%s*(%a+)')
+        if value == "true" then
+            return true
+        elseif value == "false" then
+            return false
+        end
+        return default
+    end
+    return {
+        transparency = flag("transparency", false),
+        gaps = flag("gaps", true),
+        square = flag("square", false),
+    }
+end
+
 hl.config({
-    input = {
-        kb_layout = "us",
-        follow_mouse = 0,
-    },
+    input = input.config(),
     binds = {
         window_direction_monitor_fallback = true,
     },
@@ -93,6 +159,12 @@ require("/etc/xdg/hypr/punar-binds.lua")({
     assistant_class = "punar-assistant",
     notes_class = "punar-notes",
     scratchpad_script = "/usr/lib/punar/punar-scratchpad.sh",
+    punarctl = "punarctl",
+    -- The file manager opens through the launcher's own verb, so a key and a
+    -- click on its row in the command center do the same thing one way.
+    files = "punarctl app open thunar",
+    clipboard_keys = clipboard_keys(),
+    look = look(),
 })
 
 -- User-created web-app rules are derived from punard's root-owned inventory.

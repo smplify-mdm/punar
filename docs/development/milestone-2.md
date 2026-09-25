@@ -145,7 +145,7 @@ inspection of the same tag the package is built from.
 | Floating polish: pin, centerwindow, float-aware move/resize | **in** | §13.2 |
 | Layout presets **balanced / columns / rows / focus / stack** via `punar-layout.sh` (global) | **in** | §13.5; mapping in §4 |
 | Preset **grid** | **out** | no native grid algorithm in 0.56.2 (§1.3); faking it with per-window `resizewindowpixel` breaks on the next open/close reflow. Future path: `lua:<name>` custom layout when the compositor rebase makes Lua layouts worth adopting |
-| Per-workspace presets | **out (stretch)** | keyword-added workspace rules accumulate (§1.3 caveat); global presets are honest and sufficient for acceptance. Revisit with a rule-reset mechanism |
+| Per-workspace presets | **out (stretch)** | keyword-added workspace rules accumulate (§1.3 caveat); global presets are honest and sufficient for acceptance. Revisit with a rule-reset mechanism. **Later: SMP-1405 WP-02 made PUNAR+comma/period per workspace (kept across sessions, the accumulation bounded by a reload or sign-out) and kept the command center on the session's preset; docs/development/keyboard-grammar.md, WP-02 section.** |
 | PUNAR+TAB project overview implementing Plate D-007 | **in** | §14.2; data flow §5 |
 | Named workspaces: rename via command center, `name:` navigation, names in bar + overview | **in** | §14 |
 | Workspace-name persistence: `~/.local/state/punar/workspaces.json` + restore on shell start | **in** | §14.3 first slice (“layout memory ships first” per D-007 register: names + presets, not windows) |
@@ -188,6 +188,13 @@ PUNAR + N                    Notes scratchpad (togglespecialworkspace notes)
 PUNAR + TAB                  Project overview (exec quickshell ipc call overview toggle)
 PUNAR + SHIFT + TAB          Previous open workspace (kept — fast cycle stays)
 ```
+
+**Later (SMP-1405 WP-02):** PUNAR + comma / period now cycle the FOCUSED
+WORKSPACE's own preset, as Omarchy's per-workspace layout key does; the
+command center's chooser still sets the session's preset (and gives the
+focused workspace back to it). The number row is bound by key code and
+PUNAR + [ / ] and PUNAR + / have layout-proof twins (PUNAR + ALT + Tab,
+PUNAR + F1); keyboard-grammar.md, WP-02 section.
 
 `lockactivegroup`, rename-workspace, go-to-named-workspace, and the full
 preset chooser are command-center actions, not chords. Every bind uses

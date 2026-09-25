@@ -314,15 +314,15 @@ else
     FAILED=1
 fi
 tail -n 1 "${RC_FILE}" > "${RUN_DIR}/m5-received-compliance-last.json" 2>/dev/null
-jq_check "last received compliance: device id matches, overall compliant, six named category/state pairs, exact key allowlists (spec 24/54: states, never values)" \
+jq_check "last received compliance: device id matches, overall compliant, seven named category/state pairs, exact key allowlists (spec 24/54: states, never values)" \
     "${RUN_DIR}/m5-received-compliance-last.json" \
     "(keys | sort) == [\"device_id\", \"received_at\", \"report\"]
      and .device_id == \"${DEVICE_ID}\"
      and (.report | keys | sort) == [\"categories\", \"overall\"]
      and .report.overall == \"compliant\"
-     and (.report.categories | length) == 6
+     and (.report.categories | length) == 7
      and ([.report.categories[].category] | sort
-          == [\"browser.policy\", \"security.credential_isolation\", \"security.firewall\", \"system.hostname\", \"system.update_channel\", \"time.timezone\"])
+          == [\"browser.policy\", \"security.credential_isolation\", \"security.firewall\", \"system.hostname\", \"system.keymap\", \"system.update_channel\", \"time.timezone\"])
      and (.report.categories | all((keys | sort) == [\"category\", \"state\"]))"
 
 # --- 10. inventory: sent once at enroll, then hash-gated ---------------------
@@ -341,7 +341,7 @@ jq_check "received inventory: os/kernel non-empty, 6 capability rows, exact key 
      and (.inventory.os.id | length) > 0
      and (.inventory.os.architecture == \"x86_64\" or .inventory.os.architecture == \"aarch64\")
      and (.inventory.kernel | length) > 0
-     and (.inventory.capabilities | length) == 6
+     and (.inventory.capabilities | length) == 7
      and (.inventory.capabilities | all((keys | sort) == [\"capability\", \"supported\"]))
      and (.inventory.posture | keys | sort) == [\"disk_encryption_enabled\", \"firewall\", \"firewall_enabled\", \"is_virtual\", \"os_patch_status\", \"reboot_required\", \"secure_boot\", \"tpm_present\", \"tpm_version\", \"uefi\", \"virtualization\"]
      and (.inventory.posture.os_patch_status == \"up-to-date\" or .inventory.posture.os_patch_status == \"updates-available\" or .inventory.posture.os_patch_status == \"unknown\")

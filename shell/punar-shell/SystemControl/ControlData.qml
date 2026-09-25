@@ -253,6 +253,8 @@ Scope {
             return "Update channel";
         case "security.credential_isolation":
             return "Credential isolation";
+        case "system.keymap":
+            return "Keyboard layout";
         default:
             return path;
         }
@@ -327,6 +329,14 @@ Scope {
     }
     Probe {
         id: webAppsProbe
+    }
+    // Keyboard (SMP-1405 WP-02): the layout and the clipboard-key grammar,
+    // read with the verbs a terminal uses, only while the view is open.
+    Probe {
+        id: keyboardProbe
+    }
+    Probe {
+        id: clipboardProbe
     }
     // Encryption, Secure Boot and Power: `punarctl device posture --json`,
     // the device.posture answer a managing organization also receives. One
@@ -418,6 +428,8 @@ Scope {
             data.refreshProbes();
             if (data.selectedId === "applications")
                 data.refreshWebApps();
+            if (data.selectedId === "keyboard")
+                data.refreshKeyboard();
         })
     }
 
@@ -456,6 +468,11 @@ Scope {
         webAppsProbe.ask(["punarctl", "--json", "web-apps", "list"]);
     }
 
+    function refreshKeyboard(): void {
+        keyboardProbe.ask(["punarctl", "--json", "keyboard", "layout", "status"]);
+        clipboardProbe.ask(["punarctl", "--json", "keyboard", "clipboard-keys", "status"]);
+    }
+
     // The verb behind the selected view, when that view has one of its own.
     function refreshSelectedView(): void {
         if (data.selectedId === "network")
@@ -464,6 +481,8 @@ Scope {
             connectionsProbe.ask(["punarctl", "privacy", "connections", "--json"]);
         else if (data.selectedId === "relay")
             relayProbe.ask(["punarctl", "relay", "status", "--json"]);
+        else if (data.selectedId === "keyboard")
+            data.refreshKeyboard();
     }
 
     // ---------------------------------------------------------------
@@ -707,6 +726,7 @@ Scope {
                     {id: "datetime", name: "Date & Time"},
                     {id: "bluetooth", name: "Bluetooth"},
                     {id: "displays", name: "Displays"},
+                    {id: "keyboard", name: "Keyboard"},
                     {id: "audio", name: "Audio"},
                     {id: "power", name: "Power"},
                     {id: "applications", name: "Applications"}
@@ -907,6 +927,13 @@ Scope {
             // §48 requires a reason, so the reason is asked for before
             // anything is sent. Esc cancels; Enter submits.
             data.reasonForCapability = String(a.path);
+        } else if (kind === "keyboardLayout") {
+            // The person-scoped capability: punarctl asks punard, which lets
+            // the person at this machine set it and audits the change, then
+            // applies it to this session live.
+            data.runMutation(["punarctl", "keyboard", "layout", "set", String(a.value)]);
+        } else if (kind === "clipboardKeys") {
+            data.runMutation(["punarctl", "keyboard", "clipboard-keys", String(a.value)]);
         } else if (kind === "capset") {
             var path = String(a.path);
             var value = String(a.value);
@@ -1262,6 +1289,8 @@ Scope {
         }
         if (id === "displays")
             return data.viewDisplays();
+        if (id === "keyboard")
+            return data.viewKeyboard();
         if (id === "audio")
             return data.viewAudio();
         if (id === "power")
@@ -1597,6 +1626,120 @@ Scope {
             rows: rows,
             emptyRows: "No monitor is reported by the compositor",
             note: data.displaysNote()
+        };
+    }
+
+    // The layouts offered here, as on the login screen. Every other installed
+    // layout is one command away: `punarctl keyboard layout list`.
+    readonly property var keyboardChoices: [
+        {code: "us", name: "English (US)"},
+        {code: "gb", name: "English (UK)"},
+        {code: "de", name: "German"},
+        {code: "fr", name: "French"},
+        {code: "es", name: "Spanish"},
+        {code: "it", name: "Italian"},
+        {code: "pt", name: "Portuguese"},
+        {code: "br", name: "Portuguese (Brazil)"},
+        {code: "nl", name: "Dutch"},
+        {code: "se", name: "Swedish"},
+        {code: "pl", name: "Polish"},
+        {code: "cz", name: "Czech"},
+        {code: "tr", name: "Turkish"},
+        {code: "jp", name: "Japanese"},
+        {code: "ru", name: "Russian"},
+        {code: "ua", name: "Ukrainian"}
+    ]
+
+    function viewKeyboard(): var {
+        var status = keyboardProbe.payload;
+        if (status === null) {
+            return {
+                title: "Keyboard",
+                sub: "System · layout and keys",
+                dashed: keyboardProbe.answered && keyboardProbe.errorText !== "" ? {
+                    what: "punarctl keyboard layout status did not answer",
+                    why: keyboardProbe.errorText,
+                    when_: "Run `punarctl keyboard layout` for the same answer"
+                } : {
+                    what: "Reading the keyboard",
+                    why: "punarctl keyboard layout status has not answered yet.",
+                    when_: "A moment"
+                }
+            };
+        }
+        var device = data.str(status, "device", "us");
+        var kv = [];
+        var layouts = Array.isArray(status.layouts) ? status.layouts : [];
+        for (var i = 0; i < layouts.length; i++) {
+            kv.push({
+                k: i === 0 ? "Layout" : "Also",
+                v: data.str(layouts[i], "description", "") + " · " + data.str(layouts[i], "layout", "")
+                    + (data.str(layouts[i], "variant", "") !== "" ? "+" + data.str(layouts[i], "variant", "") : ""),
+                mono: false
+            });
+        }
+        var session = data.obj(status.session);
+        if (session !== null)
+            kv.push({
+                k: "This session",
+                v: data.str(session, "kb_layout", "")
+            });
+        var live = data.obj(status.live);
+        if (live !== null && data.str(live, "active_keymap", "") !== "")
+            kv.push({
+                k: "Typing now",
+                v: data.str(live, "active_keymap", ""),
+                mono: false
+            });
+        var chord = data.str(status, "switch_chord", "");
+        if (chord !== "")
+            kv.push({
+                k: "Switch layouts",
+                v: "Alt + Alt · " + chord,
+                mono: false
+            });
+        var clipboard = clipboardProbe.payload;
+        var mac = clipboard !== null && data.str(clipboard, "clipboard_keys", "") === "mac";
+        kv.push({
+            k: "Clipboard keys",
+            v: mac ? "MAC-STYLE · Punar + C, V, X" : "STANDARD · each app's own",
+            mono: false
+        });
+
+        var rows = [];
+        var first = device.split(",")[0].split("+")[0];
+        for (var c = 0; c < data.keyboardChoices.length; c++) {
+            var choice = data.keyboardChoices[c];
+            var current = choice.code === first;
+            var row = {
+                name: choice.name,
+                meta: current ? "This device's layout" : "Select to use · " + choice.code,
+                tone: current ? "ok" : "",
+                tag: current ? "Current" : ""
+            };
+            if (!current) {
+                row.action = {
+                    kind: "keyboardLayout",
+                    value: choice.code
+                };
+            }
+            rows.push(row);
+        }
+        return {
+            title: "Keyboard",
+            sub: "System · layout, switch chord and clipboard keys",
+            kv: kv,
+            rows: rows,
+            actions: [
+                {
+                    hotkey: "C",
+                    label: mac ? "Use standard clipboard keys" : "Use Mac-style clipboard keys",
+                    tone: "ghost",
+                    kind: "clipboardKeys",
+                    value: mac ? "off" : "on"
+                }
+            ],
+            note: "The layout is the device's, shared by the login screen, the desktop and the lock screen. As the person at this machine you may change it without an administrator, and the change is recorded in the audit log; an organization can still set it for a managed device. A layout that cannot type Latin letters is led by US English with both Alt keys as the switch, so every Punar key chord keeps working. Mac-style clipboard keys make Punar + C, V and X copy, paste and cut, and move floating and centring to Punar + Alt + V and C. Terminal: punarctl keyboard layout set <layouts> · punarctl keyboard clipboard-keys on|off."
         };
     }
 

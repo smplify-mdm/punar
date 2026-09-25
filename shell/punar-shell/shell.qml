@@ -29,7 +29,7 @@ pragma ComponentBehavior: Bound
 // IPC TARGETS REGISTERED BY THIS TREE (all reachable as
 // `qs -p /usr/share/punar/shell ipc call <target> <method>`; every target
 // name is unique, verified by `qs ipc show` and by grep over the tree):
-//   bar · commandcenter · overview · windowactions · aipanel · approval · alerts
+//   bar · commandcenter · overview · windowactions · windowswitcher · aipanel · approval · alerts
 //   privacypanel · systemcontrol · notifications · toasts · osd · shortcuts · lock · theme
 //   wallpaper
 //
@@ -56,6 +56,7 @@ import "SystemControl"
 import "Wallpaper"
 import "SessionMenu"
 import "WindowActions"
+import "WindowSwitcher"
 
 ShellRoot {
     id: shellRoot
@@ -69,6 +70,7 @@ ShellRoot {
         BrowserContext.init();
         WallpaperState.init();
         SurfaceTiming.init();
+        ShortcutUsage.init();
     }
 
     // The user-invoked surfaces below retain 104–120 MiB apiece in an
@@ -101,6 +103,7 @@ ShellRoot {
         }
 
         function openSurface(): void {
+            ShortcutUsage.surfaceOpened(deferred.surfaceName);
             deferred.ensureLoaded(true);
         }
 
@@ -109,6 +112,8 @@ ShellRoot {
                 deferred.openSurface();
                 return;
             }
+            if (!deferred.surface.open)
+                ShortcutUsage.surfaceOpened(deferred.surfaceName);
             deferred.surface.toggle();
         }
 
@@ -232,6 +237,73 @@ ShellRoot {
         }
         function residency(): string {
             return windowActionsSurface.residency();
+        }
+    }
+
+    // Alt+Tab (SMP-1405 WP-02). Deferred: nothing resident until the first
+    // switch. The compositor sends the gesture's number and its Tab count
+    // with every call (punar-binds.lua), so `step` constructs the surface on
+    // the first Tab and `commit` finishes it on the release of Alt.
+    DeferredSurface {
+        id: windowSwitcherSurface
+        surfaceName: "windowswitcher"
+        // The highest gesture already finished. Kept here, not in the
+        // surface, because the surface is destroyed after each switch and two
+        // processes of one gesture can land in either order.
+        property double finishedGesture: 0
+        sourceComponent: WindowSwitcher {
+            onFinished: function (gesture) {
+                windowSwitcherSurface.finishedGesture = Math.max(windowSwitcherSurface.finishedGesture, gesture);
+            }
+        }
+
+        function current(gesture: string): bool {
+            var g = Number(gesture);
+            return isFinite(g) && g > windowSwitcherSurface.finishedGesture;
+        }
+    }
+
+    IpcHandler {
+        target: "windowswitcher"
+
+        // `step`, not `show`: `qs ipc call … show` is parsed as `qs ipc show`.
+        function step(gesture: string, steps: string): string {
+            if (!windowSwitcherSurface.current(gesture))
+                return "stale";
+            var surface = windowSwitcherSurface.surface;
+            if (surface === null) {
+                ShortcutUsage.surfaceOpened("windowswitcher");
+                surface = windowSwitcherSurface.ensureLoaded(false);
+            }
+            return surface === null ? "unavailable" : surface.ipcStep(gesture, steps);
+        }
+        function commit(gesture: string, steps: string): string {
+            if (!windowSwitcherSurface.current(gesture))
+                return "stale";
+            var surface = windowSwitcherSurface.ensureLoaded(false);
+            return surface === null ? "unavailable" : surface.ipcCommit(gesture, steps);
+        }
+        function toggle(): void {
+            windowSwitcherSurface.toggleSurface();
+        }
+        function open(): void {
+            windowSwitcherSurface.openSurface();
+        }
+        function close(): void {
+            windowSwitcherSurface.closeSurface();
+        }
+        function state(): string {
+            return windowSwitcherSurface.surfaceState();
+        }
+        function selected(): string {
+            var surface = windowSwitcherSurface.surface;
+            return surface === null ? "" : surface.ipcSelected();
+        }
+        function latency(): string {
+            return SurfaceTiming.sample("windowswitcher");
+        }
+        function residency(): string {
+            return windowSwitcherSurface.residency();
         }
     }
 
@@ -461,6 +533,24 @@ ShellRoot {
             if (surface === null)
                 return "";
             var result = surface.ipcSections();
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
+        // Type-to-filter and the "Not tried yet" hint, read over IPC so the
+        // gates can hold them (SMP-1405 WP-02).
+        function filter(text: string): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "0";
+            var result = surface.ipcFilter(text);
+            shortcutsSurface.releaseIfClosed();
+            return result;
+        }
+        function untried(): string {
+            var surface = shortcutsSurface.ensureLoaded(false);
+            if (surface === null)
+                return "";
+            var result = surface.ipcUntried();
             shortcutsSurface.releaseIfClosed();
             return result;
         }
@@ -758,9 +848,9 @@ ShellRoot {
     // the §6 surface-assignment table puts on PANEL regardless of the
     // active mood, because an OSD overlay is a plate. Volume is real: it
     // follows the PipeWire default sink's own change event and draws the
-    // level the sink settled on, whoever moved it. Brightness renders
-    // dashed with its SIM · VM tag — no backlight capability ships, so no
-    // brightness key is bound (spec §1.22).
+    // level the sink settled on, whoever moved it. Brightness is drawn when
+    // `punarctl display brightness` reports the value the backlight settled
+    // on, and never on a machine that has none (SMP-1405 WP-02).
     Osd {
     }
 

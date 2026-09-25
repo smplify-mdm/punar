@@ -51,6 +51,10 @@
 //!   brokered credential decides its expiry here (SMP-1405, phase P0a).
 //! - [`Redacted`] — wrapper that keeps secret values out of logs and
 //!   serialized output (SPEC sections 1.19 and 53).
+//! - [`keymap`] — the keyboard-layout grammar shared by punard's
+//!   `system.keymap` capability, the session's rendered input file and
+//!   `punarctl keyboard`: syntax, the installed-XKB-list check, and the rule
+//!   that keeps Latin-letter binds working under any layout (SMP-1405 WP-02).
 //! - [`storage`] — kernel-observed storage encryption: whether a path's
 //!   filesystem is backed only by LUKS2 mappings, one implementation shared
 //!   by the PIM credential vault and punard's managed-device posture.
@@ -81,6 +85,7 @@ pub mod device;
 pub mod install;
 pub mod install_answers;
 pub mod ipc;
+pub mod keymap;
 pub mod ledger;
 pub mod network;
 pub mod principal;

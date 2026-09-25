@@ -299,7 +299,7 @@ Params: none.
   "mode": "personal",
   "enrolled": false,
   "hostname": "punar-desktop",
-  "capabilities_total": 6,
+  "capabilities_total": 7,
   "last_reconcile": "2026-08-25T07:00:13Z",
   "audit": {"path": "/var/log/punar/audit.jsonl", "events": 42},
   "device": {
@@ -433,6 +433,15 @@ preference/organization-policy machinery governs `stable`, `dev`, or `edge`.
 `browser.policy` is the fifth: its only desired states are `managed` and
 `unmanaged`; live observation returns `drifted` when Chromium's root-owned
 mandatory-policy file does not match the freshly rendered effective policy.
+`security.credential_isolation` is observed only (the image decides it).
+`system.keymap` (SMP-1405 WP-02) is the keyboard layout: one to four XKB
+layouts, comma-separated, each with an optional `+variant` (`us`,
+`de+nodeadkeys`, `us,ru`), validated first by syntax and then against the
+image's own `/usr/share/X11/xkb/rules/evdev.lst`, and written as the
+`XKBLAYOUT`/`XKBVARIANT` lines of `/etc/vconsole.conf`. Its OS default is the
+installer's choice from `/var/lib/punar/install/seed.json` when that names an
+installed layout, else the first observation. It is the one **person-scoped**
+capability: see section 5.4.
 
 ### 5.3 `capabilities.get`
 
@@ -490,6 +499,44 @@ Two amendments, both additive:
   <source name> (<policy id>) · effective: <state>"). The root caller's
   exit code is `0` — the preference was recorded and outranked, not
   forbidden (spec section 39); `--json` output was already complete in M4.
+
+**SMP-1405 WP-02: person-scoped capabilities.** `system.keymap` may also
+be set by the person at the machine, **from their own session on it**. Three
+records must agree, each written by root or the kernel:
+
+1. logind names the peer's uid as `ACTIVE_UID` of seat0
+   (`/run/systemd/seats/seat0`, the file sd-login reads);
+2. the kernel places the peer's pid (`SO_PEERCRED`) in one of that uid's
+   session scopes, `0::/user.slice/user-<uid>.slice/session-<id>.scope` in
+   `/proc/<pid>/cgroup`;
+3. logind records that session (`/run/systemd/sessions/<id>`) as `UID=<uid>`,
+   `SEAT=seat0`, `ACTIVE=1` and `REMOTE=0`.
+
+The uid alone is not enough, because much runs as the seated person's uid
+that is not the person at the machine: a user service or timer, a
+D-Bus-activated app, an SSH login (`REMOTE=1`, no seat), and a helper an
+agent starts outside its scope with `systemd-run --user`. All of those live
+under `user@<uid>.service` or in a remote session, and all are refused. The
+session scope is root's (logind creates it and delegates nothing), so a
+process cannot move itself into it. **What this still cannot see**, the same
+limit section 14.5 states for attribution: a same-uid process that makes the
+session's own compositor or terminal server start a command for it gets a
+process inside the session scope. The check is evidence of where a call came
+from, not a sandbox.
+
+The rest of the ladder is unchanged and runs first: an agent-attributed peer
+takes the AI authority path (which names no rule for `system.keymap`, so it
+is refused), root is allowed, a live grant is honoured. The call is
+validated, recorded as the person's preference, applied through the typed
+backend and audited under the person's name exactly like a root call; an
+organization's pin still outranks it in the merge (the result then carries
+`overridden`). The greeter is on the seat before anyone signs in but is not
+admitted to the socket. A keyboard layout is the tool a person types with,
+not a security setting, and a password prompt between someone and their own
+keyboard would protect nothing; a device-wide layout change is visible at the
+login screen, which can always choose another layout for itself (section
+"Keyboard layout" of docs/development/keyboard-grammar.md). No other
+capability is person-scoped.
 
 ### 5.5 `audit.tail`
 
@@ -2141,7 +2188,12 @@ or path other than the confirmed target device. An installed system returns
   names unchanged). Non-TTY stdout or `NO_COLOR` strips ANSI.
 - Exit codes (D-014 Sect III): `0` success · `1` runtime/daemon error ·
   `2` usage (clap) · `3` denied · `4` approval_required (reserved until M9) ·
-  `5` daemon unreachable.
+  `5` daemon unreachable · `6` not present (SMP-1405 WP-02): what the verb
+  drives is absent, not broken — `display brightness` on a machine with no
+  backlight (every VM), `media` with no player running, `audio mute
+  --input` or a volume change when PipeWire answers but has no such device
+  (the CI VM has no sound card). A script can tell
+  "nothing to do here" from a failure without parsing text.
 - **M4 verbs:** `punarctl policy effective` (D-014 table over 5.7) and
   `punarctl policy explain <path>` (spec section 40 layout verbatim over
   5.8; personal-mode strings "Personal preference" / "OS default",
@@ -2226,10 +2278,19 @@ or path other than the confirmed target device. An installed system returns
   - `punarctl session lock|end|restart|shutdown`: these run `loginctl
     lock-session`, the compositor's `exit`, and `systemctl reboot|poweroff`,
     so polkit still decides.
-  - `punarctl audio status|volume ±N%|N%|mute [on|off|toggle]`: this runs
-    `wpctl`, capped at 100% like the volume keys.
-  - Exit codes: 5 with no compositor or PipeWire, 3 when polkit refuses, 2
-    for a bad name, address or volume.
+  - `punarctl audio status|volume ±N%|N%|mute [on|off|toggle] [--input]`:
+    this runs `wpctl`, capped at 100% like the volume keys; `--input` mutes
+    the microphone.
+  - SMP-1405 WP-02: `punarctl media play-pause|next|previous|status` (MPRIS
+    over `busctl --user`); `punarctl display brightness [get|set N%|N%|±N%]
+    [--keyboard]` (logind `Session.SetBrightness` on `session/auto`, exit 6
+    with no backlight); `punarctl keyboard layout [status|list|set]` and
+    `punarctl keyboard clipboard-keys on|off|status`; `punarctl keys list
+    [--filter] [--untried]` (the compositor's `j/binds`); `punarctl window
+    pop`; `punarctl layout <preset>|default --workspace <n|active>`.
+  - Exit codes: 5 with no compositor or PipeWire, 6 when PipeWire answers
+    but has no microphone or output to change, 3 when polkit refuses, 2 for
+    a bad name, address or volume.
   - The GUI runs these same verbs: the overview, the command center, the
     workspace store, WindowActions, SessionMenu and System Control's Power
     actions.
@@ -3141,7 +3202,10 @@ that deliberately launches a helper outside its own scope escapes
 attribution and would present as the console user; M8 already rests on
 the same foundation. M9 records the resolver's uid/pid/cgroup so an
 escape is visible after the fact, and names the real fixes (a dedicated
-uid per agent session; a logind seat-presence check) as deferred. No M9
+uid per agent session; a logind seat-presence check) as deferred. SMP-1405
+WP-02 applies the seat-presence check to the one person-scoped capability
+(`system.keymap`, section 5.4): a helper started outside an agent scope is
+refused there unless it also runs in the seated person's own session. No M9
 surface claims cryptographic proof of a human.
 
 ### 14.6 Execution ownership follows capability ownership

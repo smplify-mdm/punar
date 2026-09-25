@@ -31,28 +31,226 @@ Scope {
     property string deviceName: "Punar"
     readonly property bool reducedMotion: Quickshell.env("PUNAR_REDUCED_MOTION") === "1"
 
-    readonly property var keyboardLayouts: [
-        {
-            "code": "us",
-            "label": "US"
-        },
-        {
-            "code": "gb",
-            "label": "UK"
-        },
-        {
-            "code": "de",
-            "label": "DE"
-        },
-        {
-            "code": "fr",
-            "label": "FR"
-        },
-        {
-            "code": "es",
-            "label": "ES"
-        }
+    // ---- keyboard layout (SMP-1405 WP-02) -----------------------------
+    //
+    // The login screen types in the DEVICE's layout: greeter-session.sh ran
+    // `punarctl keyboard layout render`, and punar-greeter.lua read the result
+    // as data before this surface existed. `deviceValue` is the whole value
+    // /etc/vconsole.conf records, every layout with its variant (`us`,
+    // `us+dvorak`, `us,ru`), in punar_common::keymap's grammar; `deviceInput`
+    // is the rendered file, so choosing the device's own entry again restores
+    // it exactly.
+    //
+    // THE LABEL NEVER NAMES A LAYOUT THE SCREEN IS NOT TYPING IN. A device
+    // whose value is anything but one plain layout from the list gets its own
+    // first entry, labelled with all of it ("US-DVORAK", "US RU"), and the
+    // plain US entry then means plain US. (Before, `us+dvorak` read "US" while
+    // the screen typed Dvorak, and choosing US re-applied Dvorak: someone
+    // typing a QWERTY password failed and could not get QWERTY back.)
+    //
+    // A choice made here changes only what this screen types with. It reaches
+    // the device only through a successful sign-in: punar-greet carries it
+    // into the session as PUNAR_KEYMAP, and the signed-in person's session
+    // adopts it through punard's audited system.keymap capability. Nobody who
+    // has not signed in can change the device. `chosenLayout` stays empty
+    // until someone picks, so an untouched picker never rewrites the device.
+    // A choice nobody signs in with for ten minutes is someone else's who
+    // walked away: it is cleared and the screen goes back to the device's
+    // layout, so the next person to sign in does not adopt it unseen.
+    property string deviceValue: "us"
+    property var deviceInput: null
+    property string chosenLayout: ""
+    readonly property string activeLayout: root.chosenLayout !== "" ? root.chosenLayout : root.deviceValue
+    signal layoutReset
+
+    // Layouts whose base group cannot type Latin letters: the same list as
+    // punar_common::keymap::NON_LATIN (tests/desktop/keybind-contract-test.sh
+    // holds the two equal). Such a layout gets a US first group and the
+    // both-Alt-keys switch chord, the rule punar_common::keymap applies
+    // everywhere else, so a Latin username and the letter binds keep working.
+    readonly property var nonLatin: ["af", "am", "ara", "bd", "bg", "brai", "bt", "by", "eg", "et", "ge", "gr", "il", "in", "iq", "ir", "kg", "kh", "kz", "la", "lk", "ma", "mk", "mm", "mn", "mv", "my", "np", "pk", "rs", "ru", "sy", "th", "tj", "ua", "uz"]
+
+    function isLatin(code: string): bool {
+        return root.nonLatin.indexOf(code) < 0;
+    }
+
+    readonly property var baseLayouts: [
+        {"code": "us", "label": "US"},
+        {"code": "gb", "label": "UK"},
+        {"code": "de", "label": "DE"},
+        {"code": "fr", "label": "FR"},
+        {"code": "es", "label": "ES"},
+        {"code": "it", "label": "IT"},
+        {"code": "pt", "label": "PT"},
+        {"code": "br", "label": "BR"},
+        {"code": "nl", "label": "NL"},
+        {"code": "se", "label": "SE"},
+        {"code": "pl", "label": "PL"},
+        {"code": "cz", "label": "CZ"},
+        {"code": "tr", "label": "TR"},
+        {"code": "jp", "label": "JP"},
+        {"code": "ru", "label": "RU"},
+        {"code": "ua", "label": "UA"}
     ]
+
+    // "us+dvorak" → "US-DVORAK", "us,ru" → "US RU": every layout and variant.
+    function deviceLabel(value: string): string {
+        var entries = String(value).split(",");
+        var out = [];
+        for (var i = 0; i < entries.length; i++) {
+            var pair = entries[i].split("+");
+            out.push(pair[0].toUpperCase() + (pair.length > 1 && pair[1] !== "" ? "-" + pair[1].toUpperCase() : ""));
+        }
+        return out.join(" ");
+    }
+
+    // The list, with the device's own entry marked, or added first when the
+    // list has no entry that is exactly the device's value.
+    readonly property var keyboardLayouts: {
+        var out = [];
+        for (var i = 0; i < root.baseLayouts.length; i++)
+            out.push({"code": root.baseLayouts[i].code, "label": root.baseLayouts[i].label, "device": false});
+        var own = root.layoutIndexIn(out, root.deviceValue);
+        if (own >= 0)
+            out[own].device = true;
+        else
+            out.unshift({"code": root.deviceValue, "label": root.deviceLabel(root.deviceValue), "device": true});
+        return out;
+    }
+
+    function layoutIndexIn(list: var, code: string): int {
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].code === code)
+                return i;
+        }
+        return -1;
+    }
+
+    readonly property int activeLayoutIndex: Math.max(0, root.layoutIndexIn(root.keyboardLayouts, root.activeLayout))
+
+    function luaQuote(value: string): string {
+        return "'" + String(value).replace(/[^A-Za-z0-9_,:-]/g, "") + "'";
+    }
+
+    function inputExpression(layout: string, variant: string, options: string): string {
+        return "hl.config({ input = { kb_layout = " + root.luaQuote(layout) + ", kb_variant = "
+            + root.luaQuote(variant) + ", kb_options = " + root.luaQuote(options) + " } })";
+    }
+
+    // The three input values for a layout value, by punar_common::keymap's
+    // session rule: a Latin layout first (the first Latin one named, moved to
+    // the front, or US), at most four groups, and the switch chord whenever
+    // there is more than one.
+    function inputFor(value: string): var {
+        var layouts = [];
+        var variants = [];
+        var entries = String(value).split(",");
+        for (var i = 0; i < entries.length; i++) {
+            var pair = entries[i].split("+");
+            layouts.push(pair[0]);
+            variants.push(pair.length > 1 ? pair[1] : "");
+        }
+        if (layouts.length > 0 && !root.isLatin(layouts[0])) {
+            var latin = -1;
+            for (var j = 0; j < layouts.length; j++) {
+                if (root.isLatin(layouts[j])) {
+                    latin = j;
+                    break;
+                }
+            }
+            if (latin >= 0) {
+                layouts.unshift(layouts.splice(latin, 1)[0]);
+                variants.unshift(variants.splice(latin, 1)[0]);
+            } else {
+                layouts.unshift("us");
+                variants.unshift("");
+            }
+        }
+        layouts = layouts.slice(0, 4);
+        variants = variants.slice(0, 4);
+        var anyVariant = false;
+        for (var k = 0; k < variants.length; k++) {
+            if (variants[k] !== "")
+                anyVariant = true;
+        }
+        return {
+            "kb_layout": layouts.join(","),
+            "kb_variant": anyVariant ? variants.join(",") : "",
+            "kb_options": layouts.length > 1 ? "grp:alts_toggle" : ""
+        };
+    }
+
+    // What this screen's compositor should load for one list entry.
+    function expressionFor(entry: var): string {
+        var input = entry.device === true && root.deviceInput !== null ? root.deviceInput : root.inputFor(entry.code);
+        return root.inputExpression(input.kb_layout, input.kb_variant, input.kb_options);
+    }
+
+    // A pick from the list. The device's own entry is "no choice".
+    function chooseLayout(entry: var): void {
+        root.chosenLayout = entry.device === true ? "" : String(entry.code);
+        if (root.chosenLayout !== "")
+            choiceExpiry.restart();
+        else
+            choiceExpiry.stop();
+    }
+
+    // `--keymap <layout>` for punar-greet, only when someone chose here.
+    function keymapArgs(): var {
+        return root.chosenLayout !== "" ? ["--keymap", root.chosenLayout] : [];
+    }
+
+    Timer {
+        id: choiceExpiry
+        interval: 600000
+        repeat: false
+        onTriggered: {
+            if (root.chosenLayout === "")
+                return;
+            root.chosenLayout = "";
+            root.layoutReset();
+        }
+    }
+
+    function parseVconsole(body: string): void {
+        var layout = "";
+        var variant = "";
+        var lines = String(body).split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var m = /^\s*XKB(LAYOUT|VARIANT)=["']?([A-Za-z0-9_,-]*)["']?\s*$/.exec(lines[i]);
+            if (m === null)
+                continue;
+            if (m[1] === "LAYOUT")
+                layout = m[2];
+            else
+                variant = m[2];
+        }
+        if (layout === "")
+            return;
+        var layouts = layout.split(",").slice(0, 4);
+        var variants = variant.split(",");
+        var entries = [];
+        for (var j = 0; j < layouts.length; j++) {
+            if (layouts[j] === "")
+                return;
+            var v = j < variants.length ? variants[j] : "";
+            entries.push(v !== "" ? layouts[j] + "+" + v : layouts[j]);
+        }
+        root.deviceValue = entries.join(",");
+    }
+
+    function parseSessionInput(body: string): void {
+        var found = {};
+        var lines = String(body).split("\n");
+        for (var i = 0; i < lines.length; i++) {
+            var m = /^\s*(kb_layout|kb_variant|kb_options)\s*=\s*"([A-Za-z0-9_,:-]*)",\s*$/.exec(lines[i]);
+            if (m !== null)
+                found[m[1]] = m[2];
+        }
+        if (typeof found.kb_layout === "string" && found.kb_layout !== ""
+                && typeof found.kb_variant === "string" && typeof found.kb_options === "string")
+            root.deviceInput = found;
+    }
 
     function parseState(body: string): void {
         try {
@@ -548,6 +746,20 @@ Scope {
     }
 
     FileView {
+        id: vconsoleFile
+        path: "/etc/vconsole.conf"
+        printErrors: false
+        onLoaded: root.parseVconsole(vconsoleFile.text())
+    }
+
+    FileView {
+        id: renderedInput
+        path: Quickshell.env("XDG_RUNTIME_DIR") !== "" ? Quickshell.env("XDG_RUNTIME_DIR") + "/punar/session/input.lua" : ""
+        printErrors: false
+        onLoaded: root.parseSessionInput(renderedInput.text())
+    }
+
+    FileView {
         id: accountProjection
         path: "/run/punar/greeter.json"
         blockLoading: true
@@ -661,7 +873,6 @@ Scope {
             property string usernameBackendError: ""
             property string passwordBackendError: ""
             property string deviceBackendError: ""
-            property int layoutIndex: 0
             property bool layoutsOpen: false
             property bool usernameTouched: false
             property bool passwordTouched: false
@@ -774,7 +985,7 @@ Scope {
                 if (firstSession.running)
                     return;
                 panel.formFailure = "";
-                firstSession.command = ["/usr/bin/punar-greet", "first", panel.createdUsername];
+                firstSession.command = ["/usr/bin/punar-greet", "first", panel.createdUsername].concat(root.keymapArgs());
                 firstSession.running = true;
             }
 
@@ -932,6 +1143,20 @@ Scope {
                         loginPassword.focusField();
                 })
 
+            // A stale choice was cleared (root's choiceExpiry): the screen
+            // types in the device's layout again, and says so.
+            Connections {
+                target: root
+                function onLayoutReset(): void {
+                    if (!panel.primary)
+                        return;
+                    var own = root.keyboardLayouts[root.activeLayoutIndex];
+                    layoutProcess.command = ["hyprctl", "eval", root.expressionFor(own)];
+                    layoutProcess.running = true;
+                    panel.layoutsOpen = false;
+                }
+            }
+
             Connections {
                 target: root
                 function onStateLoadedChanged(): void {
@@ -946,9 +1171,9 @@ Scope {
                 }
             }
 
+            // This screen's own compositor only; see the note at deviceValue.
             Process {
                 id: layoutProcess
-                command: ["hyprctl", "keyword", "input:kb_layout", root.keyboardLayouts[panel.layoutIndex].code]
             }
 
             Process {
@@ -1004,7 +1229,7 @@ Scope {
 
             Process {
                 id: loginProcess
-                command: ["/usr/bin/punar-greet", "login"]
+                command: ["/usr/bin/punar-greet", "login"].concat(root.keymapArgs())
                 stdinEnabled: true
                 stdout: StdioCollector {
                     id: loginOutput
@@ -1116,16 +1341,19 @@ Scope {
                     id: keyboardControl
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 120
+                    // Wide enough for a device layout with a variant
+                    // ("Keyboard · US-DVORAK"), never narrower than before.
+                    width: Math.max(120, keyboardLabel.implicitWidth + 28)
                     height: 38
                     activeFocusOnTab: true
                     Accessible.role: Accessible.Button
-                    Accessible.name: "Keyboard layout " + root.keyboardLayouts[panel.layoutIndex].label
+                    Accessible.name: "Keyboard layout " + root.keyboardLayouts[root.activeLayoutIndex].label
                     Accessible.description: "Change the layout used to enter your password"
 
                     Meta {
+                        id: keyboardLabel
                         anchors.centerIn: parent
-                        text: "Keyboard · " + root.keyboardLayouts[panel.layoutIndex].label
+                        text: "Keyboard · " + root.keyboardLayouts[root.activeLayoutIndex].label
                         color: Theme.ink
                         z: 1
                     }
@@ -1177,9 +1405,10 @@ Scope {
                     border.color: Theme.inputBorder
                     z: 20
 
-                    Row {
+                    Grid {
                         id: layoutChoices
                         anchors.centerIn: parent
+                        columns: 8
                         spacing: 4
 
                         Repeater {
@@ -1189,17 +1418,18 @@ Scope {
                                 id: layoutChoice
                                 required property int index
                                 required property var modelData
-                                width: 34
+                                width: Math.max(34, choiceLabel.implicitWidth + 12)
                                 height: 28
                                 radius: Theme.radiusTag
-                                color: panel.layoutIndex === layoutChoice.index ? Theme.raise2 : Theme.paperSurface
-                                border.width: panel.layoutIndex === layoutChoice.index ? Theme.hairline : 0
+                                color: root.activeLayoutIndex === layoutChoice.index ? Theme.raise2 : Theme.paperSurface
+                                border.width: root.activeLayoutIndex === layoutChoice.index ? Theme.hairline : 0
                                 border.color: Theme.inputBorder
                                 activeFocusOnTab: layoutMenu.visible
                                 Accessible.role: Accessible.Button
                                 Accessible.name: layoutChoice.modelData.label + " keyboard layout"
 
                                 Meta {
+                                    id: choiceLabel
                                     anchors.centerIn: parent
                                     text: layoutChoice.modelData.label
                                     color: Theme.ink
@@ -1214,8 +1444,10 @@ Scope {
                                     border.color: Theme.ink
                                 }
                                 function select(): void {
-                                    panel.layoutIndex = layoutChoice.index;
-                                    layoutProcess.command = ["hyprctl", "keyword", "input:kb_layout", layoutChoice.modelData.code];
+                                    root.chooseLayout(layoutChoice.modelData);
+                                    // Hyprland 0.56's Lua provider applies input through
+                                    // eval, as punar-layout.sh does for presets.
+                                    layoutProcess.command = ["hyprctl", "eval", root.expressionFor(layoutChoice.modelData)];
                                     layoutProcess.running = true;
                                     panel.layoutsOpen = false;
                                 }

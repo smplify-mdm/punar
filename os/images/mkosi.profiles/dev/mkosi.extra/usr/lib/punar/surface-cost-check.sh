@@ -21,7 +21,7 @@ PROBE_PATH=/usr/share/punar/shell/surface-probe.qml
 PROBE_CMD="qs -p ${PROBE_PATH}"
 PROBE_LOG=/run/punar/surface-probe.log
 IPC_ERRORS=/run/punar/surface-probe-ipc-errors.log
-SURFACES="commandcenter systemcontrol shortcuts aipanel overview notifications"
+SURFACES="commandcenter systemcontrol shortcuts aipanel overview notifications windowswitcher"
 SAMPLES=3
 MIN_PROBE_PSS_KIB=16384
 FAILED=0
@@ -209,7 +209,73 @@ surface_closed() {
     [ "$(ipc surfaceprobe surfaceState | tr -d '[:space:]\"')" = "closed" ]
 }
 
+# WINDOWS TO DRAW. Measured on an empty desktop both the overview and the
+# Alt+Tab switcher cost almost nothing, and the switcher's budget below would
+# pass trivially (SMP-1405 WP-02 review). Three plain terminal windows are
+# opened before the overview's first sample and kept until the end; the
+# switcher's budget is refused if fewer than two were there to draw.
+#
+# ONE WINDOW PER WORKSPACE, so the two surfaces draw the same thing. The
+# overview draws one wireframe per WORKSPACE and the switcher one per WINDOW
+# (each showing that window's workspace). With all three windows on one
+# workspace the overview drew one plate of three windows and the switcher
+# three plates of three, and the relation the budget states was not being
+# measured (the VM run showed the switcher ~2 MiB over the overview for that
+# reason). Spread over workspaces 1-3, each draws three plates of one window.
+COST_WINDOWS_OPEN=no
+cost_window_count() {
+    hyprctl -j clients 2>/dev/null \
+        | jq '[.[] | select((.class // "") | startswith("punar-cost-"))] | length' 2>/dev/null \
+        || echo 0
+}
+cost_windows_mapped() { [ "$(cost_window_count)" -ge 3 ]; }
+cost_window_address() {
+    hyprctl -j clients 2>/dev/null \
+        | jq -r --arg c "punar-cost-$1" '[.[] | select(.class == $c)][0].address // ""' 2>/dev/null
+}
+cost_windows_spread() {
+    [ "$(hyprctl -j clients 2>/dev/null \
+        | jq '[.[] | select((.class // "") | startswith("punar-cost-")) | .workspace.id] | unique | length' 2>/dev/null)" = 3 ]
+}
+open_cost_windows() {
+    [ "${COST_WINDOWS_OPEN}" = no ] || return 0
+    COST_WINDOWS_OPEN=yes
+    for cost_n in 1 2 3; do
+        foot --app-id "punar-cost-${cost_n}" sleep 900 >/dev/null 2>&1 &
+    done
+    if wait_for 30 cost_windows_mapped; then
+        for cost_n in 2 3; do
+            cost_address="$(cost_window_address "${cost_n}")"
+            case "${cost_address}" in
+                0x[0-9a-f]*)
+                    hyprctl dispatch "hl.dsp.window.move({ window = 'address:${cost_address}', workspace = ${cost_n}, follow = false })" \
+                        >/dev/null 2>&1 ;;
+            esac
+        done
+        if wait_for 10 cost_windows_spread; then
+            note "# three windows open, one per workspace, for the overview and the switcher to draw"
+        else
+            note "FAIL the three cost windows did not spread over three workspaces; the overview and the switcher would not draw the same thing"
+            FAILED=1
+        fi
+    else
+        note "# only $(cost_window_count) of three windows mapped for the overview and the switcher"
+    fi
+}
+close_cost_windows() {
+    [ "${COST_WINDOWS_OPEN}" = yes ] || return 0
+    for cost_address in $(hyprctl -j clients 2>/dev/null \
+            | jq -r '.[] | select((.class // "") | startswith("punar-cost-")) | .address' 2>/dev/null); do
+        punarctl window close --address "${cost_address}" >/dev/null 2>&1 || true
+    done
+}
+
+SWITCHER_WINDOWS=0
 for surface in ${SURFACES}; do
+    case "${surface}" in
+        overview) open_cost_windows ;;
+        windowswitcher) SWITCHER_WINDOWS="$(cost_window_count)" ;;
+    esac
     sample=1
     while [ "${sample}" -le "${SAMPLES}" ]; do
         if ! start_probe; then
@@ -336,5 +402,51 @@ for surface in ${SURFACES}; do
     median_first_map="$(awk -F '\t' -v s="${surface}" '$1 == s {print $9}' "${REPORT}" | sort -n | sed -n '2p')"
     note "median ${surface}: resident_delta_kib=${median_delta} construct_ms=${median_construct} shell_map_ms=${median_shell_map} first_map_ms=${median_first_map}"
 done
+
+# THE SWITCHER'S BUDGET (SMP-1405 WP-02). Alt+Tab is a strip of the
+# overview's own wireframes, one per window, so drawing the same windows
+# (one per workspace, above: three plates each) it must never cost more to
+# keep than the overview's grid, nor take longer to first appear:
+# whatever the overview's measured numbers are on this machine, the
+# switcher stays inside them. A relative budget, because the absolute
+# numbers move with the VM's renderer and are not a product promise; this
+# relation is.
+#
+# INSIDE THE OVERVIEW'S OWN SPREAD. Each figure is one fresh process, and on
+# the same VM the overview's three first-map samples ran 117-199 ms in one
+# run and its median moved 145-165 ms between runs; a median-against-median
+# test failed on a 2 ms difference and passed on the next boot. So the
+# switcher's median must not exceed the overview's highest sample of the same
+# run: a switcher really slower or heavier than the overview still fails,
+# and noise the overview shows against itself does not.
+median_of() {
+    awk -F '\t' -v s="$1" -v c="$2" '$1 == s && $2 ~ /^[0-9]+$/ {print $c}' "${REPORT}" | sort -n | sed -n '2p'
+}
+highest_of() {
+    awk -F '\t' -v s="$1" -v c="$2" '$1 == s && $2 ~ /^[0-9]+$/ {print $c}' "${REPORT}" | sort -n | tail -1
+}
+switcher_delta="$(median_of windowswitcher 5)"
+overview_delta="$(highest_of overview 5)"
+switcher_map="$(median_of windowswitcher 9)"
+overview_map="$(highest_of overview 9)"
+overview_median_delta="$(median_of overview 5)"
+overview_median_map="$(median_of overview 9)"
+close_cost_windows
+if [ "${SWITCHER_WINDOWS:-0}" -lt 2 ] 2>/dev/null; then
+    note "FAIL windowswitcher budget: measured with ${SWITCHER_WINDOWS:-0} window(s) to draw; an empty strip proves nothing"
+    FAILED=1
+fi
+case "${switcher_delta}${overview_delta}${switcher_map}${overview_map}" in
+    ''|*[!0-9-]*)
+        note "FAIL windowswitcher budget: medians unavailable (switcher ${switcher_delta:-?}/${switcher_map:-?}, overview ${overview_delta:-?}/${overview_map:-?})"
+        FAILED=1 ;;
+    *)
+        if [ "${switcher_delta}" -le "${overview_delta}" ] && [ "${switcher_map}" -le "${overview_map}" ]; then
+            note "ok windowswitcher budget: median resident ${switcher_delta} <= ${overview_delta} KiB and median first map ${switcher_map} <= ${overview_map} ms (the overview's highest sample; its median ${overview_median_delta} KiB / ${overview_median_map} ms), both drawing ${SWITCHER_WINDOWS} windows"
+        else
+            note "FAIL windowswitcher budget: median resident ${switcher_delta} KiB / first map ${switcher_map} ms exceeds the overview's highest sample ${overview_delta} KiB / ${overview_map} ms (its median ${overview_median_delta} KiB / ${overview_median_map} ms)"
+            FAILED=1
+        fi ;;
+esac
 
 finish

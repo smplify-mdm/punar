@@ -24,8 +24,10 @@ use crate::hypr::{self, HyprError};
 /// start and CI run it too (docs/development/milestone-2.md section 4).
 const LAYOUT_SCRIPT: &str = "/usr/lib/punar/punar-layout.sh";
 /// What `layout <preset>` accepts: the five presets and the script's verbs.
-pub const LAYOUT_ARGS: [&str; 9] = [
-    "balanced", "columns", "rows", "focus", "stack", "next", "prev", "restore", "status",
+/// `default` is for `--workspace` only: it gives a workspace back to the
+/// session's preset.
+pub const LAYOUT_ARGS: [&str; 10] = [
+    "balanced", "columns", "rows", "focus", "stack", "next", "prev", "restore", "status", "default",
 ];
 const PRESETS: [&str; 5] = ["balanced", "columns", "rows", "focus", "stack"];
 
@@ -67,6 +69,22 @@ pub enum WindowCommand {
         #[arg(long)]
         address: String,
     },
+    /// Pop a window out: float it at 60% of its display, centre it and pin
+    /// it over every workspace; or put a popped-out window back in the
+    /// layout. Without --address, the focused window.
+    Pop {
+        #[arg(long)]
+        address: Option<String>,
+    },
+    /// This person's window look: transparency, the gaps between windows,
+    /// and a square shape for a window alone on its workspace. Kept across
+    /// sessions. Without arguments, the current look; with one, `toggle`.
+    Look {
+        #[arg(value_parser = ["transparency", "gaps", "square"])]
+        which: Option<String>,
+        #[arg(value_parser = ["on", "off", "toggle"], requires = "which")]
+        state: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -103,6 +121,15 @@ pub enum NotificationsCommand {
 pub enum DisplayCommand {
     /// Every connected display: mode, scale and position.
     List,
+    /// The backlight: `get`, `set 40%`, `40%`, `+5%` or `-5%`. Through this
+    /// session's own logind object; a machine with no backlight exits 6.
+    Brightness {
+        #[arg(allow_hyphen_values = true, num_args = 0..=2)]
+        change: Vec<String>,
+        /// The keyboard backlight instead of the display's.
+        #[arg(long)]
+        keyboard: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,10 +142,14 @@ pub enum AudioCommand {
         #[arg(allow_hyphen_values = true)]
         change: String,
     },
-    /// Mute the output: on, off, or toggle (the default).
+    /// Mute the output, or the microphone with --input: on, off, or toggle
+    /// (the default).
     Mute {
         #[arg(value_parser = ["on", "off", "toggle"])]
         state: Option<String>,
+        /// The default input (the microphone) instead of the output.
+        #[arg(long)]
+        input: bool,
     },
 }
 
@@ -461,13 +492,88 @@ fn current_preset() -> (String, &'static str) {
     }
 }
 
-pub fn layout(preset: &str, style: &Style, json_output: bool) -> ExitCode {
+/// The per-workspace presets punar-layout.sh keeps, validated as the script
+/// validates them: a workspace number and one of the five presets.
+fn workspace_presets() -> Vec<(i64, String)> {
+    let path = std::env::var("XDG_STATE_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute())
+                .map(|home| home.join(".local/state"))
+        })
+        .map(|dir| dir.join("punar/workspace-layouts.json"));
+    let Some(document) = path
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<(i64, String)> = document
+        .get("workspaces")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, preset)| {
+            let id = workspace_address(id).filter(|id| *id <= 9999)?;
+            let preset = preset.as_str().filter(|p| PRESETS.contains(p))?;
+            Some((id, preset.to_string()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `active`, or a workspace number, as the script takes it.
+fn workspace_target(raw: &str) -> Option<String> {
+    if raw == "active" {
+        return Some(raw.to_string());
+    }
+    workspace_address(raw)
+        .filter(|id| *id <= 9999)
+        .map(|id| id.to_string())
+}
+
+pub fn layout(preset: &str, workspace: Option<&str>, style: &Style, json_output: bool) -> ExitCode {
+    let target = match workspace {
+        None if preset == "default" => {
+            return refuse(
+                "`default` gives one workspace back to the session's preset, so it needs \
+                 --workspace <number|active>.",
+                2,
+            );
+        }
+        None => None,
+        Some(raw) => match workspace_target(raw) {
+            Some(target) => Some(target),
+            None => {
+                return refuse(
+                    &format!(
+                        "{raw:?} is not a workspace, so no layout was changed.\n\
+                         Next step: give a workspace number, or `active`."
+                    ),
+                    2,
+                );
+            }
+        },
+    };
+    if target.is_some() && preset == "restore" {
+        return refuse("`restore` covers every workspace; drop --workspace.", 2);
+    }
     if preset != "status" {
         // Refuse before running anything when there is no compositor.
         if let Err(error) = hypr::request("version") {
             return hypr_fail(error);
         }
-        let result = Command::new(LAYOUT_SCRIPT)
+        let mut command = Command::new(LAYOUT_SCRIPT);
+        if let Some(target) = &target {
+            command.args(["--workspace", target]);
+        }
+        let result = command
             .arg(preset)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -495,17 +601,50 @@ pub fn layout(preset: &str, style: &Style, json_output: bool) -> ExitCode {
         }
     }
     let (current, source) = current_preset();
+    let workspaces = workspace_presets();
+    let active = hypr::json("activeworkspace")
+        .ok()
+        .and_then(|w| w.get("id").and_then(Value::as_i64));
+    let active_preset = active.and_then(|id| {
+        workspaces
+            .iter()
+            .find(|(ws, _)| *ws == id)
+            .map(|(_, preset)| preset.clone())
+    });
     if json_output {
-        return print_json(&json!({ "preset": current, "source": source }));
+        let map: serde_json::Map<String, Value> = workspaces
+            .iter()
+            .map(|(id, preset)| (id.to_string(), json!(preset)))
+            .collect();
+        return print_json(&json!({
+            "preset": current,
+            "source": source,
+            "workspaces": map,
+            "active": active.map(|id| json!({
+                "id": id,
+                "preset": active_preset.clone().unwrap_or_else(|| current.clone()),
+                "own": active_preset.is_some(),
+            })),
+        }));
     }
     let mut out = fmt::masthead(style, "Layout", "this session");
-    out.push_str(&fmt::rows(
-        style,
-        &[Row::new("Preset", &current, Slot::Ok, source)],
-    ));
+    let mut rows = vec![Row::new("Preset", &current, Slot::Ok, source)];
+    for (id, preset) in &workspaces {
+        rows.push(Row::new(
+            &format!("Workspace {id}"),
+            preset,
+            Slot::Neutral,
+            if active == Some(*id) {
+                "its own preset · focused"
+            } else {
+                "its own preset"
+            },
+        ));
+    }
+    out.push_str(&fmt::rows(style, &rows));
     out.push_str(&fmt::note(
         style,
-        "balanced · columns · rows · focus · stack · next · prev",
+        "balanced · columns · rows · focus · stack · next · prev · --workspace <n|active>",
     ));
     print!("{out}");
     ExitCode::SUCCESS
@@ -641,7 +780,116 @@ pub fn window(command: WindowCommand, style: &Style, json_output: bool) -> ExitC
             );
             window_result(hypr::dispatch(&expression), style, json_output, "killed")
         }
+        WindowCommand::Pop { address } => pop_window(address, style, json_output),
+        WindowCommand::Look { which, state } => crate::look::look(which, state, style, json_output),
     }
+}
+
+/// The dispatchers that pop a window out or put it back, in order. Pinning
+/// needs a floating window and tiling needs an unpinned one, so the order
+/// depends on which way the window is going.
+pub fn pop_expressions(
+    address: &str,
+    floating: bool,
+    pinned: bool,
+    display: Option<(f64, f64)>,
+) -> (Vec<String>, &'static str) {
+    let window = hypr::lua_string(&format!("address:{address}"));
+    if floating && pinned {
+        return (
+            vec![
+                format!("hl.dsp.window.pin({{ window = {window}, action = 'toggle' }})"),
+                format!("hl.dsp.window.float({{ window = {window}, action = 'toggle' }})"),
+            ],
+            "back in the layout",
+        );
+    }
+    let mut out = Vec::new();
+    if !floating {
+        out.push(format!(
+            "hl.dsp.window.float({{ window = {window}, action = 'toggle' }})"
+        ));
+    }
+    if let Some((width, height)) = display {
+        out.push(format!(
+            "hl.dsp.window.resize({{ window = {window}, x = {}, y = {} }})",
+            (width * 0.6).round() as i64,
+            (height * 0.6).round() as i64
+        ));
+    }
+    out.push(format!("hl.dsp.window.center({{ window = {window} }})"));
+    if !pinned {
+        out.push(format!(
+            "hl.dsp.window.pin({{ window = {window}, action = 'toggle' }})"
+        ));
+    }
+    out.push(format!(
+        "hl.dsp.window.alter_zorder({{ window = {window}, mode = 'top' }})"
+    ));
+    (out, "popped out")
+}
+
+/// The focused display's logical size, for a pop-out's 60%.
+fn focused_display() -> Option<(f64, f64)> {
+    let monitors = hypr::json("monitors").ok()?;
+    let monitor = monitors
+        .as_array()?
+        .iter()
+        .find(|m| m.get("focused").and_then(Value::as_bool) == Some(true))?;
+    let scale = monitor
+        .get("scale")
+        .and_then(Value::as_f64)
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1.0);
+    let width = monitor.get("width").and_then(Value::as_f64)? / scale;
+    let height = monitor.get("height").and_then(Value::as_f64)? / scale;
+    (width > 0.0 && height > 0.0).then_some((width, height))
+}
+
+fn pop_window(address: Option<String>, style: &Style, json_output: bool) -> ExitCode {
+    let window = match address {
+        Some(address) if !valid_address(&address) => return bad_address(&address),
+        Some(address) => match hypr::json("clients") {
+            Ok(Value::Array(windows)) => match windows
+                .into_iter()
+                .find(|w| text(w, "address") == address)
+            {
+                Some(window) => window,
+                None => {
+                    return refuse(
+                        &format!("No window has the address {address}, so nothing was changed."),
+                        1,
+                    );
+                }
+            },
+            Ok(_) => return hypr_fail(HyprError::Refused("the window list was not a list".into())),
+            Err(error) => return hypr_fail(error),
+        },
+        None => match hypr::json("activewindow") {
+            Ok(active) if valid_address(text(&active, "address")) => active,
+            Ok(_) => {
+                return refuse(
+                    "No application window is focused, so nothing was popped out.",
+                    1,
+                );
+            }
+            Err(error) => return hypr_fail(error),
+        },
+    };
+    let address = text(&window, "address").to_string();
+    let flag = |key: &str| window.get(key).and_then(Value::as_bool) == Some(true);
+    let (expressions, what) = pop_expressions(
+        &address,
+        flag("floating"),
+        flag("pinned"),
+        focused_display(),
+    );
+    for expression in &expressions {
+        if let Err(error) = hypr::dispatch(expression) {
+            return hypr_fail(error);
+        }
+    }
+    window_result(Ok(()), style, json_output, what)
 }
 
 fn window_result(
@@ -923,7 +1171,9 @@ pub fn notifications(command: NotificationsCommand, style: &Style, json_output: 
 // ---------------------------------------------------------------------------
 
 pub fn display(command: DisplayCommand, style: &Style, json_output: bool) -> ExitCode {
-    let DisplayCommand::List = command;
+    if let DisplayCommand::Brightness { change, keyboard } = command {
+        return crate::brightness::brightness(&change, keyboard, style, json_output);
+    }
     match hypr::json("monitors") {
         Ok(Value::Array(monitors)) => {
             if json_output {
@@ -1025,6 +1275,32 @@ fn volume_arg(change: &str) -> Option<String> {
     (value <= 100).then(|| format!("{value}%{sign}"))
 }
 
+/// A device the verb would drive is not there, while PipeWire itself
+/// answers: exit 6, like `display brightness` with no backlight, rather
+/// than blaming PipeWire (SMP-1405 WP-02).
+fn audio_absent(what: &str, why: &str) -> ExitCode {
+    refuse(
+        &format!(
+            "This machine has no {what} PipeWire can use, so nothing was changed.\n\
+             Why: PipeWire answers but reports no default {what} ({}).\n\
+             Next step: connect one; the key works as soon as PipeWire sees it.",
+            if why.is_empty() {
+                "wpctl gave no reason"
+            } else {
+                why
+            }
+        ),
+        crate::ipc::EXIT_ABSENT,
+    )
+}
+
+/// Whether PipeWire answers at all.
+fn pipewire_reachable() -> bool {
+    wpctl(&["status"]).is_ok()
+}
+
+/// Both default devices, `null` where there is none. An error only when
+/// PipeWire itself does not answer.
 fn audio_state() -> Result<Value, String> {
     let read = |node: &str| -> Result<Value, String> {
         let line = wpctl(&["get-volume", node])?;
@@ -1033,9 +1309,17 @@ fn audio_state() -> Result<Value, String> {
             None => Value::Null,
         })
     };
+    let output = read("@DEFAULT_AUDIO_SINK@");
+    let input = read("@DEFAULT_AUDIO_SOURCE@");
+    if let (Err(why), Err(_)) = (&output, &input) {
+        // Neither device answered: PipeWire is down, or has no devices.
+        if !pipewire_reachable() {
+            return Err(why.clone());
+        }
+    }
     Ok(json!({
-        "output": read("@DEFAULT_AUDIO_SINK@")?,
-        "input": read("@DEFAULT_AUDIO_SOURCE@").unwrap_or(Value::Null),
+        "output": output.unwrap_or(Value::Null),
+        "input": input.unwrap_or(Value::Null),
     }))
 }
 
@@ -1060,9 +1344,14 @@ pub fn audio(command: AudioCommand, style: &Style, json_output: bool) -> ExitCod
                 );
             }
         },
-        AudioCommand::Mute { state } => Some(vec![
+        AudioCommand::Mute { state, input } => Some(vec![
             "set-mute".to_string(),
-            "@DEFAULT_AUDIO_SINK@".into(),
+            if *input {
+                "@DEFAULT_AUDIO_SOURCE@"
+            } else {
+                "@DEFAULT_AUDIO_SINK@"
+            }
+            .into(),
             match state.as_deref() {
                 Some("on") => "1",
                 Some("off") => "0",
@@ -1074,7 +1363,15 @@ pub fn audio(command: AudioCommand, style: &Style, json_output: bool) -> ExitCod
     if let Some(args) = change {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         if let Err(why) = wpctl(&args) {
-            return audio_unreachable(&why);
+            if !pipewire_reachable() {
+                return audio_unreachable(&why);
+            }
+            let what = if matches!(command, AudioCommand::Mute { input: true, .. }) {
+                "microphone"
+            } else {
+                "audio output"
+            };
+            return audio_absent(what, &why);
         }
     }
     let state = match audio_state() {
@@ -1155,6 +1452,32 @@ mod tests {
             Some(["/usr/bin/loginctl", "lock-session"])
         );
         assert_eq!(session_argv(&SessionCommand::End), None);
+    }
+
+    /// Pop out floats, sizes, centres, pins and raises; putting it back
+    /// unpins before it tiles, because a pinned window cannot tile.
+    #[test]
+    fn pop_out_and_back_send_the_dispatchers_in_order() {
+        let (out, what) = pop_expressions("0x1a", false, false, Some((1920.0, 1080.0)));
+        assert_eq!(what, "popped out");
+        assert_eq!(
+            out,
+            [
+                "hl.dsp.window.float({ window = 'address:0x1a', action = 'toggle' })",
+                "hl.dsp.window.resize({ window = 'address:0x1a', x = 1152, y = 648 })",
+                "hl.dsp.window.center({ window = 'address:0x1a' })",
+                "hl.dsp.window.pin({ window = 'address:0x1a', action = 'toggle' })",
+                "hl.dsp.window.alter_zorder({ window = 'address:0x1a', mode = 'top' })",
+            ]
+        );
+        // Already floating: no float toggle, which would tile it.
+        let (out, _) = pop_expressions("0x1a", true, false, None);
+        assert!(!out.iter().any(|e| e.contains("float")), "{out:?}");
+        let (out, what) = pop_expressions("0x1a", true, true, None);
+        assert_eq!(what, "back in the layout");
+        assert!(
+            out[0].starts_with("hl.dsp.window.pin(") && out[1].starts_with("hl.dsp.window.float(")
+        );
     }
 
     #[test]

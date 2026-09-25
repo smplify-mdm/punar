@@ -36,16 +36,15 @@ pragma ComponentBehavior: Bound
 // lie, and it raises for a change made by any source — a key, a mixer, an
 // application — because a change is a change.
 //
-// THE BRIGHTNESS ROW IS DASHED, AND THAT IS THE HONEST DRAWING
-// (DESIGN_LANGUAGE.md §7 — a dashed stroke marks a mechanism outside the
-// current production claim; spec 1.22). Punar ships no backlight
-// capability: there is no typed `system.brightness`, no `punarctl` verb
-// and, in the VM target, no physical backlight to move. So the row exists
-// in the plate's anatomy, carries the plate's own `SIM · VM` tag on a
-// dashed rule, and is reachable only by an explicit IPC call — it is never
-// bound to a key, because a key that changes nothing is exactly the dead
-// control spec 1.22 forbids. When a brightness capability ships, this row
-// loses its dash and gains its binding; until then it says so out loud.
+// THE BRIGHTNESS ROW IS REAL OR ABSENT (SMP-1405 WP-02). The brightness keys
+// run `punarctl display brightness`, which writes through logind's
+// SetBrightness on this session's own object and then calls
+// `osd brightness <percent> <display|keyboard>` with the value it READ BACK
+// from sysfs — the value the panel holds, never the value asked for, the
+// same rule the volume row keeps. A machine with no backlight (every VM)
+// makes the verb exit 6 before it calls here, so nothing is drawn: the row
+// that used to say "SIM · VM" on a dashed rule is gone, because there is no
+// longer a simulation to label.
 //
 // Expected memory: two small panel cards on one transparent, click-through
 // layer window, plus the pipewire client Quickshell already links. No
@@ -54,7 +53,7 @@ pragma ComponentBehavior: Bound
 //
 // Driven from a check script via Quickshell IPC:
 //   qs -p /usr/share/punar/shell ipc call osd state
-//   qs -p /usr/share/punar/shell ipc call osd brightness 60
+//   qs -p /usr/share/punar/shell ipc call osd brightness 60 display
 
 import QtQuick
 import Quickshell
@@ -104,11 +103,13 @@ Scope {
     readonly property real volume: root.volumeAvailable
         ? Math.max(0, Math.min(1, root.sinkAudio.volume)) : 0
 
-    // ---- brightness (dashed · not shipped) ----
+    // ---- brightness, from `punarctl display brightness` ----
 
-    // -1 until something sets it. Nothing in the image does, so on a stock
-    // machine this row is never drawn at all.
+    // -1 until a brightness change reports one. On a machine with no
+    // backlight nothing ever does, so the row is never drawn.
     property real brightness: -1
+    // "display" or "keyboard": which light the reading is for.
+    property string brightnessWhich: "display"
     readonly property bool brightnessKnown: root.brightness >= 0
 
     // ---- raising ----
@@ -227,13 +228,14 @@ Scope {
             return "volume";
         }
 
-        // The brightness row's ONLY driver. Punar ships no backlight
-        // capability, so this sets a display value and nothing else — the
-        // row draws itself dashed and says so.
-        function brightness(percent: string): string {
+        // The brightness row's driver: `punarctl display brightness` calls
+        // this after a change, with the percent it read back from sysfs and
+        // which light it was. It draws; it changes nothing.
+        function brightness(percent: string, which: string): string {
             var v = Number(percent);
-            if (isNaN(v))
+            if (isNaN(v) || percent === "")
                 return "invalid";
+            root.brightnessWhich = which === "keyboard" ? "keyboard" : "display";
             root.brightness = Math.max(0, Math.min(1, v / 100));
             root.raise("brightness");
             return String(Math.round(root.brightness * 100));
@@ -254,28 +256,6 @@ Scope {
         font.capitalization: Font.AllUppercase
         color: Theme.panelInk3
         textFormat: Text.PlainText
-    }
-
-    // A dashed hairline — the M7/M8 vocabulary, on the panel surface.
-    component DashedRule: Canvas {
-        id: dashedRule
-
-        height: 2
-
-        onPaint: {
-            var ctx = getContext("2d");
-            ctx.clearRect(0, 0, width, height);
-            ctx.strokeStyle = String(Theme.panelInk3);
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 4]);
-            ctx.beginPath();
-            ctx.moveTo(0, 0.5);
-            ctx.lineTo(width, 0.5);
-            ctx.stroke();
-        }
-        onVisibleChanged: if (visible)
-            dashedRule.requestPaint()
-        onWidthChanged: dashedRule.requestPaint()
     }
 
     // The instrument itself (D-009 `.ticks`): discrete segments, never a
@@ -407,18 +387,15 @@ Scope {
                 }
             }
 
-            // ---- brightness · DASHED, not shipped (§7) ----
+            // ---- brightness (D-009 `.osd`, the volume card's twin) ----
             Rectangle {
                 id: brightnessCard
 
                 visible: root.showing === "brightness" && root.brightnessKnown
                 width: brightnessRow.implicitWidth + 36
-                height: 68
+                height: 56
                 radius: Theme.radius
                 color: Theme.panelSurface
-                // The card's own edge stays a hairline; the dashed rule
-                // beneath the label carries the claim, exactly as the AI
-                // panel's unobserved ledger rows do.
                 border.width: Theme.hairline
                 border.color: Theme.panelEdge
 
@@ -428,32 +405,16 @@ Scope {
                     anchors.centerIn: parent
                     spacing: 14
 
-                    Column {
+                    PanelLabel {
                         anchors.verticalCenter: parent.verticalCenter
                         width: 74
-                        spacing: 4
-
-                        PanelLabel {
-                            color: Theme.panelInk3
-                            text: "Brightness"
-                        }
-
-                        DashedRule {
-                            width: 74
-                        }
-
-                        PanelLabel {
-                            font.pixelSize: 8
-                            color: Theme.panelInk3
-                            // The plate's own tag, and the reason for it.
-                            text: "Sim · VM"
-                        }
+                        color: Theme.panelFg
+                        text: root.brightnessWhich === "keyboard" ? "Keyboard" : "Brightness"
                     }
 
                     TickMeter {
                         anchors.verticalCenter: parent.verticalCenter
                         lit: root.litTicks(root.brightness)
-                        onColor: Theme.panelInk3 // dashed voice: never the full-strength reading
                     }
 
                     Text {
@@ -463,10 +424,7 @@ Scope {
                         font.family: Theme.fontMono
                         font.pixelSize: 12
                         font.weight: 500
-                        // Geist Mono is inherently tabular (the Bar/
-                        // ApprovalOverlay precedent) — the digits hold
-                        // their column without a feature override.
-                        color: Theme.panelInk3
+                        color: Theme.panelFg
                         text: root.percentText(root.brightness)
                         textFormat: Text.PlainText
                     }
@@ -487,9 +445,11 @@ Scope {
                     font.letterSpacing: Theme.tracking(8, 0.1)
                     color: Theme.panelInk3
                     textFormat: Text.PlainText
-                    text: root.showing === "brightness"
-                        ? "No backlight capability ships · this reading is simulated"
-                        : "20 ticks · 5% each · the value the sink holds"
+                    text: root.showing !== "brightness"
+                        ? "20 ticks · 5% each · the value the sink holds"
+                        : root.brightnessWhich === "keyboard"
+                            ? "20 ticks · 5% each · the value the keyboard light holds"
+                            : "20 ticks · 5% each · the value the panel holds"
                 }
             }
         }

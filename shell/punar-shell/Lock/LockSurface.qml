@@ -45,6 +45,8 @@ WlSessionLockSurface {
     property string dateText: ""
     // The field-note masthead's right-hand data slot: MM · YYYY (D-002).
     property string monthYear: ""
+    // "Keyboard Russian · Alt + Alt switches", or "" (Lock.qml).
+    property string keyboardText: ""
     property int attempts: 0
     property bool busy: false
     property bool secure: false
@@ -630,7 +632,7 @@ WlSessionLockSurface {
             anchors.bottom: parent.bottom
             font.pixelSize: 9
             font.letterSpacing: Theme.tracking(9, 0.15)
-            text: "↵ Unlock · Tab Move · Esc Clear"
+            text: (surface.keyboardText !== "" ? surface.keyboardText + " · " : "") + "↵ Unlock · Tab Move · Esc Clear"
         }
     }
 }

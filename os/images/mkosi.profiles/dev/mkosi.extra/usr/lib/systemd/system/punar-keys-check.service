@@ -1,0 +1,27 @@
+# Punar keys, keyboard layout and window grammar in-VM exercise (SMP-1405
+# WP-02; keys-check.sh says what it proves).
+#
+# Runs as User=punar, the surfaces-check pattern: the keyboard layout is set
+# by the person at the machine, and every other assertion is scoped to their
+# session. Its key requests reach the serial console on stdout, where the
+# desktop gate's QMP driver (tools/qmp-keys.py) reads them.
+#
+# Not enabled, no .wants symlink — idle-ram.sh starts it synchronously
+# (Type=oneshot blocks) right after the surfaces exercise, which proves the
+# untouched shell first. It puts the device's layout back and closes its
+# windows before it exits; KillMode's default control-group takes any probe
+# window it missed.
+
+[Unit]
+Description=Punar keys, keyboard layout and window grammar exercise (CI)
+
+[Service]
+Type=oneshot
+User=punar
+# Bounded waits inside: about forty waits of 5-30 s, each ending on first
+# success, two configuration reloads and two lock/unlock cycles. A minute or
+# two under KVM; the rest is TCG headroom (tools/boot-test.sh counts it).
+TimeoutStartSec=10min
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/lib/punar/keys-check.sh

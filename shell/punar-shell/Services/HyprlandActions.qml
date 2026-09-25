@@ -77,11 +77,23 @@ Singleton {
         root.run(["punarctl", "window", "focus", "--class", appClass]);
     }
 
-    // A layout preset: `punarctl layout`, which runs punar-layout.sh, the
-    // presets' one implementation, and refuses first when no compositor is
-    // reachable.
+    // Raise one exact window by its address (the Alt+Tab switcher); punarctl
+    // checks the address is 0x-hex before it builds the selector.
+    function focusWindowAddress(address: string): void {
+        root.run(["punarctl", "window", "focus", "--address", address]);
+    }
+
+    // A layout preset from the command center: `punarctl layout`, which runs
+    // punar-layout.sh, the presets' one implementation, and refuses first
+    // when no compositor is reachable. It sets the SESSION's preset (every
+    // workspace without one of its own follows it), then gives the focused
+    // workspace back to the session, so the choice is seen where it was
+    // made even if PUNAR+comma/period had given that workspace its own. The
+    // keys remain the per-workspace route (SMP-1405 WP-02 review: the
+    // command center had become per-workspace only, with no way back).
     function applyLayout(preset: string): void {
         root.run(["punarctl", "layout", preset]);
+        root.run(["punarctl", "layout", "default", "--workspace", "active"]);
     }
 
     // An empty name clears the workspace's name.

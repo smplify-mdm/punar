@@ -1567,6 +1567,89 @@ else
     note "ok   no live bind table to compare the fold against; skipping the fold relation"
 fi
 
+# TYPE-TO-FILTER AND THE "NOT TRIED YET" HINT (SMP-1405 WP-02), through the
+# same matches() the surface renders with. Every word must match, so "move
+# mon" keeps only moves between monitors; a filter that matches nothing
+# leaves nothing; and the hint never suggests a surface this session has
+# already opened (group 5 opened the command center above).
+sc_text() { ipc "$@" | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+sc_filter="$(sc_text shortcuts filter 'move mon')"
+case "${sc_filter}" in
+    ''|0*)
+        note "FAIL the shortcut filter 'move mon' kept no rows"
+        FAILED=1 ;;
+    *)
+        if printf '%s\n' "${sc_filter#*: }" | tr '|' '\n' | grep -v -i 'move' | grep -q '[^[:space:]]'; then
+            note "FAIL the shortcut filter 'move mon' kept a row that is not a move: ${sc_filter}"
+            FAILED=1
+        else
+            note "ok   the shortcut filter keeps only matching rows ('move mon' -> ${sc_filter%%:*})"
+        fi ;;
+esac
+if [ "$(sc_text shortcuts filter 'zzqq')" = 0 ]; then
+    note "ok   a shortcut filter that matches nothing leaves no rows"
+else
+    note "FAIL the shortcut filter 'zzqq' kept rows: $(sc_text shortcuts filter 'zzqq')"
+    FAILED=1
+fi
+sc_untried="$(sc_text shortcuts untried)"
+case "${sc_untried}" in
+    *"Open command center"*)
+        note "FAIL the not-tried-yet hint still suggests the command center after it was opened: ${sc_untried}"
+        FAILED=1 ;;
+    *)
+        note "ok   the not-tried-yet hint leaves out what was used (${sc_untried:-empty})" ;;
+esac
+# NOT VACUOUS: an empty hint passes the line above, and so would a surface
+# that failed to load. The terminal's answer is the oracle (terminal parity):
+# the shell writes the family list at its first start, `punarctl keys list
+# --untried` reads the same file, and every row the hint names must be one
+# the terminal also calls untried. Only a person who tried everything gets
+# an empty hint, and then the terminal must agree.
+sc_tried_file="${HOME:-/home/punar}/.local/state/punar/shortcuts-tried.json"
+if jq -e '.version == 1 and (.families | type) == "array" and (.families | length) > 0' \
+        "${sc_tried_file}" >/dev/null 2>&1; then
+    note "ok   the shell wrote the tried-keys file the terminal reads ($(jq '.families | length' "${sc_tried_file}") families)"
+else
+    note "FAIL the shell did not write ${sc_tried_file}, so the terminal cannot give the same hint"
+    FAILED=1
+fi
+sc_cli_untried="$(punarctl --json keys list --untried 2>/dev/null | jq -r '.[].description' 2>/dev/null)"
+if [ -n "${sc_cli_untried}" ] && [ -z "${sc_untried}" ]; then
+    note "FAIL the hint is empty while the terminal still lists untried keys: $(printf '%s' "${sc_cli_untried}" | tr '\n' '|')"
+    FAILED=1
+elif [ -z "${sc_cli_untried}" ] && [ -n "${sc_untried}" ]; then
+    note "FAIL the hint suggests '${sc_untried}' while the terminal lists nothing untried"
+    FAILED=1
+else
+    sc_hint_rows=0
+    sc_hint_bad=""
+    # Entries are "<chord>  <description>", joined by "   ·   ". A folded
+    # row ("Workspace 1…10") stands for its family, so it is matched by the
+    # description it starts with ("Workspace ").
+    sc_hints="$(printf '%s\n' "${sc_untried}" | sed 's/   ·   /\n/g')"
+    while IFS= read -r sc_hint; do
+        sc_label="$(printf '%s' "${sc_hint}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^.*  //')"
+        [ -n "${sc_label}" ] || continue
+        sc_hint_rows=$((sc_hint_rows + 1))
+        sc_base="$(printf '%s' "${sc_label}" | sed 's/[0-9][0-9]*…[0-9][0-9]*$//')"
+        if ! printf '%s\n' "${sc_cli_untried}" \
+                | awk -v b="${sc_base}" 'index($0, b) == 1 { found = 1 } END { exit !found }'; then
+            sc_hint_bad="${sc_hint_bad} '${sc_label}'"
+        fi
+    done <<SC_HINTS
+${sc_hints}
+SC_HINTS
+    if [ -n "${sc_hint_bad}" ]; then
+        note "FAIL the hint suggests keys the terminal does not call untried:${sc_hint_bad}"
+        FAILED=1
+    elif [ "${sc_hint_rows}" -gt 0 ]; then
+        note "ok   the hint's ${sc_hint_rows} suggestion(s) are all untried in the terminal's answer too"
+    else
+        note "ok   every key family was tried, and the terminal agrees"
+    fi
+fi
+
 ipc shortcuts close >/dev/null 2>&1 || true
 
 # --- group 5c: flatpak ACCEPTS the argv punard actually sends ----------------
@@ -2317,7 +2400,7 @@ rm -f "${idle_probe_conf}" "${idle_probe_flag}"
 # service-context answer is kept as an info line: the contrast between the two
 # is the evidence for which subject polkit is judging.
 mkdir -p /run/punar
-rm -f /run/punar/canpower.txt
+rm -f /run/punar/canpower.txt /run/punar/canpower.txt.part
 
 # The facts a failure needs in order to name its own cause, rather than leaving
 # a reader to guess between "no rule", "no authority" and "wrong subject".
@@ -2355,7 +2438,10 @@ cat > /run/punar/canpower.sh <<'POWERPROBE'
 # menu's rows actually run in. logind answers CanReboot/CanPowerOff for the
 # CALLER over the same rules `systemctl reboot` consults, which is how this asks
 # "would the row work" without rebooting the machine to find out.
-exec > /run/punar/canpower.txt 2>&1
+# Written aside and renamed at the end: the checker starts reading as soon
+# as the file has content, and under load it once read only this first line
+# while busctl was still asking logind (every verdict then read as "nothing").
+exec > /run/punar/canpower.txt.part 2>&1
 printf 'session=%s\n' "${XDG_SESSION_ID:-none}"
 for verb in CanReboot CanPowerOff; do
     printf '%s=%s\n' "${verb}" "$(busctl --system call org.freedesktop.login1 \
@@ -2381,6 +2467,7 @@ else
 fi
 loginctl list-sessions --no-legend 2>/dev/null | tr -s ' ' | cut -d' ' -f1-4 \
     | while IFS= read -r row; do printf 'session_row=%s\n' "${row}"; done
+mv /run/punar/canpower.txt.part /run/punar/canpower.txt
 POWERPROBE
 chmod +x /run/punar/canpower.sh
 hyprctl dispatch "hl.dsp.exec_cmd('/run/punar/canpower.sh')" >/dev/null 2>&1

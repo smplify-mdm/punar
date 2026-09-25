@@ -398,6 +398,16 @@ pub struct DaemonConfig {
     /// What one reconcile pass may spend on the control plane
     /// ([`RECONCILE_CONTROL_PLANE_BUDGET`]); shorter in tests.
     pub reconcile_control_plane_budget: Duration,
+    /// logind's record of seat0 (`ACTIVE_UID=`), which names the person in
+    /// the active local session. A person-scoped capability such as
+    /// `system.keymap` is theirs to set (SMP-1405 WP-02); injectable so
+    /// tests can seat someone without a logind.
+    pub seat_state_file: PathBuf,
+    /// logind's per-session records (`/run/systemd/sessions`): a
+    /// person-scoped call must come from the seated person's own active,
+    /// local session on seat0, not merely from their uid
+    /// ([`crate::authz::is_active_local_person`]).
+    pub sessions_dir: PathBuf,
     /// How the management chain's own units are checked on every pass while
     /// enrolled, and whether a connection to the agent must reach systemd's
     /// listener ([`crate::agent_units`], [`ControlPlaneClient::requiring_systemd_listener`]).
@@ -476,6 +486,8 @@ impl DaemonConfig {
             pi_update_sources,
             inventory_retry_base: INVENTORY_RETRY_BASE,
             reconcile_control_plane_budget: RECONCILE_CONTROL_PLANE_BUDGET,
+            seat_state_file: PathBuf::from(crate::authz::SEAT0_STATE),
+            sessions_dir: PathBuf::from(crate::authz::SESSIONS_DIR),
             agent_integrity: None,
             control_plane_override_refused: false,
             boot_id_path: PathBuf::from("/proc/sys/kernel/random/boot_id"),
@@ -774,7 +786,7 @@ impl Daemon {
                 continue;
             }
             let seed = cap
-                .observe()
+                .first_boot_default()
                 .unwrap_or_else(|_| Value::String("unknown".to_string()));
             os_defaults.seed(&id, seed)?;
         }
@@ -4099,7 +4111,9 @@ impl Inner {
             // `details` field; M9 does not extend it, and inventing one to
             // carry a grant id would be the tail wagging the schema.)
             MutationAuthority::Grant { grant_id } => vec![grant_id.clone()],
-            MutationAuthority::Root | MutationAuthority::AiAllowed { .. } => Vec::new(),
+            MutationAuthority::Root
+            | MutationAuthority::ActiveLocalPerson
+            | MutationAuthority::AiAllowed { .. } => Vec::new(),
         };
         self.execute_capability_set(&actor, cap, params, &extra_policy_ids)
             .0
