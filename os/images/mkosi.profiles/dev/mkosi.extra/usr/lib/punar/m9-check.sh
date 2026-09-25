@@ -187,6 +187,21 @@ as_punar() {
         "HOME=${PUNAR_HOME}" "$@"
 }
 
+# resolve_approved <approval-id> <output-file> — approve as the console user,
+# who answers punarctl's password prompt on a pseudo-terminal from script(1).
+# F0-S1: approving a change to a device setting needs a device administrator's
+# fresh password (the dev user holds the role, as a first account does), and
+# F0-S4: punarctl reads a password only from a terminal or a socket, never a
+# pipe into it. The answer arrives two seconds in: punarctl first asks without
+# one, is told a password is needed, and flushes pending input as it turns echo
+# off, exactly as at a keyboard. The exit status is punarctl's.
+PUNAR_PASSWORD="punar"
+resolve_approved() {
+    { sleep 2; printf '%s\n' "${PUNAR_PASSWORD}"; sleep 12; } \
+        | as_punar script -qec "${CTL} approvals resolve $1 --decision approved" /dev/null \
+        > "$2" 2>&1
+}
+
 # in_scope <cmd...> — run one command INSIDE the managed agent session's
 # scope cgroup, so punard and punar-secrets attribute it to the agent from
 # the kernel's own /proc/<pid>/cgroup and nothing is declared.
@@ -467,9 +482,16 @@ check_eq "dismissal is NOT denial: the request is still pending after the overla
 
 # The human answers. As punar — the routed console user, NOT root — so the
 # routing rule is exercised rather than bypassed by uid 0.
+# Without a password first (F0-S1): no terminal, no socket, so no
+# confirmation; punard refuses the yes and the request stays pending.
 as_punar "${CTL}" approvals resolve "${APR1}" --decision approved \
-    > "${RUN_DIR}/m9-resolve.txt" 2>&1
-check_true "the routed console user resolves the approval (exit 0)" "$?"
+    < /dev/null > "${RUN_DIR}/m9-resolve-nopass.txt" 2>&1
+check_eq "approving a device change with no password is refused (exit 3)" 3 "$?"
+as_punar "${CTL}" --json approvals get "${APR1}" > "${RUN_DIR}/m9-approval-nopass.json" 2>/dev/null
+jq_check "the approval is still pending after a yes with no password" \
+    "${RUN_DIR}/m9-approval-nopass.json" '.approval.status == "pending" and .execution == null'
+resolve_approved "${APR1}" "${RUN_DIR}/m9-resolve.txt"
+check_true "the routed console user resolves the approval with their password (exit 0)" "$?"
 as_punar "${CTL}" --json approvals get "${APR1}" > "${RUN_DIR}/m9-approved.json" 2>/dev/null
 jq_check "status approved, executed exactly once, and the execution names its audit event" \
     "${RUN_DIR}/m9-approved.json" \
@@ -897,8 +919,8 @@ jq_check "the privilege approval carries the reason VERBATIM and the grant windo
      and (.approval.resource | test("^[0-9]+m$"))
      and (.approval.reason | test("m9 exercise"))
      and .approval.requester.type == "human"'
-as_punar "${CTL}" approvals resolve "${APR_PRIV}" --decision approved >/dev/null 2>&1
-check_true "the human resolves their own privilege request (D-012 draws exactly this)" "$?"
+resolve_approved "${APR_PRIV}" "${RUN_DIR}/m9-resolve-privilege.txt"
+check_true "the human resolves their own privilege request with their password (D-012 draws exactly this)" "$?"
 as_punar "${CTL}" --json privilege status > "${RUN_DIR}/m9-grant.json" 2>/dev/null
 jq_check "a grant now exists: one capability, a window, and an id" \
     "${RUN_DIR}/m9-grant.json" \
