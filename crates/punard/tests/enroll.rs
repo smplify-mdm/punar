@@ -700,6 +700,44 @@ fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+/// How many times punard asked for its policy.
+fn fetch_count(state: &ControlPlaneState) -> usize {
+    state
+        .methods
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|method| *method == "policy.fetch")
+        .count()
+}
+
+/// Every file in policy.d, with its contents (as text, so a failing
+/// comparison reads).
+fn policy_d_bytes(daemon: &TestDaemon) -> std::collections::BTreeMap<String, String> {
+    match fs::read_dir(daemon.state_path("policy.d")) {
+        Ok(entries) => entries
+            .map(|e| {
+                let e = e.unwrap();
+                let bytes = fs::read(e.path()).unwrap_or_default();
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                )
+            })
+            .collect(),
+        Err(_) => Default::default(),
+    }
+}
+
+/// The `enroll.policy` audit events, in order.
+fn policy_events(daemon: &TestDaemon) -> Vec<Value> {
+    daemon
+        .audit_events()
+        .into_iter()
+        .filter(|e| e["action"] == "enroll.policy")
+        .collect()
+}
+
 /// A second organization envelope: a rank-3 role policy with a payload of
 /// its own.
 fn role_envelope(id: &str) -> Value {
@@ -3448,4 +3486,564 @@ fn enroll_status_says_which_policy_is_enforced_and_since_when() {
     assert_eq!(status["policy"]["revision"], Value::Null, "{status}");
     assert_eq!(status["policy"]["fetched_at"], status["enrolled_at"]);
     assert_eq!(status["policy"]["changed_at"], status["enrolled_at"]);
+}
+
+// ---------------------------------------------------------------------------
+// Live organization-policy refresh (docs/api/ipc.md sections 5.6, 5.10)
+// ---------------------------------------------------------------------------
+
+const LONG_AGO: &str = "2026-01-01T00:00:00Z";
+
+/// The baseline envelope exactly as the in-test control plane serves it with
+/// the firewall setting `enabled`.
+fn served_baseline(enabled: bool) -> Value {
+    let mut envelope: Value = serde_json::from_str(ACME_ENVELOPE).unwrap();
+    let mut desired: Value = serde_json::from_str(ACME_DESIRED).unwrap();
+    desired["spec"]["security"]["firewall"]["enabled"] = json!(enabled);
+    envelope["policy"] = desired;
+    envelope
+}
+
+/// Restart the daemon with the recorded fetch time set long ago, so a test
+/// can tell a fetch time that moved from one that did not.
+fn restarted_with_an_old_fetch(
+    dir: &Path,
+    daemon: TestDaemon,
+    control_plane: &ControlPlane,
+    firewall_state: &str,
+) -> TestDaemon {
+    daemon.stop();
+    let record_path = dir.join("state/enrollment.json");
+    let mut record = read_json(&record_path);
+    record["policy_fetched_at"] = json!(LONG_AGO);
+    fs::write(&record_path, record.to_string()).unwrap();
+    TestDaemon::start(dir, Peer::root(), &control_plane.socket, firewall_state)
+}
+
+fn last_refresh(daemon: &TestDaemon) -> Value {
+    daemon.result("enroll.status", None)["policy"]["last_refresh"].clone()
+}
+
+/// The organization turns its firewall rule off, and the next reconcile pass
+/// fetches, checks and applies the new set, then enforces it in the same pass:
+/// the device is remediated to the new value before the pass ends.
+#[test]
+fn a_changed_policy_reaches_an_enrolled_device_on_the_next_pass() {
+    let dir = test_dir("refresh-changed");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let before = daemon.result("enroll.status", None)["policy"]["revision"].clone();
+
+    *control_plane.state.firewall_enabled.lock().unwrap() = Some(false);
+    let report = daemon.result("reconcile", None);
+    let firewall = report["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["capability"] == "security.firewall")
+        .unwrap()
+        .clone();
+    assert_eq!(firewall["desired_state"], "disabled", "{report}");
+    assert_eq!(firewall["remediation"], "applied", "{report}");
+    assert_eq!(daemon.mock.state(), json!("disabled"));
+
+    let explain = daemon.result("policy.explain", Some(json!({"path": "security.firewall"})));
+    assert_eq!(explain["effective_value"], "disabled");
+    assert_eq!(explain["source"]["policy_id"], "eng-baseline-v12");
+    assert_eq!(
+        policy_d_bytes(&daemon)["eng-baseline-v12.json"],
+        serde_json::to_string_pretty(&served_baseline(false)).unwrap(),
+        "canonical bytes"
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["policy"]["last_refresh"]["result"], "applied");
+    assert_eq!(
+        status["policy"]["revision"],
+        revision_on_disk(&daemon, &["eng-baseline-v12.json"])
+    );
+    assert_ne!(status["policy"]["revision"], before);
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["result"], "applied");
+    assert_eq!(events[0]["resource"], "control_plane");
+    assert_eq!(events[0]["policy_ids"], json!(["eng-baseline-v12"]));
+    // The same pass reported the device as it now is.
+    let compliance = control_plane.state.compliance.lock().unwrap();
+    assert_eq!(compliance.last().unwrap()["report"]["overall"], "compliant");
+}
+
+/// A policy the organization adds is written, owned and enforced; one it
+/// takes away is deleted; unenrolling removes exactly what is owned then.
+#[test]
+fn a_policy_added_or_removed_by_the_organization_is_written_or_deleted() {
+    let dir = test_dir("refresh-add-remove");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+
+    *control_plane.state.extra_envelopes.lock().unwrap() = vec![role_envelope("eng-role-sre")];
+    daemon.result("reconcile", None);
+    let mut files = policy_d_files(&daemon);
+    files.sort();
+    assert_eq!(files, ["eng-baseline-v12.json", "eng-role-sre.json"]);
+    assert_eq!(
+        read_json(&daemon.state_path("enrollment.json"))["policy_files"],
+        json!(["eng-baseline-v12.json", "eng-role-sre.json"])
+    );
+    assert_eq!(
+        daemon.result("enroll.status", None)["policy_ids"],
+        json!(["eng-baseline-v12", "eng-role-sre"])
+    );
+    let events = policy_events(&daemon);
+    assert_eq!(
+        events.last().unwrap()["policy_ids"],
+        json!(["eng-baseline-v12", "eng-role-sre"])
+    );
+
+    control_plane.state.extra_envelopes.lock().unwrap().clear();
+    daemon.result("reconcile", None);
+    assert_eq!(policy_d_files(&daemon), ["eng-baseline-v12.json"]);
+    assert_eq!(
+        daemon.result("enroll.status", None)["policy_ids"],
+        json!(["eng-baseline-v12"])
+    );
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["result"], "applied");
+    assert_eq!(events[1]["policy_ids"], json!(["eng-baseline-v12"]));
+
+    *control_plane.state.extra_envelopes.lock().unwrap() = vec![role_envelope("eng-role-sre")];
+    daemon.result("reconcile", None);
+    daemon.result("enroll.stop", None);
+    assert!(policy_d_files(&daemon).is_empty(), "no orphan left");
+}
+
+/// Only an explicit "nothing is assigned" withdraws the organization's
+/// policy. The device stays enrolled; the layers it installed, the local
+/// administration veto among them, and the browser document go.
+#[test]
+fn assigning_nothing_withdraws_policy_but_the_device_stays_enrolled() {
+    let dir = test_dir("refresh-withdraw");
+    let control_plane = ControlPlane::start(&dir);
+    control_plane
+        .state
+        .deny_local_admin
+        .store(true, Ordering::SeqCst);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let rendered = daemon.state_path("browser-policy/rendered.json");
+    assert!(rendered.exists());
+    assert_eq!(
+        daemon.result("policy.effective", None)["local_admin"]["allowed"],
+        false
+    );
+
+    control_plane
+        .state
+        .serve_no_policy
+        .store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    assert!(policy_d_files(&daemon).is_empty());
+    assert!(!rendered.exists(), "the managed browser document goes");
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["enrolled"], true);
+    assert_eq!(status["policy_ids"], json!([]));
+    assert_eq!(status["policy"]["last_refresh"]["result"], "withdrawn");
+    assert_eq!(daemon.result("status", None)["mode"], "managed");
+    assert_eq!(
+        daemon.result("policy.effective", None)["local_admin"]["allowed"],
+        true
+    );
+    let explain = daemon.result("policy.explain", Some(json!({"path": "security.firewall"})));
+    assert_ne!(explain["source"]["policy_id"], "eng-baseline-v12");
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["result"], "withdrawn");
+    assert_eq!(events[0]["policy_ids"], json!(["eng-baseline-v12"]));
+
+    // Nothing assigned, nothing held: the next pass is unchanged and quiet.
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["result"], "unchanged");
+    assert_eq!(policy_events(&daemon).len(), 1);
+}
+
+/// An empty list the control plane does not vouch for — no marker, or a
+/// bundle it could not use — takes nothing away, and is recorded once.
+#[test]
+fn an_empty_answer_without_an_explicit_none_keeps_the_last_good_policy() {
+    let dir = test_dir("refresh-held");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let bytes = policy_d_bytes(&daemon);
+
+    let state = &control_plane.state;
+    state.serve_no_policy.store(true, Ordering::SeqCst);
+    state.omit_assignment.store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    daemon.result("reconcile", None);
+    assert_eq!(policy_d_bytes(&daemon), bytes);
+    assert_eq!(
+        last_refresh(&daemon),
+        json!({"at": last_refresh(&daemon)["at"], "result": "held", "reason": "unstated_empty"})
+    );
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 1, "once, not every pass: {events:?}");
+    assert_eq!(events[0]["result"], "held");
+    assert_eq!(events[0]["policy_ids"], json!(["eng-baseline-v12"]));
+
+    state.omit_assignment.store(false, Ordering::SeqCst);
+    *state.assignment.lock().unwrap() = Some("unusable");
+    daemon.result("reconcile", None);
+    assert_eq!(policy_d_bytes(&daemon), bytes);
+    assert_eq!(last_refresh(&daemon)["reason"], "unusable_assignment");
+    assert_eq!(policy_events(&daemon).len(), 2, "a new reason is news");
+    // Nor does an empty list labelled as the policy: only "none" withdraws.
+    *state.assignment.lock().unwrap() = Some("policies");
+    daemon.result("reconcile", None);
+    assert_eq!(policy_d_bytes(&daemon), bytes);
+    assert_eq!(last_refresh(&daemon)["reason"], "empty_policies");
+    assert_eq!(policy_events(&daemon).len(), 3);
+    let explain = daemon.result("policy.explain", Some(json!({"path": "security.firewall"})));
+    assert_eq!(explain["source"]["policy_id"], "eng-baseline-v12");
+
+    *state.assignment.lock().unwrap() = None;
+    state.serve_no_policy.store(false, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[3]["result"], "unchanged", "the recovery");
+}
+
+/// A set that fails a check changes nothing: policy.d byte for byte, what
+/// is enforced, and the time the enforced policy was fetched. Each distinct
+/// set is recorded once, a restart still starts, and when the organization
+/// serves a good set again one recovery is recorded.
+#[test]
+fn an_invalid_refresh_keeps_the_last_good_policy_and_is_recorded_once() {
+    let dir = test_dir("refresh-invalid");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let daemon = restarted_with_an_old_fetch(&dir, daemon, &control_plane, "enabled");
+    let bytes = policy_d_bytes(&daemon);
+    let explain = daemon.result("policy.explain", Some(json!({"path": "security.firewall"})));
+    let state = &control_plane.state;
+
+    state.serve_bad_policy.store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    daemon.result("reconcile", None);
+    assert_eq!(policy_d_bytes(&daemon), bytes);
+    assert!(!daemon.state_path(".policy.d.next").exists());
+    assert_eq!(
+        daemon.result("policy.explain", Some(json!({"path": "security.firewall"}))),
+        explain
+    );
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["policy"]["fetched_at"], LONG_AGO);
+    assert_eq!(status["policy"]["last_refresh"]["result"], "rejected");
+    assert_eq!(
+        status["policy"]["last_refresh"]["reason"],
+        "invalid_envelope"
+    );
+    let rejected = |daemon: &TestDaemon| {
+        policy_events(daemon)
+            .into_iter()
+            .filter(|e| e["result"] == "rejected")
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rejected(&daemon).len(), 1);
+    assert_eq!(
+        rejected(&daemon)[0]["policy_ids"],
+        json!(["eng-baseline-v12"]),
+        "the ids still enforced, never the ones offered"
+    );
+
+    state.serve_duplicate_ids.store(true, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["reason"], "duplicate_policy_id");
+    assert_eq!(rejected(&daemon).len(), 2, "another set");
+    assert_eq!(policy_d_bytes(&daemon), bytes);
+
+    // policy.d never held the refused set, so the daemon starts; and the
+    // set it refused before is not recorded again.
+    daemon.stop();
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result("reconcile", None);
+    assert_eq!(rejected(&daemon).len(), 2);
+
+    state.serve_duplicate_ids.store(false, Ordering::SeqCst);
+    state.serve_bad_policy.store(false, Ordering::SeqCst);
+    daemon.result("reconcile", None);
+    let events = policy_events(&daemon);
+    assert_eq!(events.last().unwrap()["result"], "unchanged", "{events:?}");
+    assert_eq!(events.len(), 3);
+    assert_ne!(
+        daemon.result("enroll.status", None)["policy"]["fetched_at"],
+        LONG_AGO
+    );
+}
+
+/// A control plane that refuses is asked again less and less often — one,
+/// three, seven passes skipped — while the last good policy stays enforced;
+/// the refusal is recorded once, and so is the recovery.
+#[test]
+fn a_refused_fetch_backs_off_and_keeps_policy() {
+    let dir = test_dir("refresh-refused");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let bytes = policy_d_bytes(&daemon);
+    let state = &control_plane.state;
+    let fetched_before = fetch_count(state);
+
+    *state.refuse_policy_fetch.lock().unwrap() = Some("internal");
+    for _ in 0..8 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(
+        fetch_count(state) - fetched_before,
+        4,
+        "passes 1, 2, 4 and 8 asked"
+    );
+    assert_eq!(policy_d_bytes(&daemon), bytes);
+    assert_eq!(
+        last_refresh(&daemon),
+        json!({"at": last_refresh(&daemon)["at"], "result": "refused", "reason": "internal"})
+    );
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["result"], "refused");
+
+    *state.refuse_policy_fetch.lock().unwrap() = None;
+    let asked = fetch_count(state);
+    for _ in 0..7 {
+        daemon.result("reconcile", None);
+    }
+    assert_eq!(fetch_count(state), asked, "seven passes skipped");
+    daemon.result("reconcile", None);
+    assert_eq!(fetch_count(state), asked + 1);
+    let events = policy_events(&daemon);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["result"], "unchanged");
+}
+
+/// The common case costs one request and nothing else: no file in policy.d
+/// is rewritten or replaced, the browser document is untouched, nothing is
+/// audited, and the time the enforced policy was fetched moves.
+#[test]
+fn an_unchanged_policy_costs_one_fetch_and_writes_nothing() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = test_dir("refresh-unchanged");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let daemon = restarted_with_an_old_fetch(&dir, daemon, &control_plane, "enabled");
+    let stamp = |path: PathBuf| {
+        let meta = fs::metadata(path).unwrap();
+        (meta.ino(), meta.modified().unwrap())
+    };
+    let before = (
+        stamp(daemon.state_path("policy.d")),
+        stamp(daemon.state_path("policy.d/eng-baseline-v12.json")),
+        stamp(daemon.state_path("browser-policy/rendered.json")),
+    );
+    let asked = fetch_count(&control_plane.state);
+
+    daemon.result("reconcile", None);
+    daemon.result("reconcile", None);
+    assert_eq!(fetch_count(&control_plane.state), asked + 2);
+    assert_eq!(
+        (
+            stamp(daemon.state_path("policy.d")),
+            stamp(daemon.state_path("policy.d/eng-baseline-v12.json")),
+            stamp(daemon.state_path("browser-policy/rendered.json")),
+        ),
+        before
+    );
+    assert!(policy_events(&daemon).is_empty());
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["policy"]["last_refresh"]["result"], "unchanged");
+    assert_ne!(status["policy"]["fetched_at"], LONG_AGO);
+}
+
+/// A refresh changes the policy and nothing the person agreed to: the
+/// organization's document is not read again, so neither removability nor
+/// ownership nor the remote-query grant moves, however the organization's
+/// terms change after enrollment.
+#[test]
+fn a_refresh_never_changes_the_enrollment_terms() {
+    let dir = test_dir("refresh-terms");
+    let control_plane = ControlPlane::start(&dir);
+    let state = &control_plane.state;
+    *state.org_removable.lock().unwrap() = Some(json!(false));
+    *state.org_ownership.lock().unwrap() = Some(json!("organization"));
+    let daemon = TestDaemon::start(&dir, Peer::root(), &control_plane.socket, "enabled");
+    daemon.result(
+        "enroll.start",
+        Some(json!({
+            "org_domain": "acme.com",
+            "accept_non_removable": true,
+            "accept_organization_owned": true
+        })),
+    );
+    let terms = |status: &Value| {
+        (
+            status["removable"].clone(),
+            status["organization_owned"].clone(),
+            status["remote_query_scopes"].clone(),
+            status["org"].clone(),
+            status["enrolled_at"].clone(),
+        )
+    };
+    let before = terms(&daemon.result("enroll.status", None));
+    let terms_file = fs::read(daemon.state_path("enrollment-terms.json")).unwrap();
+    let discovered = state
+        .methods
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| *m == "org.discover")
+        .count();
+
+    *state.org_removable.lock().unwrap() = Some(json!(true));
+    *state.org_ownership.lock().unwrap() = Some(json!("personal"));
+    *state.firewall_enabled.lock().unwrap() = Some(false);
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["result"], "applied");
+    assert_eq!(terms(&daemon.result("enroll.status", None)), before);
+    assert_eq!(
+        fs::read(daemon.state_path("enrollment-terms.json")).unwrap(),
+        terms_file
+    );
+    let discovered_after = state
+        .methods
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| *m == "org.discover")
+        .count();
+    assert_eq!(
+        discovered_after, discovered,
+        "the document is not read again"
+    );
+    let error = daemon.error("enroll.stop", None);
+    assert_eq!(error["details"]["reason"], "enrollment_not_removable");
+}
+
+/// A file a root administrator drops into policy.d after enrollment survives
+/// every refresh as the same file, is loaded with the new set as a restart
+/// would load it, and a set that names it is refused, once.
+#[test]
+fn a_foreign_policy_d_file_survives_and_blocks_a_colliding_id() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = test_dir("refresh-foreign");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let policy_d = daemon.state_path("policy.d");
+    write_file(
+        &policy_d.join("local-lab.json"),
+        json!({
+            "policy_id": "local-lab",
+            "source_kind": "organization_role_policy",
+            "precedence_rank": 3,
+            "policy": {"spec": {"security": {"localAdmin": {"policyEditing": "denied"}}}}
+        })
+        .to_string(),
+    );
+    let inode = fs::metadata(policy_d.join("local-lab.json")).unwrap().ino();
+    let local = fs::read(policy_d.join("local-lab.json")).unwrap();
+
+    *control_plane.state.firewall_enabled.lock().unwrap() = Some(false);
+    daemon.result("reconcile", None);
+    assert_eq!(last_refresh(&daemon)["result"], "applied");
+    assert_eq!(
+        fs::metadata(policy_d.join("local-lab.json")).unwrap().ino(),
+        inode
+    );
+    assert_eq!(
+        daemon.result("enroll.status", None)["policy_ids"],
+        json!(["eng-baseline-v12"])
+    );
+    let effective = daemon.result("policy.effective", None);
+    assert_eq!(effective["local_admin"]["source"]["policy_id"], "local-lab");
+
+    *control_plane.state.extra_envelopes.lock().unwrap() = vec![role_envelope("local-lab")];
+    daemon.result("reconcile", None);
+    daemon.result("reconcile", None);
+    assert_eq!(fs::read(policy_d.join("local-lab.json")).unwrap(), local);
+    assert_eq!(
+        last_refresh(&daemon),
+        json!({"at": last_refresh(&daemon)["at"], "result": "rejected",
+               "reason": "foreign_file_collision"})
+    );
+    let rejected = policy_events(&daemon)
+        .into_iter()
+        .filter(|e| e["result"] == "rejected")
+        .count();
+    assert_eq!(rejected, 1);
+    daemon.result("enroll.stop", None);
+    assert_eq!(policy_d_files(&daemon), ["local-lab.json"]);
+}
+
+/// A capability suppressed after three failed repairs is tried again as soon
+/// as the organization changes the value it must reach: the promise is
+/// "until the effective value changes", and a refresh changes it.
+#[test]
+fn a_policy_change_lifts_remediation_suppression() {
+    let dir = test_dir("refresh-suppression");
+    let control_plane = ControlPlane::start(&dir);
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    daemon.mock.set_state(json!("disabled"));
+    daemon.mock.fail_next_applies(true);
+    let remediation = |report: &Value| {
+        report["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["capability"] == "security.firewall")
+            .unwrap()["remediation"]
+            .clone()
+    };
+    for _ in 0..3 {
+        daemon.result("reconcile", None);
+    }
+    let applies = daemon.mock.apply_calls();
+    assert_eq!(remediation(&daemon.result("reconcile", None)), "suppressed");
+    assert_eq!(daemon.mock.apply_calls(), applies, "suppressed: not tried");
+
+    *control_plane.state.firewall_enabled.lock().unwrap() = Some(false);
+    daemon.mock.set_state(json!("enabled"));
+    let report = daemon.result("reconcile", None);
+    assert_eq!(
+        daemon.mock.apply_calls(),
+        applies + 1,
+        "tried in the same pass"
+    );
+    assert_eq!(remediation(&report), "apply_failed");
+}
+
+/// Something is assigned that the control plane cannot turn into Punar
+/// policy: the device enrolls with none, says why, and applies the policy
+/// on the first pass that can use it.
+#[test]
+fn an_unusable_assignment_enrolls_with_no_policy_and_says_so() {
+    let dir = test_dir("unusable-enroll");
+    let control_plane = ControlPlane::start(&dir);
+    let state = &control_plane.state;
+    state.serve_no_policy.store(true, Ordering::SeqCst);
+    *state.assignment.lock().unwrap() = Some("unusable");
+    let daemon = enrolled(&dir, &control_plane, "enabled");
+    let status = daemon.result("enroll.status", None);
+    assert_eq!(status["enrolled"], true);
+    assert_eq!(status["policy_ids"], json!([]));
+    assert_eq!(
+        status["policy"]["last_refresh"],
+        json!({"at": status["enrolled_at"], "result": "held", "reason": "unusable_assignment"})
+    );
+
+    daemon.result("reconcile", None);
+    assert!(
+        policy_events(&daemon).is_empty(),
+        "the same answer is no news"
+    );
+    state.serve_no_policy.store(false, Ordering::SeqCst);
+    *state.assignment.lock().unwrap() = None;
+    daemon.result("reconcile", None);
+    assert_eq!(policy_d_files(&daemon), ["eng-baseline-v12.json"]);
+    assert_eq!(last_refresh(&daemon)["result"], "applied");
 }

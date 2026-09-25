@@ -72,12 +72,12 @@ use crate::browser_policy::persist_rendered_browser_policy;
 use crate::capability::{Capability, Registry};
 use crate::device::{DeviceSources, observe_profile};
 use crate::enroll::{
-    ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, INVENTORY_RETRY_BASE,
+    Assignment, ControlPlaneClient, DEFAULT_CONTROL_PLANE_SOCKET, Enrollment, INVENTORY_RETRY_BASE,
     InventoryRetry, InventorySources, LastQueryRecord, LastSyncRecord, ORGANIZATION_VIEW_FILE,
-    OrgRecord, OrganizationViewRecord, StatusSummary, UpstreamError, compliance_report_body,
-    inventory_body, inventory_resend_due, load_device_token, load_enrollment,
-    load_organization_view, organization_view_summary, save_device_token, save_enrollment,
-    save_enrollment_durable, save_organization_view, write_status_summary,
+    OrgRecord, OrganizationViewRecord, PolicyRefreshRecord, StatusSummary, UpstreamError,
+    compliance_report_body, inventory_body, inventory_resend_due, load_device_token,
+    load_enrollment, load_organization_view, organization_view_summary, save_device_token,
+    save_enrollment, save_enrollment_durable, save_organization_view, write_status_summary,
 };
 use crate::install::{
     INSTALLER_SERVICE_ACTOR_ID, InstallAuditEvents, InstallError, Installer, InstallerSources,
@@ -107,8 +107,10 @@ use crate::util::{
 use crate::webapps::{WebAppError, WebAppManager};
 
 mod m9;
+mod policy_refresh;
 
 use m9::MutationAuthority;
+use policy_refresh::{REASON_UNUSABLE_ASSIGNMENT, RefreshBackoff, RefreshResult};
 
 /// Audit `resource` for the M5 enrollment mutations (ipc.md section 6).
 pub const RESOURCE_ENROLLMENT: &str = "enrollment";
@@ -487,8 +489,10 @@ struct Inner {
     local_admin: Mutex<Vec<LocalAdminLayer>>,
     /// Ranks 1–4 (and stored-rank overrides): policy.d drops. Loaded at
     /// startup; since M5 the **enrollment chain** reloads them live
-    /// (`enroll.start` writes + reloads, `enroll.stop` empties). A manual
-    /// root file-drop into policy.d still requires a daemon restart —
+    /// (`enroll.start` writes + reloads, `enroll.stop` empties), and every
+    /// policy refresh that changes the organization's set reloads the whole
+    /// directory as a restart would. A manual root file-drop into policy.d
+    /// still takes effect only at the next restart or refresh commit —
     /// documented limit (milestone-5.md section 5.1): the authoritative
     /// policy.d writer is the enrollment chain.
     org_layers: Mutex<Vec<Layer>>,
@@ -543,9 +547,17 @@ struct Inner {
     /// M9: the effective AI authority (SPEC section 20). Reloaded on every
     /// enrollment transition, because an org layer may carry one.
     ai: Mutex<AiAuthority>,
-    /// Serializes `enroll.start`/`enroll.stop` without holding the state
-    /// lock across the network + reconcile pipeline.
+    /// Serializes `enroll.start`/`enroll.stop`, and a policy refresh's
+    /// commit, without holding the state lock across the network + reconcile
+    /// pipeline.
     enroll_in_progress: AtomicBool,
+    /// How many refresh opportunities a failing policy fetch still skips
+    /// ([`RefreshBackoff`]). In memory: a restart tries at once.
+    policy_refresh_backoff: Mutex<RefreshBackoff>,
+    /// The last set this daemon refused, for which enrollment (its epoch),
+    /// and why: the same set is not checked again on every pass. In memory,
+    /// so a new build, whose checks may differ, looks at it once more.
+    policy_rejected_offer: Mutex<Option<(u64, String, &'static str)>>,
     /// One destructive install per live boot. This is a compare-exchange
     /// guard rather than a blocking mutex so a duplicate Apply receives an
     /// immediate, truthful conflict while status and recovery acknowledgement
@@ -769,6 +781,8 @@ impl Daemon {
                 approvals: Mutex::new(approvals),
                 ai: Mutex::new(ai),
                 enroll_in_progress: AtomicBool::new(false),
+                policy_refresh_backoff: Mutex::new(RefreshBackoff::default()),
+                policy_rejected_offer: Mutex::new(None),
                 install_in_progress: AtomicBool::new(false),
                 shutdown: AtomicBool::new(false),
                 active: Mutex::new(0),
@@ -4046,6 +4060,10 @@ impl Inner {
             ));
         }
 
+        // The organization's policy first, so a changed set is what this
+        // pass enforces and reports (SPEC section 42: load desired state,
+        // then diff). A no-op on a personal device.
+        self.refresh_policy_if_enrolled(&actor);
         let report = self.reconcile_and_remediate(&actor);
         *self.last_reconcile.lock().unwrap() = Some(report.reconciled_at.clone());
         Ok(to_value(report))
@@ -5172,6 +5190,12 @@ impl Inner {
         let fetched = client
             .policy_fetch(&token)
             .map_err(|e| fail_audit(self.upstream_error("policy.fetch", e)))?;
+        // Something is assigned that the control plane cannot turn into Punar
+        // policy. The device enrolls with none and says so, rather than
+        // refusing an enrollment the organization asked for; a later refresh
+        // picks the policy up once it is usable.
+        let held_unusable =
+            fetched.assignment == Assignment::Unusable && fetched.policies.is_empty();
         let set = CanonicalSet::from_envelopes(&fetched.policies, fetched.assignment)
             .map_err(|rejection| fail_audit(enroll_policy_refusal(&rejection)))?;
         let prepared = match policy_set::prepare(&self.cfg.state_dir, &set, &[]) {
@@ -5216,7 +5240,12 @@ impl Inner {
             policy_hash: Some(set.revision()),
             policy_fetched_at: Some(enrolled_at.clone()),
             policy_changed_at: Some(enrolled_at.clone()),
-            policy_refresh: None,
+            policy_refresh: held_unusable.then(|| PolicyRefreshRecord {
+                at: enrolled_at.clone(),
+                result: RefreshResult::Held.as_str().to_string(),
+                reason: Some(REASON_UNUSABLE_ASSIGNMENT.to_string()),
+                offered_hash: None,
+            }),
         };
         let enrollment_path = self.cfg.state_dir.join("enrollment.json");
         let token_path = self.cfg.state_dir.join("device-token");
@@ -5278,6 +5307,9 @@ impl Inner {
             *slot = Some(enrollment);
             self.enrollment_epoch.fetch_add(1, Ordering::SeqCst);
         }
+        // A new enrollment's first refresh is not held back by the last one's
+        // failures.
+        *self.policy_refresh_backoff.lock().unwrap() = RefreshBackoff::default();
         // What startup would load from the new policy.d: the organization's
         // set with every root drop beside it, not the set alone.
         *self.org_layers.lock().unwrap() = loaded.layers;
