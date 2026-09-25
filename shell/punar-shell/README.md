@@ -132,10 +132,12 @@ mapped from Command by an Apple VM client. Raw compositor terminology is not
 shown in the shell.
 
 Every chord below is bound in
-[`os/modules/desktop/hypr/punar-binds.conf`](../../os/modules/desktop/hypr/punar-binds.conf)
-in the **described** form, so `hyprctl binds -j` carries a human label and
-the PUNAR+/ help surface renders the live table rather than a written copy
-of it. **If this list and the machine disagree, the machine is right.**
+[`os/modules/desktop/hypr/punar-binds.lua`](../../os/modules/desktop/hypr/punar-binds.lua)
+with a description, so the compositor's bind table carries a human label and
+the PUNAR+/ help surface renders the live table (through `punarctl keys
+list`) rather than a written copy of it. **If this list and the machine
+disagree, the machine is right.** The whole grammar is in
+[`docs/development/keyboard-grammar.md`](../../docs/development/keyboard-grammar.md).
 
 | Chord | Surface |
 | --- | --- |
@@ -149,7 +151,9 @@ of it. **If this list and the machine disagree, the machine is right.**
 | `PUNAR + Q` | Ask the focused window to close normally |
 | `PUNAR + SHIFT + Q` | Window actions: close normally or enter the two-step Force quit confirmation |
 | `PUNAR + Escape` | Lock the session (`PUNAR+L` and its SHIFT/CTRL variants are all load-bearing in the §13.3 directional grammar) |
-| media keys | Volume up / down / mute — the OSD reads the **sink**, not the keypress |
+| `ALT + TAB` | Window switcher: every window, most recent first, drawn with the overview's wireframes; release Alt to choose (`SHIFT` goes back) |
+| volume keys | Volume up / down / mute — the OSD reads the **sink**, not the keypress |
+| media, microphone and brightness keys | `punarctl media`, `punarctl audio mute --input` and `punarctl display brightness`; the OSD shows the brightness the device settled on, and nothing on a machine without a backlight |
 
 Two surfaces deliberately have **no chord at all** — see below.
 
