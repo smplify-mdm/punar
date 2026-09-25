@@ -412,7 +412,8 @@ impl Inner {
                     .connections()
                     .map_err(runtime_error)?;
                 self.audit_network_denials(pass.denial_events.iter());
-                serde_json::to_value(pass.result).map_err(|error| internal(error.to_string()))
+                serde_json::to_value(pass.result.scoped_to(peer.uid))
+                    .map_err(|error| internal(error.to_string()))
             }
             NetworkMethod::Zones => Ok(self.runtime.lock().unwrap().zones_json()),
             NetworkMethod::Policy(params) => self

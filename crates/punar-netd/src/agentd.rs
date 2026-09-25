@@ -174,6 +174,7 @@ fn snapshot_from_list(list: AgentsListResult, proc_root: &Path) -> SessionSnapsh
                 process_id: record.process_id,
                 cgroup_id: cgroup_id(proc_root, &cgroup_path),
                 cgroup_path,
+                uid: process_uid(proc_root, record.process_id),
             })
         })();
         match result {
@@ -187,6 +188,17 @@ fn snapshot_from_list(list: AgentsListResult, proc_root: &Path) -> SessionSnapsh
     sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     skipped.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     SessionSnapshot { sessions, skipped }
+}
+
+/// The real uid of `pid`, from the kernel's own status file. `None` when it
+/// cannot be read; the caller then shows that session's rows to root only.
+fn process_uid(proc_root: &Path, pid: u32) -> Option<u32> {
+    let status = fs::read_to_string(proc_root.join(pid.to_string()).join("status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|ids| ids.split_whitespace().next())
+        .and_then(|real| real.parse().ok())
 }
 
 fn cgroup_id(proc_root: &Path, cgroup_path: &str) -> Option<u64> {
@@ -289,6 +301,18 @@ mod tests {
         let snapshot = snapshot_from_list(list(record()), &root);
         assert_eq!(snapshot.sessions.len(), 1);
         assert!(snapshot.skipped.is_empty());
+        // No status file: whose session it is stays unknown, and its rows
+        // go to root only.
+        assert_eq!(snapshot.sessions[0].uid, None);
+        // The owner is the kernel's real uid of the root process, never the
+        // name agentd was told.
+        fs::write(
+            root.join("42/status"),
+            "Name:\tclaude\nUid:\t1001\t1001\t1001\t1001\nGid:\t1001\t1001\t1001\t1001\n",
+        )
+        .unwrap();
+        let snapshot = snapshot_from_list(list(record()), &root);
+        assert_eq!(snapshot.sessions[0].uid, Some(1001));
         fs::write(
             root.join("42/cgroup"),
             "0::/user.slice/punar-agent-agt_4f21c09ab3e1.scope-evil\n",

@@ -3775,6 +3775,10 @@ struct ConnectionsView {
     limitations: Vec<String>,
     #[serde(default)]
     processes: Vec<NetworkProcessView>,
+    /// Other people's rows, counted and never shown (docs/api/ipc.md section
+    /// 21.3). Absent from a netd older than the scoping.
+    #[serde(default)]
+    withheld: u64,
 }
 
 #[derive(Deserialize)]
@@ -3884,6 +3888,20 @@ pub fn privacy_connections(
     ));
     if connections.processes.is_empty() {
         out.push_str(&fmt::note(style, "No current TCP connections observed"));
+    }
+    // Another person's programs, and where they connect, are that person's
+    // (F0): netd leaves them out and says how many, so "is this everything?"
+    // has an honest answer.
+    match connections.withheld {
+        0 => {}
+        1 => out.push_str(&fmt::note(
+            style,
+            "1 program of another person on this device withheld",
+        )),
+        n => out.push_str(&fmt::note(
+            style,
+            &format!("{n} programs of other people on this device withheld"),
+        )),
     }
     for process in &connections.processes {
         let context = process.session.as_ref().map_or_else(
@@ -5808,6 +5826,46 @@ pub fn app_updates(style: &Style, result: &Value, hostname: &str) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A person's audit and connection views say how much of other people's
+    /// was withheld (F0), and say nothing when nothing was. Notes print in
+    /// capitals.
+    #[test]
+    fn withheld_counts_are_said_and_only_when_there_are_some() {
+        let audit = |withheld: Value| {
+            super::audit(
+                &Style::plain(),
+                &json!({ "events": [], "withheld": withheld }),
+                "host",
+            )
+            .unwrap()
+        };
+        assert!(audit(json!(3)).contains("3 EVENTS OF OTHER PEOPLE ON THIS DEVICE WITHHELD"));
+        assert!(audit(json!(1)).contains("1 EVENT OF ANOTHER PERSON ON THIS DEVICE WITHHELD"));
+        assert!(!audit(json!(0)).contains("WITHHELD"));
+        let older = super::audit(&Style::plain(), &json!({ "events": [] }), "host").unwrap();
+        assert!(!older.contains("WITHHELD"), "an older daemon sends none");
+
+        let connections = |withheld: u64| {
+            privacy_connections(
+                &Style::plain(),
+                &json!({
+                    "scanned_at": "2026-09-25T00:00:00Z",
+                    "enforcement": "available",
+                    "relay": {"mode": "direct", "simulated": false},
+                    "dns_protection": {"state": "not_configured", "milestone": "phase_2"},
+                    "transport": "tcp",
+                    "processes": [],
+                    "withheld": withheld,
+                }),
+                "host",
+            )
+            .unwrap()
+        };
+        assert!(connections(2).contains("2 PROGRAMS OF OTHER PEOPLE ON THIS DEVICE WITHHELD"));
+        assert!(connections(1).contains("1 PROGRAM OF ANOTHER PERSON ON THIS DEVICE WITHHELD"));
+        assert!(!connections(0).contains("WITHHELD"));
+    }
 
     /// An alert names a process, and a process names itself: a hostile
     /// executable name must not steer the terminal from the status view.

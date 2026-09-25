@@ -1,11 +1,18 @@
 pragma Singleton
-// Network — event-driven privacy-panel display state.
+// Network — event-driven privacy-panel display state, for THIS person.
 //
-// The root-owned side file is the rendered local view. Opening or refreshing
-// the panel starts exactly one fixed-argv `punarctl privacy connections
-// --json` pass; netd rewrites the file only when its semantic set changes and
-// this FileView follows that replacement. There is no timer and no socket
+// Opening or refreshing the panel starts exactly one fixed-argv `punarctl
+// privacy connections --json` pass, and its answer is the view. netd scopes
+// that answer to the caller (docs/api/ipc.md section 21.3): this person's own
+// programs and managed sessions, and the device's, with `withheld` counting
+// the rows of other people it left out. There is no timer and no socket
 // client in the shell.
+//
+// WHY NOT THE SIDE FILE ANY MORE. This used to follow
+// `/run/punar-netd/connections.json` with a FileView. That file holds every
+// person's rows and was `0640 root:punar` — readable by every account — so on
+// a shared device each person could see which destinations another person's
+// programs reached. It is now root-only, and the panel asks instead.
 
 import QtQuick
 import Quickshell
@@ -14,33 +21,11 @@ import Quickshell.Io
 Singleton {
     id: root
 
-    readonly property string connectionsPath: "/run/punar-netd/connections.json"
     property var view: null
     property bool refreshing: false
     property string errorText: ""
 
-    function resetUnavailable(reason: string): void {
-        root.view = null;
-        root.errorText = reason;
-    }
-
-    function loadView(): void {
-        var parsed = null;
-        try {
-            parsed = JSON.parse(connectionFile.text());
-        } catch (e) {
-            parsed = null;
-        }
-        if (parsed === null || typeof parsed !== "object") {
-            root.resetUnavailable("The local connection view could not be read.");
-            return;
-        }
-        root.view = parsed;
-        root.errorText = "";
-    }
-
     function refresh(): void {
-        connectionFile.reload();
         if (refreshProbe.running)
             return;
         root.refreshing = true;
@@ -52,15 +37,6 @@ Singleton {
             root.refreshing = false;
             root.errorText = "The network service is unavailable. Check punar-netd.";
         }
-    }
-
-    FileView {
-        id: connectionFile
-        path: root.connectionsPath
-        watchChanges: true
-        onLoaded: root.loadView()
-        onFileChanged: connectionFile.reload()
-        onLoadFailed: root.resetUnavailable("No connection view is available yet. Refresh to run a local pass.")
     }
 
     Process {
@@ -83,19 +59,18 @@ Singleton {
                     : "The local network pass did not complete. Check punar-netd.";
                 return;
             }
-            // The command may intentionally perform no write when the set is
-            // unchanged, so parse its stdout as an immediate answer and still
-            // reload the watched file for the canonical side contract.
+            // The answer is the view: netd scoped it to this person.
             try {
                 var parsed = JSON.parse(refreshOut.text);
                 if (parsed !== null && typeof parsed === "object") {
                     root.view = parsed;
                     root.errorText = "";
+                } else {
+                    root.errorText = "The connection response was not a view.";
                 }
             } catch (e) {
                 root.errorText = "The connection response was not valid JSON.";
             }
-            connectionFile.reload();
         })
     }
 }

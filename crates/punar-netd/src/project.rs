@@ -172,6 +172,7 @@ mod tests {
                 process_id: 42,
                 cgroup_path: "/user.slice/punar-agent-agt_1.scope".into(),
                 cgroup_id: None,
+                uid: Some(1000),
             },
             passwd,
         )
