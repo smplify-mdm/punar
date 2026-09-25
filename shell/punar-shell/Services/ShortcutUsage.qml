@@ -15,9 +15,17 @@ pragma Singleton
 //
 // ONE SMALL FILE, WRITTEN RARELY. ~/.local/state/punar/shortcuts-tried.json
 // holds the names of the families and which of them were tried. It is
-// rewritten only when a family is tried for the FIRST time: a handful of
-// writes in the life of an account, never one per keypress. `punarctl keys
-// list --untried` reads the same file, so the terminal sees the same hint.
+// written when the shell first finds it missing or naming a different list
+// of families (a new account, an update that changed the list), and when a
+// family is tried for the FIRST time: a handful of writes in the life of an
+// account, never one per keypress. `punarctl keys list --untried` reads the
+// same file, so the terminal gives the same hint from the first session on
+// (a fresh account used to get three suggestions here and none there).
+//
+// NOT THE SESSION'S OWN START. Events in the first seconds after the shell
+// starts come from the session setting itself up (restoring layouts, a
+// web-app sync, the first workspace), not from a person, so they count for
+// nothing.
 
 import QtQuick
 import Quickshell
@@ -62,6 +70,8 @@ Singleton {
     // bindings that read it see the change.
     property var tried: ({})
     property bool loaded: false
+    // Raw compositor events count only after the session has settled.
+    property bool listening: false
 
     readonly property string statePath: {
         var home = Quickshell.env("HOME");
@@ -116,7 +126,8 @@ Singleton {
             doc = null;
         }
         var next = {};
-        if (doc !== null && typeof doc === "object" && doc.version === 1 && Array.isArray(doc.tried)) {
+        var current = doc !== null && typeof doc === "object" && doc.version === 1 && Array.isArray(doc.tried);
+        if (current) {
             for (var i = 0; i < doc.tried.length; i++) {
                 if (typeof doc.tried[i] === "string" && root.families.indexOf(doc.tried[i]) >= 0)
                     next[doc.tried[i]] = true;
@@ -124,6 +135,10 @@ Singleton {
         }
         root.tried = next;
         root.loaded = true;
+        // The terminal reads the family list from this file, so a missing
+        // file, or one naming another list, is written once now.
+        if (!current || !Array.isArray(doc.families) || doc.families.join("\n") !== root.families.join("\n"))
+            root.save();
     }
 
     // A shell surface opened, by its IPC target name (shell.qml calls this).
@@ -154,10 +169,19 @@ Singleton {
         onLoadFailed: root.load("")
     }
 
+    Timer {
+        interval: 10000
+        running: root.loaded
+        repeat: false
+        onTriggered: root.listening = true
+    }
+
     Connections {
         target: Hyprland
 
         function onRawEvent(event: HyprlandEvent): void {
+            if (!root.listening)
+                return;
             var data = String(event.data);
             switch (event.name) {
             case "workspacev2":

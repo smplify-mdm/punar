@@ -26,6 +26,7 @@ pragma ComponentBehavior: Bound
 // gesture), and only the strip itself takes the pointer: clicking a card
 // chooses it. If a release is ever missed, the gesture finishes on its own
 // five seconds after the last Tab, with the window that was shown selected.
+// A plain open (toggle) has no release to miss and waits for a click.
 //
 // Deferred like every user-invoked surface (shell.qml): nothing is resident
 // until the first Alt+Tab, and the object is destroyed after it closes.
@@ -242,14 +243,18 @@ DeferredSurfaceBase {
         root.open = true;
     }
 
-    // A plain open (the command center, a check script) is a one-Tab gesture
-    // that waits for a click or the five-second finish.
+    // A plain open (a check script, the cost probe) is a one-Tab gesture
+    // that waits for a click or a close. It never arms the five-second
+    // finish: that fallback exists for a missed Alt release, and a plain
+    // open has no Alt to release, so it would only switch windows by itself
+    // (in the cost probe, in the middle of the measurement).
     function toggle(): void {
         if (root.open) {
             root.dismiss();
             return;
         }
         root.ipcStep(String(root.committedGesture + 1), "1");
+        dwellTimer.stop();
         root.show();
     }
 
