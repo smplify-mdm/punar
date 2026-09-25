@@ -135,58 +135,16 @@ impl Default for CollectorSources {
     }
 }
 
-/// Posture: states, never values. `None` is "could not be established" and
-/// reaches the organization as `null`, never as a guessed `false`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Posture {
-    pub secure_boot: Option<bool>,
-    pub uefi: Option<bool>,
-    pub tpm_present: Option<bool>,
-    pub tpm_version: Option<String>,
-    /// SPEC section 1.22: a simulated Secure Boot or TPM must be labelled as
-    /// such, and this is the label.
-    pub is_virtual: Option<bool>,
-    pub virtualization: Option<String>,
-    pub disk_encryption_enabled: Option<bool>,
-    pub firewall_enabled: Option<bool>,
-    pub firewall: Option<String>,
-    pub os_patch_status: PatchStatus,
-    pub reboot_required: Option<bool>,
-}
-
-/// The console's closed patch vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PatchStatus {
-    UpToDate,
-    UpdatesAvailable,
-    Unknown,
-}
+/// Posture, patch vocabulary and hardware live in `punar-common`: the
+/// organization's inventory and the person's own `device.posture` read are
+/// one definition, and one collector fills both.
+pub use punar_common::device::{Hardware, PatchStatus, Posture};
 
 /// What the update engines say about this device's release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchPosture {
     pub status: PatchStatus,
     pub reboot_required: Option<bool>,
-}
-
-/// Device facts, read once per boot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Hardware {
-    pub manufacturer: Option<String>,
-    pub model_name: Option<String>,
-    pub bios_version: Option<String>,
-    pub cpu_model: Option<String>,
-    pub cpu_vendor: Option<String>,
-    pub cpu_cores: Option<u32>,
-    pub cpu_threads: Option<u32>,
-    pub memory_total_bytes: Option<u64>,
-    /// Rounded to whole gigabytes: a btrfs size moves by a few blocks as
-    /// chunks are allocated, and an unrounded size would change the
-    /// inventory's hash, and resend it, for no fact anyone needs.
-    pub device_capacity_bytes: Option<u64>,
-    pub root_filesystem_type: Option<String>,
-    pub battery_present: Option<bool>,
 }
 
 /// One application row, already clamped to the receiving columns.
@@ -299,11 +257,12 @@ pub struct ImageRelease {
     pub browser_version: Option<String>,
 }
 
+/// Read once per boot. The image's applications are cached apart, so a
+/// posture read never asks for the image's release.
 struct BootFacts {
     hardware: Hardware,
     is_virtual: Option<bool>,
     virtualization: Option<String>,
-    image_applications: Result<Vec<Application>, Withheld>,
 }
 
 type InstallationStamp = (Option<FileStamp>, Option<FileStamp>);
@@ -340,6 +299,7 @@ pub struct InventoryCollector {
     sources: CollectorSources,
     flatpak_bin: PathBuf,
     boot: OnceLock<BootFacts>,
+    image_applications: OnceLock<Result<Vec<Application>, Withheld>>,
     serial_number: OnceLock<Option<String>>,
     system_flatpaks: Mutex<Option<FlatpakSnapshot>>,
 }
@@ -350,8 +310,61 @@ impl InventoryCollector {
             sources,
             flatpak_bin,
             boot: OnceLock::new(),
+            image_applications: OnceLock::new(),
             serial_number: OnceLock::new(),
             system_flatpaks: Mutex::new(None),
+        }
+    }
+
+    fn boot(&self) -> &BootFacts {
+        self.boot.get_or_init(|| {
+            let (is_virtual, virtualization) = virtualization(&self.sources);
+            BootFacts {
+                hardware: hardware(&self.sources),
+                is_virtual,
+                virtualization,
+            }
+        })
+    }
+
+    /// The posture states for this pass: the same answer whether it goes to
+    /// the organization in an inventory or to the person in `device.posture`.
+    /// `firewall_state` is the `security.firewall` observation, `None` when
+    /// no firewall capability is registered.
+    pub fn posture(&self, firewall_state: Option<&Value>, patch: PatchPosture) -> Posture {
+        let boot = self.boot();
+        let firewall_enabled = match firewall_state.and_then(Value::as_str) {
+            Some("enabled") => Some(true),
+            Some("disabled") => Some(false),
+            _ => None,
+        };
+        let uefi = self.sources.efi_dir.is_dir();
+        let (tpm_present, tpm_version) = tpm(&self.sources.tpm_dir);
+        Posture {
+            secure_boot: secure_boot(&self.sources.efi_dir, &self.sources.storage.mountinfo),
+            uefi: Some(uefi),
+            tpm_present,
+            tpm_version,
+            is_virtual: boot.is_virtual,
+            virtualization: boot.virtualization.clone(),
+            disk_encryption_enabled: disk_encryption(&self.sources),
+            firewall_enabled,
+            firewall: firewall_state.map(|_| "nftables".to_string()),
+            os_patch_status: patch.status,
+            reboot_required: patch.reboot_required,
+        }
+    }
+
+    /// The device's hardware facts, read once per boot.
+    pub fn hardware(&self) -> Hardware {
+        self.boot().hardware.clone()
+    }
+
+    /// The batteries, read now: capacity and status move while the device
+    /// runs. Never part of the organization's inventory.
+    pub fn power(&self) -> punar_common::device::DevicePower {
+        punar_common::device::DevicePower {
+            batteries: crate::device::batteries(&self.sources.device.power_supply_dir),
         }
     }
 
@@ -363,36 +376,10 @@ impl InventoryCollector {
         image: impl FnOnce() -> ImageRelease,
         vendor_apps: impl FnOnce() -> Vec<(String, String, Option<String>)>,
     ) -> Collected {
-        let boot = self.boot.get_or_init(|| {
-            let (is_virtual, virtualization) = virtualization(&self.sources);
-            BootFacts {
-                hardware: hardware(&self.sources),
-                is_virtual,
-                virtualization,
-                image_applications: image_applications(&self.sources, &image()),
-            }
-        });
-
-        let firewall_enabled = match pass.firewall_state.as_ref().and_then(Value::as_str) {
-            Some("enabled") => Some(true),
-            Some("disabled") => Some(false),
-            _ => None,
-        };
-        let uefi = self.sources.efi_dir.is_dir();
-        let (tpm_present, tpm_version) = tpm(&self.sources.tpm_dir);
-        let posture = Posture {
-            secure_boot: secure_boot(&self.sources.efi_dir, &self.sources.storage.mountinfo),
-            uefi: Some(uefi),
-            tpm_present,
-            tpm_version,
-            is_virtual: boot.is_virtual,
-            virtualization: boot.virtualization.clone(),
-            disk_encryption_enabled: disk_encryption(&self.sources),
-            firewall_enabled,
-            firewall: pass.firewall_state.as_ref().map(|_| "nftables".to_string()),
-            os_patch_status: pass.patch.status,
-            reboot_required: pass.patch.reboot_required,
-        };
+        let posture = self.posture(pass.firewall_state.as_ref(), pass.patch);
+        let image_applications = self
+            .image_applications
+            .get_or_init(|| image_applications(&self.sources, &image()));
 
         let (applications, serial_number) = if pass.organization_owned {
             let serial = self
@@ -405,20 +392,20 @@ impl InventoryCollector {
                     Application::new(id, name, version.as_deref(), SOURCE_VENDOR)
                 })
                 .collect();
-            let applications = boot.image_applications.clone().and_then(|mut rows| {
+            let applications = image_applications.clone().and_then(|mut rows| {
                 rows.extend(self.system_flatpaks()?);
                 rows.extend(vendor);
                 Ok(rows)
             });
             (applications, serial)
         } else {
-            (boot.image_applications.clone(), None)
+            (image_applications.clone(), None)
         };
 
         Collected {
             architecture: pass.architecture.clone(),
             posture,
-            hardware: boot.hardware.clone(),
+            hardware: self.hardware(),
             applications: applications.map(|mut rows| {
                 // Sorted so an unchanged device hashes the same every pass;
                 // one row per identifier and source.

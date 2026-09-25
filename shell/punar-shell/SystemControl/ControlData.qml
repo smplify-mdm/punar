@@ -62,7 +62,6 @@
 // and the CLI are one capability layer — so they may as well share a mouth.
 
 import QtQuick
-import Qt.labs.folderlistmodel
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
@@ -323,6 +322,12 @@ Scope {
     Probe {
         id: webAppsProbe
     }
+    // Encryption, Secure Boot and Power: `punarctl device posture --json`,
+    // the device.posture answer a managing organization also receives. One
+    // LUKS2 answer on the device, and the battery rule the classifier uses.
+    Probe {
+        id: postureProbe
+    }
 
     // The mutation channel — separate from the probes so a write never
     // races a read, and so its exit code and stderr can be shown.
@@ -427,6 +432,7 @@ Scope {
         capsProbe.ask(["punarctl", "capabilities", "--json"]);
         policyProbe.ask(["punarctl", "policy", "effective", "--json"]);
         grantsProbe.ask(["punarctl", "privilege", "status", "--json"]);
+        postureProbe.ask(["punarctl", "device", "posture", "--json"]);
     }
 
     function refreshWebApps(): void {
@@ -440,6 +446,7 @@ Scope {
     // ---------------------------------------------------------------
 
     readonly property var statusData: data.obj(statusProbe.payload)
+    readonly property var postureData: data.obj(postureProbe.payload)
     readonly property bool daemonAnswered: data.statusData !== null
 
     readonly property var capabilityList: {
@@ -544,10 +551,6 @@ Scope {
     property string netGateway: ""
     property string netOperState: ""
     property string netAddress: ""
-    property string batteryCapacity: ""
-    property string batteryStatus: ""
-    property string cryptUuid: ""
-    property string secureBootValue: ""
 
     function hexToIp(h: string): string {
         if (h.length !== 8)
@@ -607,94 +610,6 @@ Scope {
         onLoaded: data.netAddress = String(macFile.text()).trim()
         onLoadFailed: data.netAddress = ""
     }
-    // WHICH power_supply entry is the battery, decided the way punard's
-    // device check decides it (crates/punard/src/device.rs,
-    // directory_has_battery): a name starting "BAT", otherwise the first
-    // entry whose `type` reads "Battery". Hardcoding BAT0 reported "no
-    // battery" on machines whose battery is BAT1, CMB0 or a vendor name,
-    // while punard counted them.
-    property string batteryName: ""
-    property var powerSupplyNames: []
-    property int powerSupplyProbe: -1
-
-    FolderListModel {
-        id: powerSupplies
-
-        folder: "file:///sys/class/power_supply"
-        showDirs: true
-        showFiles: true
-        showDotAndDotDot: false
-        sortField: FolderListModel.Name
-        onCountChanged: data.pickBattery()
-        onStatusChanged: data.pickBattery()
-    }
-
-    function pickBattery(): void {
-        var names = [];
-        for (var i = 0; i < powerSupplies.count; i++)
-            names.push(String(powerSupplies.get(i, "fileName")));
-        data.powerSupplyNames = names;
-        for (var j = 0; j < names.length; j++) {
-            if (names[j].indexOf("BAT") === 0) {
-                data.powerSupplyProbe = -1;
-                data.batteryName = names[j];
-                return;
-            }
-        }
-        data.batteryName = "";
-        data.powerSupplyProbe = names.length > 0 ? 0 : -1;
-    }
-
-    // Walks the entries one `type` file at a time until one says Battery.
-    FileView {
-        id: supplyTypeFile
-        path: data.powerSupplyProbe < 0 || data.powerSupplyProbe >= data.powerSupplyNames.length ? "" : "/sys/class/power_supply/" + data.powerSupplyNames[data.powerSupplyProbe] + "/type"
-        onLoaded: {
-            if (String(supplyTypeFile.text()).trim().toLowerCase() === "battery") {
-                data.batteryName = data.powerSupplyNames[data.powerSupplyProbe];
-                data.powerSupplyProbe = -1;
-            } else {
-                data.powerSupplyProbe += 1;
-            }
-        }
-        onLoadFailed: data.powerSupplyProbe += 1
-    }
-
-    FileView {
-        id: batCapFile
-        path: data.batteryName === "" ? "" : "/sys/class/power_supply/" + data.batteryName + "/capacity"
-        onLoaded: data.batteryCapacity = String(batCapFile.text()).trim()
-        onLoadFailed: data.batteryCapacity = ""
-    }
-    FileView {
-        id: batStatusFile
-        path: data.batteryName === "" ? "" : "/sys/class/power_supply/" + data.batteryName + "/status"
-        onLoaded: data.batteryStatus = String(batStatusFile.text()).trim()
-        onLoadFailed: data.batteryStatus = ""
-    }
-    // A device-mapper crypt target names itself in its UUID
-    // ("CRYPT-LUKS2-…"). This is the only disk-encryption fact the device
-    // reports without a helper; punard registers no encryption
-    // capability, so there is nothing else to read.
-    FileView {
-        id: cryptFile
-        path: "/sys/block/dm-0/dm/uuid"
-        onLoaded: data.cryptUuid = String(cryptFile.text()).trim()
-        onLoadFailed: data.cryptUuid = ""
-    }
-    // The EFI SecureBoot variable: four attribute bytes, then one value
-    // byte. Absent on a machine that did not boot under UEFI Secure Boot
-    // — which is every current Punar build, and the plate says so.
-    FileView {
-        id: secureBootFile
-        path: "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-        onLoaded: {
-            var t = String(secureBootFile.text());
-            data.secureBootValue = t.length >= 5 ? (t.charCodeAt(4) === 1 ? "enabled" : "disabled") : "";
-        }
-        onLoadFailed: data.secureBootValue = ""
-    }
-
     function parseTimezones(body: string): void {
         var seen = {"UTC": true};
         var zones = ["UTC"];
@@ -726,10 +641,6 @@ Scope {
         routeFile.reload();
         operFile.reload();
         macFile.reload();
-        batCapFile.reload();
-        batStatusFile.reload();
-        cryptFile.reload();
-        secureBootFile.reload();
     }
 
     // Live session audio. The tracker keeps the default nodes bound so
@@ -1669,82 +1580,91 @@ Scope {
         };
     }
 
+    function powerActions(): var {
+        return [
+            {
+                hotkey: "L",
+                label: data.powerArmed === "sessionEnd"
+                    ? "Press again to end session" : "End session",
+                tone: data.powerArmed === "sessionEnd" ? "warn" : "ghost",
+                kind: "sessionEnd"
+            },
+            {
+                hotkey: "R",
+                label: data.powerArmed === "systemRestart"
+                    ? "Press again to restart" : "Restart",
+                tone: data.powerArmed === "systemRestart" ? "warn" : "ghost",
+                kind: "systemRestart"
+            },
+            {
+                hotkey: "P",
+                label: data.powerArmed === "systemPowerOff"
+                    ? "Press again to shut down" : "Shut down",
+                tone: data.powerArmed === "systemPowerOff" ? "warn" : "ghost",
+                kind: "systemPowerOff"
+            }
+        ];
+    }
+
+    // The posture probe's own failure, or the AWAITING PUNARD panel. A
+    // refusal is shown verbatim rather than dressed up as "no data".
+    function postureUnanswered(): var {
+        if (postureProbe.answered && postureProbe.errorText !== "") {
+            return {
+                what: "punarctl device posture did not answer",
+                why: postureProbe.errorText,
+                when_: "Run `punarctl device posture` for the same answer"
+            };
+        }
+        return data.awaiting();
+    }
+
     function viewPower(): var {
-        if (data.batteryCapacity === "") {
+        var posture = data.postureData;
+        if (posture === null) {
+            return {
+                title: "Power",
+                sub: "System · power supply class",
+                dashed: data.postureUnanswered(),
+                actions: data.powerActions()
+            };
+        }
+        var batteries = posture.power && Array.isArray(posture.power.batteries)
+            ? posture.power.batteries : [];
+        if (batteries.length === 0) {
             return {
                 title: "Power",
                 sub: "System · power supply class",
                 dashed: {
                     what: "No battery reported",
-                    why: "This device exposes no BAT0 entry under /sys/class/power_supply — which is what a virtual machine reports, truthfully. No power capability is registered either, so there is nothing to govern.",
+                    why: "No power_supply entry on this device is named BAT… or has the type Battery, which is what a desktop or a virtual machine reports, truthfully. No power capability is registered either, so there is nothing to govern.",
                     when_: "Unscheduled · no milestone claims power management"
                 },
-                actions: [
-                    {
-                        hotkey: "L",
-                        label: data.powerArmed === "sessionEnd"
-                            ? "Press again to end session" : "End session",
-                        tone: data.powerArmed === "sessionEnd" ? "warn" : "ghost",
-                        kind: "sessionEnd"
-                    },
-                    {
-                        hotkey: "R",
-                        label: data.powerArmed === "systemRestart"
-                            ? "Press again to restart" : "Restart",
-                        tone: data.powerArmed === "systemRestart" ? "warn" : "ghost",
-                        kind: "systemRestart"
-                    },
-                    {
-                        hotkey: "P",
-                        label: data.powerArmed === "systemPowerOff"
-                            ? "Press again to shut down" : "Shut down",
-                        tone: data.powerArmed === "systemPowerOff" ? "warn" : "ghost",
-                        kind: "systemPowerOff"
-                    }
-                ]
+                actions: data.powerActions()
             };
         }
+        var kv = [];
+        for (var i = 0; i < batteries.length; i++) {
+            var battery = batteries[i];
+            var charge = typeof battery.capacity_percent === "number"
+                ? battery.capacity_percent + " %" : "charge not reported";
+            var state = typeof battery.status === "string" && battery.status !== ""
+                ? battery.status.toUpperCase() : "STATE NOT REPORTED";
+            kv.push({
+                k: String(battery.name),
+                v: charge + " · " + state
+            });
+        }
+        kv.push({
+            k: "Source",
+            v: "punarctl device — read once per open"
+        });
         return {
             title: "Power",
             sub: "System · power supply class · read-only",
-            kv: [
-                {
-                    k: "Charge",
-                    v: data.batteryCapacity + " %"
-                },
-                {
-                    k: "State",
-                    v: data.batteryStatus === "" ? "not reported" : data.batteryStatus.toUpperCase()
-                },
-                {
-                    k: "Source",
-                    v: "/sys/class/power_supply/" + data.batteryName + " — read once per open"
-                }
-            ],
+            kv: kv,
             note: "Punar reports the supply class and does not set it: there is no typed power capability. Ending the session, restarting and shutting down go to logind, which asks polkit whether this session may act.",
-            actions: [
-                {
-                    hotkey: "L",
-                    label: data.powerArmed === "sessionEnd"
-                        ? "Press again to end session" : "End session",
-                    tone: data.powerArmed === "sessionEnd" ? "warn" : "ghost",
-                    kind: "sessionEnd"
-                },
-                {
-                    hotkey: "R",
-                    label: data.powerArmed === "systemRestart"
-                        ? "Press again to restart" : "Restart",
-                    tone: data.powerArmed === "systemRestart" ? "warn" : "ghost",
-                    kind: "systemRestart"
-                },
-                {
-                    hotkey: "P",
-                    label: data.powerArmed === "systemPowerOff"
-                        ? "Press again to shut down" : "Shut down",
-                    tone: data.powerArmed === "systemPowerOff" ? "warn" : "ghost",
-                    kind: "systemPowerOff"
-                }
-            ]
+            actions: data.powerActions()
         };
     }
 
@@ -1822,57 +1742,79 @@ Scope {
     }
 
     function viewEncryption(): var {
-        var luks = data.cryptUuid !== "" && data.cryptUuid.indexOf("CRYPT-LUKS") === 0;
-        if (!luks) {
+        var posture = data.postureData;
+        if (posture === null || posture.posture === undefined) {
             return {
                 title: "Encryption",
                 sub: "Security · disk encryption",
-                kv: [
-                    {
-                        k: "Crypt target",
-                        v: data.cryptUuid === "" ? "none — no device-mapper crypt device on this machine" : data.cryptUuid,
-                        mono: data.cryptUuid !== ""
-                    }
-                ],
-                dashed: {
-                    what: "Not measured as a capability",
-                    why: "punard registers no encryption capability, so there is no effective value, no source policy and no compliance state to explain. The only fact this device reports is the device-mapper UUID above — and on this build there is not one, because the development image boots unencrypted.",
-                    when_: "The installer design makes LUKS2 the default for an installed device"
-                }
+                dashed: data.postureUnanswered()
             };
         }
+        var encrypted = posture.posture.disk_encryption_enabled;
+        var kv = [
+            {
+                k: "Data paths",
+                v: encrypted === true ? "LUKS2"
+                    : encrypted === false ? "NOT ENCRYPTED" : "UNKNOWN",
+                tone: encrypted === true ? "ok" : encrypted === false ? "bad" : "warn"
+            },
+            {
+                k: "Scope",
+                v: encrypted === true ? "every data path (/var, /home) is proven on LUKS2"
+                    : encrypted === false ? "a data path is on storage that is not LUKS2"
+                    : "the storage evidence could not be read",
+                mono: false
+            },
+            {
+                k: "Source",
+                v: "punarctl device posture — read once per open"
+            }
+        ];
         return {
             title: "Encryption",
             sub: "Security · disk encryption · dm-crypt",
-            kv: [
-                {
-                    k: "Crypt target",
-                    v: data.cryptUuid
-                },
-                {
-                    k: "Format",
-                    v: "LUKS2",
-                    tone: "ok"
-                },
-                {
-                    k: "Source",
-                    v: "/sys/block/dm-0/dm/uuid — read once per open"
-                }
-            ],
-            note: "This is an observation, not a compliance judgement: no capability governs disk encryption yet, so nothing here is remediated or audited."
+            kv: kv,
+            note: "One answer on this device: the proof punard reports to a managing organization, and the one the Mail vault requires before it opens. It is an observation, not a compliance judgement: no capability governs disk encryption yet, so nothing here is remediated or audited."
         };
     }
 
     function viewSecureBoot(): var {
         var attestation = data.str(data.statusData, "attestation", "");
-        var kv = [
-            {
-                k: "EFI variable",
-                v: data.secureBootValue === "" ? "absent — this device did not boot under UEFI Secure Boot" : data.secureBootValue.toUpperCase(),
-                mono: data.secureBootValue !== "",
-                tone: data.secureBootValue === "enabled" ? "ok" : ""
+        var posture = data.postureData;
+        var kv = [];
+        if (posture === null || posture.posture === undefined) {
+            kv.push({
+                k: "Secure Boot",
+                v: "not read"
+            });
+        } else {
+            var p = posture.posture;
+            kv.push({
+                k: "Secure Boot",
+                v: p.uefi === false ? "NOT UEFI — this device did not boot under UEFI"
+                    : p.secure_boot === true ? "ENABLED"
+                    : p.secure_boot === false ? "DISABLED" : "UNKNOWN",
+                tone: p.secure_boot === true ? "ok" : ""
+            });
+            kv.push({
+                k: "TPM",
+                v: p.tpm_present === true
+                    ? (typeof p.tpm_version === "string" ? p.tpm_version : "PRESENT")
+                    : p.tpm_present === false ? "ABSENT" : "UNKNOWN"
+            });
+            if (p.is_virtual === true) {
+                kv.push({
+                    k: "Virtual",
+                    v: (typeof p.virtualization === "string" ? p.virtualization.toUpperCase() : "HYPERVISOR")
+                        + " — Secure Boot and TPM here are the hypervisor's",
+                    tone: "warn"
+                });
             }
-        ];
+            kv.push({
+                k: "Source",
+                v: "punarctl device posture — read once per open"
+            });
+        }
         if (attestation !== "") {
             kv.push({
                 k: "Attestation",

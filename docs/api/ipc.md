@@ -195,6 +195,7 @@ RunRootShell(command)"; section 60). The 74.4 security test probes this via
 | Method              | AuthZ                 | Mutating | Audited |
 |---------------------|-----------------------|----------|---------|
 | `status`            | any connected peer    | no       | no      |
+| `device.posture`    | any connected peer    | no       | no      |
 | `capabilities.list` | any connected peer    | no       | no      |
 | `capabilities.get`  | any connected peer    | no       | no      |
 | `capabilities.set`  | **root only (uid 0)** | yes      | always (allow and deny, success and failure) |
@@ -342,6 +343,49 @@ not a capability: no method can apply RAM, CPUs, a battery, or a display.
 boolean facts use `null` for an unreadable interface, distinct from measured
 absence. An incomplete observation chooses the conservative appliance path and
 keeps the unknown facts visible rather than silently inventing hardware.
+
+### 5.1a `device.posture`
+
+The device's own posture, hardware and power, readable by the person at
+the device. It is an open read, like `status`, and takes no params.
+
+```json
+{"v":1,"id":"d1","method":"device.posture"}
+{"v":1,"id":"d1","result":{
+  "posture":{"secure_boot":true,"uefi":true,"tpm_present":true,
+             "tpm_version":"2.0","is_virtual":false,"virtualization":null,
+             "disk_encryption_enabled":true,"firewall_enabled":true,
+             "firewall":"nftables","os_patch_status":"unknown",
+             "reboot_required":null},
+  "hardware":{"manufacturer":"LENOVO","model_name":"21K5CTO1WW",
+              "bios_version":"R2AET53W","cpu_model":"AMD Ryzen 7 PRO 7840U",
+              "cpu_vendor":"AuthenticAMD","cpu_cores":8,"cpu_threads":16,
+              "memory_total_bytes":33554432000,
+              "device_capacity_bytes":512000000000,
+              "root_filesystem_type":"erofs","battery_present":true},
+  "power":{"batteries":[{"name":"BAT0","capacity_percent":64,"status":"Charging"}]},
+  "checked_at":"2026-09-24T10:00:00Z"}}
+```
+
+- **`posture` and `hardware`** are the managed inventory's own types
+  (`punar_common::device`). The same collector fills them from the same
+  inputs: this read's `security.firewall` observation, and the update
+  engines' patch evidence. The person and their organization therefore
+  read one answer.
+- **The meaning of `null`:** it is "could not be established", never a
+  guessed `false`.
+- **`disk_encryption_enabled`:** true only when every data path (`/var`,
+  `/home`) is proven LUKS2 by `punar_common::storage`, the proof the Mail
+  vault also requires. It is the one encryption answer on the device, and
+  System Control shows this one.
+- **`power.batteries`:** found by the classifier's rule, meaning a
+  `power_supply` entry named `BAT…` or one whose `type` is Battery. Each
+  has `capacity_percent` (0–100) and the kernel's `status` word, and
+  either is `null` when not reported. Power is local only: the inventory
+  carries `battery_present`, never this.
+- **What it never carries:** the serial number and the application list.
+  Those belong only to an organization-owned device's inventory
+  (docs/development/smplify-enrollment.md section 3).
 
 ### 5.2 `capabilities.list`
 
@@ -1867,6 +1911,14 @@ or path other than the confirmed target device. An installed system returns
   before anything is asked. System Control's picker runs `bind` (or `use`
   on an unnamed workspace) instead of writing the file. `context status`
   prints every binding.
+- **`punarctl device` and `punarctl device posture`** (over 5.1a): `device`
+  shows identity and class (from `status`, a second read that is left out
+  if it fails), then hardware and power. `device posture` shows
+  Encryption, Secure Boot, TPM, Virtual (the SPEC section 1.22 label),
+  Firewall and Updates, and an unknown answer stays unknown. `--json` is
+  the `device.posture` result verbatim for both verbs. System Control's
+  Encryption, Secure Boot and Power panes read `punarctl device posture
+  --json` and nothing else.
 - **App parity (client-side, no new method):** `punarctl app list` joins
   `apps.catalog {}` for category, trust tier and catalog version, and its
   `--json` is still `apps.list` verbatim. `app list --all` adds every

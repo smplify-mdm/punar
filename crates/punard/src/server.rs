@@ -1820,6 +1820,7 @@ impl Inner {
         }
         match &request.method {
             Method::Status => Ok(to_value(self.handle_status())),
+            Method::DevicePosture => Ok(to_value(self.handle_device_posture())),
             Method::CapabilitiesList => {
                 let capabilities: Vec<punar_common::CapabilityDescriptor> =
                     self.registry.iter().map(|cap| self.describe(cap)).collect();
@@ -3704,6 +3705,27 @@ impl Inner {
                 ));
                 Err(webapp_ipc_error(error))
             }
+        }
+    }
+
+    /// `device.posture`: the posture and hardware the managed inventory would
+    /// send, from the same collector and the same inputs (this read's
+    /// firewall observation and the update engines' patch evidence), plus
+    /// the batteries. One answer for the person and their organization, and
+    /// one LUKS2 answer for every surface on the device.
+    fn handle_device_posture(&self) -> punar_common::ipc::DevicePostureResult {
+        let firewall_state = self
+            .registry
+            .get(crate::backends::firewall::CAPABILITY_ID)
+            .map(|cap| self.describe(cap).current_state);
+        punar_common::ipc::DevicePostureResult {
+            posture: self.inventory.posture(
+                firewall_state.as_ref(),
+                patch_posture(self.update_status.staged_release()),
+            ),
+            hardware: self.inventory.hardware(),
+            power: self.inventory.power(),
+            checked_at: utc_now_rfc3339(),
         }
     }
 

@@ -490,6 +490,255 @@ fn device_context(hostname: &str, enrolled: bool) -> String {
     )
 }
 
+/// A byte count as a person reads it: binary units for memory.
+fn gibibytes(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+/// `punarctl device`: who this device is (from `status`, when that read
+/// answered), what it is made of, and its power.
+pub fn device(
+    style: &Style,
+    result: &Value,
+    status: Option<&Value>,
+    hostname: &str,
+) -> Result<String, String> {
+    let answer: punar_common::ipc::DevicePostureResult = parse(result)?;
+    let status: Option<model::Status> = status.and_then(|value| parse(value).ok());
+    let context = match &status {
+        Some(s) => device_context(&s.hostname, s.enrolled),
+        None => hostname.to_string(),
+    };
+    let mut out = fmt::masthead(style, "Device", &context);
+    let hw = &answer.hardware;
+    let unknown = "unknown".to_string();
+    let mut rows = Vec::new();
+    if let Some(s) = &status {
+        rows.push(Row::new(
+            "Device",
+            &s.mode,
+            Slot::Neutral,
+            &format!(
+                "{} · {} · {}",
+                s.hostname,
+                s.device_id,
+                if s.enrolled {
+                    "enrolled"
+                } else {
+                    "not enrolled"
+                }
+            ),
+        ));
+        if let Some(device) = &s.device {
+            rows.push(Row::new(
+                "Class",
+                &device.class,
+                Slot::Neutral,
+                &format!("{} · punarctl status shows the facts", device.source),
+            ));
+        }
+    }
+    let maker = hw.manufacturer.clone().unwrap_or_else(|| unknown.clone());
+    let mut model = vec![
+        hw.model_name
+            .clone()
+            .unwrap_or_else(|| "model unknown".into()),
+    ];
+    if let Some(bios) = &hw.bios_version {
+        model.push(format!("firmware {bios}"));
+    }
+    rows.push(Row::new(
+        "Maker",
+        &printable(&maker),
+        Slot::Neutral,
+        &printable(&model.join(" · ")),
+    ));
+    let threads = hw
+        .cpu_threads
+        .map_or_else(|| "unknown".to_string(), |n| format!("{n} threads"));
+    let mut cpu = vec![
+        hw.cpu_model
+            .clone()
+            .unwrap_or_else(|| "model unknown".into()),
+    ];
+    if let Some(vendor) = &hw.cpu_vendor {
+        cpu.push(vendor.clone());
+    }
+    if let Some(cores) = hw.cpu_cores {
+        cpu.push(format!("{cores} cores"));
+    }
+    rows.push(Row::new(
+        "CPU",
+        &threads,
+        Slot::Neutral,
+        &printable(&cpu.join(" · ")),
+    ));
+    rows.push(Row::new(
+        "Memory",
+        &hw.memory_total_bytes
+            .map_or_else(|| unknown.clone(), gibibytes),
+        Slot::Neutral,
+        "",
+    ));
+    rows.push(Row::new(
+        "Storage",
+        &hw.device_capacity_bytes.map_or_else(
+            || unknown.clone(),
+            |bytes| format!("{} GB", bytes / 1_000_000_000),
+        ),
+        Slot::Neutral,
+        &hw.root_filesystem_type
+            .as_deref()
+            .map(|fs| format!("root filesystem {}", printable(fs)))
+            .unwrap_or_default(),
+    ));
+    out.push_str(&fmt::rows(style, &rows));
+
+    out.push('\n');
+    out.push_str(&fmt::section(style, "Power", "read now"));
+    if answer.power.batteries.is_empty() {
+        out.push_str(&fmt::rows(
+            style,
+            &[Row::new(
+                "Battery",
+                "None",
+                Slot::Neutral,
+                "no battery reported · a desktop or a virtual machine says so truthfully",
+            )],
+        ));
+    } else {
+        let rows: Vec<Row> = answer
+            .power
+            .batteries
+            .iter()
+            .map(|battery| {
+                Row::new(
+                    &battery.name,
+                    &battery
+                        .capacity_percent
+                        .map_or_else(|| "unknown".to_string(), |p| format!("{p} %")),
+                    Slot::Neutral,
+                    battery.status.as_deref().unwrap_or("status not reported"),
+                )
+            })
+            .collect();
+        out.push_str(&fmt::rows(style, &rows));
+    }
+    out.push_str(&fmt::note(
+        style,
+        "Security posture · punarctl device posture",
+    ));
+    Ok(out)
+}
+
+/// `punarctl device posture`: what the device can prove about itself. The
+/// same states a managing organization receives, from the same collector.
+pub fn device_posture(style: &Style, result: &Value, hostname: &str) -> Result<String, String> {
+    let answer: punar_common::ipc::DevicePostureResult = parse(result)?;
+    let p = &answer.posture;
+    let mut out = fmt::masthead(style, "Device posture", hostname);
+    let tri = |value: Option<bool>, yes: &'static str, no: &'static str| match value {
+        Some(true) => (yes, Slot::Ok),
+        Some(false) => (no, Slot::Bad),
+        None => ("unknown", Slot::Warn),
+    };
+    let mut rows = Vec::new();
+
+    let (word, slot) = tri(p.disk_encryption_enabled, "LUKS2", "not encrypted");
+    rows.push(Row::new(
+        "Encryption",
+        word,
+        slot,
+        match p.disk_encryption_enabled {
+            Some(true) => "every data path (/var, /home) is proven on LUKS2",
+            Some(false) => "a data path is on storage that is not LUKS2",
+            None => "the storage evidence could not be read",
+        },
+    ));
+
+    let (word, slot) = match (p.uefi, p.secure_boot) {
+        (Some(false), _) => ("not uefi", Slot::Neutral),
+        (_, value) => tri(value, "enabled", "disabled"),
+    };
+    rows.push(Row::new(
+        "Secure Boot",
+        word,
+        slot,
+        match (p.uefi, p.secure_boot) {
+            (Some(false), _) => "this device did not boot under UEFI",
+            (_, Some(true)) => "the firmware enforced signed boot",
+            (_, Some(false)) => "UEFI boot, without Secure Boot",
+            (_, None) => "the firmware variable could not be read",
+        },
+    ));
+
+    let tpm = match (p.tpm_present, &p.tpm_version) {
+        (Some(true), Some(version)) => (version.as_str(), Slot::Ok),
+        (Some(true), None) => ("present", Slot::Ok),
+        (Some(false), _) => ("absent", Slot::Neutral),
+        (None, _) => ("unknown", Slot::Warn),
+    };
+    rows.push(Row::new("TPM", tpm.0, tpm.1, ""));
+
+    // SPEC section 1.22: a simulated Secure Boot or TPM is labelled.
+    let (word, detail) = match p.is_virtual {
+        Some(true) => (
+            "yes",
+            format!(
+                "{} · Secure Boot and TPM here are the hypervisor's",
+                p.virtualization.as_deref().unwrap_or("hypervisor")
+            ),
+        ),
+        Some(false) => ("no", String::new()),
+        None => ("unknown", String::new()),
+    };
+    rows.push(Row::new(
+        "Virtual",
+        word,
+        Slot::Neutral,
+        &printable(&detail),
+    ));
+
+    let (word, slot) = match (p.firewall.as_deref(), p.firewall_enabled) {
+        (None, _) => ("unknown", Slot::Warn),
+        (Some(_), value) => tri(value, "enabled", "disabled"),
+    };
+    rows.push(Row::new(
+        "Firewall",
+        word,
+        slot,
+        p.firewall.as_deref().unwrap_or("no firewall capability"),
+    ));
+
+    let (word, slot, detail) = match p.os_patch_status {
+        punar_common::device::PatchStatus::UpToDate => ("up to date", Slot::Ok, ""),
+        punar_common::device::PatchStatus::UpdatesAvailable => (
+            "available",
+            Slot::Warn,
+            if p.reboot_required == Some(true) {
+                "a staged release waits for a restart"
+            } else {
+                "punarctl update status"
+            },
+        ),
+        punar_common::device::PatchStatus::Unknown => (
+            "unknown",
+            Slot::Neutral,
+            "no release is staged, and nothing checks on its own · punarctl update check",
+        ),
+    };
+    rows.push(Row::new("Updates", word, slot, detail));
+    out.push_str(&fmt::rows(style, &rows));
+    out.push_str(&fmt::note(
+        style,
+        &format!(
+            "The posture a managing organization receives · read {}",
+            fmt::timestamp(&answer.checked_at)
+        ),
+    ));
+    Ok(out)
+}
+
 /// `punarctl status`. `org_policy_ids` is the policy-id list fetched from
 /// `enroll.status` when the device is enrolled (the status result itself
 /// carries only the org identity) — empty when unenrolled or when the

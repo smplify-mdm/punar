@@ -9,6 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use punar_common::device::Battery;
 use punar_common::{DeviceClass, DeviceClassSource, DeviceFacts, DeviceProfile};
 
 const MIB_IN_KIB: u64 = 1024;
@@ -121,19 +122,61 @@ pub(crate) fn logical_cores(path: &Path) -> io::Result<u32> {
     Ok(count)
 }
 
+/// The one rule for "this power supply is a battery": a name starting `BAT`,
+/// or a `type` of Battery. The classifier and the power read both use it, so
+/// they cannot disagree about which entries count.
+fn is_battery(entry: &Path, name: &str) -> bool {
+    name.starts_with("BAT")
+        || fs::read_to_string(entry.join("type"))
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("battery"))
+}
+
 pub(crate) fn directory_has_battery(path: &Path) -> io::Result<bool> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with("BAT") {
-            return Ok(true);
-        }
-        if fs::read_to_string(entry.path().join("type"))
-            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("battery"))
-        {
+        if is_battery(&entry.path(), &entry.file_name().to_string_lossy()) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Every battery, by name, with the kernel's capacity and status. An
+/// unreadable directory is no batteries; a value that is not the kernel's
+/// shape reads as not reported rather than being passed through.
+pub(crate) fn batteries(path: &Path) -> Vec<Battery> {
+    let Ok(listing) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut found: Vec<Battery> = listing
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            let printable =
+                !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_graphic());
+            if !printable || !is_battery(&entry.path(), &name) {
+                return None;
+            }
+            let read = |file: &str| {
+                fs::read_to_string(entry.path().join(file))
+                    .ok()
+                    .map(|value| value.trim().to_string())
+            };
+            Some(Battery {
+                capacity_percent: read("capacity")
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .filter(|percent| *percent <= 100),
+                status: read("status").filter(|status| {
+                    !status.is_empty()
+                        && status.len() <= 32
+                        && status.chars().all(|c| c.is_ascii_alphabetic() || c == ' ')
+                }),
+                name,
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
 }
 
 fn directory_has_connected_display(path: &Path) -> io::Result<bool> {
@@ -225,6 +268,44 @@ mod tests {
         assert_eq!(profile.facts.logical_cores, 8);
         assert_eq!(profile.facts.battery_present, Some(false));
         assert_eq!(profile.facts.display_connected, Some(true));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The power read and the classifier count the same entries: a `BAT…`
+    /// name or a `type` of Battery. Mains is not a battery, and a value that
+    /// is not the kernel's shape reads as not reported.
+    #[test]
+    fn batteries_follow_the_classifier_rule() {
+        let dir = std::env::temp_dir().join(format!("punard-batteries-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let write = |entry: &str, file: &str, value: &str| {
+            fs::create_dir_all(dir.join(entry)).unwrap();
+            fs::write(dir.join(entry).join(file), value).unwrap();
+        };
+        write("AC", "type", "Mains\n");
+        write("BAT1", "capacity", "87\n");
+        write("BAT1", "status", "Discharging\n");
+        write("CMB0", "type", "Battery\n");
+        write("CMB0", "capacity", "250\n");
+        write("CMB0", "status", "\u{1b}[2J\n");
+        let found = batteries(&dir);
+        assert_eq!(
+            found,
+            vec![
+                Battery {
+                    name: "BAT1".into(),
+                    capacity_percent: Some(87),
+                    status: Some("Discharging".into()),
+                },
+                Battery {
+                    name: "CMB0".into(),
+                    capacity_percent: None,
+                    status: None,
+                },
+            ]
+        );
+        assert_eq!(directory_has_battery(&dir).unwrap(), !found.is_empty());
+        assert!(batteries(&dir.join("missing")).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -141,6 +141,14 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Show this device: identity, class, hardware and power. `device
+    /// posture` shows what it can prove about its own security: disk
+    /// encryption, Secure Boot, TPM, firewall and updates. Both read
+    /// `device.posture`, the same answer a managing organization receives.
+    Device {
+        #[command(subcommand)]
+        command: Option<DeviceCommand>,
+    },
     /// Enroll this device with an organization, or inspect/stop the
     /// enrollment (Milestone 5 — against the dev/CI mock control plane).
     Enroll {
@@ -463,6 +471,13 @@ enum AlertsCommand {
         /// Alert id, like `alr_7c1d9a4e`.
         alert_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum DeviceCommand {
+    /// Disk encryption, Secure Boot, TPM, virtualization, firewall and
+    /// update state, as the device can prove them.
+    Posture,
 }
 
 #[derive(Subcommand)]
@@ -4445,6 +4460,30 @@ fn main() -> ExitCode {
                 let agents = Client::for_target(Target::Agentd, socket.as_deref());
                 views::status(&style, v, &policy_ids, &read_status_live(&client, &agents))
             }),
+            Err(error) => fail(&error),
+        },
+        Command::Device { command } => match client.call("device.posture", None) {
+            // `--json` is the device.posture result verbatim for both verbs.
+            // The human `device` view adds the identity and class rows from
+            // `status`, a second read; they are left out if it fails.
+            Ok(result) => {
+                let hostname = local_hostname();
+                match command {
+                    Some(DeviceCommand::Posture) => render_or_json(json, &result, |v| {
+                        views::device_posture(&style, v, &hostname)
+                    }),
+                    None => {
+                        let status = if json {
+                            None
+                        } else {
+                            client.call("status", None).ok()
+                        };
+                        render_or_json(json, &result, |v| {
+                            views::device(&style, v, status.as_ref(), &hostname)
+                        })
+                    }
+                }
+            }
             Err(error) => fail(&error),
         },
         Command::Enroll { command } => {
