@@ -473,6 +473,36 @@ else
     echo 'initramfs-release-contract-test: note: no unprivileged user namespace; skipping the real-mount check'
 fi
 
+# --- The boot step's delete actions report every unlink ----------------------
+# A dry run cannot delete, so run the helper's own DELETE_ACTIONS through GNU
+# find on a throwaway tree: one "D" line per entry, read before the unlink,
+# no error, status 0 and nothing left. (Printing after -delete once made find
+# report every entry as missing.)
+actions_line="$(grep -E '^DELETE_ACTIONS=\(' "${HELPER}")" \
+    || fail 'the helper has no DELETE_ACTIONS'
+eval "${actions_line}"
+make_debian_tree "${WORK}/delete" "${DEBIAN_SYSTEMCTL_LIBS}"
+mkdir -p "${WORK}/delete/usr/share/twice"
+mkfile "${WORK}/delete/usr/share/twice/one" 'shared content'
+ln "${WORK}/delete/usr/share/twice/one" "${WORK}/delete/usr/share/twice/two"
+entries="$(find "${WORK}/delete" -mindepth 1 \( -type f -o -type l \) | wc -l)"
+status=0
+delete_output="$(find "${WORK}/delete" -mindepth 1 \( -type f -o -type l \) \
+    "${DELETE_ACTIONS[@]}" 2>&1)" || status=$?
+[ "${status}" -eq 0 ] || fail "the delete actions exited ${status}: $(head -n 1 <<< "${delete_output}")"
+if grep -v '^D [fl] [0-9]* [0-9]*$' <<< "${delete_output}" | grep -q .; then
+    fail "the delete actions printed something else: $(grep -v '^D ' <<< "${delete_output}" | head -n 1)"
+fi
+[ "$(grep -c '^D ' <<< "${delete_output}")" -eq "${entries}" ] \
+    || fail 'the delete actions did not report every entry'
+[ -z "$(find "${WORK}/delete" \( -type f -o -type l \) -print -quit)" ] \
+    || fail 'the delete actions left an entry behind'
+# Only the last name of a hard-linked file frees it: exactly one of the two
+# names is reported with a link count of 1.
+[ "$(grep -c '^D f 15 1$' <<< "${delete_output}")" -eq 1 ] \
+    && [ "$(grep -c '^D f 15 2$' <<< "${delete_output}")" -eq 1 ] \
+    || fail 'the link counts do not show which name frees a hard-linked file'
+
 # --- It cannot run outside the initrd ------------------------------------------
 if [ -e /etc/initrd-release ]; then
     echo 'initramfs-release-contract-test: note: this host has /etc/initrd-release; skipping the outside-the-initrd check'

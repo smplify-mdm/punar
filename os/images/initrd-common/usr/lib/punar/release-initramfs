@@ -400,6 +400,11 @@ dry_run() {
     log "dry run: would delete ${files} files (${bytes} bytes) and ${symlinks} symlinks, keep ${#KEEP[@]} paths (${KEPT_BYTES} bytes)"
 }
 
+# One line per entry, printed before it is unlinked: find reads what it
+# prints from the entry, and after -delete there is nothing left to read. A
+# failed unlink adds its own "find: cannot delete" line.
+DELETE_ACTIONS=(-printf 'D %y %s %n\n' -delete)
+
 # From the first unlink on, use nothing but builtins and processes already
 # started: every other file of the initramfs is gone.
 release() {
@@ -407,7 +412,7 @@ release() {
     local files=0 symlinks=0 freed=0 errors=0 first_error=
     remount_writable
     before=$(meminfo_kb Unevictable)
-    output=$(find "${SCOPE[@]}" -delete -printf 'D %y %s %n\n' 2>&1)
+    output=$(find "${SCOPE[@]}" "${DELETE_ACTIONS[@]}" 2>&1)
     status=$?
     after=$(meminfo_kb Unevictable)
     lines_of "$output"
@@ -434,7 +439,10 @@ release() {
                 ;;
         esac
     done
-    log "released the initramfs: deleted ${files} files (${freed} bytes) and ${symlinks} symlinks, kept ${#KEEP[@]} paths (${KEPT_BYTES} bytes); Unevictable ${before} kB -> ${after} kB; find status ${status}, ${errors} errors${first_error:+ (first: ${first_error})}"
+    # With an error the counts are of attempts; Unevictable says what was freed.
+    local verb=deleted
+    [ "$errors" -eq 0 ] || verb='tried to delete'
+    log "released the initramfs: ${verb} ${files} files (${freed} bytes) and ${symlinks} symlinks, kept ${#KEEP[@]} paths (${KEPT_BYTES} bytes); Unevictable ${before} kB -> ${after} kB; find status ${status}, ${errors} errors${first_error:+ (first: ${first_error})}"
 }
 
 command -v find >/dev/null 2>&1 || keep_nothing "find is missing from the initrd"
