@@ -675,7 +675,12 @@ impl IdentityStore {
             .accounts_dir()
             .join(&marker.account_id)
             .join("account.json");
-        let mut account: AccountRecord = read_json(&account_path)?;
+        // Read as a document as well as a record, so that correcting it below
+        // rewrites only the group list and keeps every field, including any
+        // this build does not model.
+        let mut stored: serde_json::Value = read_json(&account_path)?;
+        let mut account: AccountRecord =
+            serde_json::from_value(stored.clone()).map_err(|_| IdentityError::Corrupt)?;
         if account.account_id != marker.account_id
             || account.username != marker.username
             || account.uid != marker.uid
@@ -684,8 +689,14 @@ impl IdentityStore {
         }
         // An account created by an older image was put in `input` and
         // `video`. The stored record is the authority every later boot reads,
-        // so correct it there, before anything is published, rather than
-        // only skipping the groups in /run and leaving the record to disagree.
+        // so correct it there too, rather than leave it to disagree with /run.
+        //
+        // The correction is not what keeps the groups off: materialize_account
+        // never publishes a retired group, whatever the record says. So a
+        // record that cannot be rewritten this boot (a full, failing or
+        // read-only /var) is reported and retried on the next boot, and never
+        // stops the account materializing. greetd Requires= this service, so
+        // failing here would leave the machine with no way to sign in.
         if account
             .groups
             .iter()
@@ -694,7 +705,28 @@ impl IdentityStore {
             account
                 .groups
                 .retain(|group| !RETIRED_GROUPS.contains(&group.as_str()));
-            write_json_atomic(&account_path, &account, 0o600)?;
+            if let Some(groups) = stored
+                .get_mut("groups")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                groups.retain(|group| {
+                    !group
+                        .as_str()
+                        .is_some_and(|group| RETIRED_GROUPS.contains(&group))
+                });
+            }
+            if let Err(error) = write_json_atomic(&account_path, &stored, 0o600) {
+                let detail = match &error {
+                    IdentityError::Storage(cause) => cause.to_string(),
+                    other => other.to_string(),
+                };
+                eprintln!(
+                    "punar-identity: could not remove the retired input and video groups from \
+                     {}: {detail}; they are still left out of this boot's user database, \
+                     and the record is corrected on a later boot",
+                    account_path.display()
+                );
+            }
         }
         let device: serde_json::Value = read_json(&self.paths.state_dir.join("device.json"))?;
         let device_name = device
@@ -1682,6 +1714,84 @@ mod tests {
             before,
             "a record with nothing to take away is not rewritten"
         );
+    }
+
+    /// The correction keeps every field of the stored record, including
+    /// ones this build does not model, and changes only the group list.
+    #[test]
+    fn correcting_the_record_keeps_every_other_field() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let record_path = account_json(&paths);
+        let mut legacy: serde_json::Value = read_json(&record_path).unwrap();
+        legacy["groups"] = json!(["input", "punar", "video"]);
+        legacy["futureField"] = json!({"kept": true});
+        write_json_atomic(&record_path, &legacy, 0o600).unwrap();
+
+        store.materialize().unwrap();
+
+        let mut corrected: serde_json::Value = read_json(&record_path).unwrap();
+        assert_eq!(corrected["groups"], json!(["punar"]));
+        assert_eq!(corrected["futureField"], json!({"kept": true}));
+        corrected["groups"] = legacy["groups"].clone();
+        assert_eq!(corrected, legacy, "only the group list changed");
+    }
+
+    /// A record that cannot be rewritten (here, its directory is read-only)
+    /// does not stop the account materializing, because greetd requires
+    /// materialization and nobody could sign in. The retired groups are
+    /// still kept out of /run; the record is corrected on a later boot.
+    #[test]
+    fn an_uncorrectable_record_never_stops_sign_in() {
+        let temp = TempDir::new().unwrap();
+        let (store, paths, _code) = recovery_store(&temp);
+        let record_path = account_json(&paths);
+        let mut legacy: serde_json::Value = read_json(&record_path).unwrap();
+        legacy["groups"] = json!(["punar", "video", "input"]);
+        write_json_atomic(&record_path, &legacy, 0o600).unwrap();
+        for group in RETIRED_GROUPS {
+            write_json_atomic(
+                &paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership")),
+                &json!({}),
+                0o644,
+            )
+            .unwrap();
+        }
+        let account_dir = record_path.parent().unwrap().to_path_buf();
+        let mode = fs::metadata(&account_dir).unwrap().permissions().mode();
+        fs::set_permissions(&account_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let writable = fs::write(account_dir.join("probe"), b"x").is_ok();
+
+        let outcome = store.materialize();
+        fs::set_permissions(&account_dir, fs::Permissions::from_mode(mode)).unwrap();
+        if writable {
+            // Running with the privilege to write anyway (root): the
+            // failure this test needs cannot be produced here.
+            return;
+        }
+        outcome.unwrap();
+        assert!(
+            paths
+                .runtime_userdb
+                .join("alice:punar.membership")
+                .is_file()
+        );
+        for group in RETIRED_GROUPS {
+            assert!(
+                !paths
+                    .runtime_userdb
+                    .join(format!("alice:{group}.membership"))
+                    .exists(),
+                "an unwritable record left alice in {group}"
+            );
+        }
+        let still: AccountRecord = read_json(&record_path).unwrap();
+        assert_eq!(still.groups, ["punar", "video", "input"]);
+        store.materialize().unwrap();
+        let corrected: AccountRecord = read_json(&record_path).unwrap();
+        assert_eq!(corrected.groups, ["punar"], "corrected once it can be");
     }
 
     /// Even a record that still names a retired group is never published
