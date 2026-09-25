@@ -243,13 +243,20 @@ Deliverables (spec section 76, Milestone 1):
 - [x] Podman — podman 6.1.0-1 + crun, netavark, aardvark-dns; rootless
   setup (subuid/subgid, dev user) in the profile postinst.
 - [x] Keyboard navigation — PUNAR-leader grammar in
-  `os/modules/desktop/hypr/punar-binds.conf`, documented in
+  `os/modules/desktop/hypr/punar-binds.lua` (the `.conf` beside it is the
+  superseded provider), documented in
   [`docs/development/keyboard-grammar.md`](docs/development/keyboard-grammar.md);
   config verified against the pinned hyprland; the config demonstrably
   loads in-VM (the session came up). Behavior is exercised by the M2 CI
   exercise (green — run
   [32825539021](https://github.com/smplify-mdm/punar/actions/runs/32825539021))
-  and the human walkthrough.
+  and the human walkthrough. SMP-1405 WP-02 added the window grammar,
+  Alt+Tab, media/microphone/brightness keys and the device keyboard layout,
+  each with a `punarctl` verb; `tools/hyprland-verify.sh` and
+  `tests/desktop/keybind-contract-test.sh` gate the config in CI, and
+  `os/images/mkosi.profiles/dev/mkosi.extra/usr/lib/punar/keys-check.sh`
+  presses real keys through QMP — **implemented, not yet run in CI** (its
+  first run is the next desktop gate).
 
 Acceptance (spec section 76, Milestone 1):
 
